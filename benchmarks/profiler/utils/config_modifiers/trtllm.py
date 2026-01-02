@@ -350,7 +350,11 @@ class TrtllmConfigModifier:
 
     @classmethod
     def set_prefill_config(
-        cls, config: dict, max_batch_size: int, max_num_tokens: int
+        cls,
+        config: dict,
+        max_batch_size: int,
+        max_num_tokens: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         """
         Configure prefill-related limits for aggregated prefill runs.
@@ -360,7 +364,7 @@ class TrtllmConfigModifier:
         """
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
-            cfg, backend="trtllm", sub_component_type=SubComponentType.DECODE
+            cfg, backend="trtllm", sub_component_type=component_type
         )
         args = validate_and_get_worker_args(worker_service, backend="trtllm")
         args = break_arguments(args)

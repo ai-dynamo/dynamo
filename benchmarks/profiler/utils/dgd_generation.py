@@ -26,8 +26,10 @@ from benchmarks.profiler.utils.config import (
     DgdPlannerServiceConfig,
     set_argument_value,
 )
+from benchmarks.profiler.utils.config_modifiers import CONFIG_MODIFIERS
 from benchmarks.profiler.utils.config_modifiers.parallelization_mapping import (
     ParallelizationMapping,
+    apply_parallel_mapping_to_config,
 )
 from benchmarks.profiler.utils.planner_utils import build_planner_args_from_namespace
 from dynamo.common.utils.paths import get_workspace_dir
@@ -37,13 +39,195 @@ from dynamo.planner.defaults import MockerComponentName, SubComponentType
 MOCKER_DISAGG_CONFIG_PATH = "examples/backends/mocker/deploy/disagg.yaml"
 
 
-def generate_dgd_config_with_planner(
+def _get_config_modifier_from_args(args):
+    """Return an instantiated config modifier for args.backend."""
+    config_modifier_cls = CONFIG_MODIFIERS[args.backend]
+    return config_modifier_cls()
+
+
+def _find_service_name_for_subcomponent(
+    config: Config, subcomponent: SubComponentType
+) -> str:
+    """Find the service name in a DGD config for a given subComponentType."""
+    for service_name, service_cfg in config.spec.services.items():
+        if getattr(service_cfg, "subComponentType", None) == subcomponent:
+            return service_name
+    raise KeyError(f"Could not find service with subComponentType={subcomponent!r}")
+
+
+def _load_and_apply_mappings(
+    *,
     config_path: str,
+    args,
     config_modifier,
-    output_dir: str,
+    best_prefill_mapping: ParallelizationMapping | None,
+    best_decode_mapping: ParallelizationMapping | None,
+    num_gpus_per_node: int,
+) -> Config:
+    """Load a DGD config file and apply optional prefill/decode parallel mappings (single source of truth)."""
+    with open(config_path, "r") as f:
+        raw = yaml.safe_load(f)
+
+    # Update container image if provided (overrides config file images)
+    if getattr(args, "dgd_image", None):
+        raw = config_modifier.update_image(raw, args.dgd_image)
+
+    if best_prefill_mapping is not None:
+        raw = apply_parallel_mapping_to_config(
+            raw,
+            best_prefill_mapping,
+            SubComponentType.PREFILL,
+            config_modifier,
+            num_gpus_per_node,
+            is_aggregated_config=False,
+        )
+    if best_decode_mapping is not None:
+        raw = apply_parallel_mapping_to_config(
+            raw,
+            best_decode_mapping,
+            SubComponentType.DECODE,
+            config_modifier,
+            num_gpus_per_node,
+            is_aggregated_config=False,
+        )
+
+    return Config.model_validate(raw)
+
+
+def build_prefill_service_config(
+    *,
+    config_path: str,
+    args,
+    best_prefill_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> tuple[str, dict]:
+    """Return (service_name, service_dict) for the prefill worker after applying mapping."""
+    return _build_single_worker_service_config(
+        config_path=config_path,
+        args=args,
+        mapping=best_prefill_mapping,
+        subcomponent=SubComponentType.PREFILL,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+
+
+def build_decode_service_config(
+    *,
+    config_path: str,
+    args,
+    best_decode_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> tuple[str, dict]:
+    """Return (service_name, service_dict) for the decode worker after applying mapping."""
+    return _build_single_worker_service_config(
+        config_path=config_path,
+        args=args,
+        mapping=best_decode_mapping,
+        subcomponent=SubComponentType.DECODE,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+
+
+def _build_single_worker_service_config(
+    *,
+    config_path: str,
+    args,
+    mapping: ParallelizationMapping,
+    subcomponent: SubComponentType,
+    num_gpus_per_node: int,
+) -> tuple[str, dict]:
+    """Shared helper for building a single worker service dict (prefill or decode)."""
+    config_modifier = _get_config_modifier_from_args(args)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=mapping
+        if subcomponent == SubComponentType.PREFILL
+        else None,
+        best_decode_mapping=mapping
+        if subcomponent == SubComponentType.DECODE
+        else None,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    service_name = _find_service_name_for_subcomponent(config, subcomponent)
+    config_dict = config.model_dump(exclude_unset=False)
+    return service_name, config_dict["spec"]["services"][service_name]
+
+
+def generate_prefill_service_config_preview(
+    *,
+    config_path: str,
+    args,
+    best_prefill_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a prefill-only service config object for WebUI 'Show Config'."""
+    service_name, service_dict = build_prefill_service_config(
+        config_path=config_path,
+        args=args,
+        best_prefill_mapping=best_prefill_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    return {service_name: service_dict}
+
+
+def generate_decode_service_config_preview(
+    *,
+    config_path: str,
+    args,
+    best_decode_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> dict:
+    """Generate a decode-only service config object for WebUI 'Show Config'."""
+    service_name, service_dict = build_decode_service_config(
+        config_path=config_path,
+        args=args,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    return {service_name: service_dict}
+
+
+def generate_prefill_decode_services_config_preview(
+    *,
+    config_path: str,
     args,
     best_prefill_mapping: ParallelizationMapping,
     best_decode_mapping: ParallelizationMapping,
+    num_gpus_per_node: int = 8,
+) -> dict[str, dict]:
+    """Generate a (prefill+decode)-only services config object for WebUI 'Show Config'."""
+    config_modifier = _get_config_modifier_from_args(args)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=best_prefill_mapping,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
+    prefill_service_name = _find_service_name_for_subcomponent(
+        config, SubComponentType.PREFILL
+    )
+    decode_service_name = _find_service_name_for_subcomponent(
+        config, SubComponentType.DECODE
+    )
+    config_dict = config.model_dump(exclude_unset=False)
+    services = {
+        prefill_service_name: config_dict["spec"]["services"][prefill_service_name],
+        decode_service_name: config_dict["spec"]["services"][decode_service_name],
+    }
+    return services
+
+
+def generate_dgd_config_with_planner(
+    config_path: str,
+    config_modifier,
+    output_dir: str | None,
+    args,
+    best_prefill_mapping: ParallelizationMapping | None,
+    best_decode_mapping: ParallelizationMapping | None,
     num_gpus_per_node: int = 8,
 ) -> tuple[list[dict] | dict, list[dict] | dict]:
     """Generate DGD config with planner based on profiling results.
@@ -65,62 +249,14 @@ def generate_dgd_config_with_planner(
               If a ConfigMap is generated, returns [ConfigMap, DGD]; otherwise returns a single DGD dict.
     """
 
-    # Load config from file
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    # Update container image if provided
-    # This overrides the default image in the config file for all DGD components
-    if args.dgd_image:
-        config = config_modifier.update_image(config, args.dgd_image)
-
-    # Apply prefill parallelization based on the actual mapping used in profiling
-    if best_prefill_mapping.tp is not None:
-        # Dense model or TP for prefill
-        config = config_modifier.set_config_tp_size(
-            config, best_prefill_mapping.tp, SubComponentType.PREFILL
-        )
-    elif best_prefill_mapping.tep is not None:
-        # MoE model with TEP for prefill
-        config = config_modifier.set_config_tep_size(
-            config,
-            best_prefill_mapping.tep,
-            num_gpus_per_node,
-            SubComponentType.PREFILL,
-        )
-    elif best_prefill_mapping.dep is not None:
-        # MoE model with DEP for prefill
-        config = config_modifier.set_config_dep_size(
-            config,
-            best_prefill_mapping.dep,
-            num_gpus_per_node,
-            SubComponentType.PREFILL,
-        )
-
-    # Apply decode parallelization based on the actual mapping used in profiling
-    if best_decode_mapping.tp is not None:
-        # Dense model or TP for decode
-        config = config_modifier.set_config_tp_size(
-            config, best_decode_mapping.tp, SubComponentType.DECODE
-        )
-    elif best_decode_mapping.tep is not None:
-        # MoE model with TEP for decode
-        config = config_modifier.set_config_tep_size(
-            config,
-            best_decode_mapping.tep,
-            num_gpus_per_node,
-            SubComponentType.DECODE,
-        )
-    elif best_decode_mapping.dep is not None:
-        # MoE model with DEP for decode
-        config = config_modifier.set_config_dep_size(
-            config,
-            best_decode_mapping.dep,
-            num_gpus_per_node,
-            SubComponentType.DECODE,
-        )
-
-    config = Config.model_validate(config)
+    config = _load_and_apply_mappings(
+        config_path=config_path,
+        args=args,
+        config_modifier=config_modifier,
+        best_prefill_mapping=best_prefill_mapping,
+        best_decode_mapping=best_decode_mapping,
+        num_gpus_per_node=num_gpus_per_node,
+    )
 
     # add the planner service
     planner_config = DgdPlannerServiceConfig()
@@ -157,66 +293,69 @@ def generate_dgd_config_with_planner(
 
     # Add arguments determined by profiling results
     cm_mount_path = f"{get_workspace_dir()}/profiling_results"
-    planner_args.extend(
-        [
-            f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}",
-            f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}",
-            f"--profile-results-dir={cm_mount_path}",
-        ]
-    )
+    if best_prefill_mapping is not None:
+        planner_args.append(
+            f"--prefill-engine-num-gpu={best_prefill_mapping.get_num_gpus()}"
+        )
+    if best_decode_mapping is not None:
+        planner_args.append(
+            f"--decode-engine-num-gpu={best_decode_mapping.get_num_gpus()}"
+        )
 
-    if (
-        planner_config.extraPodSpec.mainContainer
-        and planner_config.extraPodSpec.mainContainer.args is not None
-    ):
-        planner_config.extraPodSpec.mainContainer.args.extend(planner_args)
-    # Convert planner config to dict first, then the entire config to dict
+    # Work with plain dicts for PodSpec/Container extras (e.g. volumes, volumeMounts)
+    # because those fields are stored as "extra" and aren't exposed as pydantic attributes.
     planner_dict = planner_config.model_dump(exclude_unset=False)
     config_dict = config.model_dump(exclude_unset=False)
 
-    # Build a ConfigMap from NPZ profiling outputs and mount it into the Planner
-    # We store data as plain JSON (lists/float/int) to avoid binary artifacts.
-    prefill_npz = f"{output_dir}/selected_prefill_interpolation/raw_data.npz"
-    decode_npz = f"{output_dir}/selected_decode_interpolation/raw_data.npz"
-
     config_map_obj: Optional[dict] = None
-    try:
-        with np.load(prefill_npz) as p_raw:
-            prefill_json = {
-                "prefill_isl": p_raw["prefill_isl"].tolist(),
-                "prefill_ttft": p_raw["prefill_ttft"].tolist(),
-                "prefill_thpt_per_gpu": p_raw["prefill_thpt_per_gpu"].tolist(),
-            }
-    except FileNotFoundError:
-        prefill_json = None
+    prefill_json = None
+    decode_json = None
+    if output_dir is not None:
+        # Build a ConfigMap from NPZ profiling outputs and mount it into the Planner
+        # We store data as plain JSON (lists/float/int) to avoid binary artifacts.
+        prefill_npz = f"{output_dir}/selected_prefill_interpolation/raw_data.npz"
+        decode_npz = f"{output_dir}/selected_decode_interpolation/raw_data.npz"
 
-    try:
-        with np.load(decode_npz) as d_raw:
-            # max_kv_tokens saved as array; convert to int
-            max_kv_tokens = d_raw["max_kv_tokens"]
-            if hasattr(max_kv_tokens, "tolist"):
-                max_kv_tokens_val = max_kv_tokens.tolist()
-                # Handle [value] vs value
-                if isinstance(max_kv_tokens_val, list):
-                    max_kv_tokens_val = (
-                        int(max_kv_tokens_val[0]) if max_kv_tokens_val else 0
-                    )
+        try:
+            with np.load(prefill_npz) as p_raw:
+                prefill_json = {
+                    "prefill_isl": p_raw["prefill_isl"].tolist(),
+                    "prefill_ttft": p_raw["prefill_ttft"].tolist(),
+                    "prefill_thpt_per_gpu": p_raw["prefill_thpt_per_gpu"].tolist(),
+                }
+        except FileNotFoundError:
+            prefill_json = None
+
+        try:
+            with np.load(decode_npz) as d_raw:
+                # max_kv_tokens saved as array; convert to int
+                max_kv_tokens = d_raw["max_kv_tokens"]
+                if hasattr(max_kv_tokens, "tolist"):
+                    max_kv_tokens_val = max_kv_tokens.tolist()
+                    # Handle [value] vs value
+                    if isinstance(max_kv_tokens_val, list):
+                        max_kv_tokens_val = (
+                            int(max_kv_tokens_val[0]) if max_kv_tokens_val else 0
+                        )
+                    else:
+                        max_kv_tokens_val = int(max_kv_tokens_val)
                 else:
-                    max_kv_tokens_val = int(max_kv_tokens_val)
-            else:
-                max_kv_tokens_val = int(max_kv_tokens)
+                    max_kv_tokens_val = int(max_kv_tokens)
 
-            decode_json = {
-                "x_kv_usage": d_raw["x_kv_usage"].tolist(),
-                "y_context_length": d_raw["y_context_length"].tolist(),
-                "z_itl": d_raw["z_itl"].tolist(),
-                "z_thpt_per_gpu": d_raw["z_thpt_per_gpu"].tolist(),
-                "max_kv_tokens": max_kv_tokens_val,
-            }
-    except FileNotFoundError:
-        decode_json = None
+                decode_json = {
+                    "x_kv_usage": d_raw["x_kv_usage"].tolist(),
+                    "y_context_length": d_raw["y_context_length"].tolist(),
+                    "z_itl": d_raw["z_itl"].tolist(),
+                    "z_thpt_per_gpu": d_raw["z_thpt_per_gpu"].tolist(),
+                    "max_kv_tokens": max_kv_tokens_val,
+                }
+        except FileNotFoundError:
+            decode_json = None
 
     if prefill_json is not None and decode_json is not None:
+        # Only override planner profile directory when we actually have data to mount.
+        planner_args.append(f"--profile-results-dir={cm_mount_path}")
+
         config_map_obj = {
             "apiVersion": "v1",
             "kind": "ConfigMap",
@@ -248,6 +387,13 @@ def generate_dgd_config_with_planner(
                 "readOnly": True,
             }
         )
+
+    # Attach planner args (always)
+    mc_dict = planner_dict.setdefault("extraPodSpec", {}).setdefault(
+        "mainContainer", {}
+    )
+    mc_args = mc_dict.setdefault("args", [])
+    mc_args.extend(planner_args)
 
     # Finalize DGD services
     config_dict["spec"]["services"]["Planner"] = planner_dict
@@ -310,7 +456,7 @@ def _generate_mocker_config_with_planner(
                     "image"
                 ] = args.dgd_image
 
-    # Update worker args: --planner-profile-data, --model-path, --model-name
+    # Update worker args: --planner-profile-data (if available), --model-path, --model-name
     mocker_worker_names = [
         MockerComponentName.prefill_worker_k8s_name,
         MockerComponentName.decode_worker_k8s_name,
@@ -324,9 +470,10 @@ def _generate_mocker_config_with_planner(
                 "mainContainer", {}
             )
             args_list = main_container.get("args", [])
-            args_list = set_argument_value(
-                args_list, "--planner-profile-data", cm_mount_path
-            )
+            if config_map_obj is not None:
+                args_list = set_argument_value(
+                    args_list, "--planner-profile-data", cm_mount_path
+                )
             # Update model path and name if available in args
             args_list = set_argument_value(args_list, "--model-path", args.model)
             args_list = set_argument_value(args_list, "--model-name", args.model)

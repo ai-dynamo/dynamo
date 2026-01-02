@@ -64,7 +64,11 @@ class ConfigModifierProtocol(Protocol):
 
     @classmethod
     def set_prefill_config(
-        cls, config: dict, max_batch_size: int, max_num_tokens: int
+        cls,
+        config: dict,
+        max_batch_size: int,
+        max_num_tokens: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         ...
 

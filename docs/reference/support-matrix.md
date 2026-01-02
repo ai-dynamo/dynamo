@@ -63,7 +63,7 @@ The following table shows the dependency versions included with each Dynamo rele
 | **Dependency** | **main (ToT)** | **v0.8.0 (unreleased)** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
 | :------------- | :------------- | :---------------------- | :--------- | :--------------- | :--------- |
 | SGLang         | 0.5.6.post2    | 0.5.6.post2             | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
-| TensorRT-LLM   | 1.2.0rc5       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
+| TensorRT-LLM   | 1.2.0rc6       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
 | vLLM           | 0.12.0         | 0.12.0                  | 0.11.0     | 0.11.0           | 0.11.0     |
 | NIXL           | 0.8.0          | 0.8.0                   | 0.8.0      | 0.8.0            | 0.8.0      |
 
