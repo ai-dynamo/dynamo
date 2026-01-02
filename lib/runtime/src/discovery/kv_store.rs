@@ -139,14 +139,6 @@ impl Discovery for KVStoreDiscovery {
                     &inst.endpoint,
                     inst.instance_id,
                 );
-                tracing::debug!(
-                    "KVStoreDiscovery::register: Registering endpoint instance_id={}, namespace={}, component={}, endpoint={}, key={}",
-                    inst.instance_id,
-                    inst.namespace,
-                    inst.component,
-                    inst.endpoint,
-                    key
-                );
                 (INSTANCES_BUCKET, key)
             }
             DiscoveryInstance::Model {
@@ -165,54 +157,19 @@ impl Discovery for KVStoreDiscovery {
                     && !suffix.is_empty()
                 {
                     key = format!("{}/{}", key, suffix);
-                    tracing::debug!(
-                        "KVStoreDiscovery::register: Registering LoRA model with suffix={}, instance_id={}, namespace={}, component={}, endpoint={}, key={}",
-                        suffix,
-                        instance_id,
-                        namespace,
-                        component,
-                        endpoint,
-                        key
-                    );
                 }
 
-                // Log for base models (no suffix or empty suffix)
-                if model_suffix.as_ref().is_none_or(|s| s.is_empty()) {
-                    tracing::debug!(
-                        "KVStoreDiscovery::register: Registering base model instance_id={}, namespace={}, component={}, endpoint={}, key={}",
-                        instance_id,
-                        namespace,
-                        component,
-                        endpoint,
-                        key
-                    );
-                }
                 (MODELS_BUCKET, key)
             }
         };
 
         // Serialize the instance
         let instance_json = serde_json::to_vec(&instance)?;
-        tracing::debug!(
-            "KVStoreDiscovery::register: Serialized instance to {} bytes for key={}",
-            instance_json.len(),
-            key_path
-        );
 
         // Store in the KV store with no TTL (instances persist until explicitly removed)
-        tracing::debug!(
-            "KVStoreDiscovery::register: Getting/creating bucket={} for key={}",
-            bucket_name,
-            key_path
-        );
         let bucket = self.store.get_or_create_bucket(bucket_name, None).await?;
         let key = kv::Key::new(key_path.clone());
 
-        tracing::debug!(
-            "KVStoreDiscovery::register: Inserting into bucket={}, key={}",
-            bucket_name,
-            key_path
-        );
         // Use revision 0 for initial registration
         let outcome = bucket.insert(&key, instance_json.into(), 0).await?;
         tracing::debug!(
