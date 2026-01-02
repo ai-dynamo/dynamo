@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["FRONTEND"]=5)
 
 DEFAULT_FRAMEWORK=VLLM
 
@@ -120,6 +120,13 @@ SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_PYTHON_VERSION="3.10"
+
+FRONTEND_BASE_IMAGE="nvcr.io/nvidia/base/ubuntu"
+FRONTEND_BASE_IMAGE_TAG="noble-20250619"
+
+# GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
+GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
+GAIE_VERSION="v0.5.1"
 
 PYTHON_VERSION="3.12"
 
@@ -554,6 +561,8 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+elif [[ $FRAMEWORK == "FRONTEND" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.frontend
 fi
 
 # Add NIXL_REF as a build argument
@@ -935,6 +944,92 @@ if [ -z "${NO_TAG_LATEST}" ]; then
 fi
 
 show_image_options
+
+# Handle FRONTEND framework: build base dynamo image and EPP image first
+if [[ $FRAMEWORK == "FRONTEND" ]]; then
+    echo "Building FRONTEND image - requires base dynamo image and EPP image"
+    
+    # Build base dynamo image first (framework=NONE, target=dev)
+    echo ""
+    echo "Building base dynamo image for frontend..."
+    BASE_DYNAMO_TAG="dynamo:${VERSION}-none"
+    
+    BASE_DOCKERFILE="${SOURCE_DIR}/Dockerfile"
+    BASE_BUILD_ARGS="--build-arg BASE_IMAGE=${NONE_BASE_IMAGE}"
+    BASE_BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${NONE_BASE_IMAGE_TAG}"
+    BASE_BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
+    BASE_BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}"
+    BASE_BUILD_ARGS+=" --build-arg ARCH=${ARCH}"
+    
+    
+    # Show the docker command being executed if not in dry-run mode
+    if [ -z "$RUN_PREFIX" ]; then
+        set -x
+    fi
+    
+    if docker buildx version &>/dev/null; then
+        $RUN_PREFIX docker buildx build --progress=plain --load \
+            -f ${BASE_DOCKERFILE} \
+            --target dev \
+            ${PLATFORM} \
+            ${BASE_BUILD_ARGS} \
+            --tag ${BASE_DYNAMO_TAG} \
+            ${BUILD_CONTEXT} ${NO_CACHE}
+        BASE_BUILD_EXIT_CODE=${PIPESTATUS[0]}
+    else
+        $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain \
+            -f ${BASE_DOCKERFILE} \
+            --target dev \
+            ${PLATFORM} \
+            ${BASE_BUILD_ARGS} \
+            --tag ${BASE_DYNAMO_TAG} \
+            ${BUILD_CONTEXT} ${NO_CACHE}
+        BASE_BUILD_EXIT_CODE=${PIPESTATUS[0]}
+    fi
+    
+    { set +x; } 2>/dev/null
+    
+    if [ ${BASE_BUILD_EXIT_CODE} -ne 0 ]; then
+        error "ERROR: Failed to build base dynamo image for frontend"
+    fi
+    
+    echo "Successfully built base dynamo image: ${BASE_DYNAMO_TAG}"
+    
+    # Set up paths for GAIE
+    GAIE_CLONE_DIR="${BUILD_CONTEXT}/external/gateway-api-inference-extension"
+    
+    # Clone GAIE repo
+    echo ""
+    echo "Cloning GAIE repository at ${GAIE_VERSION}..."
+    $RUN_PREFIX rm -rf "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+    $RUN_PREFIX git clone ${GAIE_REPO_URL} "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX git checkout ${GAIE_VERSION}
+    $RUN_PREFIX cd "${BUILD_CONTEXT}"
+    
+    # Build EPP image
+    echo ""
+    echo "Building EPP image..."
+    export GAIE_DIR="${GAIE_CLONE_DIR}"
+    export DYNAMO_DIR="${BUILD_CONTEXT}"
+    if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
+        export TARGETARCH="arm64"
+    else
+        export TARGETARCH="amd64"
+    fi
+    
+    $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
+    
+    # Set EPP image tag (matches what build-epp-dynamo.sh produces)
+    EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
+    
+    echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
+    
+    # Add build args for frontend image
+    BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${BASE_DYNAMO_TAG}"
+    BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
+fi
 
 # Always build the main image first
 # Create build log directory for BuildKit reports
