@@ -6,11 +6,12 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS, EngineType
+from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
 from benchmarks.profiler.utils.model_info import (
     MOE_ADDITIONAL_TP_ARCHITECTURES,
     ModelInfo,
 )
+from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -222,27 +223,44 @@ def get_candidate_parallel_mappings(
 def apply_parallel_mapping_to_config(
     base_config: dict,
     mapping: ParallelizationMapping,
-    phase: str,
+    phase: SubComponentType,
     config_modifier,
     num_gpus_per_node: int | None,
+    is_aggregated_config: bool = True,
 ) -> dict:
     cfg = copy.deepcopy(base_config)
+
+    # In aggregated configs (used for profiling individual phases), the worker service we mutate
+    # is always the decode worker (prefill is converted to decode in convert_config()).
+    # In disaggregated configs (final DGD), we mutate the service matching the requested phase.
+    component_type = SubComponentType.DECODE if is_aggregated_config else phase
+
     if mapping.tp is not None:
-        cfg = config_modifier.set_config_tp_size(cfg, mapping.tp)
+        cfg = config_modifier.set_config_tp_size(cfg, mapping.tp, component_type)
     elif mapping.tep is not None:
-        cfg = config_modifier.set_config_tep_size(cfg, mapping.tep, num_gpus_per_node)
+        cfg = config_modifier.set_config_tep_size(
+            cfg, mapping.tep, num_gpus_per_node, component_type
+        )
     elif mapping.dep is not None:
-        cfg = config_modifier.set_config_dep_size(cfg, mapping.dep, num_gpus_per_node)
+        cfg = config_modifier.set_config_dep_size(
+            cfg, mapping.dep, num_gpus_per_node, component_type
+        )
     else:
         raise ValueError(f"Invalid mapping: {mapping.label()}")
 
-    # for prefill,set batch size to attention_dp_size
+    # For prefill, set batch size to attention_dp_size
     # (this assume prompt is long enough to saturate the GPU, which is usually valid in disagg)
-    if phase == EngineType.PREFILL:
+    if phase == SubComponentType.PREFILL:
+        prefill_component_type = (
+            SubComponentType.DECODE
+            if is_aggregated_config
+            else SubComponentType.PREFILL
+        )
         cfg = config_modifier.set_prefill_config(
             cfg,
             max_batch_size=mapping.get_attn_dp_size(),
             # max num tokens is shared by all attention dp ranks
             max_num_tokens=PREFILL_MAX_NUM_TOKENS * mapping.get_attn_dp_size(),
+            component_type=prefill_component_type,
         )
     return cfg

@@ -55,7 +55,6 @@ def get_aiperf_cmd_for_trace(
         str(seed),
         "--artifact-dir",
         artifact_dir,
-        "-v",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",

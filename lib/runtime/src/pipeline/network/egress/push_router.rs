@@ -198,6 +198,34 @@ where
             .await
     }
 
+    /// Select the next worker according to the routing mode.
+    /// Increments round-robin counter if applicable.
+    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    pub fn select_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            _ => {
+                panic!(
+                    "select_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
     /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject();

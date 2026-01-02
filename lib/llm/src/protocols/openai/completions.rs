@@ -4,6 +4,7 @@
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
@@ -23,7 +24,7 @@ mod delta;
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateCompletionRequest,
@@ -43,7 +44,7 @@ pub struct NvCreateCompletionRequest {
     pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionResponse {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateCompletionResponse,

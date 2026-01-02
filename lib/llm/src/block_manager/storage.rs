@@ -69,10 +69,12 @@ pub mod arena;
 pub mod cuda;
 pub mod disk;
 pub mod nixl;
+pub mod object;
 pub mod torch;
 
 pub use cuda::*;
 pub use disk::*;
+pub use object::ObjectStorage;
 use torch::*;
 
 use std::{
