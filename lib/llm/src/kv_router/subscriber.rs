@@ -651,6 +651,51 @@ pub async fn start_kv_router_background(
     Ok(())
 }
 
+/// Handle a worker discovery event (added or removed).
+async fn handle_worker_discovery(
+    event: DiscoveryEvent,
+    worker_query_client: &WorkerQueryClient,
+    kv_events_tx: &mpsc::Sender<RouterEvent>,
+    remove_worker_tx: &mpsc::Sender<WorkerId>,
+) {
+    match event {
+        DiscoveryEvent::Added(instance) => {
+            let worker_id = instance.instance_id();
+            tracing::info!(
+                "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
+            );
+
+            match recover_from_worker(
+                worker_query_client,
+                worker_id,
+                None, // Start from beginning
+                None, // Get all events
+                kv_events_tx,
+            )
+            .await
+            {
+                Ok(count) => {
+                    tracing::info!(
+                        "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to dump worker {worker_id}'s local indexer (may not have local indexer enabled): {e}"
+                    );
+                }
+            }
+        }
+        DiscoveryEvent::Removed(worker_id) => {
+            tracing::warn!("DISCOVERY: Worker {worker_id} removed, removing from router indexer");
+
+            if let Err(e) = remove_worker_tx.send(worker_id).await {
+                tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
+            }
+        }
+    }
+}
+
 /// Start a simplified background task for event consumption using NATS Core.
 ///
 /// This is used when local indexer mode is enabled. Unlike `start_kv_router_background`,
@@ -659,6 +704,9 @@ pub async fn start_kv_router_background(
 /// - Does not support snapshots, purging, or durable consumers
 /// - On worker Added: dumps worker's local indexer into router
 /// - On worker Removed: removes worker from router indexer
+///
+/// This function first recovers state from all currently registered workers before
+/// spawning the background task, ensuring the router is ready before returning.
 ///
 /// This is appropriate when workers have local indexers enabled.
 pub async fn start_kv_router_background_nats_core(
@@ -688,6 +736,40 @@ pub async fn start_kv_router_background_nats_core(
         .list_and_watch(generate_discovery_key, Some(cancellation_token.clone()))
         .await?;
 
+    // Drain and process all existing workers before spawning the background loop.
+    // list_and_watch returns existing instances first, so we poll with a short timeout
+    // to process all initial workers synchronously before the router becomes "ready".
+    loop {
+        // Use a short timeout to detect when initial discovery events are exhausted
+        let poll_result =
+            tokio::time::timeout(Duration::from_millis(100), instance_event_stream.next()).await;
+
+        match poll_result {
+            Ok(Some(Ok(event))) => {
+                handle_worker_discovery(
+                    event,
+                    &worker_query_client,
+                    &kv_events_tx,
+                    &remove_worker_tx,
+                )
+                .await;
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("Error receiving discovery event during initial sync: {e}");
+            }
+            Ok(None) => {
+                // Stream ended
+                tracing::warn!("Discovery stream ended during initial sync");
+                break;
+            }
+            Err(_) => {
+                // Timeout - no more initial events
+                tracing::debug!("Initial worker discovery sync complete");
+                break;
+            }
+        }
+    }
+
     tokio::spawn(async move {
         // Track last received event ID per worker for gap detection
         let mut last_event_ids: HashMap<WorkerId, u64> = HashMap::new();
@@ -703,51 +785,17 @@ pub async fn start_kv_router_background_nats_core(
 
                 // Handle generate endpoint instance add/remove events
                 Some(discovery_event_result) = instance_event_stream.next() => {
-                    let Ok(discovery_event) = discovery_event_result else {
+                    let Ok(event) = discovery_event_result else {
                         continue;
                     };
 
-                    match discovery_event {
-                        DiscoveryEvent::Added(_instance) => {
-                            // Extract worker_id from the instance
-                            let worker_id = _instance.instance_id();
-
-                            tracing::info!(
-                                "DISCOVERY: Worker {worker_id} added, dumping local indexer into router"
-                            );
-
-                            // Query worker's local indexer and dump all events
-                            match recover_from_worker(
-                                &worker_query_client,
-                                worker_id,
-                                None, // Start from beginning
-                                None, // Get all events
-                                &kv_events_tx,
-                            )
-                            .await
-                            {
-                                Ok(count) => {
-                                    tracing::info!(
-                                        "Successfully dumped worker {worker_id}'s local indexer, recovered {count} events"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "Failed to dump worker {worker_id}'s local indexer (may not have local indexer enabled): {e}"
-                                    );
-                                }
-                            }
-                        }
-                        DiscoveryEvent::Removed(worker_id) => {
-                            tracing::warn!(
-                                "DISCOVERY: Worker {worker_id} removed, removing from router indexer"
-                            );
-
-                            if let Err(e) = remove_worker_tx.send(worker_id).await {
-                                tracing::warn!("Failed to send worker removal for worker {worker_id}: {e}");
-                            }
-                        }
-                    }
+                    handle_worker_discovery(
+                        event,
+                        &worker_query_client,
+                        &kv_events_tx,
+                        &remove_worker_tx,
+                    )
+                    .await;
                 }
 
                 // Handle event consumption from NATS Core subscription
