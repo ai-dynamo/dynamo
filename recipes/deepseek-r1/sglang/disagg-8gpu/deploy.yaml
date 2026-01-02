@@ -17,6 +17,9 @@ spec:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
