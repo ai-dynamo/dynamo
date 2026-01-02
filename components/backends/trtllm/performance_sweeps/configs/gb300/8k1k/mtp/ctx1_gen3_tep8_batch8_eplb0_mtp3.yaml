@@ -1,12 +1,12 @@
-# concurrencies: 1, 2, 8
+# concurrencies: 1, 2, 4, 9
 prefill:
   num: 1
   config:
     max_batch_size: 2
     max_num_tokens: 16640
     max_seq_len: 8232
-    tensor_parallel_size: 4
-    moe_expert_parallel_size: 4
+    tensor_parallel_size: 2
+    moe_expert_parallel_size: 2
     enable_attention_dp: true
     pipeline_parallel_size: 1
     print_iter_log: true
@@ -33,7 +33,7 @@ prefill:
   unset_env:
     - UCX_TLS
 decode:
-  num: 4
+  num: 3
   config:
     tensor_parallel_size: 8
     moe_expert_parallel_size: 8
@@ -49,16 +49,6 @@ decode:
       - 1
       - 2
       - 4
-      - 8
-      - 16
-      - 32
-      - 64
-      - 128
-      - 256
-      - 512
-      - 768
-      - 1024
-      - 2048
       - 8
     print_iter_log: true
     kv_cache_config:
@@ -85,4 +75,3 @@ decode:
     TRTLLM_ENABLE_PDL: 1
   unset_env:
     - UCX_TLS
-
