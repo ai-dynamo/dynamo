@@ -176,6 +176,20 @@ class HandlerBase:
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
+    def _build_trace_headers(self, context: Context) -> dict[str, str] | None:
+        """
+        Build trace headers from context for propagation to TensorRT-LLM engine.
+        """
+        trace_id = context.trace_id
+        span_id = context.span_id
+        if not trace_id or not span_id:
+            return None
+
+        # W3C Trace Context format: {version}-{trace_id}-{parent_id}-{trace_flags}
+        # version: 00, trace_flags: 01 (sampled)
+        # TODO: properly propagate the trace-flags from current span.
+        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
+
     async def _handle_cancellation(
         self, generation_result: GenerationResult, context: Context
     ):
@@ -362,6 +376,9 @@ class HandlerBase:
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
+        # Build trace headers for distributed tracing
+        trace_headers = self._build_trace_headers(context)
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -369,6 +386,7 @@ class HandlerBase:
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
+                trace_headers=trace_headers,
             )
 
             # Use the context manager to handle cancellation monitoring
