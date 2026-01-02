@@ -1,14 +1,14 @@
 ## Inference Gateway Setup with Dynamo
 
-When integrating Dynamo with the Inference Gateway you could either use the default EPP image provided by the extension or use the custom Dynamo image.
+When integrating Dynamo with the Inference Gateway it is recommended to use the custom Dynamo EPP image.
 
 1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach.
 
-2. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
+2. You could still use the default EPP image provided by the extension. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
+
+EPP’s default kv-routing approach is token-aware only `by approximation` because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
-
-EPP’s default kv-routing approach is token-aware only `by approximation` because the prompt is tokenized with a generic tokenizer unaware of the model deployed. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -37,31 +37,63 @@ You can use the script below or follow the steps manually.
 Script:
 
 ```bash
-./install_gaie_crd_kgateway.sh
+./scripts/install_gaie_crd_kgateway.sh
 ```
 
 Manual steps:
 
-a. Deploy the Gateway API CRDs:
+#### a. Deploy the Gateway API CRDs
 
 ```bash
-GATEWAY_API_VERSION=v1.3.0
+GATEWAY_API_VERSION=v1.4.1
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
 ```
 
-b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs)
+#### b. Install the Inference Extension CRDs
 
 ```bash
-INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
+IGW_LATEST_RELEASE=v1.2.1
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml
 ```
 
+#### c. Install kGateway CRDs and kGateway itself
+
+kGateway needs the Agentgateway to support the Gateway Api  Inference Extension.
+
 ```bash
-kubectl get gateway inference-gateway -n my-model
+KGTW_VERSION=v2.2.0-main
+helm upgrade -i --create-namespace --namespace kgateway-system --version $KGTW_VERSION \
+  kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
+
+helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION kgateway \
+  oci://cr.kgateway.dev/kgateway-dev/charts/kgateway \
+  --set inferenceExtension.enabled=true
+```
+
+#### d. Deploy the Inference Gateway
+
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/kgateway/gateway.yaml
+```
+
+#### e. Patch the Gateway to use kgateway GatewayClass
+
+The manifest uses `gatewayClassName: agentgateway` but kGateway creates a GatewayClass named `kgateway`. Patch it:
+
+```bash
+kubectl patch gateway inference-gateway --type='json' \
+  -p='[{"op": "replace", "path": "/spec/gatewayClassName", "value": "kgateway"}]'
+```
+**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command above fixes this mismatch.
+
+#### f. Verify the Gateway is running
+
+```bash
+kubectl get gateway inference-gateway
 
 # Sample output
 # NAME                CLASS      ADDRESS   PROGRAMMED   AGE
-# inference-gateway   kgateway   x.x.x.x   True         1m
+# inference-gateway   kgateway             True         1m
 ```
 
 ### 3. Deploy Your Model ###
@@ -148,51 +180,6 @@ Dynamo provides a custom routing plugin `pkg/epp/scheduling/plugins/dynamo_kv_sc
 The Dynamo router is built as a static library, the EPP router will call to provide fast inference.
 You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
 
-##### 1. Build the custom EPP image #####
-
-If you choose to build your own image use the steps below.
-
-##### 1.1 Clone the official GAIE repo in a separate folder #####
-
-```bash
-git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git
-cd gateway-api-inference-extension
-git checkout v0.5.1
-```
-
-##### 1.2 Build the Dynamo Custom EPP #####
-
-###### 1.2.1 Clone the official EPP repo ######
-
-```bash
-# Clone the official GAIE repo in a separate folder
-cd path/to/gateway-api-inference-extension
-git clone git@github.com:kubernetes-sigs/gateway-api-inference-extension.git
-git checkout v0.5.1
-```
-
-###### 1.2.2 Run the script to build the EPP image ######
-
-The script will apply a custom patch to the code with your GAIE repo and build the image for you to use.
-
-```bash
-# Use your custom paths
-export DYNAMO_DIR=/path/to/dynamo
-export GAIE_DIR=/path/to/gateway-api-inference-extension
-
-# Run the script
-cd deploy/inference-gateway
-./build-epp-dynamo.sh
-```
-
-Under the hood the script applies the Dynamo Patch to the EPP code base; creates a Dynamo Router static library and builds a custom EPP image with it.
-Re-tag the freshly built image and push it to your registry.
-
-```bash
-docker images
-docker tag <your-new-id> <your-image-tag>
-docker push  <your-image-tag>
-```
 
 
 **Note**
@@ -357,3 +344,60 @@ If you need to uninstall run:
 kubectl delete dynamoGraphDeployment vllm-agg
 helm uninstall dynamo-gaie -n my-model
 ```
+
+---
+
+## Gateway API Inference Extension v1.2.1 Integration
+
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
+
+### v1.2.1 API Changes
+
+The v1.2.1 release introduces breaking changes to the plugin interfaces:
+
+### Building for v1.2.1
+
+The plugin code for v1.2.1 is in:
+- `pkg/plugins/dynamo_kv_scorer/plugin.go`
+- `pkg/plugins/dynamo_inject_workerid/plugin.go`
+- `pkg/plugins/dynamo_cleanup/plugin.go`
+
+#### Build Commands
+
+```bash
+# Build Dynamo library and copy to project
+make dynamo-lib
+
+# Build Docker image and load locally
+make image-local-load
+
+# Or do everything in one command
+make all
+```
+
+#### All-in-one Targets
+
+| Target | Description |
+|--------|-------------|
+| `make dynamo-lib` | Build Dynamo static library and copy to project |
+| `make all` | Build Dynamo lib + Docker image + load locally |
+| `make all-push` | Build Dynamo lib + Docker image + push to registry |
+| `make all-kind` | Build Dynamo lib + Docker image + load to kind |
+
+### Body Mutation Strategy for v1.2.1
+
+Since v1.2.1 removes `RequestBodyMutator`, the `nvext` field injection (for `backend_instance_id`, `prefill_worker_id`, etc.) must be handled by:
+
+1. **BBR Extension**: Configure the Body-Based Router to inject fields based on headers
+2. **Envoy Filter**: Use a custom Envoy filter to modify request bodies
+3. **Gateway Transformation**: Use gateway-level request transformation
+
+The `dynamo-inject-workerid` plugin sets the following headers for body transformation:
+
+| Header | Description |
+|--------|-------------|
+| `x-dynamo-routing-mode` | `aggregated` or `disaggregated` |
+| `x-dynamo-backend-instance-id` | Worker ID (aggregated mode) |
+| `x-dynamo-prefill-worker-id` | Prefill worker ID (disaggregated mode) |
+| `x-dynamo-decode-worker-id` | Decode worker ID (disaggregated mode) |
+| `x-dynamo-token-data` | JSON-encoded token IDs |

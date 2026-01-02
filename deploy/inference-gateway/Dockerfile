@@ -1,0 +1,70 @@
+# Dynamo EPP Dockerfile
+# Builds a custom EPP image with Dynamo KV-aware routing plugins
+#
+# PREREQUISITES: Run `make dynamo-lib` before building this image to ensure
+# the Dynamo FFI library and headers are in place.
+
+ARG BUILDER_IMAGE=golang:1.24-bookworm
+ARG BASE_IMAGE=ubuntu:24.04
+
+# =============================================================================
+# Build stage
+# =============================================================================
+FROM ${BUILDER_IMAGE} AS builder
+
+ARG COMMIT_SHA
+ARG BUILD_REF
+
+WORKDIR /workspace
+
+# Install build dependencies for CGO
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source code (including pre-built Dynamo library)
+COPY . .
+
+# Verify Dynamo library exists
+RUN if [ ! -f "pkg/plugins/dynamo_kv_scorer/lib/libdynamo_llm_capi.a" ]; then \
+        echo "ERROR: Dynamo library not found!"; \
+        echo "Run 'make dynamo-lib' before building the Docker image."; \
+        exit 1; \
+    fi
+
+# Build with CGO enabled for the Dynamo FFI
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/version.GitVersion=${BUILD_REF} \
+              -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \
+    -o epp ./cmd/epp
+
+# =============================================================================
+# Runtime stage
+# =============================================================================
+FROM ${BASE_IMAGE}
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /
+
+# Copy the binary from builder
+COPY --from=builder /workspace/epp .
+
+# Copy the config file
+COPY --from=builder /workspace/config/epp-config-dynamo.yaml /config/epp-config.yaml
+
+# Create non-root user
+RUN useradd -r -u 65532 -g nogroup nonroot
+USER 65532:65534
+
+ENTRYPOINT ["/epp"]
