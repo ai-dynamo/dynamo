@@ -398,7 +398,10 @@ func (r *DynamoGraphDeploymentReconciler) processRestartSequential(ctx context.C
 	_ = logger
 
 	// TODO: should we validate ordering is correct or let webhook handle this?
-	orderedServicesToRestart := dynamoDeployment.Spec.Restart.Strategy.Order
+	var orderedServicesToRestart []string
+	if dynamoDeployment.Spec.Restart != nil && dynamoDeployment.Spec.Restart.Strategy != nil {
+		orderedServicesToRestart = dynamoDeployment.Spec.Restart.Strategy.Order
+	}
 	if len(orderedServicesToRestart) == 0 {
 		orderedServicesToRestart = make([]string, 0, len(dynamoDeployment.Spec.Services))
 		for serviceName := range dynamoDeployment.Spec.Services {
@@ -477,12 +480,16 @@ func (r *DynamoGraphDeploymentReconciler) getUpgdatedInProgress(ctx context.Cont
 		if err != nil {
 			return nil, fmt.Errorf("failed to get DynamoComponentDeployment %s: %w", componentName, err)
 		}
+		isReady := false
 		for _, condition := range dcd.Status.Conditions {
 			if condition.Type == nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable && condition.Status == metav1.ConditionTrue {
-				continue
+				isReady = true
+				break
 			}
 		}
-		updatedInProgress = append(updatedInProgress, serviceName)
+		if !isReady {
+			updatedInProgress = append(updatedInProgress, serviceName)
+		}
 	}
 
 	return updatedInProgress, nil
@@ -542,7 +549,7 @@ func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) boo
 
 func shouldRestartRestart(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
-		return true
+		return false
 	}
 
 	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedAt == nil {
@@ -585,6 +592,9 @@ func (r *DynamoGraphDeploymentReconciler) triggerServiceRestartsForGrove(ctx con
 			if err != nil {
 				return fmt.Errorf("failed to get PodCliqueScalingGroup %s: %w", resourceName, err)
 			}
+			if pcsg.Annotations == nil {
+				pcsg.Annotations = make(map[string]string)
+			}
 			pcsg.Annotations[consts.RestartAnnotation] = dynamoDeployment.Spec.Restart.At.Format(time.RFC3339)
 			err = r.Update(ctx, pcsg)
 			if err != nil {
@@ -598,6 +608,9 @@ func (r *DynamoGraphDeploymentReconciler) triggerServiceRestartsForGrove(ctx con
 			}, podClique)
 			if err != nil {
 				return fmt.Errorf("failed to get PodClique %s: %w", resourceName, err)
+			}
+			if podClique.Annotations == nil {
+				podClique.Annotations = make(map[string]string)
 			}
 			podClique.Annotations[consts.RestartAnnotation] = dynamoDeployment.Spec.Restart.At.Format(time.RFC3339)
 			err = r.Update(ctx, podClique)
