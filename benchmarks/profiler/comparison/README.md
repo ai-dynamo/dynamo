@@ -107,7 +107,7 @@ kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE &
 ### Run AIPerf at 4 load levels
 
 ```bash
-MAX_BS=128
+MAX_BS=8  # Conservative for TP=1/2 disaggregated setups
 
 for LEVEL in idle medium saturation overload; do
   case $LEVEL in

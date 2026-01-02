@@ -71,16 +71,21 @@ How closely does predicted TTFT/ITL match actual?
 | ITL Error % | `\|predicted - actual\| / actual × 100` |
 | SLA Hit Rate % | Requests meeting both TTFT & ITL targets |
 
-Tested at 4 load levels:
+Tested at 4 load levels with **MAX_BS=8** (for TP=1/2 disaggregated setups):
 
 | Level | Concurrency | Purpose |
 |-------|-------------|---------|
 | Idle | 1 | Baseline (no contention) |
-| Medium | 64 (50% of 128) | Moderate load |
-| Saturation | 115 (90% of 128) | Near capacity |
-| Overload | 141 (110% of 128) | Degradation behavior |
+| Medium | 4 (50% of 8) | Moderate load |
+| Saturation | 7 (90% of 8) | Near capacity |
+| Overload | 9 (110% of 8) | Degradation behavior |
 
-*MAX_BS = 128 is held constant across all profiling methods for comparable results.*
+**Choosing MAX_BS**: Must match **actual deployment capacity**:
+- TP=1/2 disaggregated with ISL=2048: MAX_BS ≈ 8
+- TP=4 with ISL=2048: MAX_BS ≈ 16-32  
+- TP=8 with ISL=2048: MAX_BS ≈ 32-64
+
+MAX_BS must be consistent across all methods being compared.
 
 ### 3. Optimization Accuracy
 
