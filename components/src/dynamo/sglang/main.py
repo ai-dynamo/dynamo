@@ -312,28 +312,6 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.info("[ResumeMemory] Continued generation - engine unpaused")
 
             # Step 3: Re-register to discovery so frontend can route to us again
-            # We need to call BOTH register functions:
-            # - _register_llm_with_runtime_config: registers the Model Deployment Card (MDC)
-            # - register_endpoint_instance: adds to instances bucket (routing table)
-            try:
-                from dynamo.sglang.register import _register_llm_with_runtime_config
-
-                model_type = parse_endpoint_types(dynamo_args.dyn_endpoint_types)
-                await _register_llm_with_runtime_config(
-                    engine,
-                    generate_endpoint,
-                    server_args,
-                    dynamo_args,
-                    output_type=model_type,
-                )
-                logging.info(
-                    "[ResumeMemory] Re-registered model card to discovery"
-                )
-            except Exception as reg_err:
-                logging.warning(
-                    f"[ResumeMemory] Failed to re-register model card: {reg_err}"
-                )
-
             try:
                 await register_endpoint_instance(generate_endpoint)
                 logging.info(
@@ -561,28 +539,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
             logging.info("[ResumeMemory] Continued generation - engine unpaused")
 
             # Step 3: Re-register to discovery so frontend can route to us again
-            # We need to call BOTH register functions:
-            # - _register_llm_with_runtime_config: registers the Model Deployment Card (MDC)
-            # - register_endpoint_instance: adds to instances bucket (routing table)
-            try:
-                from dynamo.sglang.register import _register_llm_with_runtime_config
-
-                await _register_llm_with_runtime_config(
-                    engine,
-                    generate_endpoint,
-                    server_args,
-                    dynamo_args,
-                    input_type=ModelInput.Tokens,
-                    output_type=ModelType.Prefill,
-                )
-                logging.info(
-                    "[ResumeMemory] Re-registered model to discovery - frontend can route here again"
-                )
-            except Exception as reg_err:
-                logging.warning(
-                    f"[ResumeMemory] Failed to re-register to discovery: {reg_err}"
-                )
-
             try:
                 await register_endpoint_instance(generate_endpoint)
                 logging.info(

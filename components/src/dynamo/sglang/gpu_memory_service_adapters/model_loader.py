@@ -34,7 +34,7 @@ import json
 import logging
 import os
 from dataclasses import replace
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -233,7 +233,9 @@ class GPUServiceModelLoader:
 
         # Use device from impl (set at impl creation time from torch.cuda.current_device())
         device_index = (
-            device_config.gpu_id if device_config.gpu_id >= 0 else impl.get_device_index()
+            device_config.gpu_id
+            if device_config.gpu_id >= 0
+            else impl.get_device_index()
         )
         config_hash = compute_sglang_config_hash(model_config)
 
@@ -245,7 +247,9 @@ class GPUServiceModelLoader:
 
         if impl.get_mode() == "read":
             # Import-only mode: materialize from registry
-            return self._load_import_only(impl, model_config, device_config, config_hash)
+            return self._load_import_only(
+                impl, model_config, device_config, config_hash
+            )
         else:
             # Write mode: load from disk
             # Allocations are routed via region("weights") -> use_mem_pool()
@@ -264,7 +268,9 @@ class GPUServiceModelLoader:
 
         allocator = impl.get_allocator()
         if allocator is None:
-            raise RuntimeError("Allocator is None in READ mode - this should not happen")
+            raise RuntimeError(
+                "Allocator is None in READ mode - this should not happen"
+            )
 
         # Create meta model (model structure without weights)
         import_only_loader = ImportOnlyModelLoader(self.load_config)
@@ -309,7 +315,9 @@ class GPUServiceModelLoader:
 
         allocator = impl.get_allocator()
         if allocator is None:
-            raise RuntimeError("Allocator is None in WRITE mode - this should not happen")
+            raise RuntimeError(
+                "Allocator is None in WRITE mode - this should not happen"
+            )
 
         # Clear any stale registry entries for this config
         allocator.registry_delete_prefix(f"{config_hash}:")
@@ -320,7 +328,9 @@ class GPUServiceModelLoader:
         disk_load_config = _strip_gpu_memory_service_extra_config(self.load_config)
         disk_load_config = replace(disk_load_config, load_format="auto")
 
-        logger.info("[GPU Memory Service] Loading model from disk via DefaultModelLoader")
+        logger.info(
+            "[GPU Memory Service] Loading model from disk via DefaultModelLoader"
+        )
         model = DefaultModelLoader(disk_load_config).load_model(
             model_config=model_config,
             device_config=device_config,
@@ -328,7 +338,9 @@ class GPUServiceModelLoader:
 
         # Finalize: register tensors, commit, switch to read mode
         impl.finalize_write_mode(model, config_hash)
-        GPUServiceModelLoader._imported_weights_bytes = impl.get_imported_weights_bytes()
+        GPUServiceModelLoader._imported_weights_bytes = (
+            impl.get_imported_weights_bytes()
+        )
 
         return model.eval()
 
