@@ -57936,7 +57936,7 @@ third_party/cudnn_frontend/LICENSE.txt
 
 third_party/cutlass/LICENSE.txt
 -------------------------------
-Copyright (c) 2017-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Copyright (c) 2017-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause
 
 Redistribution and use in source and binary forms, with or without
@@ -62940,7 +62940,7 @@ Software.
 
 third_party/cutlass/python/LICENSE.txt
 --------------------------------------
-Copyright (c) 2017-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+Copyright (c) 2017-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause
 
 Redistribution and use in source and binary forms, with or without
