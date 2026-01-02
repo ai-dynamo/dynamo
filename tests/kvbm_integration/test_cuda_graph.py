@@ -165,12 +165,12 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
-        engine_config_with_cuda_graph_and_kvbm = (
+        engine_config_without_cuda_graph_and_kvbm = (
             "tests/kvbm_integration/engine_config_without_cuda_graph_and_kvbm.yaml"
         )
         logger.info("Starting worker...")
         with DynamoWorkerProcess(
-            request, "decode", engine_config_with_cuda_graph_and_kvbm
+            request, "decode", engine_config_without_cuda_graph_and_kvbm
         ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
