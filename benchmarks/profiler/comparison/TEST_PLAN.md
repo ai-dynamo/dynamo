@@ -76,9 +76,11 @@ Tested at 4 load levels:
 | Level | Concurrency | Purpose |
 |-------|-------------|---------|
 | Idle | 1 | Baseline (no contention) |
-| Medium | 50% max BS | Moderate load |
-| Saturation | 90% max BS | Near capacity |
-| Overload | 110% max BS | Degradation behavior |
+| Medium | 64 (50% of 128) | Moderate load |
+| Saturation | 115 (90% of 128) | Near capacity |
+| Overload | 141 (110% of 128) | Degradation behavior |
+
+*MAX_BS = 128 is held constant across all profiling methods for comparable results.*
 
 ### 3. Optimization Accuracy
 

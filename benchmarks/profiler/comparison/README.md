@@ -98,15 +98,16 @@ For each method, deploy its recommended config and measure actual latency at dif
 ### Deploy a method's config
 
 ```bash
+export METHOD=online_all  # update for each method
 kubectl apply -n $NAMESPACE \
-  -f benchmarks/profiler/comparison/results/<method>/config_with_planner.yaml
-kubectl port-forward svc/<deployment>-frontend 8000:8000 -n $NAMESPACE &
+  -f benchmarks/profiler/comparison/results/${METHOD}/config_with_planner.yaml
+kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE &
 ```
 
 ### Run AIPerf at 4 load levels
 
 ```bash
-MAX_BS=64  # Adjust based on profiler output
+MAX_BS=128
 
 for LEVEL in idle medium saturation overload; do
   case $LEVEL in
@@ -120,7 +121,7 @@ for LEVEL in idle medium saturation overload; do
     --concurrency $CONC --request-count 100 \
     --synthetic-input-tokens-mean 2048 --output-tokens-mean 256 \
     --goodput "time_to_first_token:500 inter_token_latency:50" \
-    --artifact-dir benchmarks/profiler/comparison/results/<method>/validation/$LEVEL
+    --artifact-dir benchmarks/profiler/comparison/results/${METHOD}/validation/$LEVEL
 done
 ```
 
@@ -142,6 +143,8 @@ python benchmarks/sin_load_generator/sin_synth.py \
   --output-file benchmarks/profiler/comparison/results/sinusoidal.jsonl
 ```
 
+***Note: the benchmarks directory needs to be in your PYTHONPATH.***
+
 ### Benchmark each method's config
 
 ```bash
@@ -150,7 +153,7 @@ aiperf profile --model Qwen/Qwen3-32B --url localhost:8000 --streaming \
   --input-file benchmarks/profiler/comparison/results/sinusoidal.jsonl \
   --custom-dataset-type mooncake_trace \
   --goodput "time_to_first_token:500 inter_token_latency:50" \
-  --artifact-dir benchmarks/profiler/comparison/results/<method>/optimization
+  --artifact-dir benchmarks/profiler/comparison/results/${METHOD}/optimization
 ```
 
 ---

@@ -10,7 +10,7 @@ metadata:
   name: qwen3-32b-online
 spec:
   model: "Qwen/Qwen3-32B"
-  backend: vllm
+  backend: trtllm
 
   profilingConfig:
     profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0.post2"
@@ -27,9 +27,6 @@ spec:
 
       sweep:
         use_ai_configurator: false  # Use real deployments
-
-  deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
 
   autoApply: false  # Profile only, don't deploy
 

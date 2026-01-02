@@ -1,21 +1,21 @@
 apiVersion: v1
 data:
-  decode_raw_data.json: '{"x_kv_usage": [0.0013671875, 0.117578125, 0.2337890625,
-    0.35, 0.4662109375, 0.582421875, 0.02770703125, 0.19394921875, 0.3878984375],
-    "y_context_length": [350.0, 350.0, 350.0, 350.0, 350.0, 350.0, 7093.0, 7093.0,
-    7093.0], "z_itl": [22.328989559118238, 28.930944401477372, 39.79771755353983,
-    50.22440618049955, 66.54923459997094, 81.3827169924877, 22.952935759519036, 26.22996563068995,
-    28.90201610807329], "z_thpt_per_gpu": [44.68861568380151, 2940.915255357205, 4243.415968515759,
-    5012.188946852754, 5040.085347797445, 5127.196771247916, 43.44732661480929, 265.7791016799465,
-    482.0421085787754], "max_kv_tokens": 256000}'
+  decode_raw_data.json: '{"x_kv_usage": [0.042558365758754865, 0.12767509727626458,
+    0.2127918287937743, 0.3404669260700389, 0.4255836575875486, 0.5532587548638133,
+    0.8624756809338522], "y_context_length": [350.0, 350.0, 350.0, 350.0, 350.0, 350.0,
+    7093.0], "z_itl": [20.1648830240481, 21.21553104809619, 21.214175196793587, 21.348323602454908,
+    21.130853109218435, 21.323943981645755, 19.900630591182367], "z_thpt_per_gpu":
+    [49.39767605629615, 140.48093975077535, 234.09581420095245, 372.20243325170793,
+    468.7227054712432, 605.3550411464695, 50.07412474689247], "max_kv_tokens": 8224}'
   prefill_raw_data.json: '{"prefill_isl": [100, 2621, 5142, 7663, 10184, 12705, 15226,
-    17747, 20268, 22789, 25310, 27831, 30352, 32873], "prefill_ttft": [46.813452999999996,
-    274.17285599999997, 545.795075, 836.529149, 1160.039976, 1512.917027, 1874.521006,
-    2256.2636279999997, 2689.089398, 3100.656301, 3572.080486, 3993.552093, 4494.880741,
-    5122.121039], "prefill_thpt_per_gpu": [2136.138088339692, 9559.662609343064, 9421.118356555344,
-    9160.46979254754, 8779.007802055263, 8397.684587629405, 8122.608363024127, 7865.658861740071,
-    7537.12391082061, 7349.734310329805, 7085.506639393231, 6968.983839921079, 6752.570701853021,
-    6417.849119476851]}'
+    17747, 20268, 22789, 25310, 27831, 30352, 32873, 35394, 37915, 40436], "prefill_ttft":
+    [46.30453, 286.161764, 572.1501539999999, 871.989733, 1236.162509, 1612.917552,
+    1981.032598, 2415.7517589999998, 2853.087129, 3317.646398, 3809.612208, 4329.945068999999,
+    4874.755766, 5454.241569, 6007.754327, 6608.139612999999, 7158.902172], "prefill_thpt_per_gpu":
+    [2159.615916628459, 9159.155169311856, 8987.151299447174, 8787.947506716802, 8238.39901781069,
+    7877.030034328748, 7685.890689215201, 7346.3674129109895, 7103.883997788698, 6869.026190897877,
+    6643.7208351155095, 6427.564219983873, 6226.363218378313, 6027.052447922114, 5891.3860443548065,
+    5737.620907011548, 5648.352083669178]}'
 kind: ConfigMap
 metadata:
   name: planner-profile-data
@@ -23,28 +23,28 @@ metadata:
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-disagg
+  name: trtllm-disagg
 spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: trtllm-disagg
       extraPodSpec:
         mainContainer:
           args: null
           command: null
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
           workingDir: null
       replicas: 1
       resources: null
       subComponentType: null
     Planner:
       componentType: planner
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: trtllm-disagg
       extraPodSpec:
         mainContainer:
           args:
-          - --backend=vllm
+          - --backend=trtllm
           - --itl=50
           - --ttft=500
           - --adjustment-interval=180
@@ -54,7 +54,7 @@ spec:
           - --max-gpu-budget=8
           - --min-endpoint=1
           - --prometheus-port=0
-          - --namespace=vllm-disagg
+          - --namespace=trtllm-disagg
           - --prefill-engine-num-gpu=1
           - --decode-engine-num-gpu=1
           - --profile-results-dir=/workspace/profiling_results
@@ -62,7 +62,7 @@ spec:
           - python3
           - -m
           - planner_sla
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
           volumeMounts:
           - mountPath: /workspace/profiling_results
             name: planner-profile-data
@@ -73,24 +73,29 @@ spec:
             name: planner-profile-data
           name: planner-profile-data
       replicas: 1
-    VllmDecodeWorker:
+    TRTLLMDecodeWorker:
       componentType: worker
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
           args:
-          - --model
+          - --model-path
           - Qwen/Qwen3-32B
-          - --is-decode-worker
-          - --tensor-parallel-size
-          - '1'
+          - --served-model-name
+          - Qwen/Qwen3-32B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/decode.yaml
+          - --disaggregation-mode
+          - decode
+          - --override-engine-args
+          - '{"tensor_parallel_size": 1}'
           command:
           - python3
           - -m
-          - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
-          workingDir: /workspace/examples/backends/vllm
+          - dynamo.trtllm
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          workingDir: /workspace/
       replicas: 1
       resources:
         limits:
@@ -98,24 +103,29 @@ spec:
         requests:
           gpu: '1'
       subComponentType: decode
-    VllmPrefillWorker:
+    TRTLLMPrefillWorker:
       componentType: worker
-      dynamoNamespace: vllm-disagg
+      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
           args:
-          - --model
+          - --model-path
           - Qwen/Qwen3-32B
-          - --is-prefill-worker
-          - --tensor-parallel-size
-          - '1'
+          - --served-model-name
+          - Qwen/Qwen3-32B
+          - --extra-engine-args
+          - ./examples/backends/trtllm/engine_configs/qwen3/prefill.yaml
+          - --disaggregation-mode
+          - prefill
+          - --override-engine-args
+          - '{"tensor_parallel_size": 1}'
           command:
           - python3
           - -m
-          - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
-          workingDir: /workspace/examples/backends/vllm
+          - dynamo.trtllm
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.7.0
+          workingDir: /workspace/
       replicas: 1
       resources:
         limits:
