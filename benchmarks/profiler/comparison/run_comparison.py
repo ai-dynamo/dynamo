@@ -154,10 +154,96 @@ def load_method_results(results_dir: Path, method_name: str) -> Optional[Profili
     metrics.num_decode_configs_tested = len(list(results_dir.glob("decode_*gpus*")))
 
     logger.info(f"Loaded {method_name}: duration={duration:.0f}s, deploys={num_deployments}")
+    
+    # Auto-load validation and optimization if available
+    metrics = load_validation_from_dir(results_dir, metrics)
+    metrics = load_optimization_from_dir(results_dir, metrics)
+    
+    return metrics
+
+
+def load_validation_from_dir(results_dir: Path, metrics: ProfilingMetrics) -> ProfilingMetrics:
+    """Auto-load validation from method's validation/ subdirectory."""
+    from benchmarks.profiler.comparison.metrics import LoadLevelMetrics
+    
+    validation_dir = results_dir / "validation"
+    if not validation_dir.exists():
+        return metrics
+    
+    for level in ["idle", "medium", "saturation", "overload"]:
+        level_dir = validation_dir / level
+        # Try profile_export_aiperf.json first (actual results)
+        aiperf_json = level_dir / "profile_export_aiperf.json"
+        if aiperf_json.exists():
+            try:
+                with open(aiperf_json, "r") as f:
+                    data = json.load(f)
+                
+                # Handle nested aiperf JSON structure (values already in ms)
+                ttft_data = data.get("time_to_first_token", {})
+                itl_data = data.get("inter_token_latency", {})
+                actual_ttft = ttft_data.get("p50", 0) if isinstance(ttft_data, dict) else 0
+                actual_itl = itl_data.get("p50", 0) if isinstance(itl_data, dict) else 0
+                
+                # Calculate error vs predicted
+                ttft_error = None
+                itl_error = None
+                if metrics.predicted_ttft > 0 and actual_ttft > 0:
+                    ttft_error = ((actual_ttft - metrics.predicted_ttft) / metrics.predicted_ttft) * 100
+                if metrics.predicted_itl > 0 and actual_itl > 0:
+                    itl_error = ((actual_itl - metrics.predicted_itl) / metrics.predicted_itl) * 100
+                
+                llm = LoadLevelMetrics(
+                    load_level=level,
+                    actual_ttft_p50=actual_ttft,
+                    actual_itl_p50=actual_itl,
+                    ttft_error_pct=ttft_error,
+                    itl_error_pct=itl_error,
+                )
+                metrics.load_level_metrics.append(llm)
+                metrics.validated = True
+                
+                # Set convenience fields
+                if level == "idle":
+                    metrics.ttft_error_at_idle = ttft_error
+                elif level == "medium":
+                    metrics.ttft_error_at_medium = ttft_error
+                elif level == "saturation":
+                    metrics.ttft_error_at_saturation = ttft_error
+                    
+                logger.info(f"  {level}: TTFT={actual_ttft:.1f}ms (err={ttft_error:.1f}% vs pred)" if ttft_error else f"  {level}: TTFT={actual_ttft:.1f}ms")
+            except Exception as e:
+                logger.warning(f"Failed to load validation for {level}: {e}")
+    
+    return metrics
+
+
+def load_optimization_from_dir(results_dir: Path, metrics: ProfilingMetrics) -> ProfilingMetrics:
+    """Load optimization accuracy from method's optimization/ subdirectory."""
+    opt_dir = results_dir / "optimization"
+    aiperf_json = opt_dir / "profile_export_aiperf.json"
+    if aiperf_json.exists():
+        try:
+            with open(aiperf_json, "r") as f:
+                data = json.load(f)
+            # Handle nested aiperf JSON structure
+            thpt_data = data.get("output_token_throughput", {})
+            goodput_data = data.get("goodput", {})
+            metrics.actual_goodput = thpt_data.get("avg", 0) if isinstance(thpt_data, dict) else 0
+            gp_rate = goodput_data.get("avg", 0) if isinstance(goodput_data, dict) else 0
+            # Calculate SLA hit rate from goodput vs request throughput
+            req_thpt = data.get("request_throughput", {}).get("avg", 0) if isinstance(data.get("request_throughput"), dict) else 0
+            if req_thpt > 0:
+                metrics.actual_sla_hit_rate = (gp_rate / req_thpt) * 100
+            metrics.optimization_validated = True
+            logger.info(f"  optimization: goodput={metrics.actual_goodput:.1f} tok/s, SLA hit={metrics.actual_sla_hit_rate}")
+        except Exception as e:
+            logger.warning(f"Failed to load optimization: {e}")
     return metrics
 
 
 def load_validation(path: Path, metrics: ProfilingMetrics) -> ProfilingMetrics:
+    """Load validation from explicit validation.json file (legacy)."""
     if not path.exists():
         return metrics
     try:

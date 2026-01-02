@@ -1,0 +1,22 @@
+# Exclude large/regeneratable files only
+# Keep small result files that contain actual metrics
+
+# Large input files (regeneratable)
+inputs.json
+sinusoidal.jsonl
+
+# Raw per-request data (too large, detailed data derivable from summary)
+profile_export.jsonl
+
+# Debug logs
+logs/
+
+# Files we KEEP (not ignored):
+# - profile_sla.log (profiling cost metrics)
+# - profile_export_aiperf.json (actual performance metrics - small ~6KB)
+# - profile_export_aiperf.csv (same metrics in CSV)
+# - config_with_planner.yaml (recommended config)
+# - comparison_results.json (comparison output)
+# - summary.txt (human-readable summary)
+# - *.png (visualization plots)
+

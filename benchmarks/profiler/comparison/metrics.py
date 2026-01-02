@@ -146,14 +146,16 @@ class ComparisonResult:
 
     def generate_summary_table(self) -> str:
         lines = [
-            "=" * 90,
+            "=" * 120,
             "PROFILING METHOD COMPARISON",
-            "=" * 90,
+            "=" * 120,
             f"Model: {self.model}",
             f"SLA: TTFT={self.target_ttft}ms, ITL={self.target_itl}ms, ISL={self.isl}, OSL={self.osl}",
-            "-" * 90,
+            "",
+            "--- PROFILING COST ---",
+            "-" * 80,
             f"{'Method':<20} {'Duration':<12} {'Deploys':<10} {'GPU-Hrs':<10} {'Pred TTFT':<12}",
-            "-" * 90,
+            "-" * 80,
         ]
 
         for m in self.method_metrics:
@@ -162,10 +164,37 @@ class ComparisonResult:
             lines.append(f"{m.method_name:<20} {dur:<12} {m.num_deployments_created:<10} "
                         f"{m.gpu_hours_consumed:.2f}{'':>6} {ttft:<12}")
 
-        lines.extend(["-" * 90,
-                      f"Fastest: {self.fastest_method}",
-                      f"Lowest cost: {self.lowest_cost_method}",
-                      "=" * 90])
+        # Predictive accuracy section
+        has_validation = any(m.validated for m in self.method_metrics)
+        if has_validation:
+            lines.extend(["", "--- PREDICTIVE ACCURACY (TTFT error vs predicted) ---", "-" * 80,
+                          f"{'Method':<20} {'Idle':<12} {'Medium':<12} {'Saturation':<12}", "-" * 80])
+            for m in self.method_metrics:
+                idle = f"{m.ttft_error_at_idle:+.1f}%" if m.ttft_error_at_idle is not None else "N/A"
+                med = f"{m.ttft_error_at_medium:+.1f}%" if m.ttft_error_at_medium is not None else "N/A"
+                sat = f"{m.ttft_error_at_saturation:+.1f}%" if m.ttft_error_at_saturation is not None else "N/A"
+                lines.append(f"{m.method_name:<20} {idle:<12} {med:<12} {sat:<12}")
+
+        # Optimization accuracy section
+        has_optimization = any(m.optimization_validated for m in self.method_metrics)
+        if has_optimization:
+            lines.extend(["", "--- OPTIMIZATION ACCURACY ---", "-" * 80,
+                          f"{'Method':<20} {'Goodput':<15} {'SLA Hit %':<12} {'Regret':<12}", "-" * 80])
+            for m in self.method_metrics:
+                gp = f"{m.actual_goodput:.1f} tok/s" if m.actual_goodput else "N/A"
+                sla = f"{m.actual_sla_hit_rate:.1f}%" if m.actual_sla_hit_rate is not None else "N/A"
+                reg = f"{m.optimization_regret:.1f}%" if m.optimization_regret is not None else "N/A"
+                lines.append(f"{m.method_name:<20} {gp:<15} {sla:<12} {reg:<12}")
+
+        # Summary
+        lines.extend(["-" * 80, "SUMMARY:"])
+        lines.append(f"  Fastest profiling: {self.fastest_method}")
+        lines.append(f"  Lowest cost: {self.lowest_cost_method}")
+        if self.most_accurate_at_medium:
+            lines.append(f"  Most accurate (medium load): {self.most_accurate_at_medium}")
+        if self.best_optimization_method:
+            lines.append(f"  Best optimization: {self.best_optimization_method}")
+        lines.append("=" * 120)
         return "\n".join(lines)
 
     def save(self, output_path: Path):

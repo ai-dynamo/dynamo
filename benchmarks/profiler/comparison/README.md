@@ -164,11 +164,12 @@ aiperf profile --model Qwen/Qwen3-32B --url localhost:8000 --streaming \
 python -m benchmarks.profiler.comparison.run_comparison \
   --aic-results benchmarks/profiler/comparison/results/aic_all \
   --online-results benchmarks/profiler/comparison/results/online_all \
-  --additional-results stack_rank:benchmarks/profiler/comparison/results/stack_rank \
-  --additional-results bayesian:benchmarks/profiler/comparison/results/bayesian \
   --model Qwen/Qwen3-32B \
   --ttft 500 --itl 50 --isl 2048 --osl 256 \
   --output-dir benchmarks/profiler/comparison/results/comparison
+
+  # --additional-results stack_rank:benchmarks/profiler/comparison/results/stack_rank \
+  # --additional-results bayesian:benchmarks/profiler/comparison/results/bayesian \
 ```
 
 ---
