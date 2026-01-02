@@ -151,9 +151,6 @@ def send_completion_request(
 @pytest.mark.nightly
 @pytest.mark.slow
 @pytest.mark.gpu_1
-@pytest.mark.skip(
-    reason="Enable these tests once `main` dynamo upgrades to TRTLLM 1.2+"
-)
 def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config not defined and
@@ -169,7 +166,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
         logger.info("Frontend started.")
 
         engine_config_with_cuda_graph_and_kvbm = (
-            "tests/kvbm/engine_config_without_cuda_graph_and_kvbm.yaml"
+            "tests/kvbm_integration/engine_config_without_cuda_graph_and_kvbm.yaml"
         )
         logger.info("Starting worker...")
         with DynamoWorkerProcess(
@@ -190,9 +187,6 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 @pytest.mark.slow
 @pytest.mark.nightly
 @pytest.mark.gpu_1
-@pytest.mark.skip(
-    reason="Enable these tests once dynamo `main` upgrades to TRTLLM 1.2+"
-)
 def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config defined and
@@ -208,7 +202,7 @@ def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
         logger.info("Frontend started.")
 
         engine_config_with_cuda_graph_and_kvbm = (
-            "tests/kvbm/engine_config_with_cuda_graph_and_kvbm.yaml"
+            "tests/kvbm_integration/engine_config_with_cuda_graph_and_kvbm.yaml"
         )
         logger.info("Starting worker...")
         with DynamoWorkerProcess(
