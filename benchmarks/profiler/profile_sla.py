@@ -59,7 +59,7 @@ from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
 
 
 @dataclass
@@ -239,7 +239,7 @@ async def run_profile(args):
                 prefill_config = apply_parallel_mapping_to_config(
                     base_prefill_config,
                     mapping,
-                    EngineType.PREFILL,
+                    SubComponentType.PREFILL,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -344,7 +344,7 @@ async def run_profile(args):
                 decode_config = apply_parallel_mapping_to_config(
                     base_decode_config,
                     mapping,
-                    EngineType.DECODE,
+                    SubComponentType.DECODE,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -493,6 +493,9 @@ async def run_profile(args):
                 selected_prefill_idx, selected_decode_idx = pick_config_with_webui(
                     prefill_data, decode_data, args
                 )
+                # update TTFT/ITL SLA based on selected config
+                args.ttft = prefill_data.ttft[selected_prefill_idx]
+                args.itl = decode_data.itl[selected_decode_idx]
             else:
                 # automatically select P/D config within SLA with the highest throughput/GPU
                 # select best parallel mapping for prefill
@@ -563,7 +566,7 @@ async def run_profile(args):
         prefill_config = apply_parallel_mapping_to_config(
             prefill_config,
             best_prefill_mapping,
-            EngineType.PREFILL,
+            SubComponentType.PREFILL,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -647,7 +650,7 @@ async def run_profile(args):
         decode_config = apply_parallel_mapping_to_config(
             decode_config,
             best_decode_mapping,
-            EngineType.DECODE,
+            SubComponentType.DECODE,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -738,17 +741,17 @@ async def run_profile(args):
         # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
             if isinstance(config, list):
-                yaml.dump_all(config, f)
+                yaml.safe_dump_all(config, f, sort_keys=False)
             else:
-                yaml.dump(config, f)
+                yaml.safe_dump(config, f, sort_keys=False)
 
         # save mocker config with planner for testing purposes
         logger.debug(f"Mocker config with planner: {mocker_config}")
         with open(f"{args.output_dir}/mocker_config_with_planner.yaml", "w") as f:
             if isinstance(mocker_config, list):
-                yaml.dump_all(mocker_config, f)
+                yaml.safe_dump_all(mocker_config, f, sort_keys=False)
             else:
-                yaml.dump(mocker_config, f)
+                yaml.safe_dump(mocker_config, f, sort_keys=False)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")

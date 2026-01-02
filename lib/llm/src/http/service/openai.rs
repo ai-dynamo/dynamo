@@ -2191,8 +2191,7 @@ mod tests {
             "model": "test-model",
             "add_special_tokens": true,
             "documents": ["doc1"],
-            "chat_template": "custom",
-            "chat_template_kwargs": {"key": "val"}
+            "chat_template": "custom"
         }"#;
 
         let request: NvCreateChatCompletionRequest = serde_json::from_str(json).unwrap();
@@ -2205,11 +2204,6 @@ mod tests {
         );
         assert!(request.unsupported_fields.contains_key("documents"));
         assert!(request.unsupported_fields.contains_key("chat_template"));
-        assert!(
-            request
-                .unsupported_fields
-                .contains_key("chat_template_kwargs")
-        );
 
         let result = validate_chat_completion_fields_generic(&request);
         assert!(result.is_err());
@@ -2221,7 +2215,6 @@ mod tests {
             assert!(msg.contains("add_special_tokens"));
             assert!(msg.contains("documents"));
             assert!(msg.contains("chat_template"));
-            assert!(msg.contains("chat_template_kwargs"));
         }
     }
 
