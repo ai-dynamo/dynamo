@@ -12,7 +12,7 @@ MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64
 
 # Explicitly set NATS server for KV event publishing
-export NATS_SERVER="nats://localhost:4222"
+export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
 
 # run frontend + KV router
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)

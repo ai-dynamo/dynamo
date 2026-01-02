@@ -17,7 +17,7 @@ NIXL_BUFFER_DEVICE=cpu
 VLLM_NIXL_BACKEND=UCX
 
 # Explicitly set NATS server for KV event publishing
-export NATS_SERVER="nats://localhost:4222"
+export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
