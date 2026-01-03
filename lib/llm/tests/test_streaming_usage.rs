@@ -328,7 +328,7 @@ async fn test_streaming_with_usage_compliance() {
 }
 
 #[tokio::test]
-async fn test_streaming_with_contiguous_usage() {
+async fn test_streaming_with_continuous_usage() {
     // Create request with stream_options.include_usage = true, stream_options.continuous_usage_stats = true
     let request = create_chat_request(Some(true), Some(true));
     let request_id = "test-456".to_string();
@@ -360,7 +360,7 @@ async fn test_streaming_with_contiguous_usage() {
         if let Some(response) = &chunk.data {
             assert!(
                 response.usage.is_some(),
-                "Content chunk {} should have usage: None",
+                "Content chunk {} should have usage: Some",
                 i
             );
             assert!(
