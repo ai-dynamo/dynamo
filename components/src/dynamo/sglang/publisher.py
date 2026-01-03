@@ -4,13 +4,15 @@
 import asyncio
 import json
 import logging
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import sglang as sgl
 import zmq
 import zmq.asyncio
-from prometheus_client import CollectorRegistry, multiprocess
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
+
+if TYPE_CHECKING:
+    from prometheus_client import CollectorRegistry
 
 from dynamo.common.utils.prometheus import register_engine_metrics_callback
 from dynamo.llm import (
@@ -224,13 +226,18 @@ class DynamoSglangPublisher:
 
 def setup_prometheus_registry(
     engine: sgl.Engine, generate_endpoint: Endpoint
-) -> CollectorRegistry:
+) -> "CollectorRegistry":
     """Set up Prometheus registry for SGLang metrics collection.
 
     SGLang uses multiprocess architecture where metrics are stored in shared memory.
     MultiProcessCollector aggregates metrics from all worker processes. The Prometheus
     registry collects sglang:* metrics which are exposed via the metrics server endpoint
     (set DYN_SYSTEM_PORT to a positive value to enable, e.g., DYN_SYSTEM_PORT=8081).
+
+    IMPORTANT: prometheus_client must be imported AFTER sgl.Engine() has called
+    set_prometheus_multiproc_dir(). Importing at module level causes prometheus_client
+    to initialize in single-process mode before PROMETHEUS_MULTIPROC_DIR is set,
+    which breaks TokenizerMetricsCollector metrics (TTFT, ITL, e2e latency, etc.).
 
     Args:
         engine: The SGLang engine instance.
@@ -239,6 +246,8 @@ def setup_prometheus_registry(
     Returns:
         Configured CollectorRegistry with multiprocess support.
     """
+    from prometheus_client import CollectorRegistry, multiprocess
+
     registry = CollectorRegistry()
     multiprocess.MultiProcessCollector(registry)
     register_engine_metrics_callback(
