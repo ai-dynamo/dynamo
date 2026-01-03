@@ -389,40 +389,117 @@ make all
 In v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
 The plugins set HTTP headers that are forwarded to the backend workers.
 
-**Backend workers must read these headers** to extract routing information instead of
-relying on `nvext` body fields.
-
 #### Headers Set by Dynamo Plugins
 
 | Header | Description | Set By |
 |--------|-------------|--------|
 | `x-worker-instance-id` | Primary worker ID | kv-aware-scorer |
 | `x-prefiller-host-port` | Prefill worker (disagg mode) | kv-aware-scorer |
-| `x-dynamo-token-data` | JSON-encoded token IDs | kv-aware-scorer |
 | `x-dynamo-routing-mode` | `aggregated` or `disaggregated` | dynamo-inject-workerid |
 | `x-dynamo-backend-instance-id` | Worker ID (aggregated mode) | dynamo-inject-workerid |
 | `x-dynamo-prefill-worker-id` | Prefill worker ID (disagg mode) | dynamo-inject-workerid |
 | `x-dynamo-decode-worker-id` | Decode worker ID (disagg mode) | dynamo-inject-workerid |
 
-#### Backend Integration
 
-Backend workers should parse these headers:
+## Lua Body Injector
 
-```python
-# Python example for backend worker
-def extract_routing_info(request):
-    headers = request.headers
-    routing_mode = headers.get("x-dynamo-routing-mode", "aggregated")
+Dynamo backend workers require the `nvext` field in the JSON body (instead of reading headers).
+You must deploy a **Lua filter** that runs inside the gateway. This filter reads the headers set
+by the Dynamo plugins and injects the `nvext` field into the request body.
 
-    if routing_mode == "disaggregated":
-        prefill_worker = headers.get("x-dynamo-prefill-worker-id")
-        decode_worker = headers.get("x-dynamo-decode-worker-id")
-    else:
-        worker_id = headers.get("x-dynamo-backend-instance-id")
+### How It Works
 
-    token_data_json = headers.get("x-dynamo-token-data")
-    if token_data_json:
-        token_ids = json.loads(token_data_json)
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Request Flow                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. Client sends request:                                            │
+│     POST /v1/chat/completions                                        │
+│     Body: {"model": "llama", "messages": [...]}                      │
+│                                                                      │
+│  2. EPP (Dynamo KV Scorer) schedules request:                        │
+│     → Sets headers:                                                  │
+│       x-worker-instance-id: 42                                       │
+│       x-dynamo-routing-mode: aggregated                              │
+│                                                                      │
+│  3. Lua Filter reads headers and modifies body:                      │
+│     Body: {"model": "llama", "messages": [...],                      │
+│            "nvext": {"backend_instance_id": 42,                      │
+│                     }}                                               │
+│                                                                      │
+│  4. Modified request forwarded to model server                       │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-This approach avoids the need for body mutation while still enabling KV-aware routing.
+### Body Modification
+
+The Lua filter injects an `nvext` field into the JSON request body:
+
+**Aggregated Mode (default):**
+```json
+{
+  "model": "llama",
+  "messages": [...],
+  "nvext": {
+    "backend_instance_id": 42,
+  }
+}
+```
+
+**Disaggregated Mode:**
+```json
+{
+  "model": "llama",
+  "messages": [...],
+  "nvext": {
+    "prefill_worker_id": 10,
+    "decode_worker_id": 42,
+  }
+}
+```
+
+### Installation for kGateway
+
+The Lua filter configuration is in `config/lua-filter/kgateway-lua-filter.yaml`.
+
+1. **Customize the configuration** for your environment:
+
+```bash
+# Update namespace and gateway name if different
+sed -i 's/namespace: default/namespace: my-model/g' config/lua-filter/kgateway-lua-filter.yaml
+sed -i 's/name: inference-gateway/name: my-gateway/g' config/lua-filter/kgateway-lua-filter.yaml
+```
+
+2. **Apply the Lua filter:**
+
+```bash
+kubectl apply -f config/lua-filter/kgateway-lua-filter.yaml
+```
+
+3. **Verify the filter is applied:**
+
+```bash
+kubectl get trafficpolicy dynamo-body-injector -o yaml
+```
+
+### Files
+
+| File | Description |
+|------|-------------|
+| `lua/body_injector.lua` | Standalone Lua script (for reference) |
+| `config/lua-filter/kgateway-lua-filter.yaml` | kGateway TrafficPolicy configuration |
+
+### Debugging
+
+Check gateway logs for `[DBI]` messages:
+
+```bash
+# Find the gateway pod
+kubectl get pods -l gateway.networking.k8s.io/gateway-name=inference-gateway
+
+# Check logs
+kubectl logs <gateway-pod> -c envoy | grep DBI
+```
+

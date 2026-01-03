@@ -1,0 +1,170 @@
+# Dynamo Body Injector - kGateway Configuration
+#
+# This configures a Lua filter in kGateway to inject nvext routing information
+# into request bodies based on headers set by the EPP Dynamo plugins.
+#
+# Prerequisites:
+#   - kGateway installed with inference extension support
+#   - EPP deployed and setting x-worker-instance-id headers
+#
+# Apply with: kubectl apply -f kgateway-lua-filter.yaml
+
+---
+# ConfigMap containing the Lua script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dynamo-body-injector-lua
+  namespace: default  # Change to your namespace
+  labels:
+    app.kubernetes.io/name: dynamo-body-injector
+    app.kubernetes.io/component: lua-filter
+data:
+  body_injector.lua: |
+    -- Dynamo Body Injector Lua Filter
+    function envoy_on_request(request_handle)
+      local worker_id = request_handle:headers():get("x-worker-instance-id")
+      if worker_id == nil or worker_id == "" then
+        return
+      end
+
+      local prefill_worker_id = request_handle:headers():get("x-prefiller-host-port")
+      local token_data = request_handle:headers():get("x-dynamo-token-data")
+      local routing_mode = request_handle:headers():get("x-dynamo-routing-mode")
+
+      local body = request_handle:body()
+      if body == nil then return end
+
+      local body_str = body:getBytes(0, body:length())
+      if body_str == nil or body_str == "" then return end
+
+      local nvext_content = ""
+      if routing_mode == "disaggregated" then
+        local parts = {}
+        if prefill_worker_id and prefill_worker_id ~= "" then
+          table.insert(parts, string.format('"prefill_worker_id":%s', prefill_worker_id))
+        end
+        if worker_id and worker_id ~= "" then
+          table.insert(parts, string.format('"decode_worker_id":%s', worker_id))
+        end
+        nvext_content = table.concat(parts, ",")
+      else
+        nvext_content = string.format('"backend_instance_id":%s', worker_id)
+      end
+
+      if token_data and token_data ~= "" and token_data ~= "[]" then
+        if nvext_content ~= "" then nvext_content = nvext_content .. "," end
+        nvext_content = nvext_content .. string.format('"token_data":%s', token_data)
+      end
+
+      if nvext_content == "" then return end
+
+      local nvext_json = '"nvext":{' .. nvext_content .. '}'
+
+      local insert_pos = nil
+      for i = #body_str, 1, -1 do
+        if body_str:sub(i, i) == "}" then
+          insert_pos = i
+          break
+        end
+      end
+
+      if insert_pos == nil then return end
+
+      local prefix = body_str:sub(1, insert_pos - 1)
+      local needs_comma = false
+      for i = #prefix, 1, -1 do
+        local char = prefix:sub(i, i)
+        if char:match("%S") then
+          if char ~= "{" and char ~= "," then needs_comma = true end
+          break
+        end
+      end
+
+      local new_body
+      if needs_comma then
+        new_body = prefix .. "," .. nvext_json .. "}"
+      else
+        new_body = prefix .. nvext_json .. "}"
+      end
+
+      request_handle:body():setBytes(new_body)
+      request_handle:headers():replace("content-length", tostring(#new_body))
+
+      request_handle:logInfo(string.format("[DBI] Injected nvext for worker %s", worker_id))
+    end
+
+---
+# kGateway TrafficPolicy to enable Lua filter
+# Note: The exact API may vary by kGateway version.
+# Check your kGateway version's documentation.
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: dynamo-body-injector
+  namespace: default
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway  # Change to your gateway name
+  policy:
+    # Lua filter configuration
+    lua:
+      inlineCode: |
+        function envoy_on_request(request_handle)
+          local worker_id = request_handle:headers():get("x-worker-instance-id")
+          if worker_id == nil or worker_id == "" then return end
+
+          local prefill_worker_id = request_handle:headers():get("x-prefiller-host-port")
+          local token_data = request_handle:headers():get("x-dynamo-token-data")
+          local routing_mode = request_handle:headers():get("x-dynamo-routing-mode")
+
+          local body = request_handle:body()
+          if body == nil then return end
+          local body_str = body:getBytes(0, body:length())
+          if body_str == nil or body_str == "" then return end
+
+          local nvext_content = ""
+          if routing_mode == "disaggregated" then
+            local parts = {}
+            if prefill_worker_id and prefill_worker_id ~= "" then
+              table.insert(parts, string.format('"prefill_worker_id":%s', prefill_worker_id))
+            end
+            if worker_id and worker_id ~= "" then
+              table.insert(parts, string.format('"decode_worker_id":%s', worker_id))
+            end
+            nvext_content = table.concat(parts, ",")
+          else
+            nvext_content = string.format('"backend_instance_id":%s', worker_id)
+          end
+
+          if token_data and token_data ~= "" and token_data ~= "[]" then
+            if nvext_content ~= "" then nvext_content = nvext_content .. "," end
+            nvext_content = nvext_content .. string.format('"token_data":%s', token_data)
+          end
+
+          if nvext_content == "" then return end
+
+          local nvext_json = '"nvext":{' .. nvext_content .. '}'
+          local insert_pos = nil
+          for i = #body_str, 1, -1 do
+            if body_str:sub(i, i) == "}" then insert_pos = i; break end
+          end
+          if insert_pos == nil then return end
+
+          local prefix = body_str:sub(1, insert_pos - 1)
+          local needs_comma = false
+          for i = #prefix, 1, -1 do
+            local char = prefix:sub(i, i)
+            if char:match("%S") then
+              if char ~= "{" and char ~= "," then needs_comma = true end
+              break
+            end
+          end
+
+          local new_body = needs_comma and (prefix .. "," .. nvext_json .. "}") or (prefix .. nvext_json .. "}")
+          request_handle:body():setBytes(new_body)
+          request_handle:headers():replace("content-length", tostring(#new_body))
+        end
+
