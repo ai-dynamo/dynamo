@@ -1,6 +1,6 @@
-# concurrencies: 296
+# concurrencies: 329
 prefill:
-  num: 1
+  num: 5
   config:
     max_batch_size: 2
     max_num_tokens: 16896
@@ -21,6 +21,9 @@ prefill:
     cache_transceiver_config:
       max_tokens_in_buffer: 8448
       backend: UCX
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 3
   env:
     NCCL_GRAPH_MIXING_SUPPORT: 0
     OMPI_MCA_coll_ucc_enable: 0
@@ -31,20 +34,19 @@ prefill:
     TRTLLM_WORKER_DISABLE_GC: 1
     UCX_CUDA_IPC_ENABLE_MNNVL: "n"
     UCX_RNDV_SCHEME: "put_zcopy"
-
   unset_env:
     - UCX_TLS
     - UCX_NET_DEVICES
 decode:
-  num: 1
+  num: 2
   config:
-    tensor_parallel_size: 4
-    moe_expert_parallel_size: 4
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
     enable_attention_dp: true
-    enable_lm_head_tp_in_adp: false
+    enable_lm_head_tp_in_adp: true
     pipeline_parallel_size: 1
-    max_batch_size: 64
-    max_num_tokens: 64
+    max_batch_size: 32
+    max_num_tokens: 128
     max_seq_len: 9256
     cuda_graph_config:
       enable_padding: true
@@ -55,18 +57,10 @@ decode:
       - 8
       - 16
       - 32
-      - 64
-      - 128
-      - 256
-      - 512
-      - 768
-      - 1024
-      - 2048
-      - 64
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.9
+      free_gpu_memory_fraction: 0.8
       dtype: fp8
     moe_config:
       backend: CUTLASS
@@ -76,8 +70,9 @@ decode:
       backend: UCX
     stream_interval: 100
     num_postprocess_workers: 4
-
-
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 3
   env:
     NCCL_GRAPH_MIXING_SUPPORT: 0
     OMPI_MCA_coll_ucc_enable: 0
@@ -88,7 +83,6 @@ decode:
     TRTLLM_WORKER_DISABLE_GC: 1
     UCX_CUDA_IPC_ENABLE_MNNVL: "n"
     UCX_RNDV_SCHEME: "put_zcopy"
-
   unset_env:
     - UCX_TLS
     - UCX_NET_DEVICES

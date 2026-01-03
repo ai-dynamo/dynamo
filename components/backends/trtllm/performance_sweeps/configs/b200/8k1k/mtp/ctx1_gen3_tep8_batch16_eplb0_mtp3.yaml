@@ -1,4 +1,4 @@
-# concurrencies: 1, 2, 3, 5, 10, 20
+# concurrencies: 22
 prefill:
   num: 1
   config:
@@ -21,7 +21,9 @@ prefill:
     cache_transceiver_config:
       max_tokens_in_buffer: 8448
       backend: UCX
-
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 3
   env:
     NCCL_GRAPH_MIXING_SUPPORT: 0
     OMPI_MCA_coll_ucc_enable: 0
@@ -36,7 +38,7 @@ prefill:
     - UCX_TLS
     - UCX_NET_DEVICES
 decode:
-  num: 5
+  num: 3
   config:
     tensor_parallel_size: 8
     moe_expert_parallel_size: 8
@@ -44,22 +46,15 @@ decode:
     enable_lm_head_tp_in_adp: false
     pipeline_parallel_size: 1
     max_batch_size: 16
-    max_num_tokens: 16
+    max_num_tokens: 64
     max_seq_len: 9256
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
       - 1
       - 2
-      - 3
       - 4
-      - 5
-      - 6
-      - 7
       - 8
-      - 10
-      - 12
-      - 14
       - 16
     print_iter_log: true
     kv_cache_config:
@@ -75,6 +70,9 @@ decode:
     stream_interval: 100
     num_postprocess_workers: 4
     allreduce_strategy: MNNVL
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 3
   env:
     NCCL_GRAPH_MIXING_SUPPORT: 0
     OMPI_MCA_coll_ucc_enable: 0

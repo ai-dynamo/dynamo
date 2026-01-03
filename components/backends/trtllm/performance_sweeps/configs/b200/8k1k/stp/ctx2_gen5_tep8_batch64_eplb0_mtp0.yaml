@@ -1,6 +1,6 @@
-# concurrencies: 1, 2, 3, 5, 10, 20
+# concurrencies: 74
 prefill:
-  num: 1
+  num: 2
   config:
     max_batch_size: 2
     max_num_tokens: 16896
@@ -43,24 +43,19 @@ decode:
     enable_attention_dp: false
     enable_lm_head_tp_in_adp: false
     pipeline_parallel_size: 1
-    max_batch_size: 16
-    max_num_tokens: 16
+    max_batch_size: 64
+    max_num_tokens: 64
     max_seq_len: 9256
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
       - 1
       - 2
-      - 3
       - 4
-      - 5
-      - 6
-      - 7
       - 8
-      - 10
-      - 12
-      - 14
       - 16
+      - 32
+      - 64
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
