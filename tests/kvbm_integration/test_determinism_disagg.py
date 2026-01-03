@@ -445,7 +445,8 @@ def llm_server(request, runtime_services):
 def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
     t = DisaggDeterminismTester(
-        base_url=llm_server.base_url, server_type=llm_server.server_type
+        base_url=llm_server.base_url,
+        server_type=llm_server.server_type,
     )
     t.download_shakespeare_text()
     return t

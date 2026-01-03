@@ -364,7 +364,8 @@ def llm_server(request, runtime_services):
 def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
     t = AggDeterminismTester(
-        base_url=llm_server.base_url, server_type=llm_server.server_type
+        base_url=llm_server.base_url,
+        server_type=llm_server.server_type,
     )
     t.download_shakespeare_text()
     return t
@@ -420,7 +421,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
     )
     @pytest.mark.parametrize(
         "max_tokens",
-        [int(x) for x in os.environ.get("KVBM_MAX_TOKENS", "10").split(",")],
+        [int(os.environ.get("KVBM_MAX_TOKENS", "48"))],
     )
     @pytest.mark.parametrize(
         "num_prompts",
@@ -441,12 +442,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
         print("CONCURRENT DETERMINISM TEST WITH IFEVAL")
         print("=" * 70)
 
-        # Override max_tokens for this test iteration
-        original_max_tokens = os.environ.get("KVBM_MAX_TOKENS")
-        os.environ["KVBM_MAX_TOKENS"] = str(max_tokens)
-        print(
-            f"Using KVBM_MAX_TOKENS={max_tokens} (parametrized, original: {original_max_tokens or '48'})"
-        )
+        print(f"Using max_tokens={max_tokens} (from KVBM_MAX_TOKENS)")
 
         # Configuration comes from parametrize
         print(
@@ -601,12 +597,6 @@ class TestDeterminismAgg(BaseTestDeterminism):
         print(f"Deterministic: {deterministic_count}")
         print(f"Success rate: {success_rate:.1%}")
         print(f"Concurrent requests: {num_concurrent}")
-
-        # Restore original max_tokens setting
-        if original_max_tokens is not None:
-            os.environ["KVBM_MAX_TOKENS"] = original_max_tokens
-        else:
-            os.environ.pop("KVBM_MAX_TOKENS", None)
 
         assert (
             success_rate == 1.0
