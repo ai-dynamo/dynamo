@@ -7,11 +7,16 @@ use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
 use nixl_sys::Agent as NixlAgent;
 
 use dynamo_runtime::utils::pool::{Returnable, SyncPool, SyncPoolItem};
+use dynamo_memory::pool::CudaMemPool;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+// ============================================================================
+// Legacy: Pinned Buffer Resource for Old Pooling (to be removed)
+// ============================================================================
 
 // Pinned Buffer Resource for Pooling
 #[derive(Debug)]
@@ -169,6 +174,10 @@ pub struct TransferContext {
     stream: Arc<CudaStream>,
     async_rt_handle: Handle,
 
+    // NEW: CUDA memory pool for stream-ordered host memory allocation
+    cuda_mem_pool: Option<Arc<CudaMemPool>>,
+
+    // LEGACY: Old pinned buffer pool (to be removed after migration)
     pinned_buffer_pool: Option<SyncPinnedBufferPool>,
 
     cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
@@ -190,7 +199,7 @@ impl TransferContext {
 
         let cancel_token_clone = cancel_token.clone();
         let cuda_event_worker = Self::setup_cuda_event_worker(cuda_event_rx, cancel_token_clone);
-        let pool = if let Some(config) = config {
+        let pool = if let Some(ref config) = config {
             if config.enable_pool {
                 let pool_size = config.max_concurrent_transfers * 2 + 2;
                 // Calculate buffer size for worst-case scenario
@@ -280,10 +289,56 @@ impl TransferContext {
             None
         };
 
+        // Create CUDA memory pool for stream-ordered allocation
+        let cuda_mem_pool = if let Some(ref cfg) = config {
+            if cfg.enable_pool {
+                // Calculate total reserve size for pre-warming
+                let num_buffers = cfg.max_concurrent_transfers * 2 + 2;
+                let buffer_size = cfg.max_transfer_batch_size
+                    * cfg.num_outer_components
+                    * cfg.num_layers
+                    * std::mem::size_of::<u64>();
+                let reserve_size = num_buffers * buffer_size;
+
+                tracing::info!(
+                    "Creating CUDA memory pool: {} buffers × {}KB = {}MB total",
+                    num_buffers,
+                    buffer_size / 1024,
+                    reserve_size / (1024 * 1024)
+                );
+
+                match CudaMemPool::builder(stream.context().clone(), reserve_size)
+                    .use_pinned_memory()
+                    .release_threshold(128 * 1024 * 1024) // Release memory above 128MB back to OS
+                    .build()
+                {
+                    Ok(pool) => {
+                        tracing::info!("CUDA memory pool created successfully (stream-ordered allocation enabled, pre-warmed with {}MB)",
+                            reserve_size / (1024 * 1024));
+                        Some(Arc::new(pool))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create CUDA memory pool: {}. Falling back to legacy pool.",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::debug!("CUDA memory pool disabled by configuration");
+                None
+            }
+        } else {
+            tracing::debug!("No pool configuration provided - CUDA memory pool disabled");
+            None
+        };
+
         Self {
             nixl_agent,
             stream,
             async_rt_handle,
+            cuda_mem_pool,
             pinned_buffer_pool: pool,
             cuda_event_tx,
             cuda_event_worker: Some(cuda_event_worker),
@@ -329,6 +384,11 @@ impl TransferContext {
 
     pub fn async_rt_handle(&self) -> &Handle {
         &self.async_rt_handle
+    }
+
+    /// Get the CUDA memory pool for stream-ordered allocations
+    pub fn cuda_mem_pool(&self) -> Option<&Arc<CudaMemPool>> {
+        self.cuda_mem_pool.as_ref()
     }
 
     pub fn cuda_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
