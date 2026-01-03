@@ -48,11 +48,14 @@ jobs:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
       PYTEST_XML_FILE: pytest_test_report.xml
       PYTEST_PARALLEL_XML_FILE: pytest_parallel.xml
+      PYTHON_COVERAGE_FILE: python_coverage.xml
+      RUST_COVERAGE_FILE: rust_coverage.lcov
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           lfs: true
+          fetch-depth: 0  # Fetch full history for coverage comparison
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to NGC
@@ -78,11 +81,16 @@ jobs:
           docker run --rm -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -ec 'rustup component add rustfmt clippy && \
+            bash -ec 'rustup component add rustfmt clippy llvm-tools-preview && \
+                      cargo install cargo-llvm-cov || true && \
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg && \
+                      cargo llvm-cov --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg --lcov --output-path=coverage.lcov && \
                       cargo test --locked --features integration -- --nocapture'
+      - name: Copy Rust coverage report
+        if: always()
+        run: |
+          docker cp ${{ env.CONTAINER_ID }}_rust_checks:/workspace/lib/llm/coverage.lcov ./${{ env.RUST_COVERAGE_FILE }} || echo "No Rust coverage report found"
       - name: Cleanup services
         if: always()
         working-directory: ./deploy
@@ -107,11 +115,17 @@ jobs:
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
+            bash -c "pytest --cov=components/src/dynamo \
+                            --cov-report=xml \
+                            --cov-report=term-missing \
+                            --basetemp=/tmp \
+                            --junitxml=${{ env.PYTEST_XML_FILE }} \
+                            -m \"${{ env.PYTEST_MARKS }}\" "
       - name: Copy test report from test Container
         if: always()
         run: |
           docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
+          docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/coverage.xml ./${{ env.PYTHON_COVERAGE_FILE }} || echo "No Python coverage report found"
       - name: Archive test report
         uses: actions/upload-artifact@v4
         if: always()
@@ -121,6 +135,25 @@ jobs:
           path: |
             ${{ env.PYTEST_XML_FILE }}
             ${{ env.PYTEST_PARALLEL_XML_FILE }}
+
+      - name: Archive coverage reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dynamo-coverage-reports
+          path: |
+            ${{ env.PYTHON_COVERAGE_FILE }}
+            ${{ env.RUST_COVERAGE_FILE }}
+
+      - name: Generate and Report Coverage
+        if: always()
+        uses: ./.github/actions/coverage-report
+        with:
+          python-coverage-file: ${{ env.PYTHON_COVERAGE_FILE }}
+          rust-coverage-file: ${{ env.RUST_COVERAGE_FILE }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          min-python-coverage: '60'
+          min-rust-coverage: '60'
 
   event_file:
     name: "Event File"

@@ -1,0 +1,210 @@
+name: 'Test Coverage Report'
+description: 'Generate and comment test coverage reports for Python and Rust'
+inputs:
+  python-coverage-file:
+    description: 'Path to Python coverage XML file'
+    required: true
+  rust-coverage-file:
+    description: 'Path to Rust coverage LCOV file'
+    required: true
+  github-token:
+    description: 'GitHub token for commenting on PRs'
+    required: true
+  min-python-coverage:
+    description: 'Minimum Python coverage threshold'
+    required: false
+    default: '60'
+  min-rust-coverage:
+    description: 'Minimum Rust coverage threshold'
+    required: false
+    default: '60'
+
+outputs:
+  python-coverage:
+    description: 'Python coverage percentage'
+    value: ${{ steps.summary.outputs.python_coverage }}
+  rust-coverage:
+    description: 'Rust coverage percentage'
+    value: ${{ steps.summary.outputs.rust_coverage }}
+  overall-coverage:
+    description: 'Overall coverage percentage'
+    value: ${{ steps.summary.outputs.overall_coverage }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate Coverage Summary
+      id: summary
+      shell: bash
+      run: |
+        # Install coverage tools
+        pip install coverage || true
+
+        # Parse Python coverage
+        if [ -f "${{ inputs.python-coverage-file }}" ]; then
+          PYTHON_COV=$(python3 -c "
+        import xml.etree.ElementTree as ET
+        tree = ET.parse('${{ inputs.python-coverage-file }}')
+        root = tree.getroot()
+        line_rate = float(root.attrib.get('line-rate', 0))
+        print(f'{line_rate * 100:.2f}')
+        " 2>/dev/null || echo "0.00")
+          echo "python_coverage=$PYTHON_COV" >> $GITHUB_OUTPUT
+          echo "📊 Python Coverage: ${PYTHON_COV}%"
+        else
+          echo "python_coverage=0.00" >> $GITHUB_OUTPUT
+          echo "⚠️  No Python coverage file found"
+        fi
+
+        # Parse Rust coverage (LCOV format)
+        if [ -f "${{ inputs.rust-coverage-file }}" ]; then
+          RUST_COV=$(awk -F: '
+            /^LF:/ { lines_found += $2 }
+            /^LH:/ { lines_hit += $2 }
+            END {
+              if (lines_found > 0) {
+                printf "%.2f", (lines_hit / lines_found) * 100
+              } else {
+                print "0.00"
+              }
+            }
+          ' "${{ inputs.rust-coverage-file }}")
+          echo "rust_coverage=$RUST_COV" >> $GITHUB_OUTPUT
+          echo "📊 Rust Coverage: ${RUST_COV}%"
+        else
+          echo "rust_coverage=0.00" >> $GITHUB_OUTPUT
+          echo "⚠️  No Rust coverage file found"
+        fi
+
+        # Calculate overall coverage (weighted average)
+        OVERALL=$(python3 -c "
+        python_cov = float('${PYTHON_COV:-0}')
+        rust_cov = float('${RUST_COV:-0}')
+        overall = (python_cov + rust_cov) / 2
+        print(f'{overall:.2f}')
+        " 2>/dev/null || echo "0.00")
+        echo "overall_coverage=$OVERALL" >> $GITHUB_OUTPUT
+        echo "📊 Overall Coverage: ${OVERALL}%"
+
+    - name: Comment Coverage on PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github-token }}
+        script: |
+          const pythonCov = '${{ steps.summary.outputs.python_coverage }}';
+          const rustCov = '${{ steps.summary.outputs.rust_coverage }}';
+          const overallCov = '${{ steps.summary.outputs.overall_coverage }}';
+
+          const coverageEmoji = (cov) => {
+            const num = parseFloat(cov);
+            if (num >= 80) return '🟢';
+            if (num >= 60) return '🟡';
+            return '🔴';
+          };
+
+          const deltaEmoji = (delta) => {
+            const num = parseFloat(delta);
+            if (num > 0) return '📈';
+            if (num < 0) return '📉';
+            return '➡️';
+          };
+
+          // TODO: Compare with base branch for delta
+          const pythonDelta = 0;
+          const rustDelta = 0;
+
+          const body = `## 📊 Test Coverage Report
+
+          | Language | Coverage | Delta | Status |
+          |----------|----------|-------|--------|
+          | Python | ${pythonCov}% | ${pythonDelta > 0 ? '+' : ''}${pythonDelta.toFixed(2)}% ${deltaEmoji(pythonDelta)} | ${coverageEmoji(pythonCov)} |
+          | Rust | ${rustCov}% | ${rustDelta > 0 ? '+' : ''}${rustDelta.toFixed(2)}% ${deltaEmoji(rustDelta)} | ${coverageEmoji(rustCov)} |
+          | **Overall** | **${overallCov}%** | - | ${coverageEmoji(overallCov)} |
+
+          ### Coverage Thresholds
+          - 🟢 Excellent: ≥ 80%
+          - 🟡 Good: ≥ 60%
+          - 🔴 Needs Improvement: < 60%
+
+          ### Delta Indicators
+          - 📈 Coverage increased
+          - 📉 Coverage decreased
+          - ➡️ Coverage unchanged
+
+          <details>
+          <summary>📁 View Detailed Reports</summary>
+
+          Download coverage artifacts from the [workflow run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) to view detailed HTML reports.
+
+          **Files included:**
+          - \`python_coverage.xml\` - Python coverage report
+          - \`rust_coverage.lcov\` - Rust coverage report
+
+          </details>
+
+          ---
+          *Coverage report generated at ${new Date().toISOString()}*
+          `;
+
+          // Find existing coverage comment
+          const comments = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+
+          const botComment = comments.data.find(comment =>
+            comment.user.type === 'Bot' &&
+            comment.body.includes('📊 Test Coverage Report')
+          );
+
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: body
+            });
+            console.log('Updated existing coverage comment');
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+            console.log('Created new coverage comment');
+          }
+
+    - name: Check Coverage Thresholds
+      shell: bash
+      run: |
+        PYTHON_COV="${{ steps.summary.outputs.python_coverage }}"
+        RUST_COV="${{ steps.summary.outputs.rust_coverage }}"
+        MIN_PYTHON="${{ inputs.min-python-coverage }}"
+        MIN_RUST="${{ inputs.min-rust-coverage }}"
+
+        echo "📊 Coverage Check:"
+        echo "  Python: ${PYTHON_COV}% (minimum: ${MIN_PYTHON}%)"
+        echo "  Rust: ${RUST_COV}% (minimum: ${MIN_RUST}%)"
+
+        FAILED=0
+
+        if (( $(echo "$PYTHON_COV < $MIN_PYTHON" | bc -l) )); then
+          echo "❌ Python coverage ${PYTHON_COV}% is below minimum ${MIN_PYTHON}%"
+          FAILED=1
+        else
+          echo "✅ Python coverage ${PYTHON_COV}% meets minimum ${MIN_PYTHON}%"
+        fi
+
+        if (( $(echo "$RUST_COV < $MIN_RUST" | bc -l) )); then
+          echo "⚠️  Rust coverage ${RUST_COV}% is below minimum ${MIN_RUST}% (warning only)"
+        else
+          echo "✅ Rust coverage ${RUST_COV}% meets minimum ${MIN_RUST}%"
+        fi
+
+        if [ $FAILED -eq 1 ]; then
+          echo "⚠️  Coverage check failed, but not blocking PR (informational only)"
+        fi
+
