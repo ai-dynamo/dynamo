@@ -136,8 +136,8 @@ impl
 
         let prompt_token_ids = request.token_ids.clone();
 
-        // TODO: Consider updating default to true to match behavior of other frameworks
-        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
+        // Default to skipping special tokens to match OpenAI-compatible behavior
+        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(true);
 
         // Extract include_stop_str_in_output from sampling_options (defaults to false)
         let include_stop_str_in_output = request
