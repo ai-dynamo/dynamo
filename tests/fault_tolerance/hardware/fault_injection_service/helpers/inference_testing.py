@@ -64,6 +64,7 @@ class InferenceLoadTester:
         self.thread: Optional[threading.Thread] = None
         self.results: List[Dict] = []
         self.lock = threading.Lock()
+        self.checkpoint_index = 0  # Track checkpoint for per-phase stats
 
     def send_inference_request(self, prompt: str = "Hello, world!") -> Dict:
         """
@@ -152,30 +153,76 @@ class InferenceLoadTester:
         with self.lock:
             return self.results.copy()
 
-    def get_stats(self) -> Dict:
+    def checkpoint(self):
+        """Mark current point for per-phase stats. Call before each test phase."""
+        with self.lock:
+            self.checkpoint_index = len(self.results)
+
+    def get_stats(self, since_checkpoint: bool = False) -> Dict:
         """
-        Get statistics for current results.
+        Get statistics for results including latency percentiles.
+
+        Args:
+            since_checkpoint: If True, only return stats since last checkpoint.
+                            If False, return cumulative stats (default).
 
         Returns:
-            Dict with keys: total, success, failed, success_rate, avg_latency, errors
+            Dict with keys: total, success, failed, success_rate,
+                          avg_latency, p50_latency, p95_latency, p99_latency,
+                          min_latency, max_latency, errors
         """
         with self.lock:
-            if not self.results:
+            # Get results based on whether we want per-phase or cumulative
+            if since_checkpoint:
+                results = self.results[self.checkpoint_index :]
+            else:
+                results = self.results
+
+            if not results:
                 return {
                     "total": 0,
                     "success": 0,
                     "failed": 0,
                     "success_rate": 0.0,
                     "avg_latency": 0.0,
+                    "p50_latency": 0.0,
+                    "p95_latency": 0.0,
+                    "p99_latency": 0.0,
+                    "min_latency": 0.0,
+                    "max_latency": 0.0,
                     "errors": [],
                 }
 
-            total = len(self.results)
-            success = sum(1 for r in self.results if r["success"])
+            total = len(results)
+            success = sum(1 for r in results if r["success"])
             failed = total - success
-            avg_latency = sum(r["latency"] for r in self.results if r["success"]) / max(
-                success, 1
-            )
+
+            # Calculate latency stats for successful requests only
+            success_latencies = sorted([r["latency"] for r in results if r["success"]])
+
+            if success_latencies:
+                avg_latency = sum(success_latencies) / len(success_latencies)
+                min_latency = min(success_latencies)
+                max_latency = max(success_latencies)
+
+                # Calculate percentiles
+                def percentile(data, p):
+                    """Calculate percentile (0-100)"""
+                    if not data:
+                        return 0.0
+                    k = (len(data) - 1) * (p / 100.0)
+                    f = int(k)
+                    c = f + 1 if (f + 1) < len(data) else f
+                    if f == c:
+                        return data[f]
+                    return data[f] * (c - k) + data[c] * (k - f)
+
+                p50 = percentile(success_latencies, 50)
+                p95 = percentile(success_latencies, 95)
+                p99 = percentile(success_latencies, 99)
+            else:
+                avg_latency = min_latency = max_latency = 0.0
+                p50 = p95 = p99 = 0.0
 
             return {
                 "total": total,
@@ -183,5 +230,10 @@ class InferenceLoadTester:
                 "failed": failed,
                 "success_rate": (success / total) * 100,
                 "avg_latency": avg_latency,
-                "errors": [r["error"] for r in self.results if r["error"]][:5],
+                "p50_latency": p50,
+                "p95_latency": p95,
+                "p99_latency": p99,
+                "min_latency": min_latency,
+                "max_latency": max_latency,
+                "errors": [r["error"] for r in results if r["error"]][:5],
             }
