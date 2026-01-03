@@ -7,6 +7,12 @@
 #   - kGateway installed with inference extension support
 #   - EPP deployed and setting x-worker-instance-id headers
 #
+# NAMESPACE NOTE:
+#   The namespace below should match where your Gateway resource is deployed.
+#   - If you ran: kubectl apply -f gateway.yaml (no -n flag) → use "default"
+#   - If you ran: kubectl apply -f gateway.yaml -n my-model → use "my-model"
+#   This is NOT the kgateway-system namespace where the controller runs.
+#
 # Apply with: kubectl apply -f kgateway-lua-filter.yaml
 
 ---
@@ -15,13 +21,15 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: dynamo-body-injector-lua
-  namespace: default  # Change to your namespace
+  namespace: default  # Change to match where your Gateway resource is deployed
   labels:
     app.kubernetes.io/name: dynamo-body-injector
     app.kubernetes.io/component: lua-filter
 data:
   body_injector.lua: |
     -- Dynamo Body Injector Lua Filter
+    -- Reads routing headers and injects nvext into request body.
+    -- NOTE: token_data is NOT passed via headers (tokens are too large).
     function envoy_on_request(request_handle)
       local worker_id = request_handle:headers():get("x-worker-instance-id")
       if worker_id == nil or worker_id == "" then
@@ -29,7 +37,6 @@ data:
       end
 
       local prefill_worker_id = request_handle:headers():get("x-prefiller-host-port")
-      local token_data = request_handle:headers():get("x-dynamo-token-data")
       local routing_mode = request_handle:headers():get("x-dynamo-routing-mode")
 
       local body = request_handle:body()
@@ -50,11 +57,6 @@ data:
         nvext_content = table.concat(parts, ",")
       else
         nvext_content = string.format('"backend_instance_id":%s', worker_id)
-      end
-
-      if token_data and token_data ~= "" and token_data ~= "[]" then
-        if nvext_content ~= "" then nvext_content = nvext_content .. "," end
-        nvext_content = nvext_content .. string.format('"token_data":%s', token_data)
       end
 
       if nvext_content == "" then return end
@@ -102,7 +104,7 @@ apiVersion: gateway.kgateway.dev/v1alpha1
 kind: TrafficPolicy
 metadata:
   name: dynamo-body-injector
-  namespace: default
+  namespace: default  # Must match the namespace where your Gateway resource is deployed
 spec:
   targetRefs:
   - group: gateway.networking.k8s.io
@@ -110,6 +112,8 @@ spec:
     name: inference-gateway  # Change to your gateway name
   policy:
     # Lua filter configuration
+    # Lua filter configuration
+    # NOTE: token_data is NOT passed via headers (tokens are too large).
     lua:
       inlineCode: |
         function envoy_on_request(request_handle)
@@ -117,7 +121,6 @@ spec:
           if worker_id == nil or worker_id == "" then return end
 
           local prefill_worker_id = request_handle:headers():get("x-prefiller-host-port")
-          local token_data = request_handle:headers():get("x-dynamo-token-data")
           local routing_mode = request_handle:headers():get("x-dynamo-routing-mode")
 
           local body = request_handle:body()
@@ -137,11 +140,6 @@ spec:
             nvext_content = table.concat(parts, ",")
           else
             nvext_content = string.format('"backend_instance_id":%s', worker_id)
-          end
-
-          if token_data and token_data ~= "" and token_data ~= "[]" then
-            if nvext_content ~= "" then nvext_content = nvext_content .. "," end
-            nvext_content = nvext_content .. string.format('"token_data":%s', token_data)
           end
 
           if nvext_content == "" then return end

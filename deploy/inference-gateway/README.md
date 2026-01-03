@@ -466,8 +466,12 @@ The Lua filter configuration is in `config/lua-filter/kgateway-lua-filter.yaml`.
 
 1. **Customize the configuration** for your environment:
 
+The namespace must match where your **Gateway resource** is deployed (not the kGateway controller namespace):
+- If you ran `kubectl apply -f gateway.yaml` without `-n` → use `default`
+- If you ran `kubectl apply -f gateway.yaml -n my-model` → use `my-model`
+
 ```bash
-# Update namespace and gateway name if different
+# Update namespace and gateway name if different from defaults
 sed -i 's/namespace: default/namespace: my-model/g' config/lua-filter/kgateway-lua-filter.yaml
 sed -i 's/name: inference-gateway/name: my-gateway/g' config/lua-filter/kgateway-lua-filter.yaml
 ```

@@ -6,12 +6,14 @@
 -- Headers consumed:
 --   x-worker-instance-id     - Target worker ID (decode worker in disagg mode)
 --   x-prefiller-host-port    - Prefill worker ID (disaggregated mode only)
---   x-dynamo-token-data      - JSON-encoded token IDs for KV cache routing
 --   x-dynamo-routing-mode    - "aggregated" or "disaggregated"
 --
 -- Body modification:
 --   Adds "nvext" field with backend_instance_id, prefill_worker_id,
---   decode_worker_id, and token_data as appropriate.
+--   and decode_worker_id as appropriate.
+--
+-- NOTE: token_data is NOT passed via headers (tokens are too large).
+--       Future versions may read token_data from the request body if present.
 
 function envoy_on_request(request_handle)
   -- Read headers set by EPP/Dynamo scorer
@@ -24,8 +26,10 @@ function envoy_on_request(request_handle)
 
   -- Get other routing headers
   local prefill_worker_id = request_handle:headers():get("x-prefiller-host-port")
-  local token_data = request_handle:headers():get("x-dynamo-token-data")
   local routing_mode = request_handle:headers():get("x-dynamo-routing-mode")
+
+  -- NOTE: token_data is NOT passed via headers (tokens are too large).
+  -- Future: may read token_data from body if already present.
 
   -- Get request body (must buffer entire body)
   local body = request_handle:body()
@@ -59,14 +63,6 @@ function envoy_on_request(request_handle)
   else
     -- Aggregated serving: single backend instance
     nvext_content = string.format('"backend_instance_id":%s', worker_id)
-  end
-
-  -- Add token_data if present (already JSON-encoded array from header)
-  if token_data and token_data ~= "" and token_data ~= "[]" then
-    if nvext_content ~= "" then
-      nvext_content = nvext_content .. ","
-    end
-    nvext_content = nvext_content .. string.format('"token_data":%s', token_data)
   end
 
   -- If nothing to inject, skip
