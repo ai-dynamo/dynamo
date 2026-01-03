@@ -3,6 +3,12 @@
 # This configuration sets up the EPP to use Dynamo's KV-aware router for
 # intelligent worker selection based on KV cache overlap.
 #
+# The KV scorer sets routing headers that the Lua filter at the gateway
+# reads to inject nvext into the request body:
+#   - x-worker-instance-id: Selected worker ID
+#   - x-prefiller-host-port: Prefill worker (disaggregated mode)
+#   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
+#
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig
 plugins:
@@ -13,14 +19,8 @@ plugins:
   - name: picker
     type: max-score-picker
 
-  # Dynamo PreRequest: normalizes routing headers for backend consumption
-  # NOTE: This plugin uses a header-only approach. Backend workers should
-  # read x-dynamo-* headers to extract routing information.
-  - name: dyn-pre
-    type: dynamo-inject-workerid
-    parameters: {}
-
   # Dynamo KV-aware Scorer: calls Dynamo router FFI for worker selection
+  # Sets routing headers for the Lua filter at the gateway
   - name: dyn-kv
     type: kv-aware-scorer
 

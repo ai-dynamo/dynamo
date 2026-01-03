@@ -33,7 +33,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extens
 
 
 # Install and upgrade Kgateway (includes CRDs)
-KGTW_VERSION=v2.2.0-main
+KGTW_VERSION=v2.1.1
 helm upgrade -i --create-namespace --namespace kgateway-system --version $KGTW_VERSION \
   kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
 

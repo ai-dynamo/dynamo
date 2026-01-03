@@ -61,7 +61,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extens
 kGateway needs the Agentgateway to support the Gateway Api  Inference Extension.
 
 ```bash
-KGTW_VERSION=v2.2.0-main
+KGTW_VERSION=v2.1.1
 helm upgrade -i --create-namespace --namespace kgateway-system --version $KGTW_VERSION \
   kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
 
@@ -359,7 +359,6 @@ The v1.2.1 release introduces breaking changes to the plugin interfaces:
 
 The plugin code for v1.2.1 is in:
 - `pkg/plugins/dynamo_kv_scorer/plugin.go`
-- `pkg/plugins/dynamo_inject_workerid/plugin.go`
 - `pkg/plugins/dynamo_cleanup/plugin.go`
 
 #### Build Commands
@@ -393,12 +392,9 @@ The plugins set HTTP headers that are forwarded to the backend workers.
 
 | Header | Description | Set By |
 |--------|-------------|--------|
-| `x-worker-instance-id` | Primary worker ID | kv-aware-scorer |
-| `x-prefiller-host-port` | Prefill worker (disagg mode) | kv-aware-scorer |
-| `x-dynamo-routing-mode` | `aggregated` or `disaggregated` | dynamo-inject-workerid |
-| `x-dynamo-backend-instance-id` | Worker ID (aggregated mode) | dynamo-inject-workerid |
-| `x-dynamo-prefill-worker-id` | Prefill worker ID (disagg mode) | dynamo-inject-workerid |
-| `x-dynamo-decode-worker-id` | Decode worker ID (disagg mode) | dynamo-inject-workerid |
+| `x-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
+| `x-prefiller-host-port` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |
+| `x-dynamo-routing-mode` | `aggregated` or `disaggregated` | kv-aware-scorer |
 
 
 ## Lua Body Injector

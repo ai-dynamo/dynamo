@@ -114,11 +114,11 @@ import (
 )
 
 const (
-	PluginName               = "dynamo-kv-scorer"
-	KVAwareScorerType        = "kv-aware-scorer"
-	WorkerIDHeader           = "x-worker-instance-id"
-	PrefillWorkerIDHeader    = "x-prefiller-host-port"
-	TokenDataHeaderKey       = "x-dynamo-token-data"
+	PluginName            = "dynamo-kv-scorer"
+	KVAwareScorerType     = "kv-aware-scorer"
+	WorkerIDHeader        = "x-worker-instance-id"
+	PrefillWorkerIDHeader = "x-prefiller-host-port"
+	RoutingModeHeader     = "x-dynamo-routing-mode"
 )
 
 // --------------------------- config / env ---------------------------
@@ -321,23 +321,28 @@ func (k *KVAwareScorer) Score(
 			"tokenDataCount", len(tokenData),
 		)
 
-		// Store in request headers for downstream plugins
+		// Store in request headers for the Lua filter at the gateway
 		if req.Headers == nil {
 			req.Headers = map[string]string{}
 		}
 		req.Headers[WorkerIDHeader] = workerID
 
-		// Set prefill worker ID if present
-		if prefillWorkerID != "" {
+		// Set routing mode and prefill worker ID based on disaggregated vs aggregated
+		if prefillWorkerID != "" && prefillWorkerID != workerID {
+			// Disaggregated mode: separate prefill and decode workers
+			req.Headers[RoutingModeHeader] = "disaggregated"
 			req.Headers[PrefillWorkerIDHeader] = prefillWorkerID
+		} else {
+			// Aggregated mode: single worker handles both prefill and decode
+			req.Headers[RoutingModeHeader] = "aggregated"
 		}
 
-		// Store token data as JSON in header for body mutation
-		if len(tokenData) > 0 {
-			if tokenDataJSON, jsonErr := json.Marshal(tokenData); jsonErr == nil {
-				req.Headers[TokenDataHeaderKey] = string(tokenDataJSON)
-			}
-		}
+		// Token data may be passed in the request body in future versions.
+		// if len(tokenData) > 0 {
+		// 	if tokenDataJSON, jsonErr := json.Marshal(tokenData); jsonErr == nil {
+		// 		req.Body[TokenDataKey] = string(tokenDataJSON)
+		// 	}
+		// }
 
 		// Register request with router bookkeeping
 		requestID := req.RequestId
@@ -606,4 +611,3 @@ func cleanupDynamo() error {
 	}
 	return nil
 }
-

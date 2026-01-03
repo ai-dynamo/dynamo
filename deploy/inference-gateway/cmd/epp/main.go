@@ -19,19 +19,18 @@ limitations under the License.
 // This EPP integrates with the Gateway API Inference Extension to provide
 // KV-aware routing for Dynamo inference backends.
 //
-// # Header-Only Routing
+// # Header-Based Routing
 //
-// The Dynamo plugins communicate routing decisions via HTTP headers:
+// The Dynamo KV scorer sets routing headers that the Lua filter at the
+// gateway uses to inject nvext into the request body:
 //
-//   - x-worker-instance-id: Selected worker ID
-//   - x-prefiller-host-port: Prefill worker (disagg mode)
-//   - x-dynamo-token-data: JSON token IDs for KV cache
+//   - x-worker-instance-id: Selected worker ID (decode worker in disagg mode)
+//   - x-prefiller-host-port: Prefill worker ID (disaggregated mode only)
 //   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
-//   - x-dynamo-backend-instance-id: Worker ID (aggregated)
-//   - x-dynamo-prefill-worker-id: Prefill worker (disagg)
-//   - x-dynamo-decode-worker-id: Decode worker (disagg)
 //
-// Backend workers must read these headers for routing decisions.
+// The Lua filter reads these headers and injects:
+//   - Aggregated: {"nvext": {"backend_instance_id": <worker_id>}}
+//   - Disaggregated: {"nvext": {"prefill_worker_id": <prefill>, "decode_worker_id": <decode>}}
 package main
 
 import (
@@ -43,17 +42,14 @@ import (
 
 	// Dynamo plugins
 	dyncleanup "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_cleanup"
-	dynprereq "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_inject_workerid"
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
 
 func main() {
 	// Register Dynamo custom plugins:
-	// - kv-aware-scorer: Calls Dynamo router to select workers based on KV cache
-	// - dynamo-inject-workerid: Normalizes routing headers for backend consumption
+	// - kv-aware-scorer: Calls Dynamo router to select workers based on KV cache, sets routing headers
 	// - dynamo-cleanup: Cleans up router state after request completion
 	plugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
-	plugins.Register("dynamo-inject-workerid", dynprereq.InjectWorkerIDPreRequestFactory)
 	plugins.Register("dynamo-cleanup", dyncleanup.DynamoCleanupPluginFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
