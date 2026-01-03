@@ -71,10 +71,15 @@ use super::*;
 
 use std::{
     collections::HashMap,
+    ffi::c_void,
     sync::{Arc, Mutex, OnceLock},
 };
 
-use cudarc::driver::{CudaContext, sys};
+use cudarc::{
+    driver::{CudaContext, sys},
+    runtime::sys::{cudaError, cudaHostRegister},
+};
+use nix::libc::{mlock, posix_memalign};
 
 use crate::block_manager::numa_allocator;
 
@@ -178,8 +183,17 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
+            let async_alloc = std::env::var("DYN_KVBM_PINNED_ALLOC_ASYNC")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+
             // Try NUMA-aware allocation if enabled, otherwise use direct allocation
             let ptr = if numa_allocator::is_numa_enabled() {
+                if async_alloc {
+                    return Err(StorageError::OperationFailed(
+                        "Async allocation is not supported with NUMA-aware allocation.".into(),
+                    ));
+                }
                 let device_id = ctx.cu_device() as u32;
                 match numa_allocator::worker_pool::NumaWorkerPool::global()
                     .allocate_pinned_for_gpu(size, device_id)
@@ -195,8 +209,54 @@ impl PinnedStorage {
                     }
                 }
             } else {
-                cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                    .map_err(StorageError::Cuda)? as *mut u8
+                if async_alloc {
+                    let mut ptr: *mut c_void = std::ptr::null_mut();
+                    if posix_memalign(&mut ptr, 4096, size) != 0 {
+                        return Err(StorageError::OperationFailed(
+                            "Failed to allocate pinned memory".into(),
+                        ));
+                    }
+                    let ptr_addr = ptr as usize;
+                    std::thread::spawn(move || {
+                        const CHUNK_SIZE: usize = 1024 * 1024 * 64; // 64MB chunks
+                        tracing::info!("Beginning asynchronous pinned memory registration. Performance instability may be observed.");
+                        let ptr = ptr_addr as *mut u8;
+                        for chunk_num in 0..size / CHUNK_SIZE {
+                            let offset = chunk_num * CHUNK_SIZE;
+
+                            if mlock(ptr.byte_add(offset) as *mut c_void, std::cmp::min(size - offset, CHUNK_SIZE)) != 0 {
+                                tracing::error!("Failed to lock pinned memory. KVBM will fallback to synchronous transfer.");
+                                return;
+                            }
+
+                            let start_time = std::time::Instant::now();
+                            if cudaHostRegister(
+                                ptr.byte_add(offset) as *mut c_void,
+                                std::cmp::min(size - offset, CHUNK_SIZE),
+                                0,
+                            ) != cudaError::cudaSuccess
+                            {
+                                tracing::error!(
+                                    "Pinned memory registration failed. KVBM will fallback to synchronous transfer."
+                                );
+                                return;
+                            } else {
+                                let duration = start_time.elapsed();
+                                tracing::debug!(
+                                    "Finished pinning chunk {} of {} in {:?}",
+                                    chunk_num,
+                                    size / CHUNK_SIZE,
+                                    duration
+                                );
+                            }
+                        }
+                        tracing::info!("Finished pinning all chunks");
+                    });
+                    ptr as *mut u8
+                } else {
+                    cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+                        .map_err(StorageError::Cuda)? as *mut u8
+                }
             };
 
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
