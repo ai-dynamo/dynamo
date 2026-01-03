@@ -648,12 +648,20 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         .client()
     )
 
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
     # Get prompt template from args (must be passed via environment or command line)
     mm_prompt_template = config.mm_prompt_template
 
     handler = ProcessorHandler(
         config.engine_args,
         encode_worker_client,
+        pd_worker_client,
         mm_prompt_template,
     )
 

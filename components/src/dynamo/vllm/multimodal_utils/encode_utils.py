@@ -23,6 +23,18 @@ from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 logger = logging.getLogger(__name__)
 
 
+def get_embedding_hash(key: str) -> str:
+    """
+    Generate a unique hash key for storing/retrieving image embeddings.
+
+    Args:
+        key: The base key string (e.g., image URL or identifier)
+    Returns:
+        A unique hash string for the given key.
+    """
+    return hash(key).__str__()
+
+
 def get_qwen_image_features(
     vision_encoder: torch.nn.Module, image_embeds: Dict[str, Any]
 ) -> torch.Tensor:

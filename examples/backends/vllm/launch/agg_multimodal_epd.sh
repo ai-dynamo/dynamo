@@ -16,10 +16,10 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
-MODEL_NAME="llava-hf/llava-1.5-7b-hf"
+MODEL_NAME="Qwen/Qwen2.5-VL-3B-Instruct"
 PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
 PROVIDED_PROMPT_TEMPLATE=""
-SINGLE_GPU=false
+SINGLE_GPU=true
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -57,11 +57,11 @@ done
 if [[ -n "$PROVIDED_PROMPT_TEMPLATE" ]]; then
     PROMPT_TEMPLATE="$PROVIDED_PROMPT_TEMPLATE"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
+    PROMPT_TEMPLATE="USER: <mm_placeholder>\n<prompt> ASSISTANT:"
 elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
     PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]] || [[ "$MODEL_NAME" == "Qwen/Qwen2-VL-2B-Instruct" ]]; then
-    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
+elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]] || [[ "$MODEL_NAME" == "Qwen/Qwen2-VL-2B-Instruct" ]] || [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-3B-Instruct" ]]; then
+    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<prompt><mm_placeholder><|im_end|>\n<|im_start|>assistant\n"
 else
     echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
     echo "Please provide a prompt template using --prompt-template option."
@@ -78,7 +78,7 @@ python -m dynamo.frontend &
 # Multi-GPU mode: Each worker gets its own GPU, so use higher memory settings
 EXTRA_ARGS=""
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    EXTRA_ARGS="--gpu-memory-utilization 0.3 --max-model-len 3072 --enforce-eager"
+    EXTRA_ARGS="--gpu-memory-utilization 0.6 --enforce-eager"
 else
     # Multi-GPU mode: standard memory settings
     EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
