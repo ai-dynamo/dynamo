@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -95,21 +95,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         if bootstrap_room is None:
             bootstrap_room = self._generate_bootstrap_room()
             logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
-
-        bootstrap_info = {
-            "bootstrap_host": self.bootstrap_host,
-            "bootstrap_port": self.bootstrap_port,
-            "bootstrap_room": bootstrap_room,
-        }
-
-        # Yield in LLMEngineOutput format for PrefillRouter compatibility
-        # The disaggregated_params field contains the bootstrap info
-        yield {
-            "token_ids": [],
-            "text": None,
-            "finish_reason": None,
-            "disaggregated_params": bootstrap_info,
-        }
 
         input_param = self._get_input_param(inner_request)
 
