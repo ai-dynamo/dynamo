@@ -1080,6 +1080,9 @@ pub fn add_query_instance_id(
 ///
 /// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
 /// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
+///
+/// Also sets `enable_local_updates: false` since the external caller (EPP/GAIE)
+/// will handle bookkeeping via C FFI functions.
 pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
     decode_worker_id: Option<i64>,
@@ -1090,6 +1093,9 @@ pub fn set_worker_ids_for_stage2(
             .build()
             .expect("NvExt builder should not fail")
     });
+
+    // Disable local updates - external caller handles bookkeeping via C FFI
+    nvext.enable_local_updates = Some(false);
 
     // Check if this is aggregated mode (same worker for both)
     let is_aggregated = prefill_worker_id == decode_worker_id;
