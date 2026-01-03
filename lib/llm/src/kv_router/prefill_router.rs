@@ -8,6 +8,7 @@ use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use dynamo_runtime::{
     component::Endpoint,
@@ -257,10 +258,14 @@ impl PrefillRouter {
                 InnerPrefillRouter::KvRouter(r) => r,
                 _ => return None,
             };
-            match kv_router
-                .chooser
-                .find_best_match(None, &req.token_ids, None, false)
-                .await
+            match async {
+                kv_router
+                    .chooser
+                    .find_best_match(None, &req.token_ids, None, false)
+                    .await
+            }
+            .instrument(tracing::info_span!("kv_find_best_match"))
+            .await
             {
                 Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
                 Err(_) => return None,
@@ -395,19 +400,29 @@ impl PrefillRouter {
         phase_permit: OwnedSemaphorePermit,
     ) {
         let router = self.prefill_router.get().cloned();
+        // Capture current span to propagate trace context to the spawned task
+        let span = tracing::Span::current();
 
-        tokio::spawn(async move {
-            match Self::execute_prefill(router, prefill_request, target_worker, Some(phase_permit))
+        tokio::spawn(
+            async move {
+                match Self::execute_prefill(
+                    router,
+                    prefill_request,
+                    target_worker,
+                    Some(phase_permit),
+                )
                 .await
-            {
-                Ok(_) => {
-                    tracing::debug!("Prefill background task completed");
-                }
-                Err(e) => {
-                    tracing::warn!("Prefill background task error: {e:?}");
+                {
+                    Ok(_) => {
+                        tracing::debug!("Prefill background task completed");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Prefill background task error: {e:?}");
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Call the prefill router and extract structured prefill result and worker ID.
