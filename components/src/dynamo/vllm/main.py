@@ -377,21 +377,12 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         prometheus_temp_dir,
     ) = setup_vllm_engine(config)
 
-    structured_outputs_backend = None
-    try:
-        structured_outputs_backend = getattr(
-            getattr(vllm_config, "structured_outputs_config", None), "backend", None
-        )
-    except Exception:
-        structured_outputs_backend = None
-
     handler = PrefillWorkerHandler(
         runtime,
         component,
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
-        structured_outputs_backend=structured_outputs_backend,
         enable_multimodal=config.enable_multimodal,
         generate_endpoint=generate_endpoint,
         config=config,
@@ -500,14 +491,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         prometheus_temp_dir,
     ) = setup_vllm_engine(config, factory)
 
-    structured_outputs_backend = None
-    try:
-        structured_outputs_backend = getattr(
-            getattr(vllm_config, "structured_outputs_config", None), "backend", None
-        )
-    except Exception:
-        structured_outputs_backend = None
-
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
     factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
@@ -519,7 +502,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         engine_client,
         default_sampling_params,
         getattr(getattr(vllm_config, "model_config", None), "max_model_len", None),
-        structured_outputs_backend=structured_outputs_backend,
         enable_multimodal=config.enable_multimodal,
         generate_endpoint=generate_endpoint,
         config=config,
