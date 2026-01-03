@@ -204,11 +204,6 @@ ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
 
-
-
-RUN echo "gcc --version && nvcc --version"
-RUN gcc --version && nvcc --version
-
 # Build and install gdrcopy
 RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
     cd gdrcopy/packages && \
