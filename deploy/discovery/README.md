@@ -26,6 +26,7 @@ The operator will automatically configure the required EndpointSlices, labels, a
 | **Variable** | **Description** | **Default** |
 | ------------ | --------------- | ----------- |
 | `DYN_DISCOVERY_BACKEND` | Discovery backend (`kv_store` for etcd or `kubernetes` for experimental EndpointSlice-based discovery) | `kv_store` |
+| `DYN_DISCOVERY_EAGER_START` | Start the Discovery Daemon eagerly (i.e. in FrontEnd) | `false`|
 
 ## Metadata Endpoint
 

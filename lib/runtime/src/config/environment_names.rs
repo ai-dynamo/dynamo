@@ -99,6 +99,14 @@ pub mod runtime {
         /// Wait time in seconds for canary deployments
         pub const DYN_CANARY_WAIT_TIME: &str = "DYN_CANARY_WAIT_TIME";
     }
+
+    /// Discovery configuration
+    pub mod discovery {
+        /// Start the Kubernetes discovery daemon eagerly at initialization
+        /// instead of lazily on first list/watch call.
+        /// Set to "true" on frontends that need discovery clients.
+        pub const DYN_DISCOVERY_EAGER_START: &str = "DYN_DISCOVERY_EAGER_START";
+    }
 }
 
 /// Worker lifecycle environment variables
@@ -361,6 +369,7 @@ mod tests {
             runtime::system::DYN_SYSTEM_HEALTH_PATH,
             runtime::system::DYN_SYSTEM_LIVE_PATH,
             runtime::canary::DYN_CANARY_WAIT_TIME,
+            runtime::discovery::DYN_DISCOVERY_EAGER_START,
             // Worker
             worker::DYN_WORKER_GRACEFUL_SHUTDOWN_TIMEOUT,
             // NATS

@@ -20,6 +20,9 @@ spec:
       extraPodSpec:
         mainContainer:
           image: ${IMAGE}
+      env:
+        - name: DYN_DISCOVERY_EAGER_START
+          value: "true"
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg
       componentType: decode
