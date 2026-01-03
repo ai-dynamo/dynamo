@@ -14,89 +14,80 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 set -e  # Exit on any error
 
-# Configuration - Set these environment variables before running
+# Script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Configuration - DYNAMO_DIR defaults to the parent dynamo repo
 if [[ -z "${DYNAMO_DIR}" ]]; then
-    echo "DYNAMO_DIR environment variable must be set"
-    echo "   Example: export DYNAMO_DIR=/path/to/dynamo"
+    # Default: assume we're in dynamo/deploy/inference-gateway
+    DYNAMO_DIR="$(cd "${PROJECT_DIR}/../.." && pwd)"
+    echo "DYNAMO_DIR not set, using default: ${DYNAMO_DIR}"
+fi
+
+# Verify we're in the right place
+if [[ ! -f "${PROJECT_DIR}/Makefile" ]]; then
+    echo "ERROR: Makefile not found in ${PROJECT_DIR}"
     exit 1
 fi
 
-if [[ -z "${GAIE_DIR}" ]]; then
-    echo "GAIE_DIR environment variable must be set"
-    echo "   Example: export GAIE_DIR=/path/to/gateway-api-inference-extension"
-    exit 1
-fi
-DYNAMO_LIB_DIR="${GAIE_DIR}/pkg/epp/scheduling/plugins/dynamo_kv_scorer/lib"
-DYNAMO_INCLUDE_DIR="${GAIE_DIR}/pkg/epp/scheduling/plugins/dynamo_kv_scorer/include"
-
-echo "Building Dynamo KV Router C Library..."
-
-# Step 1: Build the static library
-echo "Building static library..."
-cd "${DYNAMO_DIR}"
-cargo build --release -p libdynamo_llm
-
-# Step 2: Generate header file (with fallback)
-echo "Generating C header..."
-HEADER_OUTPUT="${DYNAMO_DIR}/lib/bindings/c/include/nvidia/dynamo_llm/llm_engine.h"
-
-if ! cbindgen --config lib/bindings/c/cbindgen.toml --crate libdynamo_llm --output "${HEADER_OUTPUT}"; then
-    echo "cbindgen failed, using fallback header..."
-    cp "${DYNAMO_DIR}/lib/bindings/c/src/fallback_header.h" "${HEADER_OUTPUT}"
-fi
-
-# Step 3: Ensure directories exist
-echo "Preparing directories..."
-mkdir -p "${DYNAMO_LIB_DIR}"
-mkdir -p "${DYNAMO_INCLUDE_DIR}"
-
-# Step 4: Copy files to GAIE project
-echo "Copying files to the GAIE project..."
-cp "${HEADER_OUTPUT}" "${DYNAMO_INCLUDE_DIR}/"
-cp "${DYNAMO_DIR}/target/release/libdynamo_llm_capi.a" "${DYNAMO_LIB_DIR}/"
-cp "${DYNAMO_DIR}/container/Dockerfile.epp" "${GAIE_DIR}/Dockerfile.dynamo"
-
-# Verify files were copied
-if [[ ! -f "${DYNAMO_INCLUDE_DIR}/llm_engine.h" ]]; then
-    echo "Header file copy failed!"
+if [[ ! -d "${DYNAMO_DIR}/lib/bindings/c" ]]; then
+    echo "ERROR: Dynamo source not found at ${DYNAMO_DIR}"
+    echo "Set DYNAMO_DIR to the root of the dynamo repository"
     exit 1
 fi
 
-if [[ ! -f "${DYNAMO_LIB_DIR}/libdynamo_llm_capi.a" ]]; then
-    echo "Library file copy failed!"
-    exit 1
-fi
+echo "============================================="
+echo "Dynamo EPP Build Script"
+echo "============================================="
+echo "Project Dir: ${PROJECT_DIR}"
+echo "Dynamo Dir:  ${DYNAMO_DIR}"
+echo "============================================="
 
-if [[ ! -f "${GAIE_DIR}/Dockerfile.dynamo" ]]; then
-    echo "Docker.dynamo file copy failed!"
-    exit 1
-fi
+cd "${PROJECT_DIR}"
 
-echo "Files copied successfully:"
-echo "   Header: ${DYNAMO_INCLUDE_DIR}/llm_engine.h"
-echo "   Library: ${DYNAMO_LIB_DIR}/libdynamo_llm_capi.a"
-echo "   Docker: ${GAIE_DIR}/Dockerfile.epp"
+# Build mode: local (default), push, or kind
+BUILD_MODE="${1:-local}"
 
-# Step 5: Apply Dynamo patch (if it exists)
-echo "Applying Dynamo patch..."
-cd "${GAIE_DIR}"
+case "${BUILD_MODE}" in
+    local)
+        echo "Building Dynamo library and Docker image (load locally)..."
+        make all DYNAMO_DIR="${DYNAMO_DIR}"
+        ;;
+    push)
+        echo "Building Dynamo library and Docker image (push to registry)..."
+        make all-push DYNAMO_DIR="${DYNAMO_DIR}"
+        ;;
+    kind)
+        echo "Building Dynamo library and Docker image (load to kind)..."
+        make all-kind DYNAMO_DIR="${DYNAMO_DIR}"
+        ;;
+    lib-only)
+        echo "Building Dynamo library only..."
+        make dynamo-lib DYNAMO_DIR="${DYNAMO_DIR}"
+        ;;
+    image-only)
+        echo "Building Docker image only (library must exist)..."
+        make image-local-load DYNAMO_DIR="${DYNAMO_DIR}"
+        ;;
+    *)
+        echo "Usage: $0 [local|push|kind|lib-only|image-only]"
+        echo ""
+        echo "Modes:"
+        echo "  local      - Build library and image, load locally (default)"
+        echo "  push       - Build library and image, push to registry"
+        echo "  kind       - Build library and image, load to kind cluster"
+        echo "  lib-only   - Build Dynamo library only"
+        echo "  image-only - Build Docker image only (library must exist)"
+        exit 1
+        ;;
+esac
 
-PATCH_FILE="${DYNAMO_DIR}/deploy/inference-gateway/epp-patches/v0.8.0/gaie.patch"
-if [[ -f "${PATCH_FILE}" ]]; then
-    if git apply --check "${PATCH_FILE}" 2>/dev/null; then
-        git apply "${PATCH_FILE}"
-        echo "Patch applied successfully"
-    else
-        echo "Patch doesn't apply cleanly - may already be applied or need manual resolution"
-    fi
-else
-    echo "No patch file found at ${PATCH_FILE}"
-fi
-
-# Step 6: Build the EPP image
-echo "Building the custom EPP image for GAIE..."
-make dynamo-image-local-load
-
-echo "EPP image with Dynamo KV routing built"
+echo ""
+echo "============================================="
+echo "Build complete!"
+echo "============================================="
+make info DYNAMO_DIR="${DYNAMO_DIR}"
