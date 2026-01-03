@@ -16,8 +16,6 @@ import re
 from functools import lru_cache
 from typing import TYPE_CHECKING, Optional, Pattern
 
-from prometheus_client import generate_latest
-
 from dynamo._core import Endpoint
 
 # Import CollectorRegistry only for type hints to avoid importing prometheus_client at module load time.
@@ -119,6 +117,11 @@ def get_prometheus_expfmt(
     Collects all metrics from the registry and returns them in Prometheus text exposition format.
     Optionally filters metrics by prefix, excludes certain prefixes, and adds a prefix.
 
+    IMPORTANT: prometheus_client is imported lazily here because it must be imported AFTER
+    set_prometheus_multiproc_dir() is called by SGLang's engine initialization. Importing
+    at module level causes prometheus_client to initialize in single-process mode before
+    PROMETHEUS_MULTIPROC_DIR is set, which breaks TokenizerMetricsCollector metrics.
+
     Args:
         registry: Prometheus registry to collect from.
                  Pass CollectorRegistry with MultiProcessCollector for SGLang.
@@ -138,6 +141,8 @@ def get_prometheus_expfmt(
         # Filter out python_/process_ metrics and add trtllm_ prefix
         get_prometheus_expfmt(registry, exclude_prefixes=["python_", "process_"], add_prefix="trtllm_")
     """
+    from prometheus_client import generate_latest
+
     try:
         # Generate metrics in Prometheus text format
         metrics_text = generate_latest(registry).decode("utf-8")
