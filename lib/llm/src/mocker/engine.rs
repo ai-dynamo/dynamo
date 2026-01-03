@@ -28,6 +28,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
+use crate::mocker::bootstrap::{BootstrapServer, connect_to_prefill};
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
 use crate::mocker::scheduler::Scheduler;
@@ -47,6 +48,8 @@ pub struct MockVllmEngine {
     active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
     request_senders: Arc<OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>>,
     engine_args: MockEngineArgs,
+    /// Bootstrap server for prefill workers in disaggregated mode
+    bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
 }
 
 impl MockVllmEngine {
@@ -56,6 +59,7 @@ impl MockVllmEngine {
             active_requests: Arc::new(Mutex::new(HashMap::new())),
             request_senders: Arc::new(OnceCell::new()),
             engine_args: args,
+            bootstrap_server: Arc::new(OnceCell::new()),
         }
     }
 
@@ -71,6 +75,15 @@ impl MockVllmEngine {
             tracing::info!("Simulating engine startup time: {:.2}s", startup_time_secs);
             tokio::time::sleep(Duration::from_secs_f64(startup_time_secs)).await;
             tracing::info!("Engine startup simulation completed");
+        }
+
+        // Start bootstrap server for prefill workers in disaggregated mode
+        if self.engine_args.worker_type == WorkerType::Prefill
+            && let Some(port) = self.engine_args.bootstrap_port
+        {
+            let server = BootstrapServer::start(port, cancel_token.clone()).await?;
+            let _ = self.bootstrap_server.set(server);
+            tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
         // Pass component to schedulers only if prefix caching is enabled and not a decode worker
@@ -253,6 +266,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
             )));
         }
 
+        // Bootstrap rendezvous for disaggregated serving
+        // - Decode: connect to prefill's server, block until prefill completes
+        // - Prefill: complete_room() is called after first token (see below)
+        let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
+        if let Some(bootstrap_info) = &request.bootstrap_info
+            && self.engine_args.worker_type == WorkerType::Decode
+        {
+            connect_to_prefill(
+                &bootstrap_info.bootstrap_host,
+                bootstrap_info.bootstrap_port,
+                bootstrap_info.bootstrap_room,
+            )
+            .await
+            .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
+        }
+
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
 
         // For prefill workers, override max_tokens to 1
@@ -288,6 +317,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
+        let bootstrap_server = self.bootstrap_server.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -324,6 +354,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             extra_args: None,
                             completion_usage: None,
                         };
+
+                        // Prefill: after first token, mark room complete (unblocks decode)
+                        if is_prefill
+                            && token_count == 1
+                            && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                        {
+                            server.complete_room(room_id);
+                        }
 
                         if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));
