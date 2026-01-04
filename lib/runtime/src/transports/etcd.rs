@@ -348,7 +348,10 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let (tx, rx) = mpsc::channel(32);
+        // b10: channel can deadlock if more than channel buffer size existing keys are existing (typical 1 key per replica)
+        // since no consumer is receiving yet. Increase buffer size to 32-> 4096 to avoid deadlock.
+        // Better fix: refactor the whole pattern to start the consumer first before sending existing keys.
+        let (tx, rx) = mpsc::channel(4096);
 
         // Get start revision and send existing KVs
         let mut start_revision = self
