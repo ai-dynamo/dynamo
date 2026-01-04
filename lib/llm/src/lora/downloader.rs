@@ -44,10 +44,11 @@ impl LoRADownloader {
             anyhow::bail!("Local LoRA not found: {}", lora_uri);
         }
 
-        // For remote URIs, use the URI as the cache key
-        let cache_key = self.uri_to_cache_key(lora_uri);
+        // For remote URIs, use the URI as the cache key.
+        // The cache key scheme is collision-resistant and filesystem-safe.
+        let cache_key = LoRACache::uri_to_cache_key(lora_uri);
 
-        // Fast path: check cache without holding the download lock
+        // Fast path: check cache without holding the download lock.
         if self.cache.is_cached(&cache_key) && self.cache.validate_cached(&cache_key)? {
             tracing::debug!("LoRA found in cache: {}", cache_key);
             return Ok(self.cache.get_cache_path(&cache_key));
@@ -65,7 +66,7 @@ impl LoRADownloader {
             .clone();
         let _guard = lock.lock().await;
 
-        // Double-check: another concurrent call may have completed the download while we waited
+        // Double-check: another concurrent call may have completed the download while we waited.
         if self.cache.is_cached(&cache_key) && self.cache.validate_cached(&cache_key)? {
             tracing::debug!(
                 "LoRA found in cache after acquiring lock (downloaded by concurrent request): {}",
@@ -99,10 +100,5 @@ impl LoRADownloader {
         }
 
         anyhow::bail!("LoRA {} not found in any source", lora_uri)
-    }
-
-    /// Convert URI to cache key (delegates to LoRACache for consistency)
-    fn uri_to_cache_key(&self, uri: &str) -> String {
-        LoRACache::uri_to_cache_key(uri)
     }
 }

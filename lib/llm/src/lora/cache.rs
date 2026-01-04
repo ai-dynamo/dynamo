@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use blake3;
 use std::path::PathBuf;
 
 use dynamo_runtime::config::environment_names::llm;
@@ -47,7 +48,29 @@ impl LoRACache {
     /// This is a static method to ensure consistent cache key generation
     /// across Rust and Python code.
     pub fn uri_to_cache_key(uri: &str) -> String {
-        uri.replace("://", "__").replace(['/', '\\', '.'], "_")
+        // Collision-resistant and filesystem-safe.
+        //
+        // Format: {scheme}_{hash32}
+        // - scheme: derived from the URI scheme (e.g. s3, gcs, http), sanitized to [a-z0-9_]
+        // - hash32: first 32 hex chars (128-bit) of blake3(uri)
+        let scheme = uri
+            .split("://")
+            .next()
+            .unwrap_or("uri")
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+
+        let hash = blake3::hash(uri.as_bytes()).to_string();
+        let hash32 = &hash[..32];
+        format!("{scheme}_{hash32}")
     }
 
     /// Validate cached LoRA has required files
@@ -131,13 +154,18 @@ mod tests {
 
     #[test]
     fn test_uri_to_cache_key() {
+        let s3_key = LoRACache::uri_to_cache_key("s3://bucket/path/to/lora");
+        assert!(s3_key.starts_with("s3_"));
+        assert_eq!(s3_key.len(), "s3_".len() + 32);
+
+        let file_key = LoRACache::uri_to_cache_key("file:///local/path");
+        assert!(file_key.starts_with("file_"));
+        assert_eq!(file_key.len(), "file_".len() + 32);
+
+        // Deterministic
         assert_eq!(
             LoRACache::uri_to_cache_key("s3://bucket/path/to/lora"),
-            "s3__bucket_path_to_lora"
-        );
-        assert_eq!(
-            LoRACache::uri_to_cache_key("file:///local/path"),
-            "file___local_path"
+            s3_key
         );
     }
 }
