@@ -454,12 +454,9 @@ class BaseWorkerHandler(ABC):
                             f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
                         )
                     except Exception as e:
-                        import traceback
-
-                        logger.error(
+                        logger.exception(
                             f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
                         )
-                        logger.debug(f"Traceback: {traceback.format_exc()}")
 
                         # Rollback: remove the LoRA from the engine to maintain consistency
                         try:
@@ -472,9 +469,11 @@ class BaseWorkerHandler(ABC):
                                 del self.lora_id_for_name[lora_name]
                             if lora_name in self.lora_name_to_path:
                                 del self.lora_name_to_path[lora_name]
+                            # Clean up the per-LoRA lock to prevent memory accumulation
+                            self._lora_load_locks.pop(lora_name, None)
                             logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
                         except Exception as rollback_error:
-                            logger.error(
+                            logger.exception(
                                 f"Failed to rollback LoRA {lora_name}: {rollback_error}"
                             )
 
