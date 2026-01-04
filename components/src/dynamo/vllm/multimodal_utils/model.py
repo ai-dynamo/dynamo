@@ -177,3 +177,17 @@ def _construct_qwen_image_data(
             "image_grid_thw": grid_thw_tensor,
         }
     }
+
+
+def construct_qwen_mrope_mm_data(
+    image_grid_thw: Optional[List[Any]],
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Construct minimal multimodal data needed for Qwen mRoPE initialization.
+
+    In vLLM v1, mRoPE positions are initialized for each request using `mm_features`.
+    For Qwen2.5-VL, that requires `image_grid_thw` even on decode workers that do not
+    need image embeddings (KV cache already contains vision context from prefill).
+    """
+    if image_grid_thw is None or len(image_grid_thw) == 0:
+        raise ValueError("No image grid provided for Qwen model.")
+    return {"image": {"image_grid_thw": torch.tensor(image_grid_thw)}}

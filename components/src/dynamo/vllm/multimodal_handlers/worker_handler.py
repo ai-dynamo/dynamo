@@ -18,6 +18,7 @@ from ..multimodal_utils import (
     construct_mm_data,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.model import construct_qwen_mrope_mm_data, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,23 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
-        # Decode worker doesn't process embeddings, so we pass None or empty tensor
+        # Decode workers in v1 still initialize mRoPE state per request for models
+        # that use mRoPE (e.g., Qwen2.5-VL). That requires multimodal metadata such
+        # as image_grid_thw even though embeddings/KV context already exist from prefill.
+        multi_modal_data = None
+        if is_qwen_vl_model(self.config.model):
+            try:
+                multi_modal_data = construct_qwen_mrope_mm_data(request.image_grid_thw)
+            except Exception as e:
+                logger.warning(
+                    "Failed to construct Qwen mRoPE multimodal metadata for decode "
+                    f"request_id={request.request_id}: {e}"
+                )
+
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
+                multi_modal_data=multi_modal_data,
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
