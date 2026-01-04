@@ -40,8 +40,13 @@ runs:
     - name: Pull relevant images
       shell: bash
       run: |
+        start_time=$(date +%s)
         docker pull ${{ inputs.image_tag }}
         docker pull quay.io/minio/minio
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+        echo "⏱️ Image pull duration: ${duration}s"
+        echo "## ⏱️ Pulled ${{ inputs.image_tag }} in ${duration} seconds" >> $GITHUB_STEP_SUMMARY
     - name: Setup Test Environment
       shell: bash
       run: |

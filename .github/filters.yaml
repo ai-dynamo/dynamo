@@ -9,10 +9,7 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
 
-core:
-  - *ci
-  - 'container/build.sh'
-  - 'container/deps/*'
+core_code: &core_code
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
@@ -27,11 +24,15 @@ core:
   - '!**/*.rst' # Avoid running on doc changes
   - '!**/*.txt' # Avoid running on doc changes
 
-operator:
-  - *ci
+core_container: &core_container
+  - 'container/build.sh'
+  - 'container/deps/*'
+
+operator: &operator
   - 'deploy/cloud/operator/**'
 
 deploy:
+  - *operator
   - 'deploy/cloud/helm/**'
   - 'deploy/utils/**'
 
@@ -39,20 +40,33 @@ planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
 
-vllm: &vllm
-  - 'container/Dockerfile.vllm'
-  - 'container/deps/requirements.vllm.txt'
-  - 'container/deps/vllm/**'
+vllm_code:
+  - *core_code
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
 
-sglang: &sglang
-  - 'container/Dockerfile.sglang'
+vllm_container:
+  - *core_container
+  - 'container/Dockerfile.vllm'
+  - 'container/deps/requirements.vllm.txt'
+  - 'container/deps/vllm/**'
+
+sglang_code:
+  - *core_code
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
 
-trtllm: &trtllm
-  - 'container/Dockerfile.trtllm'
+sglang_container:
+  - *core_container
+  - 'container/Dockerfile.sglang'
+
+trtllm_code:
+  - *core_code
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
+  
+trtllm_container:
+  - *core_container
+  - 'container/Dockerfile.trtllm'
   - 'container/build_trtllm_wheel.sh'
+  - 'container/deps/trtllm/**'

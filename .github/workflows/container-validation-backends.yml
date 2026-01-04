@@ -441,20 +441,15 @@ jobs:
   # IMAGE DISTRIBUTION JOBS
   # Copy built images from AWS ECR to Azure ACR after tests pass
   # ============================================================================
-  copy-images-to-acr:
-    needs: [pytests-vllm, pytests-sglang, pytests-trtllm, operator]
+  copy-vllm-to-acr:
+    needs: [pytests-vllm]
     strategy:
       fail-fast: true
       matrix:
         platform:
           - { arch: amd64 }
           # - { arch: arm64 }
-        framework:
-          - { name: vllm }
-          - { name: sglang }
-          - { name: trtllm }
-          - { name: dynamo-operator }
-    name: copy ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+    name: copy vllm-${{ matrix.platform.arch }}
     runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
@@ -463,35 +458,140 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          TARGET_TAG="${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}"
+          TARGET_TAG="${{ github.sha }}-vllm-${{ matrix.platform.arch }}"
           echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          # Set framework+arch specific output for static output mapping
-          echo "target_tag_${{ matrix.framework.name }}_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+          source_tag: ${{ github.sha }}-vllm-${{ matrix.platform.arch }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
           target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
-          # Source ECR credentials
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          # Target ACR credentials
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
     outputs:
-      target_tag_vllm_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_vllm_amd64 }}
-      target_tag_vllm_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_vllm_arm64 }}
-      target_tag_sglang_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_sglang_amd64 }}
-      target_tag_sglang_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_sglang_arm64 }}
-      target_tag_trtllm_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_trtllm_amd64 }}
-      target_tag_trtllm_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_trtllm_arm64 }}
-      target_tag_dynamo_operator_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_dynamo-operator_amd64 }}
-      target_tag_dynamo_operator_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_dynamo-operator_arm64 }}
+      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+
+  copy-sglang-to-acr:
+    needs: [pytests-sglang]
+    strategy:
+      fail-fast: true
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64 }
+    name: copy sglang-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-sglang-${{ matrix.platform.arch }}"
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+    outputs:
+      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+
+  copy-trtllm-to-acr:
+    needs: [pytests-trtllm]
+    strategy:
+      fail-fast: true
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64 }
+    name: copy trtllm-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-trtllm-${{ matrix.platform.arch }}"
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+    outputs:
+      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+
+  copy-operator-to-acr:
+    needs: [operator]
+    strategy:
+      fail-fast: true
+      matrix:
+        platform:
+          - { arch: amd64 }
+          # - { arch: arm64 }
+    name: copy dynamo-operator-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}"
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+    outputs:
+      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
 
 
   # ============================================================================
@@ -500,7 +600,7 @@ jobs:
   # ============================================================================
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [copy-images-to-acr]
+    needs: [copy-operator-to-acr]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
     outputs:
@@ -565,7 +665,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-images-to-acr.outputs.target_tag_dynamo_operator_amd64 }} 
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-operator-to-acr.outputs.target_tag_amd64 }} 
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
@@ -576,7 +676,7 @@ jobs:
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-images-to-acr]
+    needs: [deploy-operator, copy-vllm-to-acr]
     permissions:
       contents: read
     strategy:
@@ -603,7 +703,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_vllm_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-vllm-to-acr.outputs.target_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -616,7 +716,7 @@ jobs:
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
     # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [deploy-operator, copy-images-to-acr]
+    needs: [deploy-operator, copy-vllm-to-acr]
     permissions:
       contents: read
     strategy:
@@ -640,7 +740,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_vllm_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-vllm-to-acr.outputs.target_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -653,7 +753,7 @@ jobs:
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-images-to-acr]
+    needs: [deploy-operator, copy-sglang-to-acr]
     permissions:
       contents: read
     strategy:
@@ -678,7 +778,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: sglang
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_sglang_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-sglang-to-acr.outputs.target_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -691,7 +791,7 @@ jobs:
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-images-to-acr]
+    needs: [deploy-operator, copy-trtllm-to-acr]
     permissions:
       contents: read
     strategy:
@@ -718,7 +818,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: trtllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-images-to-acr.outputs.target_tag_trtllm_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-trtllm-to-acr.outputs.target_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
