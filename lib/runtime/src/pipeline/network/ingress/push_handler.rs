@@ -1,115 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod metrics;
+
+use metrics::RequestMetricsGuard;
+pub use metrics::WorkHandlerMetrics;
+
 use super::*;
 use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
-use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
-use tracing::Instrument;
-use tracing::info_span;
-
-/// Metrics configuration for profiling work handlers
-#[derive(Clone, Debug)]
-pub struct WorkHandlerMetrics {
-    pub request_counter: IntCounter,
-    pub request_duration: Histogram,
-    pub inflight_requests: IntGauge,
-    pub request_bytes: IntCounter,
-    pub response_bytes: IntCounter,
-    pub error_counter: IntCounterVec,
-}
-
-impl WorkHandlerMetrics {
-    pub fn new(
-        request_counter: IntCounter,
-        request_duration: Histogram,
-        inflight_requests: IntGauge,
-        request_bytes: IntCounter,
-        response_bytes: IntCounter,
-        error_counter: IntCounterVec,
-    ) -> Self {
-        Self {
-            request_counter,
-            request_duration,
-            inflight_requests,
-            request_bytes,
-            response_bytes,
-            error_counter,
-        }
-    }
-
-    /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
-    pub fn from_endpoint(
-        endpoint: &crate::component::Endpoint,
-        metrics_labels: Option<&[(&str, &str)]>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let metrics_labels = metrics_labels.unwrap_or(&[]);
-        let metrics = endpoint.metrics();
-        let request_counter = metrics.create_intcounter(
-            work_handler::REQUESTS_TOTAL,
-            "Total number of requests processed by work handler",
-            metrics_labels,
-        )?;
-
-        let request_duration = metrics.create_histogram(
-            work_handler::REQUEST_DURATION_SECONDS,
-            "Time spent processing requests by work handler",
-            metrics_labels,
-            None,
-        )?;
-
-        let inflight_requests = metrics.create_intgauge(
-            work_handler::INFLIGHT_REQUESTS,
-            "Number of requests currently being processed by work handler",
-            metrics_labels,
-        )?;
-
-        let request_bytes = metrics.create_intcounter(
-            work_handler::REQUEST_BYTES_TOTAL,
-            "Total number of bytes received in requests by work handler",
-            metrics_labels,
-        )?;
-
-        let response_bytes = metrics.create_intcounter(
-            work_handler::RESPONSE_BYTES_TOTAL,
-            "Total number of bytes sent in responses by work handler",
-            metrics_labels,
-        )?;
-
-        let error_counter = metrics.create_intcountervec(
-            work_handler::ERRORS_TOTAL,
-            "Total number of errors in work handler processing",
-            &[work_handler::ERROR_TYPE_LABEL],
-            metrics_labels,
-        )?;
-
-        Ok(Self::new(
-            request_counter,
-            request_duration,
-            inflight_requests,
-            request_bytes,
-            response_bytes,
-            error_counter,
-        ))
-    }
-}
-
-// RAII guard to ensure inflight gauge is decremented and request duration is observed on all code paths.
-struct RequestMetricsGuard {
-    inflight_requests: prometheus::IntGauge,
-    request_duration: prometheus::Histogram,
-    start_time: Instant,
-}
-impl Drop for RequestMetricsGuard {
-    fn drop(&mut self) {
-        self.inflight_requests.dec();
-        self.request_duration
-            .observe(self.start_time.elapsed().as_secs_f64());
-    }
-}
 
 #[async_trait]
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
@@ -143,11 +44,7 @@ where
             m.request_counter.inc();
             m.inflight_requests.inc();
             m.request_bytes.inc_by(payload.len() as u64);
-            RequestMetricsGuard {
-                inflight_requests: m.inflight_requests.clone(),
-                request_duration: m.request_duration.clone(),
-                start_time,
-            }
+            RequestMetricsGuard::new(m, start_time)
         });
 
         // decode the control message and the request
