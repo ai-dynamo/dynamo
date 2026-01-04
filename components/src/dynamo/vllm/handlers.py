@@ -254,6 +254,8 @@ class BaseWorkerHandler(ABC):
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
+        # Per-LoRA locks to prevent concurrent load operations for the same LoRA
+        self._lora_load_locks: dict[str, asyncio.Lock] = {}
 
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
@@ -320,6 +322,9 @@ class BaseWorkerHandler(ABC):
                 "uri": str  # e.g., "s3://bucket/path" or "file:///path"
             }
         }
+
+        This method is idempotent - concurrent calls for the same LoRA will be
+        serialized and only one load operation will happen.
         """
         try:
             if request is None:
@@ -367,110 +372,130 @@ class BaseWorkerHandler(ABC):
                 }
                 return
 
-            logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
-            download_result = await lora_manager.download_lora(lora_uri)
-
-            if download_result["status"] != "success":
-                yield {
-                    "status": "error",
-                    "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
-                }
-                return
-
-            lora_path = download_result["local_path"]
-            logger.debug(f"LoRA downloaded to: {lora_path}")
-
-            # Generate deterministic ID from lora_name before using it
-            lora_id = lora_name_to_id(lora_name)
-
-            # Add the LoRA to the engine
-            await self.engine_client.add_lora(
-                LoRARequest(
-                    lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
-                )
-            )
-
-            # Track the LoRA
-            self.lora_id_for_name[lora_name] = lora_id
-            self.lora_name_to_path[lora_name] = lora_path
-            logger.info(
-                f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
-            )
-
-            # Publish LoRA as a ModelDeploymentCard with format:
-            # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
-            # This allows the frontend to discover it and route correctly to the worker instance
-
-            if self.generate_endpoint is not None and self.config is not None:
-                logger.debug(
-                    f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
-                )
-                try:
-                    logger.debug(f"Publishing LoRA '{lora_name}' ModelDeploymentCard")
-
-                    # Mark this as a LoRA in user_data
-                    user_data = {
-                        "lora_adapter": True,
+            # Acquire per-LoRA lock to prevent concurrent load operations for the same LoRA
+            async with self._lora_load_locks.setdefault(lora_name, asyncio.Lock()):
+                # Check if already loaded (idempotency check after acquiring lock)
+                # Another concurrent request may have loaded this LoRA while we waited
+                if lora_name in self.lora_id_for_name:
+                    lora_id = self.lora_id_for_name[lora_name]
+                    logger.info(
+                        f"LoRA adapter already loaded (concurrent request completed): "
+                        f"{lora_name} with ID {lora_id}"
+                    )
+                    yield {
+                        "status": "success",
+                        "message": f"LoRA adapter '{lora_name}' already loaded",
+                        "lora_name": lora_name,
                         "lora_id": lora_id,
                     }
+                    return
 
-                    # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
-                    await register_llm(
-                        model_input=ModelInput.Tokens,
-                        model_type=ModelType.Chat | ModelType.Completions,
-                        endpoint=self.generate_endpoint,
-                        model_path=self.config.model,
-                        kv_cache_block_size=self.config.engine_args.block_size,
-                        user_data=user_data,
-                        lora_name=lora_name,
-                        base_model_path=self.config.model,
-                    )
-                    logger.info(
-                        f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
-                    )
-                except Exception as e:
-                    import traceback
+                logger.info(f"Downloading LoRA adapter: {lora_name} from {lora_uri}")
+                download_result = await lora_manager.download_lora(lora_uri)
 
-                    logger.error(
-                        f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
-                    )
-                    logger.debug(f"Traceback: {traceback.format_exc()}")
-
-                    # Rollback: remove the LoRA from the engine to maintain consistency
-                    try:
-                        logger.debug(
-                            f"Rolling back: removing LoRA '{lora_name}' from engine"
-                        )
-                        await self.engine_client.remove_lora(lora_id)
-                        # Remove from tracking dictionaries
-                        if lora_name in self.lora_id_for_name:
-                            del self.lora_id_for_name[lora_name]
-                        if lora_name in self.lora_name_to_path:
-                            del self.lora_name_to_path[lora_name]
-                        logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
-                    except Exception as rollback_error:
-                        logger.error(
-                            f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                        )
-
-                    # Return error status since registration failed
+                if download_result["status"] != "success":
                     yield {
                         "status": "error",
-                        "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
-                        "lora_name": lora_name,
+                        "message": f"Failed to download LoRA: {download_result.get('message', 'Unknown error')}",
                     }
                     return
-            else:
-                logger.debug(
-                    f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
+
+                lora_path = download_result["local_path"]
+                logger.debug(f"LoRA downloaded to: {lora_path}")
+
+                # Generate deterministic ID from lora_name before using it
+                lora_id = lora_name_to_id(lora_name)
+
+                # Add the LoRA to the engine
+                await self.engine_client.add_lora(
+                    LoRARequest(
+                        lora_name=lora_name, lora_int_id=lora_id, lora_path=lora_path
+                    )
                 )
 
-            yield {
-                "status": "success",
-                "message": f"LoRA adapter '{lora_name}' loaded successfully",
-                "lora_name": lora_name,
-                "lora_id": lora_id,
-            }
+                # Track the LoRA
+                self.lora_id_for_name[lora_name] = lora_id
+                self.lora_name_to_path[lora_name] = lora_path
+                logger.info(
+                    f"Successfully loaded LoRA adapter: {lora_name} with ID {lora_id}"
+                )
+
+                # Publish LoRA as a ModelDeploymentCard with format:
+                # v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
+                # This allows the frontend to discover it and route correctly to the worker instance
+
+                if self.generate_endpoint is not None and self.config is not None:
+                    logger.debug(
+                        f"Publishing LoRA '{lora_name}' ModelDeploymentCard to {self.generate_endpoint}"
+                    )
+                    try:
+                        logger.debug(
+                            f"Publishing LoRA '{lora_name}' ModelDeploymentCard"
+                        )
+
+                        # Mark this as a LoRA in user_data
+                        user_data = {
+                            "lora_adapter": True,
+                            "lora_id": lora_id,
+                        }
+
+                        # Publish with format: v1/mdc/dynamo/backend/generate/{instance_id}/{lora_slug}
+                        await register_llm(
+                            model_input=ModelInput.Tokens,
+                            model_type=ModelType.Chat | ModelType.Completions,
+                            endpoint=self.generate_endpoint,
+                            model_path=self.config.model,
+                            kv_cache_block_size=self.config.engine_args.block_size,
+                            user_data=user_data,
+                            lora_name=lora_name,
+                            base_model_path=self.config.model,
+                        )
+                        logger.info(
+                            f"Successfully published LoRA '{lora_name}' ModelDeploymentCard"
+                        )
+                    except Exception as e:
+                        import traceback
+
+                        logger.error(
+                            f"Failed to publish LoRA {lora_name} ModelDeploymentCard: {e}"
+                        )
+                        logger.debug(f"Traceback: {traceback.format_exc()}")
+
+                        # Rollback: remove the LoRA from the engine to maintain consistency
+                        try:
+                            logger.debug(
+                                f"Rolling back: removing LoRA '{lora_name}' from engine"
+                            )
+                            await self.engine_client.remove_lora(lora_id)
+                            # Remove from tracking dictionaries
+                            if lora_name in self.lora_id_for_name:
+                                del self.lora_id_for_name[lora_name]
+                            if lora_name in self.lora_name_to_path:
+                                del self.lora_name_to_path[lora_name]
+                            logger.debug(f"Successfully rolled back LoRA '{lora_name}'")
+                        except Exception as rollback_error:
+                            logger.error(
+                                f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                            )
+
+                        # Return error status since registration failed
+                        yield {
+                            "status": "error",
+                            "message": f"Failed to register LoRA '{lora_name}' in discovery registry: {str(e)}",
+                            "lora_name": lora_name,
+                        }
+                        return
+                else:
+                    logger.debug(
+                        f"Cannot publish LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}, config={self.config}"
+                    )
+
+                yield {
+                    "status": "success",
+                    "message": f"LoRA adapter '{lora_name}' loaded successfully",
+                    "lora_name": lora_name,
+                    "lora_id": lora_id,
+                }
         except Exception as e:
             logger.error(f"Failed to load LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
@@ -516,6 +541,8 @@ class BaseWorkerHandler(ABC):
             del self.lora_id_for_name[lora_name]
             if lora_name in self.lora_name_to_path:
                 del self.lora_name_to_path[lora_name]
+            # Clean up the per-LoRA lock to prevent memory accumulation
+            self._lora_load_locks.pop(lora_name, None)
 
             # Unregister the LoRA model from the model registry (outside lock)
             if self.generate_endpoint is not None:
