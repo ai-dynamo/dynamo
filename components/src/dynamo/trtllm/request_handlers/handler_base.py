@@ -72,6 +72,9 @@ class RequestHandlerConfig:
         DistributedRuntime
     ] = None  # DistributedRuntime reference for graceful shutdown
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
+    max_seq_len: Optional[
+        int
+    ] = None  # Model's maximum sequence length for dynamic max_tokens default
     kv_block_size: int = 32
 
 
@@ -93,6 +96,7 @@ class HandlerBase:
         self.connector = config.connector
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
+        self.max_seq_len = config.max_seq_len
         self.kv_block_size: int = config.kv_block_size
 
     def check_error(self, result: dict):
@@ -333,6 +337,16 @@ class HandlerBase:
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens:
             sampling_params.max_tokens = max_tokens
+        elif self.max_seq_len is not None:
+            # Dynamic default: use remaining context window when max_tokens not specified
+            # This mirrors the fix applied to the vLLM backend in PR #4156
+            input_length = len(processed_input) if processed_input is not None else 0
+            dynamic_default = max(1, self.max_seq_len - input_length)
+            sampling_params.max_tokens = dynamic_default
+            logging.debug(
+                f"Using dynamic default max_tokens={dynamic_default} "
+                f"(max_seq_len={self.max_seq_len}, input_length={input_length})"
+            )
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:
