@@ -212,348 +212,386 @@ jobs:
               -t  ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }} .
 
 
-  build-vllm:
-    needs: detect-buildkit-workers
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64 }
-          - { arch: arm64 }
-        framework:
-          - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
-    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
-        with:
-          # no_cache: 'true'
-          builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          framework: ${{ matrix.framework.name }}
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-
-  build-sglang:
-    needs: detect-buildkit-workers
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64 }
-          - { arch: arm64 }
-        framework:
-          - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
-        with:
-          # no_cache: 'true'
-          builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          framework: ${{ matrix.framework.name }}
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-  build-trtllm:
-    needs: detect-buildkit-workers
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64 }
-          - { arch: arm64 }
-        framework:
-          - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-    name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
-        with:
-          # no_cache: 'true'
-          builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          framework: ${{ matrix.framework.name }}
-          target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
   # ============================================================================
-  # TEST JOBS
-  # Run pytest suites against built images (amd64 only, requires GPU runners)
+  # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
-  pytests-vllm:
-    needs: [build-vllm, operator]
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-        framework:
-          - { name: vllm }
-    name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+  vllm-pipeline:
+    needs: [detect-buildkit-workers]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    with:
+      framework: vllm
+      arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+      arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+      arm_cuda_version: '12.9'
+      arm_torch_backend: 'cu129'
+      build_arm64: true
+      buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.vllm_amd64 }}
+      buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.vllm_arm64 }}
+    secrets: inherit
 
-  pytests-sglang:
-    needs: [build-sglang, operator]
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-        framework:
-          - { name: sglang }
-    name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+  sglang-pipeline:
+    needs: [detect-buildkit-workers]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    with:
+      framework: sglang
+      build_arm64: true
+      buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_amd64 }}
+      buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_arm64 }}
+    secrets: inherit
 
-  pytests-trtllm:
-    needs: [build-trtllm, operator]
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-        framework:
-          - { name: trtllm }
-    name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
-          pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
-          framework: "${{ matrix.framework.name }}"
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
+  trtllm-pipeline:
+    needs: [detect-buildkit-workers]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    with:
+      framework: trtllm
+      build_arm64: true
+      buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_amd64 }}
+      buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_arm64 }}
+    secrets: inherit
 
 
-  # ============================================================================
-  # IMAGE DISTRIBUTION JOBS
-  # Copy built images from AWS ECR to Azure ACR after tests pass
-  # ============================================================================
-  copy-vllm-to-acr:
-    needs: [pytests-vllm]
-    strategy:
-      fail-fast: true
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-    name: copy vllm-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          TARGET_TAG="${{ github.sha }}-vllm-${{ matrix.platform.arch }}"
-          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
-      - name: Copy image to target registry
-        uses: ./.github/actions/skopeo-copy
-        with:
-          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
-          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-    outputs:
-      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
-      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+  # build-vllm:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         - { arch: arm64 }
+  #       framework:
+  #         - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
+  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build with Remote Buildkit
+  #       id: build-image
+  #       uses: ./.github/actions/build-with-buildkit
+  #       with:
+  #         # no_cache: 'true'
+  #         builder_name: ${{ env.BUILDER_NAME }}
+  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         framework: ${{ matrix.framework.name }}
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-  copy-sglang-to-acr:
-    needs: [pytests-sglang]
-    strategy:
-      fail-fast: true
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-    name: copy sglang-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          TARGET_TAG="${{ github.sha }}-sglang-${{ matrix.platform.arch }}"
-          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
-      - name: Copy image to target registry
-        uses: ./.github/actions/skopeo-copy
-        with:
-          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
-          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-    outputs:
-      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
-      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
 
-  copy-trtllm-to-acr:
-    needs: [pytests-trtllm]
-    strategy:
-      fail-fast: true
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-    name: copy trtllm-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          TARGET_TAG="${{ github.sha }}-trtllm-${{ matrix.platform.arch }}"
-          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
-      - name: Copy image to target registry
-        uses: ./.github/actions/skopeo-copy
-        with:
-          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
-          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-    outputs:
-      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
-      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+  # build-sglang:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         - { arch: arm64 }
+  #       framework:
+  #         - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build with Remote Buildkit
+  #       id: build-image
+  #       uses: ./.github/actions/build-with-buildkit
+  #       with:
+  #         # no_cache: 'true'
+  #         builder_name: ${{ env.BUILDER_NAME }}
+  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         framework: ${{ matrix.framework.name }}
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # build-trtllm:
+  #   needs: detect-buildkit-workers
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         - { arch: arm64 }
+  #       framework:
+  #         - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+  #   name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Build with Remote Buildkit
+  #       id: build-image
+  #       uses: ./.github/actions/build-with-buildkit
+  #       with:
+  #         # no_cache: 'true'
+  #         builder_name: ${{ env.BUILDER_NAME }}
+  #         buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         framework: ${{ matrix.framework.name }}
+  #         target: runtime
+  #         platform: 'linux/${{ matrix.platform.arch }}'
+  #         base_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_base_image_tag || '' }}
+  #         runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_runtime_image_tag || '' }}
+  #         cuda_version: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_cuda_version || '' }}
+  #         torch_backend: ${{ matrix.platform.arch == 'arm64' && matrix.framework.arm_torch_backend || '' }}
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #         ci_token: ${{ secrets.CI_TOKEN }}
+  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # # ============================================================================
+  # # TEST JOBS
+  # # Run pytest suites against built images (amd64 only, requires GPU runners)
+  # # ============================================================================
+  # pytests-vllm:
+  #   needs: [build-vllm, operator]
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: gpu-l40-amd64 }
+  #       framework:
+  #         - { name: vllm }
+  #   name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Run tests
+  #       uses: ./.github/actions/pytest
+  #       with:
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+  #         framework: "${{ matrix.framework.name }}"
+  #         test_type: "pre_merge"
+  #         platform_arch: ${{ matrix.platform.arch }}
+
+  # pytests-sglang:
+  #   needs: [build-sglang, operator]
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: gpu-l40-amd64 }
+  #       framework:
+  #         - { name: sglang }
+  #   name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Run tests
+  #       uses: ./.github/actions/pytest
+  #       with:
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+  #         framework: "${{ matrix.framework.name }}"
+  #         test_type: "pre_merge"
+  #         platform_arch: ${{ matrix.platform.arch }}
+
+  # pytests-trtllm:
+  #   needs: [build-trtllm, operator]
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: gpu-l40-amd64 }
+  #       framework:
+  #         - { name: trtllm }
+  #   name: run pytests for ${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Run tests
+  #       uses: ./.github/actions/pytest
+  #       with:
+  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}
+  #         pytest_marks: "pre_merge and ${{ matrix.framework.name }} and (gpu_0 or gpu_1)"
+  #         framework: "${{ matrix.framework.name }}"
+  #         test_type: "pre_merge"
+  #         platform_arch: ${{ matrix.platform.arch }}
+
+
+  # # ============================================================================
+  # # IMAGE DISTRIBUTION JOBS
+  # # Copy built images from AWS ECR to Azure ACR after tests pass
+  # # ============================================================================
+  # copy-vllm-to-acr:
+  #   needs: [pytests-vllm]
+  #   strategy:
+  #     fail-fast: true
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #   name: copy vllm-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Calculate target tag
+  #       id: calculate-target-tag
+  #       shell: bash
+  #       run: |
+  #         TARGET_TAG="${{ github.sha }}-vllm-${{ matrix.platform.arch }}"
+  #         echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #         echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #     - name: Copy image to target registry
+  #       uses: ./.github/actions/skopeo-copy
+  #       with:
+  #         source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #         source_image: ai-dynamo/dynamo
+  #         source_tag: ${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+  #         target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_image: ai-dynamo/dynamo
+  #         target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+  #         source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #   outputs:
+  #     target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+  #     target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+
+  # copy-sglang-to-acr:
+  #   needs: [pytests-sglang]
+  #   strategy:
+  #     fail-fast: true
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #   name: copy sglang-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Calculate target tag
+  #       id: calculate-target-tag
+  #       shell: bash
+  #       run: |
+  #         TARGET_TAG="${{ github.sha }}-sglang-${{ matrix.platform.arch }}"
+  #         echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #         echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #     - name: Copy image to target registry
+  #       uses: ./.github/actions/skopeo-copy
+  #       with:
+  #         source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #         source_image: ai-dynamo/dynamo
+  #         source_tag: ${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+  #         target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_image: ai-dynamo/dynamo
+  #         target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+  #         source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #   outputs:
+  #     target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+  #     target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+
+  # copy-trtllm-to-acr:
+  #   needs: [pytests-trtllm]
+  #   strategy:
+  #     fail-fast: true
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #   name: copy trtllm-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Calculate target tag
+  #       id: calculate-target-tag
+  #       shell: bash
+  #       run: |
+  #         TARGET_TAG="${{ github.sha }}-trtllm-${{ matrix.platform.arch }}"
+  #         echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #         echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #     - name: Copy image to target registry
+  #       uses: ./.github/actions/skopeo-copy
+  #       with:
+  #         source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #         source_image: ai-dynamo/dynamo
+  #         source_tag: ${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+  #         target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_image: ai-dynamo/dynamo
+  #         target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+  #         source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #   outputs:
+  #     target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+  #     target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
 
   copy-operator-to-acr:
     needs: [operator]
@@ -676,7 +714,7 @@ jobs:
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-vllm-to-acr]
+    needs: [deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:
@@ -703,7 +741,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-vllm-to-acr.outputs.target_tag_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -716,7 +754,7 @@ jobs:
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
     # if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
-    needs: [deploy-operator, copy-vllm-to-acr]
+    needs: [deploy-operator, vllm-pipeline]
     permissions:
       contents: read
     strategy:
@@ -740,7 +778,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-vllm-to-acr.outputs.target_tag_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -753,7 +791,7 @@ jobs:
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-sglang-to-acr]
+    needs: [deploy-operator, sglang-pipeline]
     permissions:
       contents: read
     strategy:
@@ -778,7 +816,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: sglang
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-sglang-to-acr.outputs.target_tag_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.sglang-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
@@ -791,7 +829,7 @@ jobs:
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
     # if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
-    needs: [deploy-operator, copy-trtllm-to-acr]
+    needs: [deploy-operator, trtllm-pipeline]
     permissions:
       contents: read
     strategy:
@@ -818,7 +856,7 @@ jobs:
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
           framework: trtllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.copy-trtllm-to-acr.outputs.target_tag_amd64 }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.trtllm-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@v4
