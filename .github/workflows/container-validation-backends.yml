@@ -127,7 +127,7 @@ jobs:
         id: build-image
         uses: ./.github/actions/build-with-buildkit
         with:
-          no_cache: 'true'
+          # no_cache: 'true'
           builder_name: ${{ env.BUILDER_NAME }}
           buildkit_worker_addresses: ${{ needs.detect-buildkit-workers.outputs[format('{0}_{1}', matrix.framework.name, matrix.platform.arch)] }}
           image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework.name }}-${{ matrix.platform.arch }}

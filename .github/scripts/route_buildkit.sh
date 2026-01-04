@@ -1,4 +1,57 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# =============================================================================
+# route_buildkit.sh - Discover and route BuildKit pods for CI builds
+# =============================================================================
+#
+# DESCRIPTION:
+#   Discovers active BuildKit pods via Kubernetes DNS and assigns them to
+#   different framework flavors (vllm, trtllm, sglang, general) using a
+#   modulo-based routing strategy. Outputs are written to GITHUB_OUTPUT for
+#   use in GitHub Actions workflows.
+#
+# USAGE:
+#   ./route_buildkit.sh --amd    # Route AMD64 BuildKit workers
+#   ./route_buildkit.sh --arm    # Route ARM64 BuildKit workers
+#
+# ARGUMENTS:
+#   --amd   Target AMD64 architecture BuildKit pods
+#   --arm   Target ARM64 architecture BuildKit pods
+#
+# OUTPUTS (written to GITHUB_OUTPUT):
+#   vllm_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
+#   trtllm_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
+#   sglang_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
+#   general_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
+#
+# ROUTING STRATEGY:
+#   Pods are assigned to flavors based on pod index modulo 3:
+#     - vllm:    pod_index % 3 == 0  (pods 0, 3, 6, ...)
+#     - trtllm:  pod_index % 3 == 1  (pods 1, 4, 7, ...)
+#     - sglang:  pod_index % 3 == 2  (pods 2, 5, 8, ...)
+#     - general: pod_index % 3 == 2  (same as sglang)
+#
+#   If no pods match a flavor's modulo, all available pods are used as fallback.
+#
+# REQUIREMENTS:
+#   - nslookup (from dnsutils or bind-tools)
+#   - Access to Kubernetes DNS (run inside cluster)
+#   - GITHUB_OUTPUT environment variable set (GitHub Actions)
+#
+# EXAMPLES:
+#   # In GitHub Actions workflow:
+#   - name: Route Buildkit Workers
+#     run: |
+#       .github/scripts/route_buildkit.sh --amd
+#       .github/scripts/route_buildkit.sh --arm
+#
+#   # Then use outputs:
+#   buildkit_worker_addresses: ${{ steps.route.outputs.vllm_amd64 }}
+#
+# =============================================================================
+
 set -e
 
 # --- ARGUMENT PARSING ---
