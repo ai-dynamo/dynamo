@@ -32,6 +32,11 @@ on:
         required: false
         type: boolean
         default: false
+      no_cache_builds:
+        description: 'Disable Docker build cache for all container builds'
+        required: false
+        type: boolean
+        default: false
 
 # concurrency:
 #     # The group name is a ternary operation. If the ref_name is 'main',
@@ -223,15 +228,20 @@ jobs:
           PLATFORM: ${{ matrix.platform.arch }}
         run: |
           EXTRA_TAGS=""
+          NO_CACHE_FLAG=""
           if [[ "${{ github.ref_name }}" == "main" ]]; then
             EXTRA_TAGS="-t ${IMAGE_BASE}:main-dynamo-operator-${PLATFORM} -t ${IMAGE_BASE}:main-${{ github.sha }}-dynamo-operator-${PLATFORM}"
+            NO_CACHE_FLAG="--no-cache"
+          fi
+          if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
+            NO_CACHE_FLAG="--no-cache"
           fi
           docker buildx build --push \
               --platform linux/${PLATFORM} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               -f Dockerfile \
               -t ${IMAGE_BASE}:${{ github.sha }}-dynamo-operator-${PLATFORM} \
-              ${EXTRA_TAGS} .
+              ${NO_CACHE_FLAG} ${EXTRA_TAGS} .
 
 
   copy-operator-to-acr:
@@ -292,6 +302,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
     secrets: inherit
 
   sglang-pipeline:
@@ -306,6 +317,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
     secrets: inherit
 
   trtllm-pipeline:
@@ -320,6 +332,7 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
     secrets: inherit
 
 

@@ -69,6 +69,11 @@ on:
         required: false
         type: boolean
         default: true
+      no_cache:
+        description: 'Disable Docker build cache'
+        required: false
+        type: boolean
+        default: false
     secrets:
       NGC_CI_ACCESS_TOKEN:
         required: true
@@ -160,6 +165,7 @@ jobs:
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          no_cache: ${{ inputs.no_cache }}
 
   # ============================================================================
   # TEST
