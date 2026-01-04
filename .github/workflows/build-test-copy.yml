@@ -1,0 +1,204 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Build, Test, and Copy Framework Image
+
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, trtllm)'
+        required: true
+        type: string
+      arm_base_image_tag:
+        description: 'ARM64 base image tag override'
+        required: false
+        type: string
+        default: ''
+      arm_runtime_image_tag:
+        description: 'ARM64 runtime image tag override'
+        required: false
+        type: string
+        default: ''
+      arm_cuda_version:
+        description: 'ARM64 CUDA version override'
+        required: false
+        type: string
+        default: ''
+      arm_torch_backend:
+        description: 'ARM64 torch backend override'
+        required: false
+        type: string
+        default: ''
+      build_arm64:
+        description: 'Whether to build ARM64 images'
+        required: false
+        type: boolean
+        default: true
+      run_tests:
+        description: 'Whether to run pytest'
+        required: false
+        type: boolean
+        default: true
+      copy_to_acr:
+        description: 'Whether to copy images to ACR'
+        required: false
+        type: boolean
+        default: true
+      builder_name:
+        description: 'Buildkit builder name'
+        required: false
+        type: string
+        default: 'remote-buildkit'
+      buildkit_amd64_addresses:
+        description: 'Comma-separated buildkit worker addresses for amd64'
+        required: true
+        type: string
+      buildkit_arm64_addresses:
+        description: 'Comma-separated buildkit worker addresses for arm64'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      NGC_CI_ACCESS_TOKEN:
+        required: true
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      CI_TOKEN:
+        required: false
+      SCCACHE_S3_BUCKET:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+    outputs:
+      image_tag_amd64:
+        description: 'AMD64 image tag in ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_amd64 }}
+      image_tag_arm64:
+        description: 'ARM64 image tag in ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_arm64 }}
+
+jobs:
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
+    name: build ${{ inputs.framework }}-${{ matrix.platform }}
+    runs-on: builder-cpu-amd-runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Build with Remote Buildkit
+        id: build-image
+        uses: ./.github/actions/build-with-buildkit
+        with:
+          builder_name: ${{ inputs.builder_name }}
+          buildkit_worker_addresses: ${{ matrix.platform == 'amd64' && inputs.buildkit_amd64_addresses || inputs.buildkit_arm64_addresses }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
+          framework: ${{ inputs.framework }}
+          target: runtime
+          platform: linux/${{ matrix.platform }}
+          base_image_tag: ${{ matrix.platform == 'arm64' && inputs.arm_base_image_tag || '' }}
+          runtime_image_tag: ${{ matrix.platform == 'arm64' && inputs.arm_runtime_image_tag || '' }}
+          cuda_version: ${{ matrix.platform == 'arm64' && inputs.arm_cuda_version || '' }}
+          torch_backend: ${{ matrix.platform == 'arm64' && inputs.arm_torch_backend || '' }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  # ============================================================================
+  # TEST
+  # ============================================================================
+  test:
+    if: inputs.run_tests
+    needs: [build]
+    name: test ${{ inputs.framework }}-amd64
+    runs-on: gpu-l40-amd64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Run tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-amd64
+          pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge"
+          platform_arch: amd64
+
+  # ============================================================================
+  # COPY TO ACR
+  # ============================================================================
+  copy-to-acr:
+    if: inputs.copy_to_acr
+    needs: [build, test]
+    # Handle case where tests are skipped
+    # This uses always() to run even if test was skipped, but checks build succeeded
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
+    name: copy ${{ inputs.framework }}-${{ matrix.platform }}
+    runs-on: builder-cpu-amd-runner
+    outputs:
+      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG="${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}"
+          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          echo "target_tag_${{ matrix.platform }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
