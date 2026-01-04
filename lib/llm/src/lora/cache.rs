@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
-use blake3;
+use blake3::hash as blake3_hash;
 use std::path::PathBuf;
 
 use dynamo_runtime::config::environment_names::llm;
@@ -68,7 +68,7 @@ impl LoRACache {
             })
             .collect::<String>();
 
-        let hash = blake3::hash(uri.as_bytes()).to_string();
+        let hash = blake3_hash(uri.as_bytes()).to_string();
         let hash32 = &hash[..32];
         format!("{scheme}_{hash32}")
     }
