@@ -72,6 +72,10 @@ inputs:
   no_cache:
     description: 'Disable Docker build cache'
     required: false
+  extra_tags:
+    description: 'Additional image tags (newline-separated list)'
+    required: false
+    default: ''
 
 outputs:
   image_tag:
@@ -126,4 +130,5 @@ runs:
         aws_access_key_id: ${{ inputs.aws_access_key_id }}
         aws_secret_access_key: ${{ inputs.aws_secret_access_key }}
         no_cache: ${{ inputs.no_cache }}
+        extra_tags: ${{ inputs.extra_tags }}
 

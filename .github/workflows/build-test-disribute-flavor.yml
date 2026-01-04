@@ -59,6 +59,16 @@ on:
         required: false
         type: string
         default: ''
+      extra_tags:
+        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
+        required: false
+        type: string
+        default: ''
+      build_image:
+        description: 'Whether to build image'
+        required: false
+        type: boolean
+        default: true
     secrets:
       NGC_CI_ACCESS_TOKEN:
         required: true
@@ -93,6 +103,7 @@ jobs:
   # BUILD
   # ============================================================================
   build:
+    if: inputs.build_image
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +113,27 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+
+      - name: Calculate extra tags with platform suffix
+        id: extra-tags
+        shell: bash
+        env:
+          EXTRA_TAGS: ${{ inputs.extra_tags }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [ -n "$EXTRA_TAGS" ]; then
+            RESULT=""
+            while IFS= read -r tag; do
+              if [ -n "$tag" ]; then
+                RESULT+="${tag}-${PLATFORM}"$'\n'
+              fi
+            done <<< "$EXTRA_TAGS"
+            echo "tags<<EOF" >> $GITHUB_OUTPUT
+            echo "$RESULT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "tags=" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build with Remote Buildkit
         id: build-image
@@ -117,6 +149,7 @@ jobs:
           runtime_image_tag: ${{ matrix.platform == 'arm64' && inputs.arm_runtime_image_tag || '' }}
           cuda_version: ${{ matrix.platform == 'arm64' && inputs.arm_cuda_version || '' }}
           torch_backend: ${{ matrix.platform == 'arm64' && inputs.arm_torch_backend || '' }}
+          extra_tags: ${{ steps.extra-tags.outputs.tags }}
           ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -153,7 +186,7 @@ jobs:
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-amd64
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ inputs.build_image && format('{0}-{1}-amd64', github.sha, inputs.framework) || format('main-{0}-amd64', inputs.framework) }}
           pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"

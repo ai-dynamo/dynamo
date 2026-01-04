@@ -265,7 +265,8 @@ get_options() {
             ;;
         --tag)
             if [ "$2" ]; then
-                TAG="--tag $2"
+                # Support multiple --tag arguments by accumulating them
+                TAG+=" --tag $2"
                 shift
             else
                 missing_requirement "$1"
@@ -958,8 +959,8 @@ fi
 # Handle --make-efa flag: add AWS EFA layer on top of the built image
 # This runs BEFORE local-dev so the flow is: dev -> dev-aws -> local-dev-aws
 if [[ "${MAKE_EFA:-}" == "true" ]]; then
-    # Get the base image that was just built (dev or runtime)
-    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | sed 's/--tag //')
+    # Get the base image that was just built (dev or runtime) - extract first tag only
+    BASE_IMAGE_FOR_EFA=$(echo "$TAG" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
 
     # Determine the EFA stage based on the target
     # runtime target -> runtime-aws stage
@@ -970,10 +971,10 @@ if [[ "${MAKE_EFA:-}" == "true" ]]; then
         EFA_STAGE="dev-aws"
     fi
 
-    # Build AWS tags by appending -aws to existing tags
+    # Build AWS tags by appending -aws to existing tags (use first tag only for AWS variant)
     AWS_TAGS=""
     if [[ -n "$TAG" ]]; then
-        AWS_TAG=$(echo "$TAG" | sed 's/--tag //')
+        AWS_TAG=$(echo "$TAG" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
         AWS_TAGS+=" --tag ${AWS_TAG}-aws"
     fi
     if [[ -n "$LATEST_TAG" ]]; then
@@ -992,7 +993,7 @@ if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
 
         LOCAL_DEV_AWS_TAGS=""
         if [[ -n "$TAG" ]]; then
-            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
+            TAG_NAME=$(echo "$TAG" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
             LOCAL_DEV_AWS_TAGS+=" --tag ${TAG_NAME}-local-dev-aws"
         fi
         if [[ -n "$LATEST_TAG" ]]; then
@@ -1004,14 +1005,14 @@ if [[ "${LOCAL_DEV_BUILD:-}" == "true" ]]; then
     else
         # Without EFA: build regular local-dev from dev
         if [[ -n "$TAG" ]]; then
-            DEV_IMAGE=$(echo "$TAG" | sed 's/--tag //')
+            DEV_IMAGE=$(echo "$TAG" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
         else
             DEV_IMAGE="dynamo:latest-${FRAMEWORK,,}"
         fi
 
         LOCAL_DEV_TAGS=""
         if [[ -n "$TAG" ]]; then
-            TAG_NAME=$(echo "$TAG" | sed 's/--tag //')
+            TAG_NAME=$(echo "$TAG" | grep -o -- '--tag [^ ]*' | head -1 | cut -d' ' -f2)
             LOCAL_DEV_TAGS+=" --tag ${TAG_NAME}-local-dev"
         fi
         if [[ -n "$LATEST_TAG" ]]; then

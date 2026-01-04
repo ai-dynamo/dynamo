@@ -40,33 +40,45 @@ planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
 
-vllm_code:
+vllm_code: &vllm_code
   - *core_code
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
 
-vllm_container:
+vllm_container: &vllm_container
   - *core_container
   - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
 
-sglang_code:
+vllm_all:
+  - *vllm_code
+  - *vllm_container
+
+sglang_code: &sglang_code
   - *core_code
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
 
-sglang_container:
+sglang_container: &sglang_container
   - *core_container
   - 'container/Dockerfile.sglang'
 
-trtllm_code:
+sglang_all:
+  - *sglang_code
+  - *sglang_container
+
+trtllm_code: &trtllm_code
   - *core_code
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   
-trtllm_container:
+trtllm_container: &trtllm_container
   - *core_container
   - 'container/Dockerfile.trtllm'
   - 'container/build_trtllm_wheel.sh'
   - 'container/deps/trtllm/**'
+
+trtllm_all:
+  - *trtllm_code
+  - *trtllm_container

@@ -55,6 +55,10 @@ inputs:
   no_cache:
     description: 'Disable Docker build cache'
     required: false
+  extra_tags:
+    description: 'Additional image tags (newline-separated list of full image:tag references)'
+    required: false
+    default: ''
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -129,6 +133,16 @@ runs:
         fi
         if [ "${{ inputs.no_cache }}" == "true" ]; then
           EXTRA_ARGS+=" --no-cache"
+        fi
+
+        # Add extra tags (each as a separate --tag argument)
+        EXTRA_TAGS="${{ inputs.extra_tags }}"
+        if [ -n "$EXTRA_TAGS" ]; then
+          while IFS= read -r EXTRA_TAG; do
+            if [ -n "$EXTRA_TAG" ]; then
+              EXTRA_ARGS+=" --tag ${EXTRA_TAG}"
+            fi
+          done <<< "$EXTRA_TAGS"
         fi
 
         # Execute build and capture output (show on console AND save to file)
