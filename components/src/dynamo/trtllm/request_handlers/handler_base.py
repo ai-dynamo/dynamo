@@ -335,12 +335,13 @@ class HandlerBase:
                     )
 
         max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
+        if max_tokens is not None:
             sampling_params.max_tokens = max_tokens
         elif self.max_seq_len is not None:
             # Dynamic default: use remaining context window when max_tokens not specified
             # This mirrors the fix applied to the vLLM backend in PR #4156
-            input_length = len(processed_input) if processed_input is not None else 0
+            token_ids = request.get("token_ids", [])
+            input_length = len(token_ids)
             dynamic_default = max(1, self.max_seq_len - input_length)
             sampling_params.max_tokens = dynamic_default
             logging.debug(
