@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod metrics;
+mod request;
 
 use metrics::RequestMetricsGuard;
 pub use metrics::WorkHandlerMetrics;
@@ -9,6 +10,7 @@ pub use metrics::WorkHandlerMetrics;
 use super::*;
 use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
+use request::decode_payload;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -48,47 +50,19 @@ where
         });
 
         // decode the control message and the request
-        let msg = TwoPartCodec::default()
-            .decode_message(payload)?
-            .into_message_type();
-
-        // we must have a header and a body
-        // it will be held by this closure as a Some(permit)
-        let (control_msg, request) = match msg {
-            TwoPartMessageType::HeaderAndData(header, data) => {
-                tracing::trace!(
-                    "received two part message with ctrl: {} bytes, data: {} bytes",
-                    header.len(),
-                    data.len()
-                );
-                let control_msg: RequestControlMessage = match serde_json::from_slice(&header) {
-                    Ok(cm) => cm,
-                    Err(err) => {
-                        let json_str = String::from_utf8_lossy(&header);
-                        if let Some(m) = self.metrics() {
-                            m.error_counter
-                                .with_label_values(&[work_handler::error_types::DESERIALIZATION])
-                                .inc();
-                        }
-                        return Err(PipelineError::DeserializationError(format!(
-                            "Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"
-                        )));
+        let decoded = decode_payload::<T>(payload).map_err(|e| {
+            if let Some(m) = self.metrics() {
+                let error_type = match &e {
+                    PipelineError::DeserializationError(_) => {
+                        work_handler::error_types::DESERIALIZATION
                     }
+                    _ => work_handler::error_types::INVALID_MESSAGE,
                 };
-                let request: T = serde_json::from_slice(&data)?;
-                (control_msg, request)
+                m.error_counter.with_label_values(&[error_type]).inc();
             }
-            _ => {
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::INVALID_MESSAGE])
-                        .inc();
-                }
-                return Err(PipelineError::Generic(String::from(
-                    "Unexpected message from work queue; unable extract a TwoPartMessage with a header and data",
-                )));
-            }
-        };
+            e
+        })?;
+        let (control_msg, request) = (decoded.control_msg, decoded.request);
 
         // extend request with context
         tracing::trace!("received control message: {:?}", control_msg);
