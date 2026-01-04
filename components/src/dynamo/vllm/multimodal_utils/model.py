@@ -179,15 +179,35 @@ def _construct_qwen_image_data(
     }
 
 
-def construct_qwen_mrope_mm_data(
+def construct_qwen_decode_mm_data(
     image_grid_thw: Optional[List[Any]],
+    embeddings_shape: Optional[Any],
+    *,
+    dtype: torch.dtype = torch.float16,
 ) -> Dict[str, Dict[str, torch.Tensor]]:
-    """Construct minimal multimodal data needed for Qwen mRoPE initialization.
+    """Construct schema-valid Qwen multimodal data for vLLM v1 disagg decode.
 
-    In vLLM v1, mRoPE positions are initialized for each request using `mm_features`.
-    For Qwen2.5-VL, that requires `image_grid_thw` even on decode workers that do not
-    need image embeddings (KV cache already contains vision context from prefill).
+    Notes:
+    - vLLM parses multimodal inputs and builds `mm_features` from `multi_modal_data`.
+    - For Qwen VL models, the parser enforces that image data contains BOTH
+      `image_embeds` and `image_grid_thw` keys.
+    - In disaggregated decode, the KV cache already includes the vision context
+      from prefill; decode still needs `mm_features` for mRoPE initialization.
+      We therefore provide a **zero** placeholder tensor for `image_embeds` to
+      satisfy the schema.
     """
     if image_grid_thw is None or len(image_grid_thw) == 0:
         raise ValueError("No image grid provided for Qwen model.")
-    return {"image": {"image_grid_thw": torch.tensor(image_grid_thw)}}
+    if embeddings_shape is None:
+        raise ValueError("embeddings_shape is required for Qwen decode mm data.")
+
+    image_embeds = torch.zeros(embeddings_shape, dtype=dtype, device="cpu")
+    if image_embeds.ndim == 3:
+        image_embeds = image_embeds.squeeze(0)
+
+    return {
+        "image": {
+            "image_embeds": image_embeds,
+            "image_grid_thw": torch.tensor(image_grid_thw),
+        }
+    }

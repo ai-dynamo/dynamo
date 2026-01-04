@@ -18,7 +18,7 @@ from ..multimodal_utils import (
     construct_mm_data,
     vLLMMultimodalRequest,
 )
-from ..multimodal_utils.model import construct_qwen_mrope_mm_data, is_qwen_vl_model
+from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +69,9 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         # as image_grid_thw even though embeddings/KV context already exist from prefill.
         multi_modal_data = None
         if is_qwen_vl_model(self.config.model):
-            try:
-                multi_modal_data = construct_qwen_mrope_mm_data(request.image_grid_thw)
-            except Exception as e:
-                logger.warning(
-                    "Failed to construct Qwen mRoPE multimodal metadata for decode "
-                    f"request_id={request.request_id}: {e}"
-                )
+            multi_modal_data = construct_qwen_decode_mm_data(
+                request.image_grid_thw, request.embeddings_shape
+            )
 
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
