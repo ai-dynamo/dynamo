@@ -259,24 +259,24 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum RequestType {
+pub(crate) enum RequestType {
     SingleIn,
     ManyIn,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ResponseType {
+pub(crate) enum ResponseType {
     SingleOut,
     ManyOut,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct RequestControlMessage {
-    id: String,
-    request_type: RequestType,
-    response_type: ResponseType,
-    connection_info: ConnectionInfo,
+pub(crate) struct RequestControlMessage {
+    pub id: String,
+    pub request_type: RequestType,
+    pub response_type: ResponseType,
+    pub connection_info: ConnectionInfo,
 }
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
