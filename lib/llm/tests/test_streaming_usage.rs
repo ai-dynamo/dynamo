@@ -161,7 +161,10 @@ fn create_backend_stream_with_cached_tokens(
 }
 
 /// Helper to create a chat completion request with optional stream_options
-fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionRequest {
+fn create_chat_request(
+    include_usage: Option<bool>,
+    continuous_usage: Option<bool>,
+) -> NvCreateChatCompletionRequest {
     let messages = vec![ChatCompletionRequestMessage::User(
         ChatCompletionRequestUserMessage {
             content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
@@ -171,6 +174,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
 
     let stream_options = include_usage.map(|include| ChatCompletionStreamOptions {
         include_usage: include,
+        continuous_usage_stats: continuous_usage.unwrap_or(false),
     });
 
     let inner = CreateChatCompletionRequest {
@@ -194,7 +198,7 @@ fn create_chat_request(include_usage: Option<bool>) -> NvCreateChatCompletionReq
 #[tokio::test]
 async fn test_streaming_without_usage() {
     // Create request without stream_options (usage should not be included)
-    let request = create_chat_request(None);
+    let request = create_chat_request(None, None);
     let request_id = "test-123".to_string();
     let response_generator = Box::new(request.response_generator(request_id));
 
@@ -253,7 +257,7 @@ async fn test_streaming_without_usage() {
 #[tokio::test]
 async fn test_streaming_with_usage_compliance() {
     // Create request with stream_options.include_usage = true
-    let request = create_chat_request(Some(true));
+    let request = create_chat_request(Some(true), None);
     let request_id = "test-456".to_string();
     let response_generator = Box::new(request.response_generator(request_id));
 
@@ -324,9 +328,100 @@ async fn test_streaming_with_usage_compliance() {
 }
 
 #[tokio::test]
+async fn test_streaming_with_continuous_usage() {
+    // Create request with stream_options.include_usage = true, stream_options.continuous_usage_stats = true
+    let request = create_chat_request(Some(true), Some(true));
+    let request_id = "test-456".to_string();
+    let response_generator = Box::new(request.response_generator(request_id));
+
+    // Create mock backend stream
+    let ctx = Arc::new(MockContext::new());
+    let backend_stream = create_mock_backend_stream(ctx.clone());
+
+    // Transform the stream
+    let transformed_stream = OpenAIPreprocessor::transform_postprocessor_stream(
+        backend_stream,
+        response_generator,
+        ctx.clone(),
+    );
+
+    // Collect all chunks
+    let chunks: Vec<_> = transformed_stream.collect().await;
+
+    // Verify we got 4 chunks (3 content + 1 usage)
+    assert_eq!(
+        chunks.len(),
+        4,
+        "Should have 3 content chunks + 1 usage chunk"
+    );
+
+    // Verify first 3 chunks have usage: None and non-empty choices
+    for (i, chunk) in chunks.iter().take(3).enumerate() {
+        if let Some(response) = &chunk.data {
+            assert!(
+                response.usage.is_some(),
+                "Content chunk {} should have usage: Some",
+                i
+            );
+            assert!(
+                !response.choices.is_empty(),
+                "Content chunk {} should have choices",
+                i
+            );
+
+            // Verify usage counts are properly accumulated for each chunk
+            let usage = response.usage.as_ref().unwrap();
+            assert_eq!(
+                usage.completion_tokens,
+                i as u32 + 1,
+                "Should have {} completion tokens",
+                i + 1
+            );
+            assert_eq!(
+                usage.prompt_tokens, 0,
+                "Should have 0 prompt tokens (not set in test)"
+            );
+            assert_eq!(
+                usage.total_tokens,
+                i as u32 + 1,
+                "Total tokens should be prompt + completion"
+            );
+        }
+    }
+
+    // Verify the final chunk is the usage-only chunk
+    if let Some(final_response) = &chunks[3].data {
+        assert!(
+            final_response.choices.is_empty(),
+            "Final usage chunk should have empty choices array"
+        );
+        assert!(
+            final_response.usage.is_some(),
+            "Final usage chunk should have usage statistics"
+        );
+
+        let usage = final_response.usage.as_ref().unwrap();
+        assert_eq!(
+            usage.completion_tokens, 3,
+            "Should have 3 completion tokens"
+        );
+        assert_eq!(
+            usage.prompt_tokens, 0,
+            "Should have 0 prompt tokens (not set in test)"
+        );
+        assert_eq!(
+            usage.total_tokens, 3,
+            "Total tokens should be prompt + completion"
+        );
+    } else {
+        panic!("Final chunk should be a valid response");
+    }
+}
+
+#[tokio::test]
 async fn test_streaming_with_usage_false() {
     // Create request with stream_options.include_usage = false (explicitly disabled)
-    let request = create_chat_request(Some(false));
+    let request = create_chat_request(Some(false), None);
     let request_id = "test-789".to_string();
     let response_generator = Box::new(request.response_generator(request_id));
 
@@ -388,6 +483,7 @@ fn create_cmpl_request(include_usage: Option<bool>, stream: bool) -> NvCreateCom
         if let Some(include) = include_usage {
             builder.stream_options(dynamo_async_openai::types::ChatCompletionStreamOptions {
                 include_usage: include,
+                continuous_usage_stats: false,
             });
         }
         builder.build().unwrap()
@@ -610,7 +706,7 @@ async fn test_cmpl_streaming_with_cached_tokens_propagation() {
 #[tokio::test]
 async fn test_chat_streaming_with_cached_tokens_propagation() {
     // Chat Completions: include_usage=true, backend provides cached_tokens -> must propagate
-    let request = create_chat_request(Some(true));
+    let request = create_chat_request(Some(true), Some(true));
     let request_id = "chat-usage-cached-1".to_string();
     let mut response_generator = Box::new(request.response_generator(request_id));
 
