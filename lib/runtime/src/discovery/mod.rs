@@ -5,6 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::pin::Pin;
 use tokio_util::sync::CancellationToken;
 
@@ -157,7 +158,7 @@ impl DiscoverySpec {
 
 /// Registered instances in the discovery plane
 /// Represents objects that have been successfully registered with an instance ID
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "type")]
 pub enum DiscoveryInstance {
     /// Registered endpoint instance - wraps the component::Instance directly
@@ -174,6 +175,75 @@ pub enum DiscoveryInstance {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_suffix: Option<String>,
     },
+}
+
+impl<'de> serde::Deserialize<'de> for DiscoveryInstance {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // First, try to deserialize as a JSON value to inspect it
+        let value = serde_json::Value::deserialize(deserializer)?;
+        
+        // Check if it has a "type" field (new format)
+        if let Some(type_value) = value.get("type") {
+            // New format with "type" field
+            match type_value.as_str() {
+                Some("Endpoint") => {
+                    // Remove the "type" field before deserializing as Instance
+                    let mut instance_value = value.clone();
+                    if let Some(obj) = instance_value.as_object_mut() {
+                        obj.remove("type");
+                    }
+                    let instance: crate::component::Instance = serde_json::from_value(instance_value)
+                        .map_err(|e| serde::de::Error::custom(format!(
+                            "Failed to deserialize Endpoint: {}", e
+                        )))?;
+                    Ok(DiscoveryInstance::Endpoint(instance))
+                }
+                Some("Model") => {
+                    // Deserialize as Model variant
+                    let model: ModelVariant = serde_json::from_value(value)
+                        .map_err(|e| serde::de::Error::custom(format!(
+                            "Failed to deserialize Model: {}", e
+                        )))?;
+                    Ok(DiscoveryInstance::Model {
+                        namespace: model.namespace,
+                        component: model.component,
+                        endpoint: model.endpoint,
+                        instance_id: model.instance_id,
+                        card_json: model.card_json,
+                    })
+                }
+                Some(unknown) => Err(serde::de::Error::custom(format!(
+                    "Unknown DiscoveryInstance type: {}", unknown
+                ))),
+                None => Err(serde::de::Error::custom(
+                    "DiscoveryInstance type field is not a string"
+                )),
+            }
+        } else {
+            // Old format: try to deserialize as an Endpoint (Instance)
+            // This handles backward compatibility with data stored before the DiscoveryInstance enum
+            let instance: crate::component::Instance = serde_json::from_value(value)
+                .map_err(|e| serde::de::Error::custom(format!(
+                    "Failed to deserialize as old format Instance: {}", e
+                )))?;
+            Ok(DiscoveryInstance::Endpoint(instance))
+        }
+    }
+}
+
+/// Helper struct for deserializing Model variant
+#[derive(serde::Deserialize)]
+struct ModelVariant {
+    #[serde(rename = "type")]
+    _type: String,
+    namespace: String,
+    component: String,
+    endpoint: String,
+    instance_id: u64,
+    card_json: serde_json::Value,
 }
 
 impl DiscoveryInstance {
