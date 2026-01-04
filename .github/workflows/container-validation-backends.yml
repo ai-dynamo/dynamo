@@ -98,7 +98,7 @@ jobs:
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:131fc2e3d5f6b33e1413029b559831aa1c8778dd-vllm-amd64
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:43ba25bc6fc12dc8e9f4cd4f6b6af03386dab2cc-vllm-amd64
           pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
