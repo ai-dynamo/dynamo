@@ -96,6 +96,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room = self._generate_bootstrap_room()
             logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
+        bootstrap_info = {
+            "bootstrap_host": self.bootstrap_host,
+            "bootstrap_port": self.bootstrap_port,
+            "bootstrap_room": bootstrap_room,
+        }
+
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
+        yield {
+            "token_ids": [],
+            "text": None,
+            "finish_reason": None,
+            "disaggregated_params": bootstrap_info,
+        }
+
         input_param = self._get_input_param(inner_request)
 
         # Propagate trace context to SGLang
