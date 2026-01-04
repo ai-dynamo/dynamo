@@ -559,7 +559,7 @@ class MetricsPayload(BasePayload):
             metrics_to_check.append(
                 MetricCheck(
                     # Check: Minimum count of unique sglang:* metrics
-                    name="sglang:*",
+                    name="sglang_*",
                     pattern=lambda name: r"^sglang:\w+",
                     validator=lambda value: len(set(value))
                     >= 20,  # 80% of typical ~25 sglang metrics (excluding _bucket) as of 2025-10-22 (but will grow)
