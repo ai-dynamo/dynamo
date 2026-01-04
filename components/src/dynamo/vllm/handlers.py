@@ -540,8 +540,6 @@ class BaseWorkerHandler(ABC):
             del self.lora_id_for_name[lora_name]
             if lora_name in self.lora_name_to_path:
                 del self.lora_name_to_path[lora_name]
-            # Clean up the per-LoRA lock to prevent memory accumulation
-            self._lora_load_locks.pop(lora_name, None)
 
             # Unregister the LoRA model from the model registry (outside lock)
             if self.generate_endpoint is not None:
@@ -595,6 +593,9 @@ class BaseWorkerHandler(ABC):
                 logger.debug(
                     f"Cannot unregister LoRA '{lora_name}': generate_endpoint={self.generate_endpoint}"
                 )
+
+            # Clean up the per-LoRA lock only after confirmed success
+            self._lora_load_locks.pop(lora_name, None)
 
             logger.info(
                 f"Successfully unloaded LoRA adapter: {lora_name} with ID {lora_id}"
