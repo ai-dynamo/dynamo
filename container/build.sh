@@ -562,7 +562,7 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 elif [[ $FRAMEWORK == "FRONTEND" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile.frontend
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile
 fi
 
 # Add NIXL_REF as a build argument
@@ -952,40 +952,6 @@ if [[ $FRAMEWORK == "FRONTEND" ]]; then
     # Build base dynamo image first (framework=NONE, target=dev)
     echo ""
     echo "Building base dynamo image for frontend..."
-    BASE_DYNAMO_TAG="dynamo:${VERSION}-none"
-    
-    BASE_DOCKERFILE="${SOURCE_DIR}/Dockerfile"
-    BASE_BUILD_ARGS="--build-arg BASE_IMAGE=${NONE_BASE_IMAGE}"
-    BASE_BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${NONE_BASE_IMAGE_TAG}"
-    BASE_BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
-    BASE_BUILD_ARGS+=" --build-arg DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}"
-    BASE_BUILD_ARGS+=" --build-arg ARCH=${ARCH}"
-    
-    
-    # Show the docker command being executed if not in dry-run mode
-    if [ -z "$RUN_PREFIX" ]; then
-        set -x
-    fi
-    
-    if docker buildx version &>/dev/null; then
-        $RUN_PREFIX docker buildx build --progress=plain --load \
-            -f ${BASE_DOCKERFILE} \
-            --target dev \
-            ${PLATFORM} \
-            ${BASE_BUILD_ARGS} \
-            --tag ${BASE_DYNAMO_TAG} \
-            ${BUILD_CONTEXT} ${NO_CACHE}
-        BASE_BUILD_EXIT_CODE=${PIPESTATUS[0]}
-    else
-        $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain \
-            -f ${BASE_DOCKERFILE} \
-            --target dev \
-            ${PLATFORM} \
-            ${BASE_BUILD_ARGS} \
-            --tag ${BASE_DYNAMO_TAG} \
-            ${BUILD_CONTEXT} ${NO_CACHE}
-        BASE_BUILD_EXIT_CODE=${PIPESTATUS[0]}
-    fi
     
     { set +x; } 2>/dev/null
     

@@ -590,9 +590,9 @@ ENV PATH="/opt/dynamo/venv/bin:$PATH"
 # Copy virtual environment directly from dynamo_base (dev image)
 # This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
 # Copy uv to system /bin
-COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
+COPY --from=runtime /bin/uv /bin/uvx /bin/
 RUN uv python install $PYTHON_VERSION
-COPY --chown=dynamo: --from=dynamo_base /opt/dynamo/venv/ /opt/dynamo/venv/
+COPY --chown=dynamo: /opt/dynamo/venv/ /opt/dynamo/venv/
 
 # Setup environment for all users
 USER root
@@ -601,10 +601,6 @@ RUN chmod 755 /opt/dynamo/.launch_screen && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
 
 USER dynamo
-
-RUN uv pip show ai_dynamo_runtime
-RUN uv pip show ai_dynamo
-RUN uv pip show nixl
 
 ENTRYPOINT ["/epp"]
 CMD ["/bin/bash"]
