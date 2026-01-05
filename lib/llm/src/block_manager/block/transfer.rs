@@ -5,6 +5,7 @@ pub mod context;
 mod cuda;
 mod memcpy;
 mod nixl;
+mod remote;
 mod strategy;
 
 use super::*;
@@ -60,6 +61,9 @@ pub enum TransferError {
 
     #[error("Mismatched {0:?} worker ID: {1} != {2}")]
     MismatchedWorkerID(BlockTarget, usize, usize),
+
+    #[error("Transfer was cancelled")]
+    Cancelled,
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
