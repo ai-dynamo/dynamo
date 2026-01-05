@@ -75,6 +75,9 @@ def vllm_disagg_deployment():
     spec.set_dynamo_namespace("hw-fault-test")
     spec.set_model("Qwen/Qwen3-0.6B")
     spec.set_image(VLLM_DEFAULT_IMAGE)
+    
+    # Remove envFromSecret for open-source models that don't need HF token
+    spec.remove_env_from_secret()
 
     return spec
 
@@ -141,6 +144,7 @@ async def test_gpu_xid79_nvsentinel_eviction(
     hw_fault_config,
     hw_fault_backend,
     hw_fault_deployment,
+    skip_service_restart,
 ):
     """
     XID 79 fault tolerance test with NVSentinel-driven pod eviction.
@@ -204,6 +208,7 @@ async def test_gpu_xid79_nvsentinel_eviction(
         deployment_spec=deployment_spec,
         enable_hw_faults=True,
         hw_fault_config=hw_fault_config,
+        skip_service_restart=skip_service_restart,
     ) as deployment:
         
         logger.info("[PHASE 1] Deployment ready")
