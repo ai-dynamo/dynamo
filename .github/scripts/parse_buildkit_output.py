@@ -399,11 +399,13 @@ def main():
     # Add sccache statistics (parsed from build logs)
     if sccache_data:
         build_data["container"]["sccache"] = sccache_data
+        build_data["container"]["sccache_available"] = True
         print(
             f"✅ sccache metrics added to container: {len(sccache_data)} metrics",
             file=sys.stderr,
         )
     else:
+        build_data["container"]["sccache_available"] = False
         print("ℹ️  No sccache stats found in build logs", file=sys.stderr)
 
     # Output JSON
@@ -430,11 +432,16 @@ def main():
         file=sys.stderr,
     )
 
-    # Print sccache summary if available
+    # Print sccache summary
+    print("", file=sys.stderr)
+    print("🔨 sccache Summary:", file=sys.stderr)
+    print(
+        f"   Available: {container.get('sccache_available', False)}",
+        file=sys.stderr,
+    )
+    
     if "sccache" in container:
         sccache = container["sccache"]
-        print("", file=sys.stderr)
-        print("🔨 sccache Summary:", file=sys.stderr)
         if "compile_requests" in sccache:
             print(
                 f"   Compile Requests: {sccache['compile_requests']}", file=sys.stderr
