@@ -17,18 +17,15 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: pod-read
 rules:
-# InferencePools in both API groups
 - apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferencepools", "inferenceobjectives", "inferencemodelrewrites"]
   verbs: ["get", "watch", "list"]
 - apiGroups: ["inference.networking.k8s.io"]
   resources: ["inferencepools"]
   verbs: ["get", "watch", "list"]
-# Pods
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
-# Auth
 - apiGroups:
   - authentication.k8s.io
   resources:
