@@ -29,7 +29,7 @@ spec:
 
     # Reference to ConfigMap containing the DGD base config
     # For MoE models, this should point to the appropriate disagg config
-    # Original path: /sgl-workspace/dynamo/recipes/deepseek-r1/sglang/disagg-16gpu.yaml
+    # Original path: /sgl-workspace/dynamo/recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml
     configMapRef:
       name: deepseek-r1-config
       key: tep16p-dep16d-disagg.yaml
