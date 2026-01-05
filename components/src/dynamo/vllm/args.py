@@ -66,7 +66,6 @@ class Config:
     multimodal_decode_worker: bool = False
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
-    mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
     # dump config to file
     dump_config_to: Optional[str] = None
 
@@ -177,19 +176,6 @@ def parse_args() -> Config:
         "--enable-multimodal",
         action="store_true",
         help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
-    )
-    parser.add_argument(
-        "--mm-prompt-template",
-        type=str,
-        default="USER: <image>\n<prompt> ASSISTANT:",
-        help=(
-            "Different multi-modal models expect the prompt to contain different special media prompts. "
-            "The processor will use this argument to construct the final prompt. "
-            "User prompt will replace '<prompt>' in the provided template. "
-            "For example, if the user prompt is 'please describe the image' and the prompt template is "
-            "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
-            "'USER: <image> please describe the image ASSISTANT:'."
-        ),
     )
     parser.add_argument(
         "--store-kv",
@@ -324,7 +310,6 @@ def parse_args() -> Config:
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
-    config.mm_prompt_template = args.mm_prompt_template
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer

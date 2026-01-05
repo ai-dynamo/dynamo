@@ -52,11 +52,9 @@ class ProcessorHandler(ProcessMixIn):
         engine_args: AsyncEngineArgs,
         encode_worker_client: Client,
         pd_worker_client: Client,
-        prompt_template: str,
     ):
         self.encode_worker_client = encode_worker_client
         self.pd_worker_client = pd_worker_client
-        self.prompt_template = prompt_template
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
