@@ -516,8 +516,9 @@ class BaseWorkerHandler(ABC):
                     # Avoid lock-map growth on failed loads: if this attempt did not leave the LoRA
                     # loaded, remove the lock entry (best-effort).
                     if lora_name not in self.lora_id_for_name:
-                        if self._lora_load_locks.get(lora_name) is lock:
-                            self._lora_load_locks.pop(lora_name, None)
+                        with self._lora_load_locks_guard:
+                            if self._lora_load_locks.get(lora_name) is lock:
+                                self._lora_load_locks.pop(lora_name, None)
         except Exception as e:
             logger.exception(f"Failed to load LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
@@ -587,28 +588,32 @@ class BaseWorkerHandler(ABC):
                             )
 
                             # Rollback: re-add the LoRA to the engine to maintain consistency
-                            try:
-                                logger.debug(
-                                    f"Rolling back: re-adding LoRA '{lora_name}' to engine"
+                            if lora_path is None:
+                                logger.error(
+                                    f"Cannot rollback LoRA '{lora_name}': lora_path is None (data inconsistency)"
                                 )
-                                await self.engine_client.add_lora(
-                                    LoRARequest(
-                                        lora_name=lora_name,
-                                        lora_int_id=lora_id,
-                                        lora_path=lora_path,
+                            else:
+                                try:
+                                    logger.debug(
+                                        f"Rolling back: re-adding LoRA '{lora_name}' to engine"
                                     )
-                                )
-                                # Re-add to tracking dictionaries
-                                self.lora_id_for_name[lora_name] = lora_id
-                                if lora_path:
+                                    await self.engine_client.add_lora(
+                                        LoRARequest(
+                                            lora_name=lora_name,
+                                            lora_int_id=lora_id,
+                                            lora_path=lora_path,
+                                        )
+                                    )
+                                    # Re-add to tracking dictionaries
+                                    self.lora_id_for_name[lora_name] = lora_id
                                     self.lora_name_to_path[lora_name] = lora_path
-                                logger.debug(
-                                    f"Successfully rolled back LoRA '{lora_name}'"
-                                )
-                            except Exception as rollback_error:
-                                logger.exception(
-                                    f"Failed to rollback LoRA {lora_name}: {rollback_error}"
-                                )
+                                    logger.debug(
+                                        f"Successfully rolled back LoRA '{lora_name}'"
+                                    )
+                                except Exception as rollback_error:
+                                    logger.exception(
+                                        f"Failed to rollback LoRA {lora_name}: {rollback_error}"
+                                    )
 
                             # Return error status since unregistration failed
                             yield {
@@ -634,8 +639,9 @@ class BaseWorkerHandler(ABC):
                 finally:
                     # Remove lock entry once the LoRA is not loaded (or never was).
                     if lora_name not in self.lora_id_for_name:
-                        if self._lora_load_locks.get(lora_name) is lock:
-                            self._lora_load_locks.pop(lora_name, None)
+                        with self._lora_load_locks_guard:
+                            if self._lora_load_locks.get(lora_name) is lock:
+                                self._lora_load_locks.pop(lora_name, None)
         except Exception as e:
             logger.exception(f"Failed to unload LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
