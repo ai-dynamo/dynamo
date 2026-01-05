@@ -6,6 +6,9 @@
 
 set -e
 
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -24,6 +27,11 @@ HF_LORA_REPO="${HF_LORA_REPO:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
 LORA_NAME="${LORA_NAME:-codelion/Qwen3-0.6B-accuracy-recovery-lora}"
 # TEMP_DIR will be created using mktemp when needed
 TEMP_DIR=""
+
+# HF_CLI_CMD will be set to either "hf" or "huggingface-cli" based on huggingface-hub python package version
+# Starting from HF v0.34.0, the `huggingface-cli` command is deprecated in favor of `hf`.
+# Please refer to https://huggingface.co/blog/hf-cli for more details.
+HF_CLI_CMD=""
 
 # Parse command line arguments
 MODE="full"
@@ -88,8 +96,15 @@ check_dependencies() {
         exit 1
     fi
 
-    if ! command -v huggingface-cli &> /dev/null; then
-        echo "Error: huggingface-cli is not installed. Install with: pip install huggingface-hub"
+    # Check for either hf or huggingface-cli
+    if command -v hf &> /dev/null; then
+        HF_CLI_CMD="hf"
+        print_success "Found Hugging Face CLI: hf ($(hf version))"
+    elif command -v huggingface-cli &> /dev/null; then
+        HF_CLI_CMD="huggingface-cli"
+        print_success "Found Hugging Face CLI: huggingface-cli ($(huggingface-cli version))"
+    else
+        echo "Error: Neither 'hf' nor 'huggingface-cli' is installed. Install with: pip install huggingface-hub[cli]"
         exit 1
     fi
 
@@ -165,11 +180,16 @@ download_lora_from_hf() {
     # Create temporary directory using mktemp (global variable for cleanup)
     TEMP_DIR=$(mktemp -d -t lora_download_XXXXXX)
 
-    # Download LoRA adapter files
-    print_info "Downloading adapter files..."
-    huggingface-cli download "${HF_LORA_REPO}" \
-        --local-dir "${TEMP_DIR}" \
-        --local-dir-use-symlinks False
+    # Download LoRA adapter files using the detected CLI
+    print_info "Downloading adapter files using ${HF_CLI_CMD}..."
+    if [ "${HF_CLI_CMD}" = "huggingface-cli" ]; then
+        huggingface-cli download "${HF_LORA_REPO}" \
+            --local-dir "${TEMP_DIR}" \
+            --local-dir-use-symlinks False
+    else
+        hf download "${HF_LORA_REPO}" \
+            --local-dir "${TEMP_DIR}"
+    fi
 
     print_success "LoRA downloaded to ${TEMP_DIR}"
 
@@ -292,7 +312,7 @@ full_setup() {
     echo ""
     echo "Next steps:"
     echo "  1. Run the Dynamo service with LoRA support:"
-    echo "     ./agg_lora_s3.sh"
+    echo "     ${SCRIPT_DIR}/agg_lora.sh"
     echo ""
     echo "  2. Load the LoRA adapter:"
     echo "     curl -X POST http://localhost:8081/v1/loras \\"
