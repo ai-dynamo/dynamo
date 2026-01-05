@@ -475,3 +475,23 @@ kubectl get trafficpolicy dynamo-body-injector -o yaml
 
 The status should show `Accepted: True` and `Attached: True`.
 
+### Other Gateway Implementations
+
+We provide reference implementations for other gateway types. These are provided as starting points and may require adjustments for your specific environment:
+
+| Gateway | Configuration File | Resource Type |
+|---------|-------------------|---------------|
+| kGateway | `config/lua-filter/kgateway-lua-filter.yaml` | TrafficPolicy |
+| Istio | `config/lua-filter/istio-envoyfilter.yaml` | EnvoyFilter |
+| Envoy Gateway | `config/lua-filter/envoygateway-patch.yaml` | EnvoyPatchPolicy |
+
+For Istio:
+```bash
+kubectl apply -f config/lua-filter/istio-envoyfilter.yaml
+```
+
+For Envoy Gateway:
+```bash
+kubectl apply -f config/lua-filter/envoygateway-patch.yaml
+```
+
