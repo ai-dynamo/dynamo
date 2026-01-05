@@ -41,16 +41,16 @@ import (
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 
 	// Dynamo plugins
-	dynresponse "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_response_complete"
 	dynscorer "github.com/nvidia/dynamo/deploy/inference-gateway/pkg/plugins/dynamo_kv_scorer"
 )
 
 func main() {
 	// Register Dynamo custom plugins:
-	// - kv-aware-scorer: Calls Dynamo router to select workers based on KV cache, sets routing headers
-	// - dynamo-response-complete: Cleans up router state after request completion
+	// - kv-aware-scorer: Implements Scorer, PreRequest, and ResponseComplete interfaces
+	//   - Score: Calls Dynamo router to select workers based on KV cache, sets routing headers
+	//   - PreRequest: Registers request with router bookkeeping after scheduling is finalized
+	//   - ResponseComplete: Cleans up router bookkeeping when response completes
 	plugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
-	plugins.Register("dynamo-response-complete", dynresponse.DynamoResponseCompletePluginFactory)
 
 	// Run using standard GAIE runner (it registers built-in plugins automatically)
 	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {

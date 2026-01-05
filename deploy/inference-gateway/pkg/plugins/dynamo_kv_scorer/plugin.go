@@ -107,6 +107,7 @@ import (
 	"unsafe"
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
@@ -167,6 +168,7 @@ type KVAwareScorer struct {
 var _ plugins.Plugin = (*KVAwareScorer)(nil)
 var _ framework.Scorer = (*KVAwareScorer)(nil)
 var _ rc.PreRequest = (*KVAwareScorer)(nil)
+var _ rc.ResponseComplete = (*KVAwareScorer)(nil)
 
 func NewKVAwareScorer(ctx context.Context) *KVAwareScorer {
 	return &KVAwareScorer{
@@ -436,6 +438,39 @@ func (k *KVAwareScorer) PreRequest(
 	)
 }
 
+// ResponseComplete is called after the complete response is sent to the client.
+// It cleans up the router bookkeeping state for the completed request by calling
+// dynamo_router_free_request to release resources associated with the request.
+func (k *KVAwareScorer) ResponseComplete(
+	ctx context.Context,
+	request *schedtypes.LLMRequest,
+	response *rc.Response,
+	targetPod *backend.Pod,
+) {
+	logger := log.FromContext(ctx)
+
+	if request == nil {
+		logger.V(logutil.DEBUG).Info("ResponseComplete: request is nil, skipping cleanup")
+		return
+	}
+
+	requestID := request.RequestId
+	if requestID == "" {
+		logger.V(logutil.DEBUG).Info("ResponseComplete: no request ID, skipping cleanup")
+		return
+	}
+
+	// Call the dynamo router to free the request bookkeeping
+	if err := callFreeRequestInternal(requestID); err != nil {
+		logger.V(logutil.DEFAULT).Error(err, "ResponseComplete: failed to free request",
+			"requestID", requestID)
+		return
+	}
+
+	logger.V(logutil.VERBOSE).Info("ResponseComplete: freed request from router",
+		"requestID", requestID)
+}
+
 // --------------------------- router call (persistent only) ---------------------------
 
 func (k *KVAwareScorer) callDynamoRouter(
@@ -638,9 +673,8 @@ func CallMarkPrefillComplete(requestID string) error {
 	return nil
 }
 
-// CallFreeRequest cleans up router state for a completed/cancelled request.
-// Exported for use by response handlers.
-func CallFreeRequest(requestID string) error {
+// callFreeRequestInternal cleans up router state for a completed/cancelled request.
+func callFreeRequestInternal(requestID string) error {
 	if !runtimeInitialized {
 		return fmt.Errorf("dynamo runtime not initialized")
 	}
