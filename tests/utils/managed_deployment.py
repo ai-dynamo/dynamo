@@ -21,6 +21,7 @@ from kubernetes_asyncio.client import exceptions
 # Try to import HW fault helpers (optional dependency)
 try:
     from tests.utils.hw_fault_helpers import HWFaultConfig, HWFaultManager
+
     HW_FAULTS_AVAILABLE = True
 except ImportError:
     HW_FAULTS_AVAILABLE = False
@@ -296,7 +297,10 @@ class DeploymentSpec:
         """
         services_dict = self._deployment_spec.get("spec", {}).get("services", {})
         if service_name:
-            if service_name in services_dict and "envFromSecret" in services_dict[service_name]:
+            if (
+                service_name in services_dict
+                and "envFromSecret" in services_dict[service_name]
+            ):
                 del services_dict[service_name]["envFromSecret"]
         else:
             for svc_name in services_dict:
@@ -631,7 +635,11 @@ class ManagedDeployment:
         )
 
     async def _wait_for_ready(
-        self, timeout: int = 1800, sleep=1, log_interval=60, force_pod_check: bool = False
+        self,
+        timeout: int = 1800,
+        sleep=1,
+        log_interval=60,
+        force_pod_check: bool = False,
     ):
         """
         Wait for the custom resource to be ready.
@@ -702,9 +710,7 @@ class ManagedDeployment:
                             "[force_pod_check] All pods ready at pod level"
                         )
                         self._logger.info(f"Current deployment state: {current_state}")
-                        self._logger.info(
-                            f"Elapsed time: {elapsed:.1f}s / {timeout}s"
-                        )
+                        self._logger.info(f"Elapsed time: {elapsed:.1f}s / {timeout}s")
                         return True
                     elif attempt % log_interval == 0:
                         self._logger.info(
@@ -717,9 +723,7 @@ class ManagedDeployment:
                 ):
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
-                    self._logger.info(
-                        f"Elapsed time: {elapsed:.1f}s / {timeout}s"
-                    )
+                    self._logger.info(f"Elapsed time: {elapsed:.1f}s / {timeout}s")
 
                     self._logger.info(
                         f"Deployment {self._deployment_name} has Ready condition {desired_ready_condition_val} and state {desired_state_val}"
@@ -740,7 +744,9 @@ class ManagedDeployment:
                                 "DGD status appears stale - pods are ready but DGD shows not ready. "
                                 "Using pod-level readiness as fallback."
                             )
-                            self._logger.info(f"Current deployment state: {current_state}")
+                            self._logger.info(
+                                f"Current deployment state: {current_state}"
+                            )
                             self._logger.info(f"Current conditions: {conditions}")
                             self._logger.info(
                                 f"Elapsed time: {elapsed:.1f}s / {timeout}s"
@@ -1206,13 +1212,22 @@ class ManagedDeployment:
         # Use Helm to deploy dynamo-platform (NATS + etcd only, no operator)
         # Use the helm repo name instead of direct URL for better compatibility
         cmd = [
-            "helm", "upgrade", "--install", "dynamo-platform",
+            "helm",
+            "upgrade",
+            "--install",
+            "dynamo-platform",
             "nvidia-ai-dynamo/dynamo-platform",
-            "--namespace", self.namespace,
-            "--set", "dynamo-operator.enabled=false",  # Don't deploy operator (cluster-wide exists)
-            "--set", "nats.enabled=true",
-            "--set", "etcd.enabled=true",
-            "--wait", "--timeout", "5m",
+            "--namespace",
+            self.namespace,
+            "--set",
+            "dynamo-operator.enabled=false",  # Don't deploy operator (cluster-wide exists)
+            "--set",
+            "nats.enabled=true",
+            "--set",
+            "etcd.enabled=true",
+            "--wait",
+            "--timeout",
+            "5m",
         ]
 
         try:
@@ -1224,7 +1239,9 @@ class ManagedDeployment:
         except subprocess.TimeoutExpired:
             raise RuntimeError("Helm install timed out")
         except FileNotFoundError:
-            self._logger.warning("Helm not found - cannot deploy dynamo-platform automatically")
+            self._logger.warning(
+                "Helm not found - cannot deploy dynamo-platform automatically"
+            )
             raise RuntimeError(
                 "Helm CLI not found. Either install Helm or use a namespace with "
                 "existing dynamo-platform (e.g., --namespace=fault-tolerance)"
@@ -1293,7 +1310,9 @@ class ManagedDeployment:
 
         # Setup CUDA fault injection library
         if not await self._hw_fault_manager.setup():
-            self._logger.warning("[HW Faults] Setup failed - some features may be unavailable")
+            self._logger.warning(
+                "[HW Faults] Setup failed - some features may be unavailable"
+            )
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._cleanup()
@@ -1316,7 +1335,9 @@ class ManagedDeployment:
                 if "worker" in service_name.lower():
                     node = pod.raw.get("spec", {}).get("nodeName")
                     if node:
-                        self._logger.info(f"[HW Faults] Auto-detected target node from {service_name}: {node}")
+                        self._logger.info(
+                            f"[HW Faults] Auto-detected target node from {service_name}: {node}"
+                        )
                         if self._hw_fault_manager:
                             self._hw_fault_manager.set_target_node(node)
                         return node
@@ -1326,7 +1347,9 @@ class ManagedDeployment:
             for pod in service_pods:
                 node = pod.raw.get("spec", {}).get("nodeName")
                 if node:
-                    self._logger.info(f"[HW Faults] Auto-detected target node (fallback): {node}")
+                    self._logger.info(
+                        f"[HW Faults] Auto-detected target node (fallback): {node}"
+                    )
                     if self._hw_fault_manager:
                         self._hw_fault_manager.set_target_node(node)
                     return node
@@ -1353,9 +1376,13 @@ class ManagedDeployment:
     ) -> Optional[str]:
         """Inject a hardware fault (XID error)."""
         if not self._hw_fault_manager:
-            self._logger.warning("[HW Faults] HW fault manager not initialized - skipping injection")
+            self._logger.warning(
+                "[HW Faults] HW fault manager not initialized - skipping injection"
+            )
             return None
-        return await self._hw_fault_manager.inject_xid_fault(xid_type=xid_type, gpu_id=gpu_id)
+        return await self._hw_fault_manager.inject_xid_fault(
+            xid_type=xid_type, gpu_id=gpu_id
+        )
 
     async def toggle_cuda_faults(self, enable: bool = True) -> bool:
         """Toggle CUDA faults ON/OFF without restarting pods."""
@@ -1371,6 +1398,7 @@ class ManagedDeployment:
         # Fallback implementation
         try:
             import kr8s
+
             node = kr8s.get("node", node_name)
             return node.spec.get("unschedulable", False)
         except Exception:
@@ -1388,6 +1416,7 @@ class ManagedDeployment:
     ) -> bool:
         """Wait for all pods to be scheduled on nodes other than the excluded one."""
         import asyncio
+
         start_time = time.time()
 
         while time.time() - start_time < timeout:
@@ -1396,7 +1425,9 @@ class ManagedDeployment:
 
             for service_name, service_pods in pods.items():
                 for pod in service_pods:
-                    node = getattr(pod.spec, "nodeName", None) or getattr(pod.spec, "node_name", None)
+                    node = getattr(pod.spec, "nodeName", None) or getattr(
+                        pod.spec, "node_name", None
+                    )
                     if node == exclude_node:
                         all_off_excluded = False
                         break
@@ -1404,13 +1435,17 @@ class ManagedDeployment:
                     break
 
             if all_off_excluded and sum(len(p) for p in pods.values()) > 0:
-                self._logger.info(f"[HW Faults] All pods on healthy nodes (not on {exclude_node})")
+                self._logger.info(
+                    f"[HW Faults] All pods on healthy nodes (not on {exclude_node})"
+                )
                 return True
 
             await asyncio.sleep(10)
             elapsed = int(time.time() - start_time)
             if elapsed % 60 == 0:
-                self._logger.info(f"[{elapsed}s] Waiting for pods to schedule off {exclude_node}...")
+                self._logger.info(
+                    f"[{elapsed}s] Waiting for pods to schedule off {exclude_node}..."
+                )
 
         self._logger.warning("Timeout waiting for pods on healthy nodes")
         return False
@@ -1426,7 +1461,9 @@ class ManagedDeployment:
             force_pod_check: If True, always verify at pod level instead of trusting
                             DGD status. Use after operations that force-delete pods.
         """
-        return await self._wait_for_ready(timeout=timeout, force_pod_check=force_pod_check)
+        return await self._wait_for_ready(
+            timeout=timeout, force_pod_check=force_pod_check
+        )
 
     def collect_metrics(self, phase: str = ""):
         """Collect metrics for the current phase (stub for now)."""
