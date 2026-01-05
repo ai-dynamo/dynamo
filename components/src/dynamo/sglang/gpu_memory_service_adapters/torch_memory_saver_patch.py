@@ -32,6 +32,23 @@ def _is_gpu_memory_service_mode() -> bool:
     )
 
 
+def _get_gpu_memory_service_mode() -> str:
+    """Get the GPU Memory Service load mode from environment variable.
+
+    Returns:
+        "write" (cold start from disk) or "read" (import only).
+        Defaults to "write" if not specified.
+    """
+    mode = os.environ.get("GPU_MEMORY_SERVICE_LOAD_MODE", "write").strip().lower()
+    if mode not in ("write", "read"):
+        logger.warning(
+            f"[GPU Memory Service Patch] Invalid GPU_MEMORY_SERVICE_LOAD_MODE={mode!r}, "
+            "expected 'write' or 'read'. Defaulting to 'write'."
+        )
+        return "write"
+    return mode
+
+
 def _resolve_socket_path(device_index: int) -> str:
     """Resolve socket path from environment or use default."""
     socket_path = os.environ.get("GPU_MEMORY_SERVICE_SOCKET_PATH")
@@ -96,15 +113,19 @@ def patch_torch_memory_saver():
             # Resolve socket path from env or default
             socket_path = _resolve_socket_path(device_index)
 
+            # Get explicit mode from environment (defaults to "write")
+            gms_mode = _get_gpu_memory_service_mode()
+
             # Create underlying torch impl for non-weights tags (KV cache etc.)
             # Use "torch" hook mode which uses PyTorch's CUDAPluggableAllocator
             torch_impl = _TorchMemorySaverImpl(hook_mode="torch")
 
-            # Create GPU Memory Service impl (owns allocator, AUTO mode detection)
+            # Create GPU Memory Service impl (owns allocator, explicit mode)
             gpu_impl = GPUMemoryServiceMemorySaverImpl(
                 torch_impl=torch_impl,
                 socket_path=socket_path,
                 device_index=device_index,
+                mode=gms_mode,
             )
 
             # Store reference for model loader to access

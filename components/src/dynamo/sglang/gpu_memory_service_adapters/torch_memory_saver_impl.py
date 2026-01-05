@@ -33,7 +33,7 @@ import torch
 from torch_memory_saver.hooks.base import HookUtilBase
 
 if TYPE_CHECKING:
-    from gpu_memory_service.allocator import RPCCumemAllocator
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
     from torch.cuda.memory import MemPool
     from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
 
@@ -81,9 +81,9 @@ class GPUMemoryServiceMemorySaverImpl:
     - "weights" or "model_weights": Handled by GPU Memory Service allocator (VA-stable)
     - Other tags (e.g., "kv_cache"): Delegated to torch mempool mode
 
-    The impl OWNS the GPU Memory Service allocator. In __init__, it performs AUTO mode detection:
-    - Try READ mode first (import-only fast path for weights already committed)
-    - Fall back to WRITE mode if READ not available
+    The impl OWNS the GPU Memory Service allocator. Mode must be specified explicitly:
+    - "write": Cold start from disk, publish weights
+    - "read": Import-only from existing committed weights
 
     Torch mempool mode is REQUIRED for this hybrid implementation.
     """
@@ -93,8 +93,9 @@ class GPUMemoryServiceMemorySaverImpl:
         torch_impl: "_TorchMemorySaverImpl",
         socket_path: str,
         device_index: int,
+        mode: str = "write",
     ):
-        """Initialize impl and create allocator (AUTO mode detection).
+        """Initialize impl and create allocator.
 
         The impl is created lazily via patched _ensure_initialized() when
         torch_memory_saver.region() is first called. At that point we're about
@@ -104,20 +105,22 @@ class GPUMemoryServiceMemorySaverImpl:
             torch_impl: The underlying torch_memory_saver impl for non-weights tags.
             socket_path: Unix socket path for the GPU Memory Service allocation server.
             device_index: CUDA device index for this process.
+            mode: Explicit mode - "write" (cold start) or "read" (import only).
         """
         self._torch_impl = torch_impl
         self._socket_path = socket_path
         self._device_index = device_index
         self._disabled = False
+        self._requested_mode = mode
 
         # Track imported bytes for memory accounting
         self._imported_weights_bytes: int = 0
 
-        # Initialize allocator with AUTO mode detection
-        self._allocator: Optional["RPCCumemAllocator"]
+        # Initialize allocator with explicit mode
+        self._allocator: Optional["GMSClientMemoryManager"]
         self._mem_pool: Optional["MemPool"]
         self._mode: str
-        self._allocator, self._mem_pool, self._mode = self._init_allocator()
+        self._allocator, self._mem_pool, self._mode = self._init_allocator(mode)
 
         logger.info(
             "[GPU Memory Service Hybrid] Initialized with torch mempool mode for KV cache support"
@@ -133,25 +136,28 @@ class GPUMemoryServiceMemorySaverImpl:
 
     def _init_allocator(
         self,
-    ) -> tuple[Optional["RPCCumemAllocator"], Optional["MemPool"], str]:
-        """Create allocator with AUTO mode detection (try READ first, fall back to WRITE).
+        mode: str,
+    ) -> tuple[Optional["GMSClientMemoryManager"], Optional["MemPool"], str]:
+        """Create allocator with explicit mode.
+
+        Args:
+            mode: "write" for cold start from disk, "read" for import-only.
 
         Returns:
             Tuple of (allocator, mem_pool, mode). mem_pool is None for READ mode.
         """
-        from gpu_memory_service.allocator import RPCCumemAllocator
-        from gpu_memory_service.lifecycle import (
+        from gpu_memory_service import (
+            GMSClientMemoryManager,
             get_or_create_allocator,
             register_allocator,
         )
 
-        # Try READ mode first (import-only fast path)
-        try:
-            allocator = RPCCumemAllocator(
+        if mode == "read":
+            # Import-only fast path - wait indefinitely for RO lock
+            allocator = GMSClientMemoryManager(
                 self._socket_path,
                 mode="read",
                 device=self._device_index,
-                timeout_ms=0,  # Immediate check - fail fast if not ready
             )
             # Register in lifecycle module for consumers (sleep/wake via get_allocator())
             register_allocator(allocator)
@@ -160,8 +166,8 @@ class GPUMemoryServiceMemorySaverImpl:
                 self._device_index,
             )
             return allocator, None, "read"
-        except TimeoutError:
-            # Fall back to WRITE mode - use lifecycle.py for full PyTorch integration
+        else:
+            # WRITE mode - use lifecycle.py for full PyTorch integration
             allocator, mem_pool = get_or_create_allocator(
                 self._socket_path,
                 self._device_index,
@@ -185,7 +191,7 @@ class GPUMemoryServiceMemorySaverImpl:
         """Mark allocation region with tag.
 
         - Weights (WRITE mode): Route allocations through GPU Memory Service mempool
-        - Weights (READ mode): No-op (weights will be materialized from registry)
+        - Weights (READ mode): No-op (weights will be materialized from metadata)
         - Other tags: Delegate to torch mempool mode with synchronization
         """
         if not self._is_weights_tag(tag):
@@ -333,7 +339,7 @@ class GPUMemoryServiceMemorySaverImpl:
 
     # --- Accessor methods for model loader ---
 
-    def get_allocator(self) -> Optional["RPCCumemAllocator"]:
+    def get_allocator(self) -> Optional["GMSClientMemoryManager"]:
         """Get the allocator (for model loader to use)."""
         return self._allocator
 
@@ -352,12 +358,12 @@ class GPUMemoryServiceMemorySaverImpl:
     def finalize_write_mode(self, model: torch.nn.Module, config_hash: str) -> None:
         """Called after model loading in WRITE mode to commit and switch to read.
 
-        This registers all model tensors in the GPU Memory Service registry,
+        This registers all model tensors in the GMS metadata store,
         commits the allocations, and switches to read mode.
 
         Args:
             model: The loaded model with weights on GPU.
-            config_hash: Hash prefix for registry keys.
+            config_hash: Hash prefix for metadata keys.
         """
         if self._mode != "write":
             logger.debug(
@@ -371,12 +377,12 @@ class GPUMemoryServiceMemorySaverImpl:
                 "Allocator is None in WRITE mode - this should not happen"
             )
 
-        from gpu_memory_service.extensions import _rpc_cumem_ext as cumem
-        from gpu_memory_service.tensor import register_module_tensors
+        from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
+        from gpu_memory_service.client.torch.tensor import register_module_tensors
 
-        # Register tensors in the GPU Memory Service registry
+        # Register tensors in the GMS metadata store
         total_bytes = register_module_tensors(
-            self._allocator, model, registry_prefix=f"{config_hash}:"
+            self._allocator, model, metadata_prefix=f"{config_hash}:"
         )
         self._imported_weights_bytes = int(total_bytes)
 

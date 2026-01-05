@@ -1,4 +1,4 @@
-"""vLLM integration for GPU Memory Service (Allocation Server + embedded registry).
+"""vLLM integration for GPU Memory Service (Allocation Server + embedded metadata store).
 
 This module registers a vLLM `load_format` that loads model weights into
 GPU Memory Service allocations (RW session), publishes via Commit(), and then
@@ -8,8 +8,8 @@ Configuration via model_loader_extra_config:
 - gpu_memory_service_socket_path: Unix socket path for the Allocation Server (per GPU). You may
   include `{device}` which will be formatted with the GPU device index.
   Default: /tmp/gpu_memory_service_{device}.sock
-- gpu_memory_service_load_mode: Load mode - "write" (cold start), "read" (import only), or "auto".
-  Default: auto
+- gpu_memory_service_load_mode: Load mode - "write" (cold start) or "read" (import only).
+  Default: write
 
 IMPORTANT: Sleep/Wake Memory Behavior
 -------------------------------------
@@ -37,7 +37,7 @@ from typing import Any, Optional
 
 import torch
 
-from dynamo.gpu_memory_service import RPCCumemAllocator, get_or_create_allocator
+from dynamo.gpu_memory_service import GMSClientMemoryManager, get_or_create_allocator
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,6 @@ class GPUMemoryServiceLoadMode(Enum):
 
     WRITE = "write"  # Cold-start from disk and publish
     READ = "read"  # Import-only (fast restart; requires weights already committed)
-    AUTO = "auto"  # Try read first; if not READY, fall back to write
 
 
 # Keys that GPU Memory Service adds to model_loader_extra_config - must be stripped before
@@ -219,7 +218,7 @@ def _get_gpu_memory_service_load_mode(
         load_config: vLLM LoadConfig object with model_loader_extra_config dict.
 
     Returns:
-        GPU Memory ServiceLoadMode enum value.
+        GPUMemoryServiceLoadMode enum value.
     """
     raw = None
 
@@ -228,9 +227,9 @@ def _get_gpu_memory_service_load_mode(
         extra_config = getattr(load_config, "model_loader_extra_config", None) or {}
         raw = extra_config.get("gpu_memory_service_load_mode")
 
-    # Default to auto mode (tries read first, falls back to write)
+    # Default to write mode (cold start from disk)
     if not raw:
-        return GPUMemoryServiceLoadMode.AUTO
+        return GPUMemoryServiceLoadMode.WRITE
 
     raw = raw.strip().lower()
     try:
@@ -243,7 +242,7 @@ def _get_gpu_memory_service_load_mode(
 
 
 def compute_vllm_config_hash(vllm_config: Any) -> str:
-    """Best-effort stable hash for registry key prefixing."""
+    """Best-effort stable hash for metadata key prefixing."""
     # Avoid pickling vLLM internals; serialize a small stable subset.
     payload = {
         "model": getattr(getattr(vllm_config, "model_config", None), "model", None),
@@ -339,17 +338,15 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     target_device.index if target_device.index is not None else 0
                 )
 
-            # Acquire RW lock and prepare registry namespace.
+            # Acquire RW lock and prepare metadata namespace.
             config_hash = compute_vllm_config_hash(vllm_config)
 
             # Get load mode from config
             mode = _get_gpu_memory_service_load_mode(load_config)
-            if mode in (GPUMemoryServiceLoadMode.READ, GPUMemoryServiceLoadMode.AUTO):
-                ro_alloc: Optional[RPCCumemAllocator] = None
+            if mode == GPUMemoryServiceLoadMode.READ:
+                ro_alloc: Optional[GMSClientMemoryManager] = None
                 try:
-                    from dynamo.gpu_memory_service import (
-                        materialize_module_from_registry,
-                    )
+                    from dynamo.gpu_memory_service import materialize_module_from_gms
                     from dynamo.vllm.gpu_memory_service_adapters.import_only_loader import (
                         ImportOnlyModelLoader as VLLMImportOnlyLoader,
                     )
@@ -359,15 +356,11 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     if torch.cuda.is_available():
                         torch.cuda.set_device(device_index)
 
-                    # In auto mode, do an immediate readiness check (timeout=0).
-                    # For read mode, we create the allocator directly first to handle
-                    # timeout gracefully - if it times out, we can fall back to write mode.
-                    ro_timeout = 0 if mode == GPUMemoryServiceLoadMode.AUTO else None
-                    ro_alloc = RPCCumemAllocator(
+                    # Read mode: wait indefinitely for RO lock (no timeout)
+                    ro_alloc = GMSClientMemoryManager(
                         socket_path,
                         mode="read",
                         device=device_index,
-                        timeout_ms=ro_timeout,
                     )
 
                     # Create the model structure on meta device with post-processing.
@@ -378,7 +371,7 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                         vllm_config=vllm_config, model_config=model_config
                     )
 
-                    imported_bytes = materialize_module_from_registry(
+                    imported_bytes = materialize_module_from_gms(
                         ro_alloc,
                         model,
                         prefix=f"{config_hash}:",
@@ -389,7 +382,7 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     _gpu_memory_service_imported_weights_bytes = int(imported_bytes)
 
                     # Success! Register the allocator in the client module.
-                    # We do this after success to avoid polluting the registry on failure.
+                    # We do this after success to avoid polluting the metadata on failure.
                     from dynamo.gpu_memory_service import register_allocator
 
                     register_allocator(ro_alloc)
@@ -406,22 +399,10 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                         imported_bytes / (1 << 30),
                     )
                     return model.eval()
-                except TimeoutError:
+                except Exception:
                     if ro_alloc is not None:
                         ro_alloc.close()
-                    if mode == GPUMemoryServiceLoadMode.READ:
-                        raise
-                    logger.info(
-                        "[GPU Memory Service] Import-only fast path not READY; falling back to disk load+publish"
-                    )
-                except Exception as e:
-                    if ro_alloc is not None:
-                        ro_alloc.close()
-                    if mode == GPUMemoryServiceLoadMode.READ:
-                        raise
-                    logger.info(
-                        f"[GPU Memory Service] Import-only fast path failed; falling back to disk load+publish: {e}"
-                    )
+                    raise
 
             # Get or create allocator in write mode with PyTorch MemPool.
             # The client module ensures only one allocator exists per process.
@@ -431,7 +412,7 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
 
             # Start fresh (weights model load is authoritative).
             allocator.clear_all()
-            allocator.registry_delete_prefix(f"{config_hash}:")
+            allocator.metadata_delete_prefix(f"{config_hash}:")
 
             # Route allocations to the pool while initializing + loading weights.
             # Create a copy with valid load_format and stripped GPU Memory Service keys for DefaultModelLoader.
@@ -465,11 +446,11 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     # understand VMM memory.
                     torch.cuda.empty_cache()
 
-            # Register all model tensors into the GPU Memory Service registry
+            # Register all model tensors into the GMS metadata store
             from dynamo.gpu_memory_service import register_module_tensors
 
             total_bytes = register_module_tensors(
-                allocator, model, registry_prefix=f"{config_hash}:"
+                allocator, model, metadata_prefix=f"{config_hash}:"
             )
             GPUServiceModelLoader._imported_weights_bytes = total_bytes
             _gpu_memory_service_imported_weights_bytes = total_bytes
@@ -485,7 +466,7 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
 
             allocator.switch_to_read()
 
-            # Allocator is already in the registry from get_or_create_allocator().
+            # Allocator is already registered from get_or_create_allocator().
             # No need to register again.
 
             # Apply vLLM worker patches

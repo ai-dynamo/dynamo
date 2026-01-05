@@ -11,7 +11,8 @@ The core functionality is in the gpu_memory package; this module provides:
 
 # Re-export core functionality from gpu_memory_service package
 from gpu_memory_service import (
-    RPCCumemAllocator,
+    GMSClientMemoryManager,
+    GMSRPCClient,
     StaleWeightsError,
     clear_allocator,
     get_allocator,
@@ -21,19 +22,25 @@ from gpu_memory_service import (
 )
 
 # Re-export extensions (built separately)
-from gpu_memory_service.extensions import _rpc_cumem_ext, _tensor_from_pointer
-from gpu_memory_service.server import AllocationServer, AllocationServerClient
+from gpu_memory_service.client.torch.extensions import (
+    _allocator_ext,
+    _tensor_from_pointer,
+)
 
 # Re-export tensor utilities
-from gpu_memory_service.tensor import (
-    materialize_module_from_registry,
+from gpu_memory_service.client.torch.tensor import (
+    materialize_module_from_gms,
     register_module_tensors,
 )
 
+# Re-export server
+from gpu_memory_service.server import GMSRPCServer
+
 __all__ = [
     # Core allocator
-    "RPCCumemAllocator",
+    "GMSClientMemoryManager",
     "StaleWeightsError",
+    "GMSRPCClient",
     # Lifecycle management
     "get_or_create_allocator",
     "get_allocator",
@@ -41,12 +48,11 @@ __all__ = [
     "register_allocator",
     "clear_allocator",
     # Server components
-    "AllocationServer",
-    "AllocationServerClient",
+    "GMSRPCServer",
     # Tensor utilities
     "register_module_tensors",
-    "materialize_module_from_registry",
+    "materialize_module_from_gms",
     # Extensions
-    "_rpc_cumem_ext",
+    "_allocator_ext",
     "_tensor_from_pointer",
 ]

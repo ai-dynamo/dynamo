@@ -1,9 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor utilities for GPU Memory Service.
 
 This module consolidates all tensor-related functionality for GPU Memory Service:
 - Tensor metadata serialization/deserialization
 - Module tree extraction (params, buffers, tensor_attrs)
-- Registry operations (reading/writing tensor specs)
+- Metadata operations (reading/writing tensor specs)
 - Tensor materialization from mapped memory
 
 This provides a unified interface for both write (registration) and read
@@ -20,22 +23,22 @@ from typing import TYPE_CHECKING, Dict, Iterator, List, Optional, Tuple, Union
 import torch
 
 if TYPE_CHECKING:
-    from gpu_memory_service.allocator import RPCCumemAllocator
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Tensor Metadata - serialization format for registry storage
+# Tensor Metadata - serialization format for metadata store
 # =============================================================================
 
 
 @dataclass(frozen=True)
 class TensorMeta:
-    """Metadata for a tensor stored in the GPU Memory Service registry (serialization format).
+    """Metadata for a tensor stored in the GMS metadata store (serialization format).
 
-    This is the canonical format for tensor metadata stored in the artifact
-    registry. The dtype is stored as a string for JSON serialization.
+    This is the canonical format for tensor metadata stored in the metadata
+    store. The dtype is stored as a string for JSON serialization.
     """
 
     shape: Tuple[int, ...]
@@ -125,7 +128,7 @@ def tensor_meta_from_tensor(
 
 
 def serialize_tensor_meta(meta: TensorMeta) -> bytes:
-    """Serialize TensorMeta to JSON bytes for registry storage.
+    """Serialize TensorMeta to JSON bytes for metadata store.
 
     Args:
         meta: The tensor metadata to serialize.
@@ -161,14 +164,14 @@ def _parse_dtype(dtype_str: str) -> torch.dtype:
 
 
 def parse_tensor_meta(value: bytes) -> ParsedTensorMeta:
-    """Parse registry metadata blob into ParsedTensorMeta.
+    """Parse metadata blob into ParsedTensorMeta.
 
     Supports both legacy and current formats:
     - legacy: {"shape": [...], "dtype": "torch.float16", "nbytes": ...}
     - current: {"shape": [...], "dtype": "...", "stride": [...], "span_bytes": ..., "tensor_type": ...}
 
     Args:
-        value: UTF-8 encoded JSON bytes from registry.
+        value: UTF-8 encoded JSON bytes from metadata store.
 
     Returns:
         ParsedTensorMeta with torch.dtype and computed span_bytes.
@@ -213,7 +216,7 @@ def parse_tensor_meta(value: bytes) -> ParsedTensorMeta:
 
 @dataclass
 class TensorIPCInfo:
-    """Information about a tensor for IPC/registry purposes."""
+    """Information about a tensor for IPC/metadata purposes."""
 
     shape: Tuple[int, ...]
     dtype: torch.dtype
@@ -413,13 +416,13 @@ def resolve_module_attr(
 
 
 # =============================================================================
-# Registry Operations - reading/writing tensor specs
+# Metadata Operations - reading/writing tensor specs
 # =============================================================================
 
 
 @dataclass(frozen=True)
-class RegistryTensorSpec:
-    """A single tensor entry from the Artifact Registry."""
+class TensorSpec:
+    """A single tensor entry from the GMS metadata store."""
 
     key: str
     name: str
@@ -428,31 +431,31 @@ class RegistryTensorSpec:
     meta: ParsedTensorMeta
 
 
-def load_registry_tensor_specs(
-    allocator: "RPCCumemAllocator", prefix: str
-) -> Dict[str, RegistryTensorSpec]:
-    """Load and parse all registry entries under a given prefix.
+def load_tensor_specs(
+    manager: "GMSClientMemoryManager", prefix: str
+) -> Dict[str, TensorSpec]:
+    """Load and parse all metadata entries under a given prefix.
 
     Args:
-        allocator: The GPU Memory Service allocator with registry access.
-        prefix: Registry key prefix (e.g., "abc123:").
+        manager: The GPU Memory Service memory manager with metadata access.
+        prefix: Metadata key prefix (e.g., "abc123:").
 
     Returns:
-        Mapping of tensor name (without prefix) -> RegistryTensorSpec.
+        Mapping of tensor name (without prefix) -> TensorSpec.
     """
-    keys = allocator.registry_list(prefix)
-    specs: Dict[str, RegistryTensorSpec] = {}
+    keys = manager.metadata_list(prefix)
+    specs: Dict[str, TensorSpec] = {}
 
     for key in keys:
-        got = allocator.registry_get(key)
+        got = manager.metadata_get(key)
         if got is None:
-            raise RuntimeError(f"Registry key disappeared during read: {key}")
+            raise RuntimeError(f"Metadata key disappeared during read: {key}")
         allocation_id, offset_bytes, value = got
         name = key[len(prefix) :] if key.startswith(prefix) else key
         meta = parse_tensor_meta(value)
         if name in specs:
-            raise RuntimeError(f"Duplicate registry tensor name: {name}")
-        specs[name] = RegistryTensorSpec(
+            raise RuntimeError(f"Duplicate metadata tensor name: {name}")
+        specs[name] = TensorSpec(
             key=key,
             name=name,
             allocation_id=str(allocation_id),
@@ -464,23 +467,23 @@ def load_registry_tensor_specs(
 
 
 def register_tensor(
-    allocator: "RPCCumemAllocator",
+    manager: "GMSClientMemoryManager",
     name: str,
     tensor: torch.Tensor,
     allocation_id: str,
     base_va: int,
-    registry_prefix: str,
+    metadata_prefix: str,
     tensor_type: str = "parameter",
 ) -> int:
-    """Register a tensor's metadata in the GPU Memory Service registry.
+    """Register a tensor's metadata in the GMS metadata store.
 
     Args:
-        allocator: The GPU Memory Service allocator (must be in write mode).
+        manager: The GPU Memory Service memory manager (must be in write mode).
         name: The tensor name (e.g., "model.layers.0.self_attn.q_proj.weight").
         tensor: The CUDA tensor to register.
         allocation_id: The GPU Memory Service allocation ID containing this tensor.
         base_va: The base virtual address of the allocation.
-        registry_prefix: Prefix for registry keys (e.g., "abc123:").
+        metadata_prefix: Prefix for metadata keys (e.g., "abc123:").
         tensor_type: Type classification ("parameter", "buffer", "tensor_attr").
 
     Returns:
@@ -490,8 +493,8 @@ def register_tensor(
     offset = ptr - base_va
 
     meta = tensor_meta_from_tensor(tensor, tensor_type)
-    allocator.registry_put(
-        key=f"{registry_prefix}{name}",
+    manager.metadata_put(
+        key=f"{metadata_prefix}{name}",
         allocation_id=allocation_id,
         offset_bytes=int(offset),
         value=serialize_tensor_meta(meta),
@@ -501,19 +504,19 @@ def register_tensor(
 
 
 def register_module_tensors(
-    allocator: "RPCCumemAllocator",
+    manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
-    registry_prefix: str,
+    metadata_prefix: str,
 ) -> int:
-    """Register all tensors from a model into the GPU Memory Service registry.
+    """Register all tensors from a model into the GMS metadata store.
 
     This extracts all parameters, buffers, and tensor attributes from the model
-    and registers them in the GPU Memory Service registry.
+    and registers them in the GMS metadata store.
 
     Args:
-        allocator: The GPU Memory Service allocator (must be in write mode).
+        manager: The GPU Memory Service memory manager (must be in write mode).
         model: The PyTorch model to register.
-        registry_prefix: Prefix for registry keys (e.g., "abc123:").
+        metadata_prefix: Prefix for metadata keys (e.g., "abc123:").
 
     Returns:
         Total bytes registered.
@@ -558,7 +561,7 @@ def register_module_tensors(
 
             # Find which allocation contains this tensor
             alloc_info = None
-            for va, mapping in allocator._mappings.items():
+            for va, mapping in manager._mappings.items():
                 if va <= ptr < va + mapping.aligned_size:
                     alloc_info = (va, mapping.allocation_id)
                     break
@@ -574,12 +577,12 @@ def register_module_tensors(
 
             base_va, alloc_id = alloc_info
             nbytes = register_tensor(
-                allocator,
+                manager,
                 name,
                 t,
                 alloc_id,
                 base_va,
-                registry_prefix,
+                metadata_prefix,
                 tensor_type,
             )
             total_bytes += nbytes
@@ -597,31 +600,33 @@ def register_module_tensors(
 # =============================================================================
 
 
-def tensor_from_registry_spec(
-    allocator: "RPCCumemAllocator",
-    spec: RegistryTensorSpec,
+def tensor_from_spec(
+    manager: "GMSClientMemoryManager",
+    spec: TensorSpec,
     *,
     device_index: int,
 ) -> torch.Tensor:
-    """Create a torch.Tensor that aliases mapped CUDA memory for a registry spec.
+    """Create a torch.Tensor that aliases mapped CUDA memory for a tensor spec.
 
     Args:
-        allocator: The GPU Memory Service allocator (imports the allocation if needed).
-        spec: The registry tensor specification.
+        manager: The GPU Memory Service memory manager (imports the allocation if needed).
+        spec: The tensor specification from GMS metadata store.
         device_index: CUDA device index.
 
     Returns:
         A tensor aliasing the mapped memory.
     """
     try:
-        import gpu_memory_service.extensions._tensor_from_pointer as tfp
+        from gpu_memory_service.client.torch.extensions import (
+            _tensor_from_pointer as tfp,
+        )
     except Exception as e:
         raise RuntimeError(
-            "Missing gpu_memory_service.core.csrc._tensor_from_pointer extension "
+            "Missing _tensor_from_pointer extension "
             "(required for import-only loader)."
         ) from e
 
-    base_va = allocator.import_allocation(spec.allocation_id)
+    base_va = manager.import_allocation(spec.allocation_id)
     ptr = int(base_va) + int(spec.offset_bytes)
 
     if spec.meta.stride is None:
@@ -637,15 +642,15 @@ def tensor_from_registry_spec(
     )
 
 
-def materialize_module_from_registry(
-    allocator: "RPCCumemAllocator",
+def materialize_module_from_gms(
+    manager: "GMSClientMemoryManager",
     model: torch.nn.Module,
     *,
     prefix: str,
     device_index: int,
     strict: bool = True,
 ) -> int:
-    """Materialize model tensors by importing from registry metadata.
+    """Materialize model tensors by importing from GMS.
 
     This handles:
     - Parameters (via module._parameters)
@@ -653,59 +658,59 @@ def materialize_module_from_registry(
     - Tensor attributes (via setattr, for things like _k_scale, _v_scale)
 
     Args:
-        allocator: The GPU Memory Service allocator in read mode.
+        manager: The GPU Memory Service memory manager in read mode.
         model: The model to populate with tensors.
-        prefix: Registry key prefix (e.g., "abc123:").
+        prefix: Metadata key prefix (e.g., "abc123:").
         device_index: CUDA device index.
         strict: If True, warn about remaining meta tensors.
 
     Returns:
         Total imported tensor byte span.
     """
-    specs = load_registry_tensor_specs(allocator, prefix)
+    specs = load_tensor_specs(manager, prefix)
 
-    # Categorize registry entries by tensor_type
+    # Categorize metadata entries by tensor_type
     param_specs = {k: v for k, v in specs.items() if v.meta.tensor_type == "parameter"}
     buffer_specs = {k: v for k, v in specs.items() if v.meta.tensor_type == "buffer"}
     attr_specs = {k: v for k, v in specs.items() if v.meta.tensor_type == "tensor_attr"}
 
     model_params = set(n for n, _ in model.named_parameters())
     model_buffers = set(n for n, _ in model.named_buffers())
-    registry_params = set(param_specs.keys())
-    registry_buffers = set(buffer_specs.keys())
+    metadata_params = set(param_specs.keys())
+    metadata_buffers = set(buffer_specs.keys())
 
     logger.info(
-        "[GPU Memory Service] Registry contains: %d params, %d buffers, %d tensor_attrs",
+        "[GPU Memory Service] Metadata contains: %d params, %d buffers, %d tensor_attrs",
         len(param_specs),
         len(buffer_specs),
         len(attr_specs),
     )
 
-    in_registry_not_model = (
-        (registry_params | registry_buffers) - model_params - model_buffers
+    in_metadata_not_model = (
+        (metadata_params | metadata_buffers) - model_params - model_buffers
     )
-    in_model_not_registry = (
-        (model_params | model_buffers) - registry_params - registry_buffers
+    in_model_not_metadata = (
+        (model_params | model_buffers) - metadata_params - metadata_buffers
     )
 
-    if in_registry_not_model:
+    if in_metadata_not_model:
         logger.warning(
-            "[GPU Memory Service] Registry params/buffers NOT in model (%d): %s",
-            len(in_registry_not_model),
-            list(in_registry_not_model)[:10],
+            "[GPU Memory Service] Metadata params/buffers NOT in model (%d): %s",
+            len(in_metadata_not_model),
+            list(in_metadata_not_model)[:10],
         )
-    if in_model_not_registry:
+    if in_model_not_metadata:
         logger.warning(
-            "[GPU Memory Service] Model params/buffers NOT in registry (%d): %s",
-            len(in_model_not_registry),
-            list(in_model_not_registry)[:10],
+            "[GPU Memory Service] Model params/buffers NOT in metadata (%d): %s",
+            len(in_model_not_metadata),
+            list(in_model_not_metadata)[:10],
         )
 
     imported_span_bytes = 0
     tensor_attr_count = 0
 
     for name, spec in specs.items():
-        t = tensor_from_registry_spec(allocator, spec, device_index=device_index)
+        t = tensor_from_spec(manager, spec, device_index=device_index)
         imported_span_bytes += int(spec.meta.span_bytes)
 
         mod, attr = resolve_module_attr(model, name)
@@ -729,7 +734,7 @@ def materialize_module_from_registry(
                 raise RuntimeError(
                     f"Parameter mismatch for {name}: "
                     f"param(shape={tuple(p.shape)}, dtype={p.dtype}) "
-                    f"registry(shape={tuple(t.shape)}, dtype={t.dtype})"
+                    f"metadata(shape={tuple(t.shape)}, dtype={t.dtype})"
                 )
             needs_replace = bool(getattr(p, "is_meta", False)) or (p.device != t.device)
             if needs_replace:
@@ -753,7 +758,7 @@ def materialize_module_from_registry(
                 raise RuntimeError(
                     f"Buffer mismatch for {name}: "
                     f"buf(shape={tuple(b.shape)}, dtype={b.dtype}) "
-                    f"registry(shape={tuple(t.shape)}, dtype={t.dtype})"
+                    f"metadata(shape={tuple(t.shape)}, dtype={t.dtype})"
                 )
             mod._buffers[attr] = t.detach().clone()
             continue
@@ -772,7 +777,7 @@ def materialize_module_from_registry(
             setattr(mod, attr, t if tensor_type == "parameter" else t.detach().clone())
         else:
             logger.debug(
-                "[GPU Memory Service] Creating new %s for registry entry not in model: %s",
+                "[GPU Memory Service] Creating new %s for metadata entry not in model: %s",
                 tensor_type,
                 name,
             )
@@ -792,7 +797,7 @@ def materialize_module_from_registry(
 
     if tensor_attr_count > 0:
         logger.info(
-            "[GPU Memory Service] Materialized %d tensor_attrs from registry",
+            "[GPU Memory Service] Materialized %d tensor_attrs from GMS",
             tensor_attr_count,
         )
 

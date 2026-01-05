@@ -1,4 +1,4 @@
-// RPC-aware CUDAPluggableAllocator for the GPU Memory Service.
+// CUDAPluggableAllocator for the GPU Memory Service.
 //
 // This extension provides two key pieces:
 // 1) A CUDAPluggableAllocator backend (my_malloc/my_free) that reserves VA and
@@ -128,7 +128,7 @@ my_malloc(ssize_t size, int device, CUstream stream)
 
   // Require Python callback to allocate + map remote memory for this VA.
   if (!g_python_malloc_callback) {
-    std::cerr << "rpc_cumem: init_module(malloc_cb, free_cb) must be called before using my_malloc" << std::endl;
+    std::cerr << "allocator: init_module(malloc_cb, free_cb) must be called before using my_malloc" << std::endl;
     cuMemAddressFree(va, aligned_size);
     g_allocations.erase(va);
     return nullptr;
@@ -318,191 +318,6 @@ py_import_and_map(PyObject* self, PyObject* args)
   return PyLong_FromUnsignedLongLong((unsigned long long)handle);
 }
 
-// unmap_imported(va) - Unmap and release the imported handle reference (for sleep)
-static PyObject*
-py_unmap_imported(PyObject* self, PyObject* args)
-{
-  unsigned long long va;
-
-  if (!PyArg_ParseTuple(args, "K", &va)) {
-    return nullptr;
-  }
-
-  auto it = g_allocations.find((CUdeviceptr)va);
-  if (it == g_allocations.end()) {
-    PyErr_SetString(PyExc_ValueError, "VA not found in allocations");
-    return nullptr;
-  }
-
-  AllocationInfo& info = it->second;
-
-  if (info.handle == 0) {
-    PyErr_SetString(PyExc_RuntimeError, "VA not mapped");
-    return nullptr;
-  }
-
-  ensure_context(info.device);
-  error_code = CUDA_SUCCESS;
-
-  CUDA_CHECK(cuMemUnmap((CUdeviceptr)va, info.aligned_size));
-  if (error_code != CUDA_SUCCESS) {
-    PyErr_SetString(PyExc_RuntimeError, error_msg);
-    return nullptr;
-  }
-
-  // Release the imported handle reference (we need to re-import on wake)
-  CUDA_CHECK(cuMemRelease(info.handle));
-
-  info.handle = 0;
-
-  Py_RETURN_NONE;
-}
-
-// get_allocation_info(va) -> (size, aligned_size, handle, is_imported, device)
-static PyObject*
-py_get_allocation_info(PyObject* self, PyObject* args)
-{
-  unsigned long long va;
-
-  if (!PyArg_ParseTuple(args, "K", &va)) {
-    return nullptr;
-  }
-
-  auto it = g_allocations.find((CUdeviceptr)va);
-  if (it == g_allocations.end()) {
-    PyErr_SetString(PyExc_ValueError, "VA not found in allocations");
-    return nullptr;
-  }
-
-  AllocationInfo& info = it->second;
-
-  return Py_BuildValue(
-      "(KKKpi)", (unsigned long long)info.size, (unsigned long long)info.aligned_size, (unsigned long long)info.handle,
-      info.is_imported, info.device);
-}
-
-// get_granularity(device) -> int
-static PyObject*
-py_get_granularity(PyObject* self, PyObject* args)
-{
-  int device;
-  if (!PyArg_ParseTuple(args, "i", &device)) {
-    return nullptr;
-  }
-
-  ensure_context(device);
-  size_t gran = get_granularity(device);
-
-  return PyLong_FromSize_t(gran);
-}
-
-// reserve_va(size, device) -> (va, aligned_size)
-// Directly reserve VA without going through PyTorch's allocation machinery
-static PyObject*
-py_reserve_va(PyObject* self, PyObject* args)
-{
-  unsigned long long size;
-  int device;
-
-  if (!PyArg_ParseTuple(args, "Ki", &size, &device)) {
-    return nullptr;
-  }
-
-  ensure_context(device);
-  error_code = CUDA_SUCCESS;
-
-  size_t granularity = get_granularity(device);
-  size_t aligned_size = align_size(size, granularity);
-
-  // Reserve virtual address
-  CUdeviceptr va;
-  CUDA_CHECK(cuMemAddressReserve(&va, aligned_size, granularity, 0, 0));
-  if (error_code != CUDA_SUCCESS) {
-    PyErr_SetString(PyExc_RuntimeError, error_msg);
-    return nullptr;
-  }
-
-  // Track this allocation (VA reserved; no physical memory mapped yet)
-  AllocationInfo info = {};
-  info.va = va;
-  info.size = size;
-  info.aligned_size = aligned_size;
-  info.device = device;
-  info.handle = 0;
-  info.is_imported = false;
-
-  g_allocations[va] = info;
-
-  // Call Python callback if set
-  if (g_python_malloc_callback) {
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    PyObject* args_cb = Py_BuildValue(
-        "(KKKiK)", (unsigned long long)va, (unsigned long long)size, (unsigned long long)aligned_size, device,
-        (unsigned long long)0);
-
-    PyObject* result = PyObject_CallObject(g_python_malloc_callback, args_cb);
-    Py_DECREF(args_cb);
-    Py_XDECREF(result);
-
-    if (PyErr_Occurred()) {
-      PyErr_Print();
-      // Treat callback failure as reservation failure.
-      cuMemAddressFree(va, aligned_size);
-      g_allocations.erase(va);
-      PyGILState_Release(gstate);
-      return nullptr;
-    }
-
-    PyGILState_Release(gstate);
-  }
-
-  return Py_BuildValue("(KK)", (unsigned long long)va, (unsigned long long)aligned_size);
-}
-
-// export_fd(va) -> fd
-// Export a VMM allocation as a shareable POSIX file descriptor
-static PyObject*
-py_export_fd(PyObject* self, PyObject* args)
-{
-  unsigned long long va;
-
-  if (!PyArg_ParseTuple(args, "K", &va)) {
-    return nullptr;
-  }
-
-  auto it = g_allocations.find((CUdeviceptr)va);
-  if (it == g_allocations.end()) {
-    PyErr_SetString(PyExc_ValueError, "VA not found in allocations");
-    return nullptr;
-  }
-
-  AllocationInfo& info = it->second;
-
-  if (info.handle == 0) {
-    PyErr_SetString(PyExc_RuntimeError, "VA not mapped");
-    return nullptr;
-  }
-
-  if (info.is_imported) {
-    PyErr_SetString(PyExc_RuntimeError, "Cannot export imported memory");
-    return nullptr;
-  }
-
-  ensure_context(info.device);
-  error_code = CUDA_SUCCESS;
-
-  // Export to POSIX file descriptor
-  int fd;
-  CUDA_CHECK(cuMemExportToShareableHandle(&fd, info.handle, CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR, 0));
-  if (error_code != CUDA_SUCCESS) {
-    PyErr_SetString(PyExc_RuntimeError, error_msg);
-    return nullptr;
-  }
-
-  return PyLong_FromLong(fd);
-}
-
 // get_all_allocations() -> list of (va, size, aligned_size, handle, is_imported, is_mapped, device)
 // Get info about all tracked allocations
 static PyObject*
@@ -534,99 +349,6 @@ py_get_all_allocations(PyObject* self, PyObject* args)
   }
 
   return result;
-}
-
-// free_va(va) - Free a VA reservation (unmaps if mapped)
-static PyObject*
-py_free_va(PyObject* self, PyObject* args)
-{
-  unsigned long long va;
-
-  if (!PyArg_ParseTuple(args, "K", &va)) {
-    return nullptr;
-  }
-
-  auto it = g_allocations.find((CUdeviceptr)va);
-  if (it == g_allocations.end()) {
-    PyErr_SetString(PyExc_ValueError, "VA not found in allocations");
-    return nullptr;
-  }
-
-  AllocationInfo& info = it->second;
-  ensure_context(info.device);
-  error_code = CUDA_SUCCESS;
-
-  // Call Python callback if set
-  if (g_python_free_callback) {
-    PyGILState_STATE gstate = PyGILState_Ensure();
-
-    PyObject* args_cb = Py_BuildValue("(K)", (unsigned long long)va);
-    PyObject* result = PyObject_CallObject(g_python_free_callback, args_cb);
-    Py_DECREF(args_cb);
-    Py_XDECREF(result);
-
-    if (PyErr_Occurred()) {
-      PyErr_Print();
-    }
-
-    PyGILState_Release(gstate);
-  }
-
-  // Unmap if mapped
-  if (info.handle != 0) {
-    CUDA_CHECK(cuMemUnmap((CUdeviceptr)va, info.aligned_size));
-
-    // Always release the handle reference (imported or locally created).
-    CUDA_CHECK(cuMemRelease(info.handle));
-  }
-
-  // Free VA reservation
-  CUDA_CHECK(cuMemAddressFree((CUdeviceptr)va, info.aligned_size));
-
-  g_allocations.erase(it);
-
-  Py_RETURN_NONE;
-}
-
-// set_access(va, read_only) - Flip VA access permissions.
-// Used by writers to flip local mappings to RO before publish/commit.
-static PyObject*
-py_set_access(PyObject* self, PyObject* args)
-{
-  unsigned long long va;
-  int read_only;
-
-  if (!PyArg_ParseTuple(args, "Kp", &va, &read_only)) {
-    return nullptr;
-  }
-
-  auto it = g_allocations.find((CUdeviceptr)va);
-  if (it == g_allocations.end()) {
-    PyErr_SetString(PyExc_ValueError, "VA not found in allocations");
-    return nullptr;
-  }
-
-  AllocationInfo& info = it->second;
-  if (info.handle == 0) {
-    PyErr_SetString(PyExc_RuntimeError, "VA not mapped");
-    return nullptr;
-  }
-
-  ensure_context(info.device);
-  error_code = CUDA_SUCCESS;
-
-  CUmemAccessDesc access = {};
-  access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  access.location.id = info.device;
-  access.flags = read_only ? CU_MEM_ACCESS_FLAGS_PROT_READ : CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-  CUDA_CHECK(cuMemSetAccess((CUdeviceptr)va, info.aligned_size, &access, 1));
-  if (error_code != CUDA_SUCCESS) {
-    PyErr_SetString(PyExc_RuntimeError, error_msg);
-    return nullptr;
-  }
-
-  Py_RETURN_NONE;
 }
 
 // set_access_all(read_only) -> int
@@ -672,25 +394,18 @@ py_set_access_all(PyObject* self, PyObject* args)
 static PyMethodDef module_methods[] = {
     {"init_module", py_init_module, METH_VARARGS, "Initialize module with malloc/free callbacks"},
     {"import_and_map", py_import_and_map, METH_VARARGS, "Import external FD and map to reserved VA"},
-    {"unmap_imported", py_unmap_imported, METH_VARARGS, "Unmap imported memory (for sleep)"},
-    {"get_allocation_info", py_get_allocation_info, METH_VARARGS, "Get allocation info for a VA"},
-    {"get_granularity", py_get_granularity, METH_VARARGS, "Get VMM allocation granularity for device"},
-    {"reserve_va", py_reserve_va, METH_VARARGS, "Reserve VA directly (bypasses PyTorch allocation sizing)"},
-    {"free_va", py_free_va, METH_VARARGS, "Free a VA reservation"},
-    {"set_access", py_set_access, METH_VARARGS, "Flip VA access permissions (read-only / read-write)"},
     {"set_access_all", py_set_access_all, METH_VARARGS, "Flip access permissions for all mapped allocations"},
-    {"export_fd", py_export_fd, METH_VARARGS, "Export VMM allocation as shareable POSIX file descriptor"},
     {"get_all_allocations", py_get_all_allocations, METH_NOARGS, "Get info about all tracked allocations"},
     {nullptr, nullptr, 0, nullptr}};
 
-static struct PyModuleDef rpc_cumem_module = {
-    PyModuleDef_HEAD_INIT, "_rpc_cumem_ext", "RPC CUDA memory allocator using VMM for GPU Memory Service integrations",
-    -1, module_methods};
+static struct PyModuleDef allocator_module = {
+    PyModuleDef_HEAD_INIT, "_allocator_ext", "CUDA memory allocator using VMM for GPU Memory Service integrations", -1,
+    module_methods};
 
 PyMODINIT_FUNC
-PyInit__rpc_cumem_ext(void)
+PyInit__allocator_ext(void)
 {
-  return PyModule_Create(&rpc_cumem_module);
+  return PyModule_Create(&allocator_module);
 }
 
 }  // extern "C"
