@@ -78,7 +78,7 @@ def test_directory(request):
 
 def create_trtllm_config(test_directory: Path) -> Path:
     """Create TensorRT-LLM config YAML file with KVBM connector configuration."""
-    config_path = test_directory / "trtllm_config.yaml"
+    config_path = Path(os.path.join(test_directory, "trtllm_config.yaml"))
     config = {
         "backend": "pytorch",
         "cuda_graph_config": None,
@@ -218,7 +218,7 @@ def frontend_server(test_directory, runtime_services):
     )
 
     # Create separate log directory for frontend to avoid conflicts with vllm
-    frontend_log_dir = (test_directory / "frontend").absolute()
+    frontend_log_dir = Path(os.path.join(test_directory, "frontend")).absolute()
     frontend_log_dir.mkdir(parents=True, exist_ok=True)
 
     # Create managed process and start via context manager
@@ -310,7 +310,7 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
 
     # Create separate log directory for worker to avoid conflicts with frontend
-    worker_log_dir = (test_directory / engine).absolute()
+    worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
     worker_log_dir.mkdir(parents=True, exist_ok=True)
 
     # Create managed process and start via context manager
@@ -649,7 +649,7 @@ class TestConsolidatorRouterE2E:
             }
         )
 
-        frontend_log_dir = (test_directory / "frontend").absolute()
+        frontend_log_dir = Path(os.path.join(test_directory, "frontend")).absolute()
         frontend_log_dir.mkdir(parents=True, exist_ok=True)
 
         with ManagedProcess(
@@ -720,7 +720,7 @@ class TestConsolidatorRouterE2E:
             if engine == "trtllm":
                 worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
 
-            worker_log_dir = (test_directory / engine).absolute()
+            worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
             worker_log_dir.mkdir(parents=True, exist_ok=True)
 
             with ManagedProcess(
