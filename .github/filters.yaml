@@ -16,6 +16,7 @@ ci: &ci
 core:
   - *ci
   - 'container/build.sh'
+  - 'container/Dockerfile'
   - 'container/deps/*'
   - 'lib/**'
   - 'tests/**'
