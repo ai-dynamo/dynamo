@@ -30,6 +30,10 @@ jobs:
         id: filter
         with:
           files_yaml_from_source_file: .github/filters.yaml
+      - name: Debug changed files
+        run: |
+          echo "core_any_changed: ${{ steps.filter.outputs.core_any_changed }}"
+          echo "core_all_changed_files: ${{ steps.filter.outputs.core_all_changed_files }}"
 
   dynamo-status-check:
     runs-on: ubuntu-latest

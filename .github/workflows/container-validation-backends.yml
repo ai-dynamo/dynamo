@@ -46,6 +46,23 @@ jobs:
         id: filter
         with:
           files_yaml_from_source_file: .github/filters.yaml
+      - name: Debug changed files
+        run: |
+          echo "=== Changed Files Summary ==="
+          echo "core_any_changed: ${{ steps.filter.outputs.core_any_changed }}"
+          echo "operator_any_changed: ${{ steps.filter.outputs.operator_any_changed }}"
+          echo "deploy_any_changed: ${{ steps.filter.outputs.deploy_any_changed }}"
+          echo "vllm_any_changed: ${{ steps.filter.outputs.vllm_any_changed }}"
+          echo "sglang_any_changed: ${{ steps.filter.outputs.sglang_any_changed }}"
+          echo "trtllm_any_changed: ${{ steps.filter.outputs.trtllm_any_changed }}"
+          echo ""
+          echo "=== Files that matched each filter ==="
+          echo "core files: ${{ steps.filter.outputs.core_all_changed_files }}"
+          echo "operator files: ${{ steps.filter.outputs.operator_all_changed_files }}"
+          echo "deploy files: ${{ steps.filter.outputs.deploy_all_changed_files }}"
+          echo "vllm files: ${{ steps.filter.outputs.vllm_all_changed_files }}"
+          echo "sglang files: ${{ steps.filter.outputs.sglang_all_changed_files }}"
+          echo "trtllm files: ${{ steps.filter.outputs.trtllm_all_changed_files }}"
 
   backend-status-check:
     runs-on: ubuntu-latest
