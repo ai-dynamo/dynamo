@@ -61,8 +61,7 @@ class ApiTester:
         )
         self.model_id = (
             model_id
-            or os.environ.get("KVBM_MODEL_ID")
-            or "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
         )
 
     def make_request(
