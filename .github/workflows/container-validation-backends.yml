@@ -56,31 +56,31 @@ jobs:
   # SETUP & DETECTION JOBS
   # ============================================================================
 
-  changed-files:
-    runs-on: ubuntu-latest
-    name: Detect Changes & Pre-commit
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
-    outputs:
-      core: ${{ steps.filter.outputs.core }}
-      operator: ${{ steps.filter.outputs.operator }}
-      deploy: ${{ steps.filter.outputs.deploy }}
-      vllm_all: ${{ steps.filter.outputs.vllm_all }}
-      vllm_container: ${{ steps.filter.outputs.vllm_container }}
-      sglang_all: ${{ steps.filter.outputs.sglang_all }}
-      sglang_container: ${{ steps.filter.outputs.sglang_container }}
-      trtllm_all: ${{ steps.filter.outputs.trtllm_all }}
-      trtllm_container: ${{ steps.filter.outputs.trtllm_container }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Check for changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
-        id: filter
-        with:
-          filters: .github/filters.yaml
-      - uses: actions/setup-python@v5
-      - uses: pre-commit/action@v3.0.0
-        timeout-minutes: 3
+  # changed-files:
+  #   runs-on: ubuntu-latest
+  #   name: Detect Changes & Pre-commit
+  #   environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+  #   outputs:
+  #     core: ${{ steps.filter.outputs.core }}
+  #     operator: ${{ steps.filter.outputs.operator }}
+  #     deploy: ${{ steps.filter.outputs.deploy }}
+  #     vllm_all: ${{ steps.filter.outputs.vllm_all }}
+  #     vllm_container: ${{ steps.filter.outputs.vllm_container }}
+  #     sglang_all: ${{ steps.filter.outputs.sglang_all }}
+  #     sglang_container: ${{ steps.filter.outputs.sglang_container }}
+  #     trtllm_all: ${{ steps.filter.outputs.trtllm_all }}
+  #     trtllm_container: ${{ steps.filter.outputs.trtllm_container }}
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Check for changes
+  #       uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+  #       id: filter
+  #       with:
+  #         filters: .github/filters.yaml
+  #     - uses: actions/setup-python@v5
+  #     - uses: pre-commit/action@v3.0.0
+  #       timeout-minutes: 3
 
   detect-buildkit-workers:
     name: Detect Buildkit Workers
@@ -94,7 +94,7 @@ jobs:
       shell: bash
       run: |
         .github/scripts/route_buildkit.sh --amd
-        # .github/scripts/route_buildkit.sh --arm
+        .github/scripts/route_buildkit.sh --arm
     outputs:
       vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
       vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
