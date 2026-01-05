@@ -49,7 +49,10 @@ jobs:
       - name: Debug changed files
         run: |
           echo "=== All Changed Files ==="
-          echo "${{ steps.filter.outputs.all_changed_files }}"
+          echo "${{ steps.filter.outputs.all_all_changed_files }}"
+          echo ""
+          echo "=== Filters That Matched ==="
+          echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
           echo ""
           echo "=== Filter Results (any_changed) ==="
           echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"

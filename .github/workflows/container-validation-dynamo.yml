@@ -33,7 +33,7 @@ jobs:
       - name: Debug changed files
         run: |
           echo "=== All Changed Files ==="
-          echo "${{ steps.filter.outputs.all_changed_files }}"
+          echo "${{ steps.filter.outputs.all_all_changed_files }}"
           echo ""
           echo "=== Filter Results ==="
           echo "core_any_changed: ${{ steps.filter.outputs.core_any_changed }}"
