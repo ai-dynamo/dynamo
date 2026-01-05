@@ -822,7 +822,7 @@ class HWFaultManager:
                         )
 
                 with suppress_deprecation_warnings():
-                    result = k8s_custom.replace_namespaced_custom_object(
+                    k8s_custom.replace_namespaced_custom_object(
                         group="nvidia.com",
                         version="v1alpha1",
                         namespace=self.namespace,
@@ -830,7 +830,7 @@ class HWFaultManager:
                         name=self.deployment_name,
                         body=dgd,
                     )
-                self.logger.info(f"[HW Faults] DGD spec replaced successfully")
+                self.logger.info("[HW Faults] DGD spec replaced successfully")
 
                 # Verify the change actually took effect
                 with suppress_deprecation_warnings():
