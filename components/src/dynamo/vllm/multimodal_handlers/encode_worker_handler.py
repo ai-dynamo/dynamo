@@ -148,7 +148,7 @@ class EncodeWorkerHandler:
                         request.multimodal_inputs[idx].multimodal_input.image_url
                     )
                     logger.info(
-                        f"ENCODER: saving local safetensors file with key {embedding_key}"
+                        f"ENCODER: saving local safetensors file with key {embedding_key}, {embeddings_cpu.numel()} * {embeddings_cpu.element_size()} bytes"
                     )
                     tensors = {"ec_cache": embeddings_cpu}
                     safetensors.torch.save_file(

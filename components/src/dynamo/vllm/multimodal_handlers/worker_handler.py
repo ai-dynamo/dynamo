@@ -307,7 +307,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     logger.info(
                         f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
                     )
-                logger.info(f"Response outputs: {response.outputs}")
+                # logger.info(f"Response outputs: {response.outputs}")
                 yield MyRequestOutput(
                     request_id=response.request_id,
                     prompt=response.prompt,

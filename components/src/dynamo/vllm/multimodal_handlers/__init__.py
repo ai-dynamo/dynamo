@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dynamo.vllm.multimodal_handlers.encode_worker_handler import EncodeWorkerHandler
+from dynamo.vllm.multimodal_handlers.preprocessed_handler import (
+    ProcessorHandler as PreprocessedHandler,
+)
 from dynamo.vllm.multimodal_handlers.processor_handler import ProcessorHandler
 from dynamo.vllm.multimodal_handlers.worker_handler import (
     MultimodalDecodeWorkerHandler,
@@ -11,6 +14,7 @@ from dynamo.vllm.multimodal_handlers.worker_handler import (
 __all__ = [
     "EncodeWorkerHandler",
     "ProcessorHandler",
+    "PreprocessedHandler",
     "MultimodalPDWorkerHandler",
     "MultimodalDecodeWorkerHandler",
 ]

@@ -24,6 +24,7 @@ from dynamo.vllm.multimodal_utils.protocol import (
     MultiModalInput,
     MultiModalRequest,
     MyRequestOutput,
+    PatchedTokensPrompt,
     vLLMMultimodalRequest,
 )
 
@@ -41,6 +42,7 @@ __all__ = [
     "load_vision_model",
     "MultiModalInput",
     "MultiModalGroup",
+    "PatchedTokensPrompt",
     "get_embedding_hash",
     "MultiModalRequest",
     "MyRequestOutput",

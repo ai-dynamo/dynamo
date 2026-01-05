@@ -33,6 +33,7 @@ from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
+    PreprocessedHandler,
     ProcessorHandler,
 )
 
@@ -43,6 +44,8 @@ from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+PROCESSOR_TYPE = ModelInput.Tokens  # or ModelInput.Text
 
 
 async def graceful_shutdown(runtime):
@@ -658,19 +661,27 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
     # Get prompt template from args (must be passed via environment or command line)
     mm_prompt_template = config.mm_prompt_template
 
-    handler = ProcessorHandler(
-        config.engine_args,
-        encode_worker_client,
-        pd_worker_client,
-        mm_prompt_template,
-    )
+    if PROCESSOR_TYPE == ModelInput.Text:
+        handler = ProcessorHandler(
+            config.engine_args,
+            encode_worker_client,
+            pd_worker_client,
+            mm_prompt_template,
+        )
+    else:
+        handler = PreprocessedHandler(
+            config.engine_args,
+            encode_worker_client,
+            pd_worker_client,
+            mm_prompt_template,
+        )
 
     logger.info("Waiting for Encoder Worker Instances ...")
     await encode_worker_client.wait_for_instances()
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        PROCESSOR_TYPE,
         ModelType.Chat,
         generate_endpoint,
         config.model,
