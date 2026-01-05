@@ -18,10 +18,6 @@
 set -euo pipefail
 trap 'echo "Error at line $LINENO. Exiting."' ERR
 
-
-MODEL_NAMESPACE=my-model
-kubectl create namespace $MODEL_NAMESPACE || true
-
 # Install the Gateway API
 GATEWAY_API_VERSION=v1.4.1
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
