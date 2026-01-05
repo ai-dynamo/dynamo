@@ -91,31 +91,58 @@ index dee7e99..d3f9ec7 100644
  .PHONY: image-local-build
  image-local-build: ## Build the EPP image using Docker Buildx for local development.
 diff --git a/cmd/epp/main.go b/cmd/epp/main.go
-index b5e0617..8592735 100644
+index b5e0617..b5c0312 100644
 --- a/cmd/epp/main.go
 +++ b/cmd/epp/main.go
-@@ -22,6 +22,11 @@ import (
+@@ -22,6 +22,12 @@ import (
  	ctrl "sigs.k8s.io/controller-runtime"
  
  	"sigs.k8s.io/gateway-api-inference-extension/cmd/epp/runner"
 +	eppplugins "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 +
 +	// Dynamo plugins
++	dyncleanup "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol/plugins/dynamo_cleanup"
 +	dynprereq "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid"
 +	dynscorer "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/plugins/dynamo_kv_scorer"
  )
  
  func main() {
-@@ -30,6 +35,9 @@ func main() {
+@@ -30,6 +36,10 @@ func main() {
  	// For adding out-of-tree plugins to the plugins registry, use the following:
  	// plugins.Register(my-out-of-tree-plugin-name, my-out-of-tree-plugin-factory-function)
  
 +	eppplugins.Register("dynamo-inject-workerid", dynprereq.InjectWorkerIDPreRequestFactory)
 +	eppplugins.Register("kv-aware-scorer", dynscorer.KVAwareScorerFactory)
++	eppplugins.Register("dynamo-cleanup", dyncleanup.DynamoCleanupPluginFactory)
 +
  	if err := runner.NewRunner().Run(ctrl.SetupSignalHandler()); err != nil {
  		os.Exit(1)
  	}
+diff --git a/pkg/epp/requestcontrol/body_mutator.go b/pkg/epp/requestcontrol/body_mutator.go
+new file mode 100644
+index 0000000..de87445
+--- /dev/null
++++ b/pkg/epp/requestcontrol/body_mutator.go
+@@ -0,0 +1,19 @@
++package requestcontrol
++
++import (
++	"context"
++
++	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
++)
++
++// RequestBodyMutator allows pre-request plugins to mutate the outbound request body.
++// Implementations are invoked after the standard PreRequest hook completes.
++type RequestBodyMutator interface {
++	MutateRequestBody(
++		ctx context.Context,
++		request *schedtypes.LLMRequest,
++		schedulingResult *schedtypes.SchedulingResult,
++		targetPort int,
++		body map[string]any,
++	)
++}
 diff --git a/pkg/epp/requestcontrol/director.go b/pkg/epp/requestcontrol/director.go
 index 670d922..0cf04cb 100644
 --- a/pkg/epp/requestcontrol/director.go
@@ -159,6 +186,98 @@ index 670d922..0cf04cb 100644
  		metrics.RecordRequestControlPluginProcessingLatency(PreRequestPluginType, plugin.TypedName().Type, time.Since(before))
  	}
  }
+diff --git a/pkg/epp/requestcontrol/plugins/dynamo_cleanup/plugin.go b/pkg/epp/requestcontrol/plugins/dynamo_cleanup/plugin.go
+new file mode 100644
+index 0000000..a389372
+--- /dev/null
++++ b/pkg/epp/requestcontrol/plugins/dynamo_cleanup/plugin.go
+@@ -0,0 +1,86 @@
++package dynamo_cleanup
++
++import (
++	"context"
++	"encoding/json"
++
++	log "sigs.k8s.io/controller-runtime/pkg/log"
++	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
++	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
++	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
++	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
++	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
++
++	dynamo "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/plugins/dynamo_kv_scorer"
++)
++
++const (
++	PluginName = "dynamo-cleanup"
++	PluginType = "dynamo-cleanup"
++)
++
++// DynamoCleanupPlugin is a PostResponse plugin that cleans up router state
++// when a request completes. It calls dynamo_router_free_request to release
++// the bookkeeping resources associated with the request.
++type DynamoCleanupPlugin struct {
++	typedName plugins.TypedName
++}
++
++var _ plugins.Plugin = (*DynamoCleanupPlugin)(nil)
++var _ rc.PostResponse = (*DynamoCleanupPlugin)(nil)
++
++// NewDynamoCleanupPlugin creates a new DynamoCleanupPlugin instance.
++func NewDynamoCleanupPlugin() *DynamoCleanupPlugin {
++	return &DynamoCleanupPlugin{
++		typedName: plugins.TypedName{Type: PluginType, Name: PluginName},
++	}
++}
++
++// WithName sets a custom name for the plugin.
++func (p *DynamoCleanupPlugin) WithName(name string) *DynamoCleanupPlugin {
++	p.typedName.Name = name
++	return p
++}
++
++// DynamoCleanupPluginFactory creates a DynamoCleanupPlugin from configuration.
++func DynamoCleanupPluginFactory(name string, _ json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
++	return NewDynamoCleanupPlugin().WithName(name), nil
++}
++
++// TypedName returns the plugin's type and name.
++func (p *DynamoCleanupPlugin) TypedName() plugins.TypedName {
++	return p.typedName
++}
++
++// PostResponse is called after a response is received from the model server.
++// It cleans up the router bookkeeping state for the completed request.
++func (p *DynamoCleanupPlugin) PostResponse(
++	ctx context.Context,
++	request *schedtypes.LLMRequest,
++	response *rc.Response,
++	targetPod *backend.Pod,
++) {
++	logger := log.FromContext(ctx)
++
++	if request == nil {
++		logger.V(logutil.DEBUG).Info("DynamoCleanupPlugin: request is nil, skipping cleanup")
++		return
++	}
++
++	requestID := request.RequestId
++	if requestID == "" {
++		logger.V(logutil.DEBUG).Info("DynamoCleanupPlugin: no request ID, skipping cleanup")
++		return
++	}
++
++	// Call the dynamo router to free the request bookkeeping
++	if err := dynamo.CallFreeRequest(requestID); err != nil {
++		logger.V(logutil.DEFAULT).Error(err, "DynamoCleanupPlugin: failed to free request",
++			"requestID", requestID)
++		return
++	}
++
++	logger.V(logutil.VERBOSE).Info("DynamoCleanupPlugin: freed request from router",
++		"requestID", requestID)
++}
++
 diff --git a/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go b/pkg/epp/requestcontrol/plugins/dynamo_inject_workerid/plugin.go
 new file mode 100644
 index 0000000..1c8f979
@@ -338,10 +457,10 @@ index 0000000..1c8f979
 +}
 diff --git a/pkg/epp/scheduling/plugins/dynamo_kv_scorer/epp-config-dynamo.yaml b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/epp-config-dynamo.yaml
 new file mode 100644
-index 0000000..b689c00
+index 0000000..e94b72b
 --- /dev/null
 +++ b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/epp-config-dynamo.yaml
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,24 @@
 +# This is an example for configuring the EPP to use the dynamo token-aware kv router for scoring the pods
 +apiVersion: inference.networking.x-k8s.io/v1alpha1
 +kind: EndpointPickerConfig
@@ -357,6 +476,9 @@ index 0000000..b689c00
 +    parameters: {}
 +  - name: dyn-kv
 +    type: kv-aware-scorer
++  # Cleanup: frees router bookkeeping when request completes
++  - name: dyn-cleanup
++    type: dynamo-cleanup
 +schedulingProfiles:
 +  - name: default
 +    plugins:
@@ -365,10 +487,10 @@ index 0000000..b689c00
 +      - pluginRef: picker
 diff --git a/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
 new file mode 100644
-index 0000000..6ee6634
+index 0000000..31af16e
 --- /dev/null
 +++ b/pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go
-@@ -0,0 +1,446 @@
+@@ -0,0 +1,587 @@
 +package dynamo_kv_scorer
 +
 +/*
@@ -435,6 +557,20 @@ index 0000000..6ee6634
 +dynamo_llm_result_t dynamo_free_worker_selection_result(uint32_t *token_ids,
 +                                                        size_t token_count,
 +                                                        char *annotated_request_json);
++
++// Router bookkeeping functions for GAIE integration
++dynamo_llm_result_t dynamo_router_add_request(WorkerSelectionPipeline *pipeline,
++                                              const char *request_id_c_str,
++                                              const uint32_t *token_ids,
++                                              size_t token_count,
++                                              uint64_t worker_id,
++                                              uint32_t dp_rank);
++
++dynamo_llm_result_t dynamo_router_mark_prefill_complete(WorkerSelectionPipeline *pipeline,
++                                                        const char *request_id_c_str);
++
++dynamo_llm_result_t dynamo_router_free_request(WorkerSelectionPipeline *pipeline,
++                                               const char *request_id_c_str);
 +*/
 +import "C"
 +
@@ -459,6 +595,7 @@ index 0000000..6ee6634
 +	KVAwareScorerType        = "kv-aware-scorer"
 +	StateKeyWorkerInstanceID = schedtypes.StateKey("dynamo/worker-instance-id")
 +	StateKeyPrefillWorkerID  = schedtypes.StateKey("dynamo/prefill-worker-id")
++	StateKeyRequestID        = schedtypes.StateKey("dynamo/request-id")
 +	WorkerIDHeader           = "x-worker-instance-id"
 +	PrefillWorkerIDHeader    = "x-prefiller-host-port"
 +	tokenDataAnnotationKey   = "dynamo/token-data"
@@ -685,6 +822,19 @@ index 0000000..6ee6634
 +			copy(copied, tokenData)
 +			req.Annotations[tokenDataAnnotationKey] = copied
 +		}
++
++		// GAIE Stage 1: Register request with router bookkeeping
++		// The request ID comes from Envoy's request ID header
++		requestID := req.RequestId
++		if requestID != "" {
++			cycle.Write(StateKeyRequestID, stateString(requestID))
++			if addErr := k.callAddRequest(ctx, requestID, tokenData, workerID, prefillWorkerID); addErr != nil {
++				logger.V(logutil.DEFAULT).Error(addErr, "Failed to add request to router bookkeeping",
++					"requestID", requestID)
++			}
++		} else {
++			logger.V(logutil.VERBOSE).Info("No request ID available, skipping router bookkeeping")
++		}
 +	}
 +
 +	out := make(map[schedtypes.Pod]float64, len(pods))
@@ -792,6 +942,119 @@ index 0000000..6ee6634
 +		"annotations": []string{"query_instance_id"},
 +	}
 +	return requestBody
++}
++
++// --------------------------- router bookkeeping ---------------------------
++
++// callAddRequest registers a request with the router's bookkeeping.
++// This should be called after worker selection to track active requests.
++func (k *KVAwareScorer) callAddRequest(
++	ctx context.Context,
++	requestID string,
++	tokenData []int64,
++	workerID string,
++	prefillWorkerID string,
++) error {
++	logger := log.FromContext(ctx)
++
++	if !runtimeInitialized {
++		return fmt.Errorf("dynamo runtime not initialized")
++	}
++
++	pipelineMutex.RLock()
++	currentPipeline := pipeline
++	pipelineMutex.RUnlock()
++
++	if currentPipeline == nil {
++		return fmt.Errorf("dynamo worker selection pipeline not created")
++	}
++
++	// Parse worker ID (use decode worker for bookkeeping in disagg mode)
++	var workerIDUint uint64
++	if _, err := fmt.Sscanf(workerID, "%d", &workerIDUint); err != nil {
++		return fmt.Errorf("invalid worker ID: %s", workerID)
++	}
++
++	// Convert token data from int64 to uint32
++	tokens := make([]uint32, len(tokenData))
++	for i, t := range tokenData {
++		tokens[i] = uint32(t)
++	}
++
++	cRequestID := C.CString(requestID)
++	defer C.free(unsafe.Pointer(cRequestID))
++
++	var cTokens *C.uint32_t
++	if len(tokens) > 0 {
++		cTokens = (*C.uint32_t)(unsafe.Pointer(&tokens[0]))
++	}
++
++	rc := C.dynamo_router_add_request(
++		currentPipeline,
++		cRequestID,
++		cTokens,
++		C.size_t(len(tokens)),
++		C.uint64_t(workerIDUint),
++		C.uint32_t(0), // dp_rank = 0 for now
++	)
++
++	if rc != C.DYNAMO_OK {
++		return fmt.Errorf("dynamo_router_add_request failed")
++	}
++
++	logger.V(logutil.VERBOSE).Info("Added request to router bookkeeping",
++		"requestID", requestID, "workerID", workerID, "tokenCount", len(tokens))
++	return nil
++}
++
++// CallMarkPrefillComplete marks prefill as completed for a request.
++// Exported for use by response handlers.
++func CallMarkPrefillComplete(requestID string) error {
++	if !runtimeInitialized {
++		return fmt.Errorf("dynamo runtime not initialized")
++	}
++
++	pipelineMutex.RLock()
++	currentPipeline := pipeline
++	pipelineMutex.RUnlock()
++
++	if currentPipeline == nil {
++		return fmt.Errorf("dynamo worker selection pipeline not created")
++	}
++
++	cRequestID := C.CString(requestID)
++	defer C.free(unsafe.Pointer(cRequestID))
++
++	rc := C.dynamo_router_mark_prefill_complete(currentPipeline, cRequestID)
++	if rc != C.DYNAMO_OK {
++		return fmt.Errorf("dynamo_router_mark_prefill_complete failed")
++	}
++	return nil
++}
++
++// CallFreeRequest cleans up router state for a completed/cancelled request.
++// Exported for use by response handlers.
++func CallFreeRequest(requestID string) error {
++	if !runtimeInitialized {
++		return fmt.Errorf("dynamo runtime not initialized")
++	}
++
++	pipelineMutex.RLock()
++	currentPipeline := pipeline
++	pipelineMutex.RUnlock()
++
++	if currentPipeline == nil {
++		return fmt.Errorf("dynamo worker selection pipeline not created")
++	}
++
++	cRequestID := C.CString(requestID)
++	defer C.free(unsafe.Pointer(cRequestID))
++
++	rc := C.dynamo_router_free_request(currentPipeline, cRequestID)
++	if rc != C.DYNAMO_OK {
++		return fmt.Errorf("dynamo_router_free_request failed")
++	}
++	return nil
 +}
 +
 +// --------------------------- shutdown ---------------------------
