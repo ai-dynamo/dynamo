@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
@@ -194,6 +194,10 @@ insta = { version = "1.41", features = [
 
 lazy_static = "1.4"
 mockito = "1.7.0"
+
+[[bin]]
+name = "generate-frontend-openapi"
+path = "src/bin/generate_frontend_openapi.rs"
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }

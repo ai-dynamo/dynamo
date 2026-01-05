@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -8,10 +8,41 @@ use serde::{Deserialize, Serialize};
 
 use super::timing::RequestTracker;
 use super::{OutputOptions, SamplingOptions, StopConditions};
-use crate::kv_router::{RouterConfigOverride, protocols::RequestExtraInfo};
+use crate::kv_router::RouterConfigOverride;
 #[cfg(feature = "media-nixl")]
 use crate::preprocessor::media::RdmaMediaDataDescriptor;
 use crate::protocols::TokenIdType;
+
+/// Routing hints for directing requests to specific workers.
+/// These fields are extracted from nvext and used by the router to determine
+/// which worker(s) should handle the request.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(default)]
+pub struct RoutingHints {
+    /// General backend instance ID for direct routing (aggregated mode)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance_id: Option<u64>,
+
+    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefill_worker_id: Option<u64>,
+
+    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decode_worker_id: Option<u64>,
+
+    /// Data parallel rank for the request
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dp_rank: Option<u32>,
+
+    /// Controls whether the router should manage local bookkeeping (add_request,
+    /// mark_prefill_completed, free) for this request.
+    ///
+    /// - `None` or `Some(true)`: Router handles bookkeeping locally (default behavior)
+    /// - `Some(false)`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_local_updates: Option<bool>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct BootstrapInfo {
@@ -85,9 +116,10 @@ pub struct PreprocessedRequest {
     #[builder(default)]
     pub annotations: Vec<String>,
 
-    /// Targeted backend instance ID for the request
+    /// Routing hints for worker targeting (backend_instance_id, prefill/decode worker IDs, dp_rank)
     #[builder(default)]
-    pub backend_instance_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingHints>,
 
     /// Router configuration overrides for this specific request
     #[builder(default)]
@@ -103,41 +135,15 @@ pub struct PreprocessedRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bootstrap_info: Option<BootstrapInfo>,
 
-    /// Data parallel rank for the request (used with data parallelism)
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub dp_rank: Option<u32>,
-
     /// Additional arguments for extensibility
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<serde_json::Value>,
 
-    /// Extra fields requested to be included in the response's nvext
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extra_fields: Option<Vec<String>>,
-
-    /// Multimodal request-level metadata (mm_hash and token offsets)
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request_extra_info: Option<RequestExtraInfo>,
     /// Optional request tracker for per-request metrics (shared with DeltaGenerator)
     #[builder(default)]
     #[serde(skip)]
     pub tracker: Option<Arc<RequestTracker>>,
-
-    /// Targeted prefill worker ID for disaggregated serving (GAIE Stage 2)
-    /// When set, the prefill request will be routed to this specific worker.
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_prefill_worker_id: Option<u64>,
-
-    /// Targeted decode worker ID for disaggregated serving (GAIE Stage 2)
-    /// When set, the decode request will be routed to this specific worker.
-    #[builder(default)]
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub target_decode_worker_id: Option<u64>,
 }
 
 impl PreprocessedRequest {
@@ -154,11 +160,14 @@ impl PreprocessedRequest {
             .find(|a| a.starts_with(&prefix))
             .map(|a| a[prefix.len()..].to_string())
     }
-}
 
-impl PreprocessedRequest {
     pub fn builder() -> PreprocessedRequestBuilder {
         PreprocessedRequestBuilder::default()
+    }
+
+    /// Get mutable access to routing hints, creating default if None
+    pub fn routing_mut(&mut self) -> &mut RoutingHints {
+        self.routing.get_or_insert_with(RoutingHints::default)
     }
 }
 

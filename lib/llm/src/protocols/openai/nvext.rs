@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 pub use crate::protocols::common::timing::TimingInfo;
@@ -13,7 +14,7 @@ pub trait NvExtProvider {
 }
 
 /// Worker ID information for disaggregated serving
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct WorkerIdInfo {
     /// The prefill worker ID that processed this request
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,7 +26,7 @@ pub struct WorkerIdInfo {
 }
 
 /// NVIDIA LLM response extensions
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
 pub struct NvExtResponse {
     /// Worker ID information (prefill and decode worker IDs)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,7 +44,7 @@ pub struct NvExtResponse {
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
-#[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
 pub struct NvExt {
     /// If true, sampling will be forced to be greedy.
@@ -104,6 +105,17 @@ pub struct NvExt {
     #[builder(default, setter(strip_option))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decode_worker_id: Option<u64>,
+
+    /// Controls whether the router should manage local bookkeeping (add_request,
+    /// mark_prefill_completed, free) for this request.
+    ///
+    /// - `None` or `true`: Router handles bookkeeping locally (default behavior)
+    /// - `false`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
+    ///
+    /// Set to `false` for GAIE Stage 2 when the EPP/sidecar manages request lifecycle.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_local_updates: Option<bool>,
 }
 
 impl Default for NvExt {
@@ -152,6 +164,7 @@ mod tests {
         assert_eq!(nv_ext.extra_fields, None);
         assert_eq!(nv_ext.prefill_worker_id, None);
         assert_eq!(nv_ext.decode_worker_id, None);
+        assert_eq!(nv_ext.enable_local_updates, None);
     }
 
     // Test valid builder configurations

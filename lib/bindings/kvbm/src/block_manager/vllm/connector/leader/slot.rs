@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{any::Any, cmp::max, sync::Arc};
@@ -202,7 +202,7 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
                 // Update Prometheus metrics
                 let host_rate = cache_stats_clone.host_hit_rate();
                 let disk_rate = cache_stats_clone.disk_hit_rate();
-                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate);
+                kvbm_metrics_clone.update_cache_hit_rates(host_rate, disk_rate, 0.0);
                 // Also log cache hit rates periodically
                 cache_stats_clone.maybe_log();
             }

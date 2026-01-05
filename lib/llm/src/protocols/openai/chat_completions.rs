@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
@@ -31,7 +32,7 @@ pub use delta::DeltaGenerator;
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
@@ -43,7 +44,12 @@ pub struct NvCreateChatCompletionRequest {
     pub nvext: Option<NvExt>,
 
     /// Extra args to pass to the chat template rendering context
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepts "chat_template_kwargs" as an alias for compatibility
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
     /// Runtime media decoding parameters.
