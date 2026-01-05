@@ -471,7 +471,6 @@ impl WorkerSelector for DefaultWorkerSelector {
         let prefill_tokens = &request.prefill_tokens;
 
         let mut worker_logits = HashMap::new();
-        let mut max_logit = f64::NEG_INFINITY;
 
         // Calculate logits for each worker with dp_rank
         // Outer loop: iterate over all workers from runtime config
@@ -507,7 +506,6 @@ impl WorkerSelector for DefaultWorkerSelector {
 
                 // Calculate logit (lower is better)
                 let logit = overlap_weight * potential_prefill_block + decode_block;
-                max_logit = max_logit.max(logit);
 
                 worker_logits.insert(worker, logit);
 
