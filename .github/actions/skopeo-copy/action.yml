@@ -94,25 +94,25 @@ runs:
         set -euo pipefail
 
         SOURCE_REF="docker://${{ inputs.source_registry }}/${{ inputs.source_image }}:${{ inputs.source_tag }}"
-        
+
         # Use source values as defaults if target not specified
         TARGET_IMAGE="${{ inputs.target_image }}"
         if [ -z "$TARGET_IMAGE" ]; then
           TARGET_IMAGE="${{ inputs.source_image }}"
         fi
-        
+
         TARGET_TAG="${{ inputs.target_tag }}"
         if [ -z "$TARGET_TAG" ]; then
           TARGET_TAG="${{ inputs.source_tag }}"
         fi
-        
+
         TARGET_REF="docker://${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}"
-        
+
         echo "Copying image:"
         echo "  Source: ${SOURCE_REF}"
         echo "  Target: ${TARGET_REF}"
-        
+
         skopeo copy --all "${SOURCE_REF}" "${TARGET_REF}"
-        
+
         echo "target_image_ref=${{ inputs.target_registry }}/${TARGET_IMAGE}:${TARGET_TAG}" >> $GITHUB_OUTPUT
         echo "✅ Image copied successfully"

@@ -411,12 +411,12 @@ jobs:
   #         --set dynamo-operator.namespaceRestriction.enabled=true \
   #         --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
   #         --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-  #         --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-operator-to-acr.outputs.target_tag_amd64 }} 
+  #         --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-operator-to-acr.outputs.target_tag_amd64 }}
   #       # Wait for all deployments to be ready
   #       timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   # # ============================================================================
-  # # 
+  # #
   # # End-to-end tests for each framework with various deployment profiles
   # # ============================================================================
   # deploy-test-vllm:
@@ -571,7 +571,7 @@ jobs:
   #         retention-days: 7
 
   # # ============================================================================
-  # # CLEANUP JOBS 
+  # # CLEANUP JOBS
   # # Clean up ephemeral Kubernetes namespace and resources
   # # ============================================================================
   # cleanup:

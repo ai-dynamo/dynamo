@@ -72,7 +72,7 @@ trtllm_code: &trtllm_code
   - *core_code
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-  
+
 trtllm_container: &trtllm_container
   - *core_container
   - 'container/Dockerfile.trtllm'

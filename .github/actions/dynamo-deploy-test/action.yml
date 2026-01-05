@@ -91,7 +91,7 @@ runs:
         echo "${{ inputs.kubeconfig_base64 }}" | base64 -d > ${{ github.workspace }}/.kubeconfig
         chmod 600 ${{ github.workspace }}/.kubeconfig
         echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
-        
+
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
         kubectl config set-context --current --namespace=${{ inputs.namespace }}
         kubectl config get-contexts
@@ -141,12 +141,12 @@ runs:
         echo "=== WAITING FOR PODS ==="
         sleep 20
         echo "Waiting for pods with label nvidia.com/dynamo-graph-deployment-name: $GRAPH_NAME"
-        
+
         if ! kubectl wait --for=condition=ready pod \
           -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" \
           -n ${KUBE_NS} \
           --timeout=${POD_READY_TIMEOUT}; then
-          
+
           echo "::error::Pods failed to become ready within timeout"
           echo "deploy_failed=true" >> $GITHUB_OUTPUT
           exit 1
@@ -168,31 +168,31 @@ runs:
         GRAPH_NAME: ${{ steps.deploy.outputs.graph_name }}
       run: |
         export KUBECONFIG=${{ github.workspace }}/.kubeconfig
-        
+
         echo "## ❌ Pod Readiness Failure: ${FRAMEWORK} / ${DEPLOYMENT_FILE}" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
         echo "**Graph Name:** \`${GRAPH_NAME}\`" >> "$GITHUB_STEP_SUMMARY"
         echo "**Namespace:** \`${NAMESPACE}\`" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
-        
+
         echo "### All relevant Pods in Namespace" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} -o wide >> "$GITHUB_STEP_SUMMARY" 2>&1
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
-        
+
         # echo "### Pod Descriptions" >> "$GITHUB_STEP_SUMMARY"
         # echo '```' >> "$GITHUB_STEP_SUMMARY"
         # kubectl describe pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} >> "$GITHUB_STEP_SUMMARY" 2>&1
         # echo '```' >> "$GITHUB_STEP_SUMMARY"
         # echo "" >> "$GITHUB_STEP_SUMMARY"
-        
+
         echo "### Pod Logs (last 30 lines per container)" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
-        
+
         # Get logs pod by pod for better readability
         PODS=$(kubectl get pods -l "nvidia.com/dynamo-graph-deployment-name=$GRAPH_NAME" -n ${NAMESPACE} -o jsonpath='{.items[*].metadata.name}')
-        
+
         if [ -z "$PODS" ]; then
           echo "_No pods found matching the deployment label_" >> "$GITHUB_STEP_SUMMARY"
         else
@@ -228,19 +228,19 @@ runs:
         FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} \
           -l nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME} \
           -o jsonpath='{.items[0].metadata.name}')
-        
+
         CONTAINER_PORT=$(kubectl get pod $FRONTEND_POD -n ${NAMESPACE} \
           -o jsonpath='{.spec.containers[0].ports[?(@.name=="http")].containerPort}')
-        
+
         echo "Frontend Pod: ${FRONTEND_POD}"
         echo "Container Port: ${CONTAINER_PORT}"
-        
+
         kubectl port-forward pod/$FRONTEND_POD 8000:${CONTAINER_PORT} -n ${NAMESPACE} &
         PORT_FORWARD_PID=$!
-        
+
         LLM_URL="http://localhost:8000"
         sleep ${PORT_FORWARD_DELAY}
-        
+
         echo "LLM URL: ${LLM_URL}"
         echo "Model Name: ${MODEL_NAME}"
 
@@ -309,10 +309,10 @@ runs:
         fi
 
         echo "test_result=${TEST_RESULT}" >> $GITHUB_OUTPUT
-        
+
         # Cleanup port-forward
         kill $PORT_FORWARD_PID 2>/dev/null || true
-        
+
         exit $TEST_RESULT
 
     - name: Cleanup Deployment
