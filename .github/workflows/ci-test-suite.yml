@@ -102,9 +102,7 @@ jobs:
           docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64" || echo "Framework image not found in cache"
           docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
           echo "Cache pull completed"
-      # Skip framework build for sglang - it uses pre-built runtime image and has no framework target
       - name: Build Framework Image
-        if: matrix.framework != 'sglang'
         id: build_framework
         uses: ./.github/actions/docker-build
         with:
@@ -123,7 +121,6 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           image_tag: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
       - name: Tag and Push Framework Images
-        if: matrix.framework != 'sglang'
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
@@ -211,9 +208,7 @@ jobs:
           docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64" || echo "Framework image not found in cache"
           docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
           echo "Cache pull completed"
-      # Skip framework build for sglang - it uses pre-built runtime image and has no framework target
       - name: Build Framework Image
-        if: matrix.framework != 'sglang'
         id: build_framework
         uses: ./.github/actions/docker-build
         with:
@@ -232,7 +227,6 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           image_tag: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
       - name: Tag and Push Framework Images
-        if: matrix.framework != 'sglang'
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
