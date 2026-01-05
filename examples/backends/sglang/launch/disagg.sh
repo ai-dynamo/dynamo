@@ -61,8 +61,7 @@ python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
-  --tp 2 \
-  --load-balance-method round_robin \
+  --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
   --disaggregation-bootstrap-port 12345 \
@@ -79,8 +78,7 @@ CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
   --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
-  --prefill-round-robin-balance \
-  --tp 2 \
+  --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port 12345 \
