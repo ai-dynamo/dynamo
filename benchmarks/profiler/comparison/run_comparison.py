@@ -210,6 +210,8 @@ def load_validation_from_dir(results_dir: Path, metrics: ProfilingMetrics) -> Pr
                     metrics.ttft_error_at_medium = ttft_error
                 elif level == "saturation":
                     metrics.ttft_error_at_saturation = ttft_error
+                elif level == "overload":
+                    metrics.ttft_error_at_overload = ttft_error
                     
                 logger.info(f"  {level}: TTFT={actual_ttft:.1f}ms (err={ttft_error:.1f}% vs pred)" if ttft_error else f"  {level}: TTFT={actual_ttft:.1f}ms")
             except Exception as e:

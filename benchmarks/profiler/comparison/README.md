@@ -98,7 +98,7 @@ For each method, deploy its recommended config and measure actual latency at dif
 ### Deploy a method's config
 
 ```bash
-export METHOD=online_all  # update for each method
+export METHOD=aic_all  # update for each method
 kubectl apply -n $NAMESPACE \
   -f benchmarks/profiler/comparison/results/${METHOD}/config_with_planner.yaml
 kubectl port-forward svc/trtllm-disagg-frontend 8000:8000 -n $NAMESPACE &
@@ -131,24 +131,64 @@ done
 
 ## Step 4: Optimization Accuracy Testing
 
-Test all configs under realistic workloads to measure actual goodput.
+Measure whether each method selected the **best config** under realistic production load.
 
-### Generate sinusoidal load
+### Methodology
+
+1. **Establish ground truth**: Run ALL configs from Online-ALL profiling under realistic load
+2. **Find optimal**: Identify which config achieves highest goodput/GPU while meeting SLA
+3. **Measure regret**: Compare each method's recommendation against ground truth
+
+### Realistic workload options
+
+**Option A: Sinusoidal load** (standard Planner testing pattern)
 
 ```bash
-python benchmarks/sin_load_generator/sin_synth.py \
+PYTHONPATH=$PYTHONPATH:benchmarks python benchmarks/sin_load_generator/sin_synth.py \
   --time-duration 1800 \
-  --request-rate-min 5 --request-rate-max 45 \
+  --request-rate-min 0.5 --request-rate-max 2 \
+  --request-rate-period 300 \
   --isl1 2048 --osl1 256 \
+  --isl2 2048 --osl2 256 \
   --output-file benchmarks/profiler/comparison/results/sinusoidal.jsonl
 ```
 
-***Note: the benchmarks directory needs to be in your PYTHONPATH.***
+**Note:** Request rates must match deployment capacity:
+- TP=1/2 disaggregated (2-3 GPUs): ~0.5-2 req/s
+- TP=4 (4 GPUs): ~2-8 req/s  
+- TP=8 (8 GPUs): ~5-20 req/s
 
-### Benchmark each method's config
+Calibrate to the **smallest config** being tested to ensure all configs can complete without crashing.
+
+**Option B: Production trace** (preferred for real-world accuracy)
 
 ```bash
-# For each method:
+# Use DeepInfra or other production traces when available
+cp /path/to/production_trace.jsonl benchmarks/profiler/comparison/results/trace.jsonl
+```
+
+### Ground truth from profiling
+
+The Online profiler already tested all TP combinations and recorded per-config metrics.
+Extract ground truth from the profiling logs:
+
+```bash
+# Online-ALL already tested TP=1,2,4,8 for both prefill and decode
+# Check what each profiler recommended:
+grep "Suggested" results/aic_all/profile_sla.log
+grep "Suggested" results/online_all/profile_sla.log
+```
+
+Example results:
+- **AIC-ALL**: Prefill TP=1 (1 GPU) + Decode TP=2 (2 GPUs) = 3 GPUs total
+- **Online-ALL**: Prefill TP=1 (1 GPU) + Decode TP=1 (1 GPU) = 2 GPUs total
+
+### Validate recommended configs under realistic load
+
+For each method, deploy its config (same as Step 3) and run the realistic load:
+
+```bash
+# Assumes deployment is already running and port-forwarded
 aiperf profile --model Qwen/Qwen3-32B --url localhost:8000 --streaming \
   --input-file benchmarks/profiler/comparison/results/sinusoidal.jsonl \
   --custom-dataset-type mooncake_trace \
@@ -156,7 +196,11 @@ aiperf profile --model Qwen/Qwen3-32B --url localhost:8000 --streaming \
   --artifact-dir benchmarks/profiler/comparison/results/${METHOD}/optimization
 ```
 
----
+**Repeat for each method** (aic_all, online_all, and all experimental methods).
+
+The comparison script calculates regret using Online-ALL as ground truth.
+
+--
 
 ## Step 5: Compare All Results
 
@@ -182,8 +226,8 @@ results/
 │   ├── config_with_planner.yaml
 │   ├── profile_sla.log
 │   ├── validation/{idle,medium,saturation,overload}/
-│   └── optimization/
-├── online_all/                     # Baseline: Online
+│   └── optimization/              # Realistic load test
+├── online_all/                     # Baseline: Online (ground truth)
 │   ├── config_with_planner.yaml
 │   ├── profile_sla.log
 │   ├── validation/
@@ -193,7 +237,7 @@ results/
 │   ├── profile_sla.log
 │   ├── validation/
 │   └── optimization/
-├── sinusoidal.jsonl
+├── sinusoidal.jsonl                # or trace.jsonl
 └── comparison/
     ├── comparison_results.json
     ├── summary.txt

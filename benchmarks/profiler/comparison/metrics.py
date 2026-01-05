@@ -61,6 +61,7 @@ class ProfilingMetrics:
     ttft_error_at_idle: Optional[float] = None
     ttft_error_at_medium: Optional[float] = None
     ttft_error_at_saturation: Optional[float] = None
+    ttft_error_at_overload: Optional[float] = None
 
     # Optimization accuracy
     optimization_validated: bool = False
@@ -125,6 +126,11 @@ class ComparisonResult:
         if not self.method_metrics:
             return
 
+        # Set ground truth from online_aiperf (it tested all configs)
+        online = next((m for m in self.method_metrics if m.method_name == "online_aiperf"), None)
+        if online and online.actual_goodput and online.actual_goodput > 0:
+            self.set_ground_truth("online_aiperf", online.actual_goodput)
+
         durations = [(m.method_name, m.total_duration_seconds)
                      for m in self.method_metrics if m.total_duration_seconds > 0]
         if durations:
@@ -167,13 +173,14 @@ class ComparisonResult:
         # Predictive accuracy section
         has_validation = any(m.validated for m in self.method_metrics)
         if has_validation:
-            lines.extend(["", "--- PREDICTIVE ACCURACY (TTFT error vs predicted) ---", "-" * 80,
-                          f"{'Method':<20} {'Idle':<12} {'Medium':<12} {'Saturation':<12}", "-" * 80])
+            lines.extend(["", "--- PREDICTIVE ACCURACY (TTFT error vs predicted) ---", "-" * 100,
+                          f"{'Method':<20} {'Idle':<12} {'Medium':<12} {'Saturation':<12} {'Overload':<12}", "-" * 100])
             for m in self.method_metrics:
                 idle = f"{m.ttft_error_at_idle:+.1f}%" if m.ttft_error_at_idle is not None else "N/A"
                 med = f"{m.ttft_error_at_medium:+.1f}%" if m.ttft_error_at_medium is not None else "N/A"
                 sat = f"{m.ttft_error_at_saturation:+.1f}%" if m.ttft_error_at_saturation is not None else "N/A"
-                lines.append(f"{m.method_name:<20} {idle:<12} {med:<12} {sat:<12}")
+                ovl = f"{m.ttft_error_at_overload:+.1f}%" if m.ttft_error_at_overload is not None else "N/A"
+                lines.append(f"{m.method_name:<20} {idle:<12} {med:<12} {sat:<12} {ovl:<12}")
 
         # Optimization accuracy section
         has_optimization = any(m.optimization_validated for m in self.method_metrics)

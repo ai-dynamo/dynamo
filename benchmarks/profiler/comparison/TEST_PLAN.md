@@ -95,9 +95,17 @@ Did the method find the best possible config?
 |--------|---------|
 | Goodput (req/s) | Requests meeting SLA per second |
 | Goodput/GPU | Efficiency metric |
-| Regret % | `(ground_truth - method) / ground_truth × 100` |
+| Regret % | `(best_config - method_config) / best_config × 100` |
 
-**Ground truth** = Online-ALL's config goodput under realistic load.
+**Ground truth establishment**:
+1. Deploy ALL configs (TP=1, 2, 4, 8) under realistic load
+2. Measure goodput/GPU for each while meeting SLA
+3. Best config = highest goodput/GPU that meets SLA constraints
+4. Compare each method's recommendation against this ground truth
+
+**Realistic workload options**:
+- Sinusoidal load (standard Planner testing): 5-45 req/s over 30 min
+- Production trace (DeepInfra or similar): actual request patterns
 
 ---
 
@@ -118,10 +126,15 @@ For each method:
 
 ### Phase 3: Optimization Accuracy
 
-For each method:
-1. Deploy its config
-2. Run AIPerf with sinusoidal load (30 min)
-3. Measure goodput, compare to ground truth
+**Establish ground truth** (run once):
+1. Deploy ALL configs (TP=1, 2, 4, 8) under realistic load
+2. Run AIPerf with sinusoidal/production trace (30 min each)
+3. Find best config = highest goodput/GPU meeting SLA
+
+**Compare each method**:
+1. Check which config each method recommended
+2. Look up that config's goodput from ground truth testing
+3. Calculate regret vs best config
 
 ### Phase 4: Compare & Report
 
