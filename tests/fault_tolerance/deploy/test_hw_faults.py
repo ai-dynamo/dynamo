@@ -247,7 +247,8 @@ async def test_gpu_xid79_nvsentinel_eviction(
         assert passthrough_success, "Failed to setup CUDA passthrough"
         logger.info("  ✓ CUDA passthrough configured")
         
-        await deployment.wait_for_all_pods_ready(timeout=300)
+        # force_pod_check=True because CUDA setup force-deletes pods and DGD status may be stale
+        await deployment.wait_for_all_pods_ready(timeout=300, force_pod_check=True)
         logger.info("  ✓ Pods ready with CUDA library (faults disabled)")
         log_pod_status("After CUDA Setup")
         
@@ -449,7 +450,8 @@ async def test_gpu_xid79_nvsentinel_eviction(
         logger.info("  (vLLM workers take ~5-7 min to start after cold eviction)")
         
         await deployment.wait_for_pods_on_healthy_nodes(exclude_node=target_node, timeout=1000)
-        await deployment.wait_for_all_pods_ready(timeout=1000)
+        # force_pod_check=True because pods were evicted and new ones are starting
+        await deployment.wait_for_all_pods_ready(timeout=1000, force_pod_check=True)
         
         log_pod_status("After Eviction (new clean pods)")
         

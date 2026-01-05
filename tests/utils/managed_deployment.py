@@ -398,6 +398,15 @@ class DeploymentSpec:
             for svc, spec in self._deployment_spec["spec"]["services"].items()
         ]
 
+    def get_service_replicas(self, service_name: str) -> int | None:
+        """Get expected replica count for a service."""
+        services = self._deployment_spec["spec"].get("services", {})
+        # Case-insensitive lookup
+        for name, spec in services.items():
+            if name.lower() == service_name.lower():
+                return spec.get("replicas", 1)
+        return None
+
     def __getitem__(self, service_name: str) -> ServiceSpec:
         """Allow dict-like access: d['Frontend']"""
         return ServiceSpec(
@@ -621,15 +630,18 @@ class ManagedDeployment:
             timeout, sleep, log_interval, False, "pending"
         )
 
-    async def _wait_for_ready(self, timeout: int = 1800, sleep=1, log_interval=60):
+    async def _wait_for_ready(
+        self, timeout: int = 1800, sleep=1, log_interval=60, force_pod_check: bool = False
+    ):
         """
         Wait for the custom resource to be ready.
 
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
+            force_pod_check: If True, always use pod-level readiness check instead of DGD status.
         """
         return await self._wait_for_condition(
-            timeout, sleep, log_interval, True, "successful"
+            timeout, sleep, log_interval, True, "successful", force_pod_check
         )
 
     async def _wait_for_condition(
@@ -639,6 +651,7 @@ class ManagedDeployment:
         log_interval=60,
         desired_ready_condition_val: bool = True,
         desired_state_val: str = "successful",
+        force_pod_check: bool = False,
     ):
         start_time = time.time()
 
@@ -677,14 +690,35 @@ class ManagedDeployment:
 
                 observed_state_val = status_obj.get("state")  # type: ignore[attr-defined]
 
-                if (
+                elapsed = time.time() - start_time
+
+                # When force_pod_check is True, always verify at pod level
+                # This is needed after operations that force-delete pods (e.g., CUDA setup)
+                # where DGD status may be stale and show "successful" briefly
+                if force_pod_check:
+                    pods_ready = await self._check_all_pods_ready()
+                    if pods_ready:
+                        self._logger.info(
+                            f"[force_pod_check] All pods ready at pod level"
+                        )
+                        self._logger.info(f"Current deployment state: {current_state}")
+                        self._logger.info(
+                            f"Elapsed time: {elapsed:.1f}s / {timeout}s"
+                        )
+                        return True
+                    elif attempt % log_interval == 0:
+                        self._logger.info(
+                            f"[force_pod_check] Waiting for pods... "
+                            f"Elapsed: {elapsed:.1f}s / {timeout}s"
+                        )
+                elif (
                     observed_ready_condition_val == str(desired_ready_condition_val)
                     and observed_state_val == desired_state_val
                 ):
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
                     self._logger.info(
-                        f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
+                        f"Elapsed time: {elapsed:.1f}s / {timeout}s"
                     )
 
                     self._logger.info(
@@ -692,6 +726,27 @@ class ManagedDeployment:
                     )
                     return True
                 else:
+                    # Fallback: check actual pod readiness when DGD status may be stale
+                    # Only use fallback after 120s grace period to avoid stale data
+                    # (e.g., after pod restarts, old pods may briefly appear ready)
+                    if (
+                        desired_ready_condition_val
+                        and desired_state_val == "successful"
+                        and elapsed > 120  # Grace period before fallback
+                    ):
+                        pods_ready = await self._check_all_pods_ready()
+                        if pods_ready:
+                            self._logger.warning(
+                                "DGD status appears stale - pods are ready but DGD shows not ready. "
+                                "Using pod-level readiness as fallback."
+                            )
+                            self._logger.info(f"Current deployment state: {current_state}")
+                            self._logger.info(f"Current conditions: {conditions}")
+                            self._logger.info(
+                                f"Elapsed time: {elapsed:.1f}s / {timeout}s"
+                            )
+                            return True
+
                     if attempt % log_interval == 0:
                         self._logger.info(f"Current deployment state: {current_state}")
                         self._logger.info(f"Current conditions: {conditions}")
@@ -713,6 +768,68 @@ class ManagedDeployment:
                 )
             await asyncio.sleep(sleep)
         raise TimeoutError("Deployment failed to become ready within timeout")
+
+    async def _check_all_pods_ready(self) -> bool:
+        """
+        Check if all pods for the deployment are actually ready at the pod level.
+        This is a fallback for when DGD status is stale due to operator caching issues.
+        Strict checks to avoid false positives from terminating/initializing pods.
+        """
+        try:
+            pods = self.get_pods()
+            if not pods:
+                return False
+
+            for service_name, service_pods in pods.items():
+                expected_replicas = self.deployment_spec.get_service_replicas(
+                    service_name
+                )
+                if expected_replicas is None:
+                    continue
+
+                ready_count = 0
+                for pod in service_pods:
+                    status = pod.raw.get("status", {})
+                    phase = status.get("phase", "")
+
+                    # Skip non-running pods
+                    if phase != "Running":
+                        continue
+
+                    # Skip pods being deleted (have deletionTimestamp)
+                    if pod.raw.get("metadata", {}).get("deletionTimestamp"):
+                        continue
+
+                    # Check all containers are ready (not just started)
+                    container_statuses = status.get("containerStatuses", [])
+                    if not container_statuses:
+                        continue
+
+                    # Verify: ready=True AND no waiting state (PodInitializing, etc.)
+                    all_ready = True
+                    for cs in container_statuses:
+                        if not cs.get("ready", False):
+                            all_ready = False
+                            break
+                        # Check not in waiting state
+                        state = cs.get("state", {})
+                        if "waiting" in state:
+                            all_ready = False
+                            break
+
+                    if all_ready:
+                        ready_count += 1
+
+                if ready_count < expected_replicas:
+                    self._logger.debug(
+                        f"Service {service_name}: {ready_count}/{expected_replicas} pods ready"
+                    )
+                    return False
+
+            return True
+        except Exception as e:
+            self._logger.debug(f"Pod readiness check failed: {e}")
+            return False
 
     async def _restart_nats(self):
         NATS_STS_NAME = "dynamo-platform-nats"
@@ -1298,9 +1415,18 @@ class ManagedDeployment:
         self._logger.warning(f"Timeout waiting for pods on healthy nodes")
         return False
 
-    async def wait_for_all_pods_ready(self, timeout: int = 600) -> bool:
-        """Wait for all deployment pods to be ready."""
-        return await self._wait_for_ready(timeout=timeout)
+    async def wait_for_all_pods_ready(
+        self, timeout: int = 600, force_pod_check: bool = False
+    ) -> bool:
+        """
+        Wait for all deployment pods to be ready.
+
+        Args:
+            timeout: Maximum time to wait in seconds
+            force_pod_check: If True, always verify at pod level instead of trusting
+                            DGD status. Use after operations that force-delete pods.
+        """
+        return await self._wait_for_ready(timeout=timeout, force_pod_check=force_pod_check)
 
     def collect_metrics(self, phase: str = ""):
         """Collect metrics for the current phase (stub for now)."""
