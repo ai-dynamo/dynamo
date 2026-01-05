@@ -48,16 +48,17 @@ def create_ec_transfer_config(
             raise ValueError(f"Invalid JSON in --ec-extra-config: {e}")
 
     # Add storage path to config if provided
+    # Note: ECExampleConnector expects "shared_storage_path" key
     if ec_storage_path:
-        extra_config["storage_path"] = ec_storage_path
+        extra_config["shared_storage_path"] = ec_storage_path
 
     # Validate required fields
     if (
         ec_connector_backend == "ECExampleConnector"
-        and "storage_path" not in extra_config
+        and "shared_storage_path" not in extra_config
     ):
         raise ValueError(
-            "ECExampleConnector requires 'storage_path' in config. "
+            "ECExampleConnector requires 'shared_storage_path' in config. "
             "Provide via --ec-storage-path or --ec-extra-config"
         )
 

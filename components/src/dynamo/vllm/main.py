@@ -35,6 +35,7 @@ from dynamo.vllm.ec_transfer_utils import (
     get_pd_engine_id,
 )
 from dynamo.vllm.multimodal_handlers import (
+    ECProcessorHandler,
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
@@ -94,6 +95,9 @@ async def worker():
     if config.vllm_native_encoder_worker:
         await init_vllm_native_encoder(runtime, config)
         logger.debug("init_vllm_native_encoder completed")
+    elif config.ec_processor:
+        await init_ec_processor(runtime, config)
+        logger.debug("init_ec_processor completed")
     elif config.multimodal_processor:
         await init_multimodal_processor(runtime, config)
         logger.debug("init_multimodal_processor completed")
@@ -744,9 +748,8 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
 
     # 2. Configure ECTransferConfig for producer role
-    engine_id = get_encoder_engine_id(
-        config.namespace, config.component, component.instance_id
-    )
+    # Use instance_id=0 as default (single instance per component)
+    engine_id = get_encoder_engine_id(config.namespace, config.component, instance_id=0)
 
     ec_transfer_config = create_ec_transfer_config(
         engine_id=engine_id,
@@ -796,6 +799,76 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
+async def init_ec_processor(runtime: DistributedRuntime, config: Config):
+    """
+    Initialize ECConnector processor component.
+
+    Simple processor that routes multimodal requests using ECConnector pattern:
+    1. Preprocess request (same as regular processor)
+    2. Send multimodal items to encoder workers (stores to shared storage)
+    3. Forward preprocessed request to PD worker (loads from shared storage)
+    4. Stream response back to client
+    """
+    # Create component and endpoint
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Get encoder worker client
+    encoder_client = (
+        await runtime.namespace(config.namespace)
+        .component("encoder")
+        .endpoint("generate")
+        .client()
+    )
+
+    # Get PD worker client
+    pd_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    # Get prompt template from args (must be passed via environment or command line)
+    mm_prompt_template = config.mm_prompt_template
+
+    # Create EC processor handler (with preprocessing like regular processor)
+    handler = ECProcessorHandler(
+        config.engine_args,
+        encoder_worker_client=encoder_client,
+        pd_worker_client=pd_client,
+        prompt_template=mm_prompt_template,
+    )
+
+    logger.info("Waiting for encoder and PD worker instances...")
+    await encoder_client.wait_for_instances()
+    await pd_client.wait_for_instances()
+
+    # Register the endpoint as entrypoint to a model (same as regular processor)
+    await register_llm(
+        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve EC processor endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve EC processor endpoint: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
 async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     """
     Initialize multimodal worker component.
@@ -818,9 +891,8 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     if config.ec_consumer_mode:
         logger.info("Configuring as ECConnector consumer for encoder embeddings")
 
-        engine_id = get_pd_engine_id(
-            config.namespace, config.component, component.instance_id
-        )
+        # Use instance_id=0 as default (single instance per component)
+        engine_id = get_pd_engine_id(config.namespace, config.component, instance_id=0)
 
         ec_transfer_config = create_ec_transfer_config(
             engine_id=engine_id,

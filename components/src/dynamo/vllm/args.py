@@ -61,6 +61,7 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
+    ec_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
@@ -160,6 +161,11 @@ def parse_args() -> Config:
         "--multimodal-processor",
         action="store_true",
         help="Run as multimodal processor component for handling multimodal requests",
+    )
+    parser.add_argument(
+        "--ec-processor",
+        action="store_true",
+        help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers)",
     )
     parser.add_argument(
         "--multimodal-encode-worker",
@@ -307,6 +313,7 @@ def parse_args() -> Config:
     # Check multimodal role exclusivity
     mm_flags = (
         int(bool(args.multimodal_processor))
+        + int(bool(args.ec_processor))
         + int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
         + int(bool(args.multimodal_decode_worker))
@@ -315,7 +322,7 @@ def parse_args() -> Config:
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, "
+            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
             "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
         )
 
@@ -335,6 +342,9 @@ def parse_args() -> Config:
 
     # Set component and endpoint based on worker type
     if args.multimodal_processor:
+        config.component = "processor"
+        config.endpoint = "generate"
+    elif args.ec_processor:
         config.component = "processor"
         config.endpoint = "generate"
     elif args.vllm_native_encoder_worker:
@@ -371,6 +381,7 @@ def parse_args() -> Config:
     config.custom_jinja_template = args.custom_jinja_template
     config.dyn_endpoint_types = args.dyn_endpoint_types
     config.multimodal_processor = args.multimodal_processor
+    config.ec_processor = args.ec_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
