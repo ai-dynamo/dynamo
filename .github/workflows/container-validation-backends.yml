@@ -41,13 +41,35 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
+      - name: Get merge base
+        id: merge-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # For PR branches, compare against merge-base with PR's target branch
+          # For main/release branches, use default behavior (previous commit)
+          if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+            PR_NUMBER="${BASH_REMATCH[1]}"
+            BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+            echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
+            BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
+            echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+          else
+            echo "base_sha=" >> $GITHUB_OUTPUT
+            echo "Using default comparison (previous commit)"
+          fi
       - name: Check for changes
         uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
         id: filter
         with:
           files_yaml_from_source_file: .github/filters.yaml
+          base_sha: ${{ steps.merge-base.outputs.base_sha }}
       - name: Debug changed files
         run: |
+          echo "=== Base SHA Used ==="
+          echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
+          echo ""
           echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
           echo "${{ steps.filter.outputs.all_all_changed_files }}"
           echo ""
