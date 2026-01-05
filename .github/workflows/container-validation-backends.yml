@@ -94,7 +94,7 @@ jobs:
       shell: bash
       run: |
         .github/scripts/route_buildkit.sh --amd
-        .github/scripts/route_buildkit.sh --arm
+        # .github/scripts/route_buildkit.sh --arm
     outputs:
       vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
       vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}

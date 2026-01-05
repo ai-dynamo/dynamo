@@ -114,7 +114,7 @@ COUNT=$(get_pod_count)
 
 # Retry loop if no pods found
 if [ "$COUNT" -eq "0" ]; then
-  echo "⚠️  Warning: DNS returned 0 records. KEDA might be warming up."
+  echo "⚠️  DNS returned 0 records. KEDA should be triggering a new buildkit pod."
   
   for (( retry=1; retry<=MAX_RETRIES; retry++ )); do
     echo "⏳ Waiting ${RETRY_DELAY}s for BuildKit pods to become available (attempt ${retry}/${MAX_RETRIES})..."
