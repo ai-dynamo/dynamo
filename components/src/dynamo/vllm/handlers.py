@@ -515,10 +515,12 @@ class BaseWorkerHandler(ABC):
                 finally:
                     # Avoid lock-map growth on failed loads: if this attempt did not leave the LoRA
                     # loaded, remove the lock entry (best-effort).
-                    if lora_name not in self.lora_id_for_name:
-                        with self._lora_load_locks_guard:
-                            if self._lora_load_locks.get(lora_name) is lock:
-                                self._lora_load_locks.pop(lora_name, None)
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.lora_id_for_name
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
         except Exception as e:
             logger.exception(f"Failed to load LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
@@ -638,10 +640,12 @@ class BaseWorkerHandler(ABC):
                     }
                 finally:
                     # Remove lock entry once the LoRA is not loaded (or never was).
-                    if lora_name not in self.lora_id_for_name:
-                        with self._lora_load_locks_guard:
-                            if self._lora_load_locks.get(lora_name) is lock:
-                                self._lora_load_locks.pop(lora_name, None)
+                    with self._lora_load_locks_guard:
+                        if (
+                            lora_name not in self.lora_id_for_name
+                            and self._lora_load_locks.get(lora_name) is lock
+                        ):
+                            self._lora_load_locks.pop(lora_name, None)
         except Exception as e:
             logger.exception(f"Failed to unload LoRA adapter: {e}")
             yield {"status": "error", "message": str(e)}
