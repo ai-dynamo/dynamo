@@ -71,8 +71,8 @@ static void
 get_fault_config(int* inject, int* xid_type, cudaError_t* error_code)
 {
   static int initialized = 0;
-  static int env_inject = 0;       // From environment variable (initial state)
-  static int cached_xid = 79;      // Default to XID 79
+  static int env_inject = 0;   // From environment variable (initial state)
+  static int cached_xid = 79;  // Default to XID 79
   static cudaError_t cached_error = cudaErrorNoDevice;
 
   if (!initialized) {
@@ -329,8 +329,7 @@ cudaGetDeviceProperties(cudaDeviceProp* prop, int device)
 
 // Intercept: Kernel launch (CRITICAL for inference)
 cudaError_t
-cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim,
-                 void** args, size_t sharedMem, cudaStream_t stream)
+cudaLaunchKernel(const void* func, dim3 gridDim, dim3 blockDim, void** args, size_t sharedMem, cudaStream_t stream)
 {
   if (should_inject_fault()) {
     cudaError_t error = get_error_code();
