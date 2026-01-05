@@ -39,9 +39,9 @@ plugins:
   - name: dyn-kv
     type: kv-aware-scorer
 
-  # Dynamo Cleanup: frees router bookkeeping when request completes
-  - name: dyn-cleanup
-    type: dynamo-cleanup
+  # Dynamo Response Complete: frees router bookkeeping when request completes
+  - name: dyn-response-complete
+    type: dynamo-response-complete
 
 schedulingProfiles:
   - name: default

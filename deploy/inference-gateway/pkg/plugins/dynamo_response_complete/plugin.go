@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package dynamo_cleanup
+package dynamo_response_complete
 
 import (
 	"context"
@@ -31,50 +31,46 @@ import (
 )
 
 const (
-	PluginName = "dynamo-cleanup"
-	PluginType = "dynamo-cleanup"
+	PluginName = "dynamo-response-complete"
+	PluginType = "dynamo-response-complete"
 )
 
-// DynamoCleanupPlugin is a ResponseComplete plugin that cleans up router state
+// DynamoResponseCompletePlugin is a ResponseComplete plugin that cleans up router state
 // when a request completes. It calls dynamo_router_free_request to release
 // the bookkeeping resources associated with the request.
-//
-// In v1.2.1, this implements the ResponseComplete interface instead of PostResponse.
-type DynamoCleanupPlugin struct {
+type DynamoResponseCompletePlugin struct {
 	typedName plugins.TypedName
 }
 
-var _ plugins.Plugin = (*DynamoCleanupPlugin)(nil)
-var _ rc.ResponseComplete = (*DynamoCleanupPlugin)(nil)
+var _ plugins.Plugin = (*DynamoResponseCompletePlugin)(nil)
+var _ rc.ResponseComplete = (*DynamoResponseCompletePlugin)(nil)
 
-// NewDynamoCleanupPlugin creates a new DynamoCleanupPlugin instance.
-func NewDynamoCleanupPlugin() *DynamoCleanupPlugin {
-	return &DynamoCleanupPlugin{
+// NewDynamoResponseCompletePlugin creates a new DynamoResponseCompletePlugin instance.
+func NewDynamoResponseCompletePlugin() *DynamoResponseCompletePlugin {
+	return &DynamoResponseCompletePlugin{
 		typedName: plugins.TypedName{Type: PluginType, Name: PluginName},
 	}
 }
 
 // WithName sets a custom name for the plugin.
-func (p *DynamoCleanupPlugin) WithName(name string) *DynamoCleanupPlugin {
+func (p *DynamoResponseCompletePlugin) WithName(name string) *DynamoResponseCompletePlugin {
 	p.typedName.Name = name
 	return p
 }
 
-// DynamoCleanupPluginFactory creates a DynamoCleanupPlugin from configuration.
-func DynamoCleanupPluginFactory(name string, _ json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
-	return NewDynamoCleanupPlugin().WithName(name), nil
+// DynamoResponseCompletePluginFactory creates a DynamoResponseCompletePlugin from configuration.
+func DynamoResponseCompletePluginFactory(name string, _ json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
+	return NewDynamoResponseCompletePlugin().WithName(name), nil
 }
 
 // TypedName returns the plugin's type and name.
-func (p *DynamoCleanupPlugin) TypedName() plugins.TypedName {
+func (p *DynamoResponseCompletePlugin) TypedName() plugins.TypedName {
 	return p.typedName
 }
 
 // ResponseComplete is called after the complete response is sent.
 // It cleans up the router bookkeeping state for the completed request.
-//
-// This replaces the old PostResponse interface in v1.2.1.
-func (p *DynamoCleanupPlugin) ResponseComplete(
+func (p *DynamoResponseCompletePlugin) ResponseComplete(
 	ctx context.Context,
 	request *schedtypes.LLMRequest,
 	response *rc.Response,
@@ -83,24 +79,24 @@ func (p *DynamoCleanupPlugin) ResponseComplete(
 	logger := log.FromContext(ctx)
 
 	if request == nil {
-		logger.V(logutil.DEBUG).Info("DynamoCleanupPlugin: request is nil, skipping cleanup")
+		logger.V(logutil.DEBUG).Info("DynamoResponseCompletePlugin: request is nil, skipping cleanup")
 		return
 	}
 
 	requestID := request.RequestId
 	if requestID == "" {
-		logger.V(logutil.DEBUG).Info("DynamoCleanupPlugin: no request ID, skipping cleanup")
+		logger.V(logutil.DEBUG).Info("DynamoResponseCompletePlugin: no request ID, skipping cleanup")
 		return
 	}
 
 	// Call the dynamo router to free the request bookkeeping
 	if err := dynamo.CallFreeRequest(requestID); err != nil {
-		logger.V(logutil.DEFAULT).Error(err, "DynamoCleanupPlugin: failed to free request",
+		logger.V(logutil.DEFAULT).Error(err, "DynamoResponseCompletePlugin: failed to free request",
 			"requestID", requestID)
 		return
 	}
 
-	logger.V(logutil.VERBOSE).Info("DynamoCleanupPlugin: freed request from router",
+	logger.V(logutil.VERBOSE).Info("DynamoResponseCompletePlugin: freed request from router",
 		"requestID", requestID)
 }
 
