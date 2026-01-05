@@ -20,6 +20,10 @@
 #   --amd   Target AMD64 architecture BuildKit pods
 #   --arm   Target ARM64 architecture BuildKit pods
 #
+# ENVIRONMENT VARIABLES:
+#   MAX_RETRIES   Max attempts to wait for pods (default: 8)
+#   RETRY_DELAY   Seconds between retry attempts (default: 30)
+#
 # OUTPUTS (written to GITHUB_OUTPUT):
 #   vllm_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
 #   trtllm_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
@@ -93,18 +97,41 @@ if ! command -v nslookup &> /dev/null; then
     exit 1
 fi
 
-# Count active IPs for the headless service
-IP_COUNT=$(nslookup ${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local | grep -i "Address" | grep -v "#53" | wc -l)
-COUNT=$((IP_COUNT))
+# --- RETRY CONFIGURATION ---
+MAX_RETRIES=${MAX_RETRIES:-8}
+RETRY_DELAY=${RETRY_DELAY:-30}
+# ---------------------------
 
+# Function to count active IPs for the headless service
+get_pod_count() {
+  local ip_count
+  ip_count=$(nslookup ${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local 2>/dev/null | grep -i "Address" | grep -v "#53" | wc -l)
+  echo $((ip_count))
+}
+
+# Initial count
+COUNT=$(get_pod_count)
+
+# Retry loop if no pods found
 if [ "$COUNT" -eq "0" ]; then
-  echo "⚠️ Warning: DNS returned 0 records. KEDA might be warming up."
-  # Trigger KEDA scale-up by hitting the endpoint (fire and forget)
-  curl -s --max-time 2 "http://${POD_PREFIX}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}" &>/dev/null &
-  for flavor in "${FLAVORS[@]}"; do
-    echo "${flavor}_${ARCH}=tcp://${POD_PREFIX}-0.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}" >> "$GITHUB_OUTPUT"
+  echo "⚠️  Warning: DNS returned 0 records. KEDA might be warming up."
+  
+  for (( retry=1; retry<=MAX_RETRIES; retry++ )); do
+    echo "⏳ Waiting ${RETRY_DELAY}s for BuildKit pods to become available (attempt ${retry}/${MAX_RETRIES})..."
+    sleep "$RETRY_DELAY"
+    
+    COUNT=$(get_pod_count)
+    if [ "$COUNT" -gt "0" ]; then
+      echo "✅ BuildKit pods are now available!"
+      break
+    fi
+    
+    if [ "$retry" -eq "$MAX_RETRIES" ]; then
+      echo "❌ Error: No BuildKit pods available after ${MAX_RETRIES} attempts ($(( MAX_RETRIES * RETRY_DELAY ))s total)."
+      echo "   Please check KEDA scaling configuration and BuildKit deployment status."
+      exit 1
+    fi
   done
-  exit 0
 fi
 
 echo "✅ Found $COUNT active pod(s) in service $SERVICE_NAME."
