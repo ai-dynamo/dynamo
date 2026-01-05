@@ -184,6 +184,17 @@ impl StreamSender {
         }
         Ok(())
     }
+
+    /// Create a StreamSender for testing. Returns the sender and a receiver to inspect sent messages.
+    #[cfg(test)]
+    pub(crate) fn new_test() -> (Self, tokio::sync::mpsc::Receiver<TwoPartMessage>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let sender = StreamSender {
+            tx,
+            prologue: Some(ResponseStreamPrologue { error: None }),
+        };
+        (sender, rx)
+    }
 }
 
 pub struct StreamReceiver {

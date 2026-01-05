@@ -3,6 +3,7 @@
 
 mod metrics;
 mod request;
+mod response;
 
 use metrics::RequestMetricsGuard;
 pub use metrics::WorkHandlerMetrics;
@@ -11,6 +12,7 @@ use super::*;
 use crate::metrics::prometheus_names::work_handler;
 use crate::protocols::maybe_error::MaybeError;
 use request::decode_payload;
+use response::{create_response_publisher, send_prologue_and_get_stream, stream_responses};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -69,25 +71,19 @@ where
         tracing::trace!("received request: {:?}", request);
         let request: context::Context<T> = Context::with_id(request, control_msg.id);
 
-        // todo - eventually have a handler class which will returned an abstracted object, but for now,
-        // we only support tcp here, so we can just unwrap the connection info
-        tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_stream(
+        // Create response channel
+        // TODO: eventually have a handler class which will return an abstracted object,
+        // but for now, we only support tcp here
+        let mut publisher = create_response_publisher(
             request.context(),
             control_msg.connection_info,
+            self.metrics(),
         )
-        .await
-        .map_err(|e| {
-            if let Some(m) = self.metrics() {
-                m.error_counter
-                    .with_label_values(&[work_handler::error_types::RESPONSE_STREAM])
-                    .inc();
-            }
-            PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
-        })?;
+        .await?;
 
+        // Call generate (business logic)
         tracing::trace!("calling generate");
-        let stream = self
+        let generate_result = self
             .segment
             .get()
             .expect("segment not set")
@@ -102,99 +98,17 @@ where
                 PipelineError::GenerateError(e)
             });
 
-        // the prolouge is sent to the client to indicate that the stream is ready to receive data
-        // or if the generate call failed, the error is sent to the client
-        let mut stream = match stream {
-            Ok(stream) => {
-                tracing::trace!("Successfully generated response stream; sending prologue");
-                let _result = publisher.send_prologue(None).await;
-                stream
-            }
-            Err(e) => {
-                let error_string = e.to_string();
+        // Send prologue and get stream (or propagate error after sending error prologue)
+        let mut stream = send_prologue_and_get_stream(&mut publisher, generate_result).await?;
 
-                #[cfg(debug_assertions)]
-                {
-                    tracing::debug!(
-                        "Failed to generate response stream (with debug backtrace): {:?}",
-                        e
-                    );
-                }
-                #[cfg(not(debug_assertions))]
-                {
-                    tracing::error!("Failed to generate response stream: {}", error_string);
-                }
-
-                let _result = publisher.send_prologue(Some(error_string)).await;
-                Err(e)?
-            }
-        };
-
-        let context = stream.context();
-
-        // TODO: Detect end-of-stream using Server-Sent Events (SSE)
-        let mut send_complete_final = true;
-        while let Some(resp) = stream.next().await {
-            tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err()
-                && format!("{:?}", err) == STREAM_ERR_MSG
-            {
-                tracing::warn!(STREAM_ERR_MSG);
-                send_complete_final = false;
-                break;
-            }
-            let resp_wrapper = NetworkStreamWrapper {
-                data: Some(resp),
-                complete_final: false,
-            };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
-            if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
-            }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
-                // If context is already stopped (e.g., stop word detected), the client likely
-                // closed the connection after receiving the complete response. This is expected.
-                if !context.is_stopped() {
-                    tracing::error!("Failed to publish response for stream {}", context.id());
-                }
-                context.stop_generating();
-                send_complete_final = false;
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
-                        .inc();
-                }
-                break;
-            }
-        }
-        if send_complete_final {
-            let resp_wrapper = NetworkStreamWrapper::<U> {
-                data: None,
-                complete_final: true,
-            };
-            let resp_bytes = serde_json::to_vec(&resp_wrapper)
-                .expect("fatal error: invalid response object - this should never happen");
-            if let Some(m) = self.metrics() {
-                m.response_bytes.inc_by(resp_bytes.len() as u64);
-            }
-            if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!(
-                    "Failed to publish complete final for stream {}",
-                    context.id()
-                );
-                if let Some(m) = self.metrics() {
-                    m.error_counter
-                        .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
-                        .inc();
-                }
-            }
-            // Notify the health check manager that the stream has finished.
-            // This resets the timer, delaying the next canary health check.
-            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
-                notifier.notify_one();
-            }
-        }
+        // Stream responses to client
+        stream_responses(
+            &mut stream,
+            &mut publisher,
+            self.metrics(),
+            self.endpoint_health_check_notifier.get(),
+        )
+        .await?;
 
         // Ensure the metrics guard is not dropped until the end of the function.
         drop(_inflight_guard);
