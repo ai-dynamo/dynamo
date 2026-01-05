@@ -54,7 +54,7 @@ Environment variables control server settings and test load:
   - `--num-gpu-blocks-override` is applied when `gpu_blocks` is parametrized
 
 - Request/test parameters
-  - `KVBM_MAX_TOKENS` (default: `48`)
+  - `KVBM_MAX_TOKENS` (default: `48`) - single integer for max tokens per request
   - `KVBM_SEED` (default: `42`)
   - `KVBM_MAX_ITERATIONS` (default: `500`)
   - `KVBM_WORD_COUNT` (default: `200`)
@@ -64,19 +64,18 @@ Environment variables control server settings and test load:
   - `KVBM_HTTP_TIMEOUT` (default: `30` seconds)
   - `KVBM_SHAKESPEARE_URL` (default: MIT OCW Shakespeare text)
 
-- Concurrent testing
-  - `KVBM_CONCURRENT_REQUESTS` (default: `"3"` - comma-separated list for parametrization of max concurrent workers)
-  - `KVBM_MAX_TOKENS` (default: `"10"` - comma-separated list for parametrization of max_tokens in concurrent tests)
-  - `KVBM_IFEVAL_PROMPTS` (default: `"120"` - comma-separated list for parametrization of number of IFEval prompts to use)
+- Concurrent testing (only for `test_concurrent_determinism_with_ifeval`)
+  - `KVBM_CONCURRENT_REQUESTS` (default: `3`) - comma-separated list for parametrization of max concurrent workers
+  - `KVBM_IFEVAL_PROMPTS` (default: `120`) - comma-separated list for parametrization of number of IFEval prompts
 
-Example:
+### Example
 
 ```bash
-KVBM_MODEL_ID=Qwen/Qwen3-0.6B \
-KVBM_CPU_BLOCKS=12000 \
+KVBM_MODEL_ID=deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+KVBM_CPU_BLOCKS=10000 \
 KVBM_MAX_ITERATIONS=100 \
+KVBM_MAX_TOKENS=48 \
 KVBM_CONCURRENT_REQUESTS="10,25,50" \
-KVBM_MAX_TOKENS="48,128,256" \
 KVBM_IFEVAL_PROMPTS="50,120,200" \
 pytest -v -m "kvbm" -s
 ```
