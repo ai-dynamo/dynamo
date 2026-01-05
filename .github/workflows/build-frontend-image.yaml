@@ -62,6 +62,9 @@ jobs:
       - name: Build Frontend Container
         id: build-image
         uses: ./.github/actions/docker-build
+        env:
+          PLATFORMS: linux/${{ matrix.platform.arch }}
+          TARGETARCH: ${{ matrix.platform.arch }}
         with:
           framework: none
           target: frontend

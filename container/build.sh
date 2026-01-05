@@ -965,11 +965,6 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     echo "Building EPP image..."
     export GAIE_DIR="${GAIE_CLONE_DIR}"
     export DYNAMO_DIR="${BUILD_CONTEXT}"
-    if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
-        export TARGETARCH="arm64"
-    else
-        export TARGETARCH="amd64"
-    fi
     
     $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
     
