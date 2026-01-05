@@ -261,23 +261,6 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-## Advanced Examples
-
-Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
-
-### Run a multi-node sized model
-- **[Run a multi-node model](multinode-examples.md)**
-
-### Large scale P/D disaggregation with WideEP
-- **[Run DeepSeek-R1-FP8 on H100s](dsr1-wideep-h100.md)**
-- **[Run DeepSeek-R1-FP8 on GB200s](dsr1-wideep-gb200.md)**
-
-### Hierarchical Cache (HiCache)
-- **[Enable SGLang Hierarchical Cache (HiCache)](sgl-hicache-example.md)**
-
-### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
-- **[Run a multimodal model with EPD Disaggregation](../../multimodal/sglang.md)**
-
 ## Deployment
 
 We currently provide deployment examples for Kubernetes and SLURM.
