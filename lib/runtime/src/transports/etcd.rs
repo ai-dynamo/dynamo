@@ -348,20 +348,27 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(4096);
 
-        // Get start revision and send existing KVs
-        let mut start_revision = self
-            .get_start_revision(
-                prefix.as_ref(),
-                if include_existing { Some(&tx) } else { None },
-            )
+        // Get start revision and existing KVs (if requested)
+        let (mut start_revision, existing_kvs) = self
+            .get_start_revision(prefix.as_ref(), include_existing)
             .await?;
 
         // Resilience watch stream in background
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
         self.rt.spawn(async move {
+            // Flush existing KVs first (before starting watch)
+            if let Some(kvs) = existing_kvs {
+                for kv in kvs {
+                    if tx.send(WatchEvent::Put(kv)).await.is_err() {
+                        tracing::debug!("receiver dropped during initial kv flush");
+                        return;
+                    }
+                }
+            }
+
             let mut reconnect = true;
             while reconnect {
                 // Start a new watch stream
@@ -384,15 +391,16 @@ impl Client {
         })
     }
 
-    /// Fetch the initial revision for watching and optionally send existing key-values.
+    /// Fetch the initial revision for watching and optionally return existing key-values.
     ///
-    /// Returns the next revision to watch from. If `existing_kvs_tx` is provided,
-    /// all existing keys with the prefix are sent through the channel first.
+    /// Returns the next revision to watch from and, if `include_existing` is true,
+    /// the existing keys with the prefix. Existing KVs should be sent to the consumer
+    /// before starting the watch to maintain ordering.
     async fn get_start_revision(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
-        existing_kvs_tx: Option<&mpsc::Sender<WatchEvent>>,
-    ) -> Result<i64> {
+        include_existing: bool,
+    ) -> Result<(i64, Option<Vec<KeyValue>>)> {
         let mut kv_client = self.connector.get_client().kv_client();
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
@@ -406,16 +414,14 @@ impl Client {
         tracing::trace!("{prefix}: start_revision: {start_revision}");
         start_revision += 1;
 
-        // Send existing KVs from response if requested
-        if let Some(tx) = existing_kvs_tx {
+        // Return existing KVs if requested
+        let existing_kvs = include_existing.then(|| {
             let kvs = get_response.take_kvs();
             tracing::trace!("initial kv count: {:?}", kvs.len());
-            for kv in kvs.into_iter() {
-                tx.send(WatchEvent::Put(kv)).await?;
-            }
-        }
+            kvs
+        });
 
-        Ok(start_revision)
+        Ok((start_revision, existing_kvs))
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.
