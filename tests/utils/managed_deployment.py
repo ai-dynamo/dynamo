@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -699,7 +699,7 @@ class ManagedDeployment:
                     pods_ready = await self._check_all_pods_ready()
                     if pods_ready:
                         self._logger.info(
-                            f"[force_pod_check] All pods ready at pod level"
+                            "[force_pod_check] All pods ready at pod level"
                         )
                         self._logger.info(f"Current deployment state: {current_state}")
                         self._logger.info(
@@ -1307,7 +1307,7 @@ class ManagedDeployment:
         # If already set, return it
         if self._hw_fault_manager and self._hw_fault_manager._target_node:
             return self._hw_fault_manager._target_node
-        
+
         # Auto-detect from running pods (kr8s uses pod.raw dict access)
         pods = self.get_pods()
         for service_name, service_pods in pods.items():
@@ -1320,7 +1320,7 @@ class ManagedDeployment:
                         if self._hw_fault_manager:
                             self._hw_fault_manager.set_target_node(node)
                         return node
-        
+
         # Fallback: any pod with a node
         for service_name, service_pods in pods.items():
             for pod in service_pods:
@@ -1330,7 +1330,7 @@ class ManagedDeployment:
                     if self._hw_fault_manager:
                         self._hw_fault_manager.set_target_node(node)
                     return node
-        
+
         self._logger.warning("[HW Faults] Could not auto-detect target node from pods")
         return None
 
@@ -1339,13 +1339,13 @@ class ManagedDeployment:
         if not self._hw_fault_manager:
             self._logger.error("[HW Faults] HW fault manager not initialized")
             return False
-        
+
         # Auto-detect target node if not set
         if not self._hw_fault_manager._target_node:
             target = self.get_hw_fault_target_node()
             if target:
                 self._hw_fault_manager.set_target_node(target)
-        
+
         return await self._hw_fault_manager.setup_cuda_passthrough(xid_type=xid_type)
 
     async def inject_hw_fault(
@@ -1389,11 +1389,11 @@ class ManagedDeployment:
         """Wait for all pods to be scheduled on nodes other than the excluded one."""
         import asyncio
         start_time = time.time()
-        
+
         while time.time() - start_time < timeout:
             pods = self.get_pods()
             all_off_excluded = True
-            
+
             for service_name, service_pods in pods.items():
                 for pod in service_pods:
                     node = getattr(pod.spec, "nodeName", None) or getattr(pod.spec, "node_name", None)
@@ -1402,17 +1402,17 @@ class ManagedDeployment:
                         break
                 if not all_off_excluded:
                     break
-            
+
             if all_off_excluded and sum(len(p) for p in pods.values()) > 0:
                 self._logger.info(f"[HW Faults] All pods on healthy nodes (not on {exclude_node})")
                 return True
-            
+
             await asyncio.sleep(10)
             elapsed = int(time.time() - start_time)
             if elapsed % 60 == 0:
                 self._logger.info(f"[{elapsed}s] Waiting for pods to schedule off {exclude_node}...")
-        
-        self._logger.warning(f"Timeout waiting for pods on healthy nodes")
+
+        self._logger.warning("Timeout waiting for pods on healthy nodes")
         return False
 
     async def wait_for_all_pods_ready(
