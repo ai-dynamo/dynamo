@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple
 import sglang as sgl
 import zmq
 import zmq.asyncio
+from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
 from sglang.srt.utils import get_local_ip_auto, get_zmq_socket, maybe_wrap_ipv6_address
 
 if TYPE_CHECKING:
@@ -50,6 +51,11 @@ def format_zmq_endpoint(endpoint_template: str, ip_address: str) -> str:
     # Use SGLang's utility to wrap IPv6 addresses in brackets
     formatted_ip = maybe_wrap_ipv6_address(ip_address)
     return endpoint_template.replace("*", formatted_ip)
+
+
+# Note: We use SGLang's ZmqEventPublisher.offset_endpoint_port() directly
+# to ensure perfect alignment between publisher (SGLang) and subscriber (dynamo).
+# This is the same pattern used by dynamo+vLLM.
 
 
 class DynamoSglangPublisher:
@@ -138,29 +144,64 @@ class DynamoSglangPublisher:
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(metrics)
 
-    def init_kv_event_publish(self) -> Optional[ZmqKvEventPublisher]:
-        """Initialize KV event publisher if configured.
+    def init_kv_event_publish(self) -> List[ZmqKvEventPublisher]:
+        """Initialize KV event publisher(s) if configured.
+
+        For DP attention mode, creates one subscriber per DP rank port.
+        Each SGLang scheduler in DP attention mode publishes to a unique port
+        (base_port + attn_dp_rank), so we need to subscribe to all of them.
 
         Returns:
-            ZmqKvEventPublisher instance if kv_events_config is set, None otherwise.
+            List of ZmqKvEventPublisher instances if kv_events_config is set,
+            empty list otherwise.
         """
-        self.kv_publisher = None
+        self.kv_publishers: List[ZmqKvEventPublisher] = []
+
         if self.server_args.kv_events_config:
             kv_events = json.loads(self.server_args.kv_events_config)
-            ep = kv_events.get("endpoint")
-            zmq_ep = format_zmq_endpoint(ep, get_local_ip_auto()) if ep else None
+            base_ep = kv_events.get("endpoint")
+            local_ip = get_local_ip_auto()
 
-            zmq_config = ZmqKvEventPublisherConfig(
-                worker_id=self.generate_endpoint.connection_id(),
-                kv_block_size=self.server_args.page_size,
-                zmq_endpoint=zmq_ep,
-                enable_local_indexer=self.dynamo_args.enable_local_indexer,
-            )
-            logging.info(f"Setting up ZMQ kv event publisher at {zmq_ep}")
-            self.kv_publisher = ZmqKvEventPublisher(
-                component=self.component, config=zmq_config
-            )
-        return self.kv_publisher
+            # Determine number of DP ranks to subscribe to
+            # With DP attention enabled, each attn_dp_rank publishes to its own port
+            dp_size = getattr(self.server_args, "dp_size", 1) or 1
+            enable_dp_attention = getattr(self.server_args, "enable_dp_attention", False)
+
+            if enable_dp_attention and dp_size > 1:
+                # Subscribe to all DP rank ports
+                num_subscribers = dp_size
+                logging.info(
+                    f"DP attention mode detected (dp_size={dp_size}). "
+                    f"Creating {num_subscribers} ZMQ subscribers for ports "
+                    f"{base_ep} through port+{dp_size - 1}"
+                )
+            else:
+                # Standard mode: single subscriber
+                num_subscribers = 1
+
+            for dp_rank in range(num_subscribers):
+                # Use SGLang's offset_endpoint_port to ensure alignment with publishers
+                # This is the same function SGLang schedulers use to determine their bind ports
+                zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
+                if zmq_ep:
+                    zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
+
+                zmq_config = ZmqKvEventPublisherConfig(
+                    worker_id=self.generate_endpoint.connection_id(),
+                    kv_block_size=self.server_args.page_size,
+                    zmq_endpoint=zmq_ep,
+                    enable_local_indexer=self.dynamo_args.enable_local_indexer,
+                )
+                logging.info(f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} at {zmq_ep}")
+                publisher = ZmqKvEventPublisher(
+                    component=self.component, config=zmq_config
+                )
+                self.kv_publishers.append(publisher)
+
+        # Maintain backward compatibility: set kv_publisher to first publisher if any
+        self.kv_publisher = self.kv_publishers[0] if self.kv_publishers else None
+
+        return self.kv_publishers
 
     def _record(
         self,
