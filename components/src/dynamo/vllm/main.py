@@ -29,11 +29,17 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.vllm.ec_transfer_utils import (
+    create_ec_transfer_config,
+    get_encoder_engine_id,
+    get_pd_engine_id,
+)
 from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
     ProcessorHandler,
+    VLLMNativeEncoderWorkerHandler,
 )
 
 from .args import Config, overwrite_args, parse_args
@@ -85,7 +91,10 @@ async def worker():
         config.model = config.engine_args.model = await fetch_llm(config.model)
 
     # Route to appropriate initialization based on config flags
-    if config.multimodal_processor:
+    if config.vllm_native_encoder_worker:
+        await init_vllm_native_encoder(runtime, config)
+        logger.debug("init_vllm_native_encoder completed")
+    elif config.multimodal_processor:
         await init_multimodal_processor(runtime, config)
         logger.debug("init_multimodal_processor completed")
     elif config.multimodal_encode_worker:
@@ -717,7 +726,71 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
             ),
         )
     except Exception as e:
-        logger.error(f"Failed to serve endpoints: {e}")
+        logger.error(f"Failed to serve encode worker endpoint: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
+    """
+    Initialize vLLM-native encoder worker component (ECConnector mode).
+
+    This encoder uses vLLM's built-in encoder disaggregation with ECConnector.
+    vLLM handles encoder execution, caching, and storage automatically.
+    """
+    # 1. Create component and endpoint
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # 2. Configure ECTransferConfig for producer role
+    engine_id = get_encoder_engine_id(
+        config.namespace, config.component, component.instance_id
+    )
+
+    ec_transfer_config = create_ec_transfer_config(
+        engine_id=engine_id,
+        ec_role="ec_producer",  # This instance produces encoder outputs
+        ec_connector_backend=config.ec_connector_backend,
+        ec_storage_path=config.ec_storage_path,
+        ec_extra_config=config.ec_extra_config,
+    )
+
+    # Set ECTransferConfig on engine args
+    config.engine_args.ec_transfer_config = ec_transfer_config
+    logger.info(f"Configured as ECConnector producer with engine_id={engine_id}")
+
+    # 3. Setup vLLM engine
+    (
+        engine_client,
+        vllm_config,
+        default_sampling_params,
+        prometheus_temp_dir,
+    ) = setup_vllm_engine(config)
+
+    # 4. Create handler (no PD client needed for ECConnector mode)
+    handler = VLLMNativeEncoderWorkerHandler(
+        runtime,
+        component,
+        engine_client,
+        config,
+    )
+    handler.add_temp_dir(prometheus_temp_dir)
+
+    # 5. No async init needed - vLLM handles everything
+    # await handler.async_init(runtime)  # Not needed for ECConnector mode
+
+    logger.info("Starting to serve vLLM-native encoder endpoint...")
+
+    # 6. Serve endpoint
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve vLLM-native encoder endpoint: {e}")
         raise
     finally:
         handler.cleanup()
@@ -732,11 +805,34 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     2. --multimodal-encode-prefill-worker: Handles inline encoding (e.g., Llama 4)
 
     Both can operate in aggregated (P+D) or disaggregated (P→D) mode.
+
+    When --ec-consumer-mode is enabled, configures as ECConnector consumer
+    to load encoder embeddings from shared storage.
     """
     component = runtime.namespace(config.namespace).component(config.component)
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
+
+    # Configure ECConnector consumer mode if enabled
+    if config.ec_consumer_mode:
+        logger.info("Configuring as ECConnector consumer for encoder embeddings")
+
+        engine_id = get_pd_engine_id(
+            config.namespace, config.component, component.instance_id
+        )
+
+        ec_transfer_config = create_ec_transfer_config(
+            engine_id=engine_id,
+            ec_role="ec_consumer",  # This instance consumes encoder outputs
+            ec_connector_backend=config.ec_connector_backend,
+            ec_storage_path=config.ec_storage_path,
+            ec_extra_config=config.ec_extra_config,
+        )
+
+        # Set ECTransferConfig on engine args
+        config.engine_args.ec_transfer_config = ec_transfer_config
+        logger.info(f"Configured as ECConnector consumer with engine_id={engine_id}")
 
     (
         engine_client,

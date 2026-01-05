@@ -3,6 +3,9 @@
 
 from dynamo.vllm.multimodal_handlers.encode_worker_handler import EncodeWorkerHandler
 from dynamo.vllm.multimodal_handlers.processor_handler import ProcessorHandler
+from dynamo.vllm.multimodal_handlers.vllm_native_encoder_handler import (
+    VLLMNativeEncoderWorkerHandler,
+)
 from dynamo.vllm.multimodal_handlers.worker_handler import (
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
@@ -13,4 +16,5 @@ __all__ = [
     "ProcessorHandler",
     "MultimodalPDWorkerHandler",
     "MultimodalDecodeWorkerHandler",
+    "VLLMNativeEncoderWorkerHandler",
 ]
