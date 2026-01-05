@@ -172,6 +172,7 @@ where
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
@@ -196,6 +197,7 @@ where
     build_routed_pipeline_with_preprocessor(
         card,
         client,
+        model_manager,
         router_mode,
         worker_monitor,
         chooser,
@@ -212,6 +214,7 @@ where
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
@@ -277,8 +280,8 @@ where
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser =
-        prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
+    let prefill_chooser = prefill_chooser
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

@@ -5,8 +5,8 @@
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 2>/dev/null || true
+    kill $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 $DECODE_PID2 2>/dev/null || true
+    wait $DYNAMO_PID $PREFILL_PID1 $PREFILL_PID2 $DECODE_PID1 $DECODE_PID2 2>/dev/null || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports:"
-            echo "  8082-8083 (prefill workers), 8084-8085 (decode workers)"
+            echo "  8081-8082 (prefill workers), 8083-8084 (decode workers)"
             exit 0
             ;;
         *)
@@ -48,6 +48,7 @@ fi
 
 # Start frontend with KV routing
 # The frontend will automatically detect prefill workers and activate an internal prefill router
+# No standalone prefill router needed - the frontend handles prefill routing internally
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend \
@@ -55,19 +56,8 @@ python3 -m dynamo.frontend \
     --router-reset-states &
 DYNAMO_PID=$!
 
-# run prefill router
-# Use numeric DYN_SYSTEM_PORT{N} env vars so launchers/test harnesses can set
-# ports without encoding role names (prefill/decode) in the env var.
-OTEL_SERVICE_NAME=dynamo-router-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.router \
-  --endpoint dynamo.prefill.generate \
-  --block-size 64 \
-  --router-reset-states \
-  --no-track-active-blocks &
-PREFILL_ROUTER_PID=$!
-
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
+OTEL_SERVICE_NAME=dynamo-worker-prefill-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -80,10 +70,10 @@ python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID=$!
+PREFILL_PID1=$!
 
 # run prefill worker
-OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
+OTEL_SERVICE_NAME=dynamo-worker-prefill-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -96,10 +86,10 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID=$!
+PREFILL_PID2=$!
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-8084} \
+OTEL_SERVICE_NAME=dynamo-worker-decode-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT3:-8083} \
 CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -112,10 +102,10 @@ CUDA_VISIBLE_DEVICES=3 python3 -m dynamo.sglang \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
-PREFILL_PID=$!
+DECODE_PID1=$!
 
 # run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT5:-8085} \
+OTEL_SERVICE_NAME=dynamo-worker-decode-2 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT4:-8084} \
 CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -127,4 +117,8 @@ CUDA_VISIBLE_DEVICES=2 python3 -m dynamo.sglang \
   --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5559"}' \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
-  "${TRACE_ARGS[@]}"
+  "${TRACE_ARGS[@]}" &
+DECODE_PID2=$!
+
+# Wait for any worker to exit (keeps script running)
+wait
