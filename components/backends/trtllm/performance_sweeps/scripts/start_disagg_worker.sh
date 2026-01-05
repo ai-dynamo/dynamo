@@ -13,6 +13,16 @@ if [ ! -f "${config_file}" ]; then
     exit 1
 fi
 
+echo "Waiting for frontend startup"
+
+# Loop until the curl output contains the healthy string
+while ! curl -s $ETCD_ENDPOINTS/health | grep -q '"health":"true"'; do
+  echo "Still waiting..."
+  sleep 5
+done
+
+echo "frontend startup complete"
+
 config_tmp_file=$(mktemp)
 
 env_vars=$(python3 -c "

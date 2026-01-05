@@ -110,9 +110,6 @@ srun -l --container-name=${CONTAINER_NAME} \
 SERVER_PID=$!
 echo "$SERVER_PID" >> "$PID_FILE"
 
-# wait for the server to start
-sleep 10
-
 if [[ -n $(scontrol show config | grep "GresTypes" | grep "gpu") ]]; then
     gpus_per_node="--gpus-per-node ${NTASKS_PER_NODE}"
 else
