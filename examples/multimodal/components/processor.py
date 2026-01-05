@@ -204,15 +204,30 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text - find the text content item
-        user_text = None
+        # Safely extract user text
+        # Find all text content items from "user" role messages, and concatenate them.
+        # For multi-turn conversation, add a newline between each turn.
+        # This is not perfect solution as we encode multi-turn conversation as a single turn.
+        # However, as multi-turn conversation in a single request is not well defined in the spec (purposefully)
+        # this is the best we can do for now.
+        # TODO: Revisit this later when adding multi-turn conversation support.
+        user_texts = []
         for message in raw_request.messages:
-            for item in message.content:
-                if item.type == "text":
-                    user_text = item.text
-                    break
-        if user_text is None:
-            raise ValueError("No text content found in the request messages")
+            if message.role == "user":
+                # Collect all text content items from this user message
+                text_parts = []
+                for item in message.content:
+                    if item.type == "text":
+                        text_parts.append(item.text)
+                # If this user message has text content, join it and add to user_texts
+                if text_parts:
+                    user_texts.append("".join(text_parts))
+
+        if not user_texts:
+            raise ValueError("No text content found in user messages")
+
+        # Join all user turns with newline separator
+        user_text = "\n".join(user_texts)
 
         prompt = template.replace("<prompt>", user_text)
 
