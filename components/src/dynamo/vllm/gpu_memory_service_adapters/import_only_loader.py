@@ -2,12 +2,12 @@
 
 This loader creates the model structure WITHOUT loading weights from disk.
 It's designed for the GPU Memory Service read path where weights are
-materialized from the registry after model initialization.
+materialized from the metadata store after model initialization.
 
 IMPORTANT: This loader runs quantization post-processing to ensure the model
 has the same parameter structure as the write-mode model (which had post-processing
-applied before registry entries were created). Post-processing can create/destroy
-parameters, so it must be run before materializing from registry.
+applied before metadata entries were created). Post-processing can create/destroy
+parameters, so it must be run before materializing from metadata.
 
 Usage:
     from dynamo.vllm.gpu_memory_service_adapters.import_only_loader import ImportOnlyModelLoader
@@ -19,8 +19,8 @@ Usage:
     loader = ImportOnlyModelLoader(load_config)
     model = loader.load_model(vllm_config=vllm_config, model_config=model_config)
 
-    # Then materialize weights from GPU memory service registry
-    materialize_module_from_registry(allocator, model, prefix=..., device_index=...)
+    # Then materialize weights from GMS
+    materialize_module_from_gms(allocator, model, prefix=..., device_index=...)
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class ImportOnlyModelLoader:
     This loader is used for the GPU Memory Service read/import-only path.
     It creates a model on META device with the FINAL parameter structure (after
     quantization post-processing), which can then be populated with weights from
-    the GPU memory service registry.
+    the GMS metadata store.
 
     Key differences from DefaultModelLoader:
     - Does NOT call load_weights() (no disk I/O)
@@ -57,7 +57,7 @@ class ImportOnlyModelLoader:
     The flow is:
     1. Create model on meta device (no GPU memory)
     2. Run quant post-processing on meta tensors (may create/destroy parameters)
-    3. Caller materializes weights from registry (replaces meta tensors)
+    3. Caller materializes weights from metadata (replaces meta tensors)
     """
 
     _registered: bool = False
@@ -91,7 +91,7 @@ class ImportOnlyModelLoader:
         pass
 
     def load_weights(self, model: nn.Module, model_config: "ModelConfig") -> None:
-        """No-op: weights will be materialized from registry by caller."""
+        """No-op: weights will be materialized from metadata by caller."""
         pass
 
     def load_model(
@@ -104,7 +104,7 @@ class ImportOnlyModelLoader:
         The model is created on the meta device and quantization post-processing
         is applied to ensure the parameter structure matches what was registered
         during write mode. The caller is responsible for materializing the weights
-        (e.g., via materialize_module_from_registry).
+        (e.g., via materialize_module_from_gms).
 
         Args:
             vllm_config: vLLM configuration
@@ -156,8 +156,8 @@ class ImportOnlyModelLoader:
         # This is critical because:
         # 1. Write mode runs post-processing BEFORE registering tensors
         # 2. Post-processing can create/destroy/rename parameters
-        # 3. Registry entries correspond to post-processed parameter names
-        # 4. Without this step, materialize_module_from_registry would fail
+        # 3. Metadata entries correspond to post-processed parameter names
+        # 4. Without this step, materialize_module_from_gms would fail
         #    due to parameter name mismatches
         #
         # Note: Post-processing runs on meta tensors. Some quant methods may:

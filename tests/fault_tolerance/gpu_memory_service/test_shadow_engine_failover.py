@@ -291,6 +291,7 @@ class VLLMWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
         nixl_port: int = 5600,
         kv_event_port: int = 20080,
         timeout: int = 300,
+        gms_load_mode: str = "write",
     ):
         self.nixl_port = nixl_port
         self.kv_event_port = kv_event_port
@@ -298,6 +299,15 @@ class VLLMWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
         # Socket path template uses {device} placeholder that gets substituted per GPU
         # Example: /tmp/gpu_memory_service_{device}.sock -> /tmp/gpu_memory_service_0.sock for device 0
         socket_path_config = socket_path_template
+
+        # Build model_loader_extra_config with socket path and load mode
+        extra_config = {
+            "gpu_memory_service_socket_path": socket_path_config,
+            "gpu_memory_service_load_mode": gms_load_mode,
+        }
+        import json
+
+        extra_config_str = json.dumps(extra_config)
 
         command = [
             "python3",
@@ -313,7 +323,7 @@ class VLLMWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
             "--gpu-memory-utilization",
             "0.9",  # Test multiple engine sleep/wake
             "--model-loader-extra-config",
-            f'{{"gpu_memory_service_socket_path": "{socket_path_config}"}}',
+            extra_config_str,
         ]
 
         env = os.environ.copy()
@@ -396,12 +406,20 @@ class SGLangWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
         sglang_port: int = 30000,
         disaggregation_bootstrap_port: int = 8998,
         timeout: int = 300,
+        gms_load_mode: str = "write",
     ):
         self.sglang_port = sglang_port
         self.disaggregation_bootstrap_port = disaggregation_bootstrap_port
 
         # Socket path template uses {device} placeholder that gets substituted per GPU
         socket_path_config = socket_path_template
+
+        # Build model_loader_extra_config with socket path
+        # Note: For SGLang, load mode is set via GPU_MEMORY_SERVICE_LOAD_MODE env var
+        import json
+
+        extra_config = {"gpu_memory_service_socket_path": socket_path_config}
+        extra_config_str = json.dumps(extra_config)
 
         command = [
             "python3",
@@ -421,12 +439,14 @@ class SGLangWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
             "--disaggregation-bootstrap-port",
             str(disaggregation_bootstrap_port),
             "--model-loader-extra-config",
-            f'{{"gpu_memory_service_socket_path": "{socket_path_config}"}}',
+            extra_config_str,
         ]
 
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_PORT"] = str(system_port)
+        # SGLang uses env var for GPU Memory Service load mode
+        env["GPU_MEMORY_SERVICE_LOAD_MODE"] = gms_load_mode
 
         super().__init__(
             request=request,
@@ -540,6 +560,7 @@ def create_engine_process(
     ports: dict,
     is_primary: bool,
     tp: int = GPU_MEMORY_SERVICE_TP,
+    gms_load_mode: Optional[str] = None,
 ) -> EngineWithGPUMemoryServiceProcess:
     """Factory function to create the appropriate engine process for a backend.
 
@@ -552,10 +573,17 @@ def create_engine_process(
         ports: Dictionary of allocated ports
         is_primary: True if this is the primary engine (affects port selection)
         tp: Tensor parallelism degree
+        gms_load_mode: GPU Memory Service load mode ("write" or "read").
+                      If None, uses "write" for first engine (shadow), "read" for subsequent (primary).
 
     Returns:
         An engine process instance
     """
+    # Determine load mode: first engine (shadow, is_primary=False) uses write,
+    # subsequent engines (primary, is_primary=True) use read to import existing weights
+    if gms_load_mode is None:
+        gms_load_mode = "read" if is_primary else "write"
+
     if backend == Backend.VLLM:
         kwargs = {
             "request": request,
@@ -563,6 +591,7 @@ def create_engine_process(
             "socket_path_template": socket_path_template,
             "system_port": system_port,
             "tp": tp,
+            "gms_load_mode": gms_load_mode,
         }
         if is_primary:
             kwargs["nixl_port"] = ports["primary_nixl_port"]
@@ -575,6 +604,7 @@ def create_engine_process(
             "socket_path_template": socket_path_template,
             "system_port": system_port,
             "tp": tp,
+            "gms_load_mode": gms_load_mode,
         }
         if is_primary:
             kwargs["sglang_port"] = ports["primary_sglang_port"]

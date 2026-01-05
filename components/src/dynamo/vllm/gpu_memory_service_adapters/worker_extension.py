@@ -22,7 +22,7 @@ import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from dynamo.gpu_memory_service import RPCCumemAllocator
+    from dynamo.gpu_memory_service import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,8 @@ _original_load_model = None
 _original_init_device = None
 
 
-def get_gpu_memory_service_allocator() -> Optional["RPCCumemAllocator"]:
-    """Get the GPU Memory Service allocator from central registry."""
+def get_gpu_memory_service_allocator() -> Optional["GMSClientMemoryManager"]:
+    """Get the GPU Memory Service allocator singleton."""
     from dynamo.gpu_memory_service import get_allocator
 
     return get_allocator()
@@ -169,9 +169,9 @@ def _get_gpu_memory_service_committed_bytes() -> int:
     socket_path = DEFAULT_GPU_MEMORY_SERVICE_SOCKET_PATH.format(device=local_rank)
 
     try:
-        from dynamo.gpu_memory_service import AllocationServerClient
+        from dynamo.gpu_memory_service import GMSRPCClient
 
-        client = AllocationServerClient(socket_path, lock_type="ro", timeout_ms=2000)
+        client = GMSRPCClient(socket_path, lock_type="ro")
         allocations = client.list_allocations()
         total_bytes = sum(alloc.get("aligned_size", 0) for alloc in allocations)
         client.close()

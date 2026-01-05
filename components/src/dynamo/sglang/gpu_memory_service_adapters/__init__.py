@@ -1,4 +1,4 @@
-"""SGLang adapter for GPU Memory Service (Allocation Server + embedded registry)."""
+"""SGLang adapter for GPU Memory Service (Allocation Server + embedded metadata store)."""
 
 import logging
 

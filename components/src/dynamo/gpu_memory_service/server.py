@@ -3,7 +3,7 @@
 
 """GPU Memory Service allocation server component for Dynamo.
 
-This component wraps the AllocationServer from gpu_memory_service to manage
+This component wraps the GMSRPCServer from gpu_memory_service to manage
 GPU memory allocations with connection-based RW/RO locking.
 
 Workers connect via the socket path, which should be passed to vLLM/SGLang via:
@@ -23,7 +23,7 @@ import threading
 from typing import Optional
 
 import uvloop
-from gpu_memory_service.server import AllocationServer
+from gpu_memory_service.server import GMSRPCServer
 
 from .args import parse_args
 
@@ -34,51 +34,79 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class AllocationServerThread:
-    """Wrapper to run AllocationServer in a background thread."""
+class GMSRPCServerThread:
+    """Wrapper to run GMSRPCServer in a background thread."""
 
     def __init__(self, socket_path: str, device: int):
         self.socket_path = socket_path
         self.device = device
-        self._server: Optional[AllocationServer] = None
+        self._server: Optional[GMSRPCServer] = None
         self._thread: Optional[threading.Thread] = None
         self._started = threading.Event()
         self._error: Optional[Exception] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     def start(self) -> None:
         """Start the allocation server in a background thread."""
         self._thread = threading.Thread(
             target=self._run_server,
-            name=f"AllocationServer-GPU{self.device}",
+            name=f"GMSRPCServer-GPU{self.device}",
             daemon=True,
         )
         self._thread.start()
-        # Wait for server to be ready
+        # Wait for server to be ready (socket file created)
         self._started.wait(timeout=10.0)
         if self._error is not None:
             raise self._error
         if not self._started.is_set():
-            raise RuntimeError("AllocationServer failed to start within timeout")
+            raise RuntimeError("GMSRPCServer failed to start within timeout")
 
     def _run_server(self) -> None:
-        """Run the server (called in background thread)."""
+        """Run the server (called in background thread).
+
+        The GMSRPCServer is async-based, so we create a new event loop for this thread.
+        """
         try:
-            self._server = AllocationServer(self.socket_path, device=self.device)
+            # Create a new event loop for this thread
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+
+            self._server = GMSRPCServer(self.socket_path, device=self.device)
+
+            # Start the server (creates the socket)
+            self._loop.run_until_complete(self._server.start())
             logger.info(
-                f"AllocationServer started on device {self.device} at {self.socket_path}"
+                f"GMSRPCServer started on device {self.device} at {self.socket_path}"
             )
             self._started.set()
-            self._server.serve_forever()
+
+            # Run the main loop
+            while self._server._running:
+                self._loop.run_until_complete(asyncio.sleep(1))
+
         except Exception as e:
-            logger.error(f"AllocationServer error: {e}")
+            logger.error(f"GMSRPCServer error: {e}")
             self._error = e
             self._started.set()  # Unblock waiter even on error
+        finally:
+            if self._loop is not None:
+                self._loop.close()
 
     def stop(self) -> None:
         """Stop the allocation server."""
         if self._server is not None:
-            logger.info(f"Stopping AllocationServer on device {self.device}")
-            self._server.stop()
+            logger.info(f"Stopping GMSRPCServer on device {self.device}")
+            # Signal the server to stop - the loop in _run_server will exit
+            self._server._running = False
+            self._server._shutdown = True
+            # Wake any blocked waiters from the server's event loop
+            if self._loop is not None and self._loop.is_running():
+
+                async def _notify():
+                    async with self._server._condition:
+                        self._server._condition.notify_all()
+
+                asyncio.run_coroutine_threadsafe(_notify(), self._loop)
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=5.0)
 
@@ -102,8 +130,8 @@ async def worker() -> None:
         os.unlink(config.socket_path)
         logger.debug(f"Removed existing socket file: {config.socket_path}")
 
-    # Start AllocationServer in a background thread
-    server = AllocationServerThread(config.socket_path, config.device)
+    # Start GMSRPCServer in a background thread
+    server = GMSRPCServerThread(config.socket_path, config.device)
     server.start()
 
     # Set up shutdown event

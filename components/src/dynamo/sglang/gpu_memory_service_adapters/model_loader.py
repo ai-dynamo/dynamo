@@ -1,4 +1,4 @@
-"""SGLang integration for GPU Memory Service (Allocation Server + embedded registry).
+"""SGLang integration for GPU Memory Service (Allocation Server + embedded metadata store).
 
 This module provides a custom SGLang `load_format` class that can be passed as
 `LoadConfig(load_format=...)`. It integrates with the GPUMemoryServiceMemorySaverImpl
@@ -12,7 +12,7 @@ Flow:
 
 For import-only mode (READ):
 - Impl detects weights are already committed via timeout=0 probe
-- GPUServiceModelLoader creates a meta model and materializes from registry
+- GPUServiceModelLoader creates a meta model and materializes from metadata
 
 IMPORTANT: Sleep/Wake Memory Behavior
 -------------------------------------
@@ -61,7 +61,7 @@ def _safe_empty_cache() -> None:
     global _original_empty_cache
     # Check if we have GPU Memory Service VMM allocations
     try:
-        from gpu_memory_service.extensions import _rpc_cumem_ext as cumem
+        from gpu_memory_service.client.torch.extensions import _allocator_ext as cumem
 
         allocations = cumem.get_all_allocations()
         if allocations:
@@ -171,7 +171,7 @@ def _strip_gpu_memory_service_extra_config(load_config: Any) -> Any:
 
 
 def compute_sglang_config_hash(model_config: Any) -> str:
-    """Best-effort stable hash for registry key prefixing."""
+    """Best-effort stable hash for metadata key prefixing."""
     payload = {
         "model_path": getattr(model_config, "model_path", None),
         "revision": getattr(model_config, "revision", None),
@@ -192,7 +192,7 @@ class GPUServiceModelLoader:
     - After loading, finalize_write_mode() commits and switches to read mode
 
     In READ mode (import-only):
-    - Weights are materialized from the GPU Memory Service registry
+    - Weights are materialized from GMS
     """
 
     # Exported for memory accounting patches
@@ -216,7 +216,7 @@ class GPUServiceModelLoader:
 
         Gets the allocator from GPUMemoryServiceMemorySaverImpl (created by patch).
         Depending on mode:
-        - READ: Materialize weights from registry
+        - READ: Materialize weights from metadata store
         - WRITE: Load from disk (allocations routed via region), then finalize
         """
         from dynamo.sglang.gpu_memory_service_adapters.torch_memory_saver_impl import (
@@ -246,7 +246,7 @@ class GPUServiceModelLoader:
         )
 
         if impl.get_mode() == "read":
-            # Import-only mode: materialize from registry
+            # Import-only mode: materialize from metadata
             return self._load_import_only(
                 impl, model_config, device_config, config_hash
             )
@@ -259,8 +259,8 @@ class GPUServiceModelLoader:
     def _load_import_only(
         self, impl, model_config, device_config, config_hash: str
     ) -> torch.nn.Module:
-        """Import weights from GPU Memory Service registry (READ mode)."""
-        from gpu_memory_service.tensor import materialize_module_from_registry
+        """Import weights from GMS (READ mode)."""
+        from gpu_memory_service.client.torch.tensor import materialize_module_from_gms
 
         from dynamo.sglang.gpu_memory_service_adapters.import_only_loader import (
             ImportOnlyModelLoader,
@@ -279,8 +279,8 @@ class GPUServiceModelLoader:
             device_config=device_config,
         )
 
-        # Materialize weights from registry
-        imported_bytes = materialize_module_from_registry(
+        # Materialize weights from GMS
+        imported_bytes = materialize_module_from_gms(
             allocator,
             model,
             prefix=f"{config_hash}:",
@@ -293,7 +293,7 @@ class GPUServiceModelLoader:
         GPUServiceModelLoader._imported_weights_bytes = int(imported_bytes)
 
         logger.info(
-            "[GPU Memory Service] Import-only loaded %.2f GiB from registry",
+            "[GPU Memory Service] Import-only loaded %.2f GiB from metadata",
             imported_bytes / (1 << 30),
         )
 
@@ -319,8 +319,8 @@ class GPUServiceModelLoader:
                 "Allocator is None in WRITE mode - this should not happen"
             )
 
-        # Clear any stale registry entries for this config
-        allocator.registry_delete_prefix(f"{config_hash}:")
+        # Clear any stale metadata entries for this config
+        allocator.metadata_delete_prefix(f"{config_hash}:")
 
         # Load model - allocations routed through region("weights") -> use_mem_pool()
         # The mempool context is already set up by ModelRunner.load_model() which wraps

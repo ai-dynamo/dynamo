@@ -1,4 +1,4 @@
-"""vLLM adapter for GPU Memory Service (Allocation Server + embedded registry)."""
+"""vLLM adapter for GPU Memory Service (Allocation Server + embedded metadata store)."""
 
 import logging
 import os

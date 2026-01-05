@@ -112,11 +112,11 @@ def _create_ext_modules():
 
     ext_modules = []
 
-    # _rpc_cumem_ext: Uses CUDA driver API and Python C API (no PyTorch)
+    # _allocator_ext: CUDAPluggableAllocator using CUDA driver API and Python C API
     ext_modules.append(
         CUDAExtension(
-            name="gpu_memory_service.extensions._rpc_cumem_ext",
-            sources=["extensions/rpc_cumem.cpp"],
+            name="gpu_memory_service.client.torch.extensions._allocator_ext",
+            sources=["client/torch/extensions/allocator.cpp"],
             include_dirs=[cuda_include],
             library_dirs=cuda_lib_dirs,
             libraries=["cuda"],
@@ -128,8 +128,8 @@ def _create_ext_modules():
     if torch_include:
         ext_modules.append(
             CUDAExtension(
-                name="gpu_memory_service.extensions._tensor_from_pointer",
-                sources=["extensions/tensor_from_pointer.cpp"],
+                name="gpu_memory_service.client.torch.extensions._tensor_from_pointer",
+                sources=["client/torch/extensions/tensor_from_pointer.cpp"],
                 include_dirs=torch_include + [cuda_include],
                 library_dirs=torch_lib + cuda_lib_dirs,
                 libraries=["c10", "torch", "torch_python"],
@@ -167,16 +167,22 @@ setup(
     # Package directory mapping: the current directory IS the gpu_memory_service package
     packages=[
         "gpu_memory_service",
+        "gpu_memory_service.common",
         "gpu_memory_service.server",
-        "gpu_memory_service.extensions",
+        "gpu_memory_service.client",
+        "gpu_memory_service.client.torch",
+        "gpu_memory_service.client.torch.extensions",
     ],
     package_dir={
         "gpu_memory_service": ".",
+        "gpu_memory_service.common": "common",
         "gpu_memory_service.server": "server",
-        "gpu_memory_service.extensions": "extensions",
+        "gpu_memory_service.client": "client",
+        "gpu_memory_service.client.torch": "client/torch",
+        "gpu_memory_service.client.torch.extensions": "client/torch/extensions",
     },
     package_data={
-        "gpu_memory_service.extensions": ["*.cpp"],
+        "gpu_memory_service.client.torch.extensions": ["*.cpp"],
     },
     ext_modules=_create_ext_modules(),
     cmdclass={"build_ext": BuildExtension},

@@ -1,15 +1,18 @@
-"""RPCCumemAllocator - unified client-side CUDA VMM allocator.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
-This is the unified allocator for the GPU Memory Service architecture.
+"""GPU Memory Service client-side memory manager.
+
+This is the unified memory manager for the GPU Memory Service architecture.
 
 Key properties:
-- Uses AllocationServerClient over a Unix-domain socket.
+- Uses GMSRPCClient over a Unix-domain socket.
 - The socket connection itself is the RW/RO lock.
-- In write mode, the allocator can allocate + map RW and then publish via commit().
-- In read mode, the allocator can import + map RO and hold the RO lock during inference.
+- In write mode, the manager can allocate + map RW and then publish via commit().
+- In read mode, the manager can import + map RO and hold the RO lock during inference.
 - sleep()/wake() releases and reacquires the RO lock (and remaps allocations).
 
-This module intentionally uses CUDA driver API calls via ctypes to:
+This module uses CUDA driver API calls via ctypes to:
 - import FDs (cuMemImportFromShareableHandle)
 - reserve VA (cuMemAddressReserve)
 - map/unmap (cuMemMap/cuMemUnmap)
@@ -26,7 +29,19 @@ from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
-from gpu_memory_service.server.client import AllocationServerClient
+from gpu_memory_service.client.rpc import GMSRPCClient
+from gpu_memory_service.common.cuda_vmm import (
+    CU_MEM_ACCESS_FLAGS_PROT_READ,
+    CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+    CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+    CU_MEM_LOCATION_TYPE_DEVICE,
+    CUdeviceptr,
+    CUmemAccessDesc,
+    CUmemGenericAllocationHandle,
+    check_cuda_result,
+    get_allocation_granularity,
+    get_cuda_driver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,59 +61,6 @@ class StaleWeightsError(Exception):
     pass
 
 
-# CUDA constants
-CU_MEM_ALLOCATION_TYPE_PINNED = 0x1
-CU_MEM_LOCATION_TYPE_DEVICE = 0x1
-CU_MEM_ACCESS_FLAGS_PROT_READ = 0x1
-CU_MEM_ACCESS_FLAGS_PROT_READWRITE = 0x3
-CU_MEM_ALLOC_GRANULARITY_MINIMUM = 0x0
-CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 0x1
-
-CUdeviceptr = c_ulonglong
-CUmemGenericAllocationHandle = c_ulonglong
-
-
-class CUmemLocation(ctypes.Structure):
-    _fields_ = [("type", c_int), ("id", c_int)]
-
-
-class CUmemAccessDesc(ctypes.Structure):
-    _fields_ = [("location", CUmemLocation), ("flags", c_int)]
-
-
-class CUmemAllocationProp(ctypes.Structure):
-    _fields_ = [
-        ("type", c_int),
-        ("requestedHandleTypes", c_int),
-        ("location", CUmemLocation),
-        ("win32HandleMetaData", c_void_p),
-        ("allocFlags_compressionType", ctypes.c_uint),
-        ("allocFlags_gpuDirectRDMACapable", ctypes.c_uint),
-        ("allocFlags_usage", ctypes.c_uint),
-        ("allocFlags_reserved", ctypes.c_uint * 4),
-    ]
-
-
-# Load CUDA library (lazy)
-_cuda = None
-
-
-def _get_cuda():
-    global _cuda
-    if _cuda is None:
-        _cuda = ctypes.CDLL("libcuda.so.1")
-    return _cuda
-
-
-def _check(result: int, name: str):
-    """Check CUDA result and raise on error."""
-    if result != 0:
-        cuda = _get_cuda()
-        err = ctypes.c_char_p()
-        cuda.cuGetErrorString(result, byref(err))
-        raise RuntimeError(f"{name}: {err.value.decode() if err.value else result}")
-
-
 @dataclass(frozen=True)
 class LocalMapping:
     """Immutable record of a local VA mapping."""
@@ -113,8 +75,8 @@ class LocalMapping:
 
 
 @dataclass(frozen=True)
-class PreservedRegistrySpec:
-    """Snapshot of registry tensor spec for validation on wake."""
+class PreservedMetadataSpec:
+    """Snapshot of metadata tensor spec for validation on wake."""
 
     key: str
     allocation_id: str
@@ -124,20 +86,19 @@ class PreservedRegistrySpec:
     stride: Optional[Tuple[int, ...]]
 
 
-class RPCCumemAllocator:
-    """Unified allocator that can act as writer or reader.
+class GMSClientMemoryManager:
+    """Unified memory manager that can act as writer or reader.
 
     Modes:
-    - mode="write": acquire RW lock, allocate/map RW, mutate registry, commit/publish.
+    - mode="write": acquire RW lock, allocate/map RW, mutate metadata, commit/publish.
     - mode="read": acquire RO lock (READY only), import/map RO, sleep/wake.
-    - mode="auto": try RO immediately; if not READY, fall back to RW.
     """
 
     def __init__(
         self,
         socket_path: str,
         *,
-        mode: Literal["write", "read", "auto"] = "read",
+        mode: Literal["write", "read"],
         device: int = 0,
         timeout_ms: Optional[int] = None,
     ) -> None:
@@ -145,7 +106,7 @@ class RPCCumemAllocator:
         self.device = device
         self._timeout_ms = timeout_ms
 
-        self._client: Optional[AllocationServerClient] = None
+        self._client: Optional[GMSRPCClient] = None
         self._mappings: Dict[int, LocalMapping] = {}  # va -> mapping
         self._allocation_id_to_va: Dict[str, int] = {}
 
@@ -157,47 +118,27 @@ class RPCCumemAllocator:
 
         # VA-stable sleep/wake state
         self._va_preserved = False
-        self._preserved_registry_prefix: Optional[str] = None
-        self._preserved_registry_specs: Dict[str, PreservedRegistrySpec] = {}
+        self._preserved_metadata_prefix: Optional[str] = None
+        self._preserved_metadata_specs: Dict[str, PreservedMetadataSpec] = {}
 
         # Ensure torch is on the right device for subsequent CUDA operations.
         if torch.cuda.is_available():
             torch.cuda.set_device(self.device)
 
         # Cache granularity for VA alignment
-        self.granularity = self._get_granularity()
+        self.granularity = get_allocation_granularity(device)
 
         if mode == "write":
             self._connect(lock_type="rw", timeout_ms=timeout_ms)
         elif mode == "read":
             self._connect(lock_type="ro", timeout_ms=timeout_ms)
-        elif mode == "auto":
-            try:
-                # Fast-path: if READY, RO handshake succeeds immediately.
-                self._connect(lock_type="ro", timeout_ms=0)
-            except TimeoutError:
-                self._connect(lock_type="rw", timeout_ms=timeout_ms)
         else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-    def _get_granularity(self) -> int:
-        cuda = _get_cuda()
-        prop = CUmemAllocationProp()
-        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED
-        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE
-        prop.location.id = self.device
-        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
-        gran = c_size_t()
-        _check(
-            cuda.cuMemGetAllocationGranularity(byref(gran), byref(prop), 0),
-            "granularity",
-        )
-        return int(gran.value)
+            raise ValueError(f"Unknown mode: {mode}. Must be 'write' or 'read'.")
 
     def _connect(
         self, *, lock_type: Literal["rw", "ro"], timeout_ms: Optional[int]
     ) -> None:
-        self._client = AllocationServerClient(
+        self._client = GMSRPCClient(
             self.socket_path, lock_type=lock_type, timeout_ms=timeout_ms
         )
         self._sleeping = False
@@ -206,7 +147,7 @@ class RPCCumemAllocator:
 
     @property
     def mode(self) -> Literal["write", "read"]:
-        """Current mode of the allocator."""
+        """Current mode of the memory manager."""
         return self._mode
 
     @property
@@ -223,130 +164,52 @@ class RPCCumemAllocator:
     def is_sleeping(self) -> bool:
         return self._sleeping
 
-    @property
-    def mapping_count(self) -> int:
-        """Count of currently active (mapped) allocations.
+    # ==================== Metadata convenience ====================
 
-        Excludes preserved VA reservations that are unmapped during sleep.
-        """
-        return sum(1 for m in self._mappings.values() if m.handle != 0)
-
-    @property
-    def preserved_va_count(self) -> int:
-        """Count of preserved VA reservations (mapped + unmapped)."""
-        return len(self._mappings)
-
-    # ==================== Registry convenience ====================
-
-    def registry_put(
+    def metadata_put(
         self, key: str, allocation_id: str, offset_bytes: int, value: bytes
     ) -> bool:
         self._require_connected()
         assert self._client is not None
-        return self._client.registry_put(key, allocation_id, offset_bytes, value)
+        return self._client.metadata_put(key, allocation_id, offset_bytes, value)
 
-    def registry_get(self, key: str) -> Optional[tuple[str, int, bytes]]:
+    def metadata_get(self, key: str) -> Optional[tuple[str, int, bytes]]:
         self._require_connected()
         assert self._client is not None
-        return self._client.registry_get(key)
+        return self._client.metadata_get(key)
 
-    def registry_list(self, prefix: str = "") -> List[str]:
+    def metadata_list(self, prefix: str = "") -> List[str]:
         self._require_connected()
         assert self._client is not None
-        return self._client.registry_list(prefix)
+        return self._client.metadata_list(prefix)
 
-    def registry_delete(self, key: str) -> bool:
+    def metadata_delete(self, key: str) -> bool:
         self._require_connected()
         assert self._client is not None
-        return self._client.registry_delete(key)
+        return self._client.metadata_delete(key)
 
-    def registry_delete_prefix(self, prefix: str) -> int:
+    def metadata_delete_prefix(self, prefix: str) -> int:
+        """Delete all metadata keys with prefix (RW only).
+
+        This is a convenience method that iterates over List(prefix) and
+        deletes each key individually.
+        """
         self._require_connected()
         assert self._client is not None
-        return self._client.registry_delete_prefix(prefix)
-
-    def registry_prune_allocation(self, allocation_id: str) -> int:
-        self._require_connected()
-        assert self._client is not None
-        return self._client.registry_prune_allocation(allocation_id)
-
-    def registry_prune_missing_allocations(
-        self, valid_allocation_ids: List[str]
-    ) -> int:
-        self._require_connected()
-        assert self._client is not None
-        return self._client.registry_prune_missing_allocations(valid_allocation_ids)
+        keys = self._client.metadata_list(prefix)
+        count = 0
+        for key in keys:
+            if self._client.metadata_delete(key):
+                count += 1
+        return count
 
     # ==================== Allocation operations ====================
 
     def list_allocations(self, tag: Optional[str] = None) -> List[Dict]:
+        """List all allocations on the server."""
         self._require_connected()
         assert self._client is not None
         return self._client.list_allocations(tag)
-
-    def get_va(self, allocation_id: str) -> Optional[int]:
-        return self._allocation_id_to_va.get(allocation_id)
-
-    def allocate(self, size: int, tag: str = "default") -> Tuple[str, int]:
-        """Allocate on server and map RW locally (write mode only)."""
-        self._require_connected()
-        if self.lock_type != "rw":
-            raise RuntimeError("allocate() requires RW mode")
-        assert self._client is not None
-
-        cuda = _get_cuda()
-
-        allocation_id, aligned_size = self._client.allocate(size, tag)
-        fd = self._client.export(allocation_id)
-
-        try:
-            handle = CUmemGenericAllocationHandle()
-            _check(
-                cuda.cuMemImportFromShareableHandle(
-                    byref(handle),
-                    c_void_p(fd),
-                    c_int(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-                    c_ulonglong(0),
-                ),
-                "cuMemImportFromShareableHandle",
-            )
-        finally:
-            os.close(fd)
-
-        va = CUdeviceptr()
-        _check(
-            cuda.cuMemAddressReserve(
-                byref(va),
-                c_size_t(aligned_size),
-                c_size_t(self.granularity),
-                CUdeviceptr(0),
-                c_ulonglong(0),
-            ),
-            "cuMemAddressReserve",
-        )
-
-        _check(
-            cuda.cuMemMap(
-                va, c_size_t(aligned_size), c_size_t(0), handle, c_ulonglong(0)
-            ),
-            "cuMemMap",
-        )
-
-        self._set_access(va.value, aligned_size, access="rw")
-
-        self._track_mapping(
-            LocalMapping(
-                allocation_id=allocation_id,
-                va=va.value,
-                size=size,
-                aligned_size=aligned_size,
-                handle=int(handle.value),
-                tag=tag,
-                access="rw",
-            )
-        )
-
-        return allocation_id, va.value
 
     def allocate_to_va(
         self,
@@ -385,11 +248,13 @@ class RPCCumemAllocator:
 
         # Import the C++ extension for import_and_map
         try:
-            from gpu_memory_service.extensions import _rpc_cumem_ext as cumem
+            from gpu_memory_service.client.torch.extensions import (
+                _allocator_ext as cumem,
+            )
         except ImportError as e:
             raise RuntimeError(
                 "Missing CUDA VMM pluggable allocator extension. "
-                "Build gpu_memory_service/core/csrc/rpc_cumem.cpp first."
+                "Build gpu_memory_service with extensions first."
             ) from e
 
         # Allocate on server
@@ -419,7 +284,7 @@ class RPCCumemAllocator:
                 handle = int(info[3])
                 break
 
-        # Track in Python allocator for sleep/wake
+        # Track in Python memory manager for sleep/wake
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
@@ -445,7 +310,7 @@ class RPCCumemAllocator:
         if allocation_id in self._allocation_id_to_va:
             return self._allocation_id_to_va[allocation_id]
 
-        cuda = _get_cuda()
+        cuda = get_cuda_driver()
 
         alloc_info = self._client.get_allocation(allocation_id)
         aligned_size = int(alloc_info["aligned_size"])
@@ -455,7 +320,7 @@ class RPCCumemAllocator:
         fd = self._client.export(allocation_id)
         try:
             handle = CUmemGenericAllocationHandle()
-            _check(
+            check_cuda_result(
                 cuda.cuMemImportFromShareableHandle(
                     byref(handle),
                     c_void_p(fd),
@@ -468,7 +333,7 @@ class RPCCumemAllocator:
             os.close(fd)
 
         va = CUdeviceptr()
-        _check(
+        check_cuda_result(
             cuda.cuMemAddressReserve(
                 byref(va),
                 c_size_t(aligned_size),
@@ -478,7 +343,7 @@ class RPCCumemAllocator:
             ),
             "cuMemAddressReserve",
         )
-        _check(
+        check_cuda_result(
             cuda.cuMemMap(
                 va, c_size_t(aligned_size), c_size_t(0), handle, c_ulonglong(0)
             ),
@@ -501,15 +366,6 @@ class RPCCumemAllocator:
         )
 
         return va.value
-
-    def import_all(self, tag: Optional[str] = None) -> Dict[str, int]:
-        self._require_connected()
-        allocs = self.list_allocations(tag)
-        out: Dict[str, int] = {}
-        for a in allocs:
-            alloc_id = a["allocation_id"]
-            out[alloc_id] = self.import_allocation(alloc_id)
-        return out
 
     def clear_all(self) -> int:
         """Clear all allocations on the server (RW only).
@@ -574,7 +430,7 @@ class RPCCumemAllocator:
         becomes a reader for inference.
         """
         if self._closed:
-            raise RuntimeError("Allocator is closed")
+            raise RuntimeError("Memory manager is closed")
         if self._sleeping:
             raise RuntimeError(
                 "Cannot switch_to_read() while sleeping; call wake() first"
@@ -591,18 +447,18 @@ class RPCCumemAllocator:
 
     # ==================== Sleep / wake (read mode) ====================
 
-    def sleep(self, *, registry_prefix: Optional[str] = None) -> None:
+    def sleep(self, *, metadata_prefix: Optional[str] = None) -> None:
         """Release RO lock and unmap local allocations (VA-stable).
 
         VAs are preserved during sleep so tensor pointers remain stable.
         On wake, allocations are remapped to the same VAs.
 
         Args:
-            registry_prefix: If provided, snapshot registry specs for validation on wake.
+            metadata_prefix: If provided, snapshot metadata specs for validation on wake.
                             Typically the config_hash prefix (e.g., "abc123:").
         """
         if self._closed:
-            raise RuntimeError("Allocator is closed")
+            raise RuntimeError("Memory manager is closed")
         if self._sleeping:
             return
         self._require_connected()
@@ -616,11 +472,11 @@ class RPCCumemAllocator:
         # Preserve allocation IDs for remapping on wake
         self._preserved_allocation_ids = list(self._allocation_id_to_va.keys())
 
-        # Snapshot registry specs for validation on wake (if prefix provided)
-        self._preserved_registry_prefix = registry_prefix
-        self._preserved_registry_specs.clear()
-        if registry_prefix is not None:
-            self._snapshot_registry_specs(registry_prefix)
+        # Snapshot metadata specs for validation on wake (if prefix provided)
+        self._preserved_metadata_prefix = metadata_prefix
+        self._preserved_metadata_specs.clear()
+        if metadata_prefix is not None:
+            self._snapshot_metadata_specs(metadata_prefix)
 
         # Unmap physical memory but keep VA reservations
         self._unmap_preserving_va()
@@ -631,12 +487,12 @@ class RPCCumemAllocator:
         self._client = None
         self._sleeping = True
 
-    def _snapshot_registry_specs(self, prefix: str) -> None:
-        """Snapshot registry tensor specs for validation on wake."""
+    def _snapshot_metadata_specs(self, prefix: str) -> None:
+        """Snapshot metadata tensor specs for validation on wake."""
         assert self._client is not None
-        keys = self._client.registry_list(prefix)
+        keys = self._client.metadata_list(prefix)
         for key in keys:
-            got = self._client.registry_get(key)
+            got = self._client.metadata_get(key)
             if got is None:
                 continue
             allocation_id, offset_bytes, value = got
@@ -650,7 +506,7 @@ class RPCCumemAllocator:
                 stride = None
                 if "stride" in obj and obj["stride"] is not None:
                     stride = tuple(int(x) for x in obj["stride"])
-                self._preserved_registry_specs[key] = PreservedRegistrySpec(
+                self._preserved_metadata_specs[key] = PreservedMetadataSpec(
                     key=key,
                     allocation_id=allocation_id,
                     offset_bytes=offset_bytes,
@@ -659,7 +515,7 @@ class RPCCumemAllocator:
                     stride=stride,
                 )
             except Exception as e:
-                logger.debug(f"Failed to parse registry spec for {key}: {e}")
+                logger.debug(f"Failed to parse metadata spec for {key}: {e}")
 
     def wake(self, timeout_ms: Optional[int] = None) -> bool:
         """Reacquire RO lock and remap preserved allocations (VA-stable).
@@ -678,7 +534,7 @@ class RPCCumemAllocator:
             StaleWeightsError: If weights were structurally changed while sleeping.
         """
         if self._closed:
-            raise RuntimeError("Allocator is closed")
+            raise RuntimeError("Memory manager is closed")
         if not self._sleeping:
             return True
 
@@ -692,9 +548,9 @@ class RPCCumemAllocator:
         eff_timeout = timeout_ms if timeout_ms is not None else self._timeout_ms
         self._connect(lock_type="ro", timeout_ms=eff_timeout)
 
-        # Validate registry specs if we have preserved specs
-        if self._preserved_registry_specs:
-            self._validate_registry_specs()
+        # Validate metadata specs if we have preserved specs
+        if self._preserved_metadata_specs:
+            self._validate_metadata_specs()
 
         # Remap to preserved VAs
         remapped_count = 0
@@ -721,34 +577,34 @@ class RPCCumemAllocator:
 
         self._sleeping = False
         self._va_preserved = False
-        self._preserved_registry_specs.clear()
-        self._preserved_registry_prefix = None
+        self._preserved_metadata_specs.clear()
+        self._preserved_metadata_prefix = None
         return True
 
-    def _validate_registry_specs(self) -> None:
-        """Validate registry specs haven't changed structurally since sleep.
+    def _validate_metadata_specs(self) -> None:
+        """Validate metadata specs haven't changed structurally since sleep.
 
         Raises StaleWeightsError if tensor structure changed.
         """
         assert self._client is not None
-        for key, preserved in self._preserved_registry_specs.items():
-            got = self._client.registry_get(key)
+        for key, preserved in self._preserved_metadata_specs.items():
+            got = self._client.metadata_get(key)
             if got is None:
-                raise StaleWeightsError(f"Registry key {key} no longer exists")
+                raise StaleWeightsError(f"Metadata key {key} no longer exists")
 
             allocation_id, offset_bytes, value = got
 
             # Check allocation_id matches
             if allocation_id != preserved.allocation_id:
                 raise StaleWeightsError(
-                    f"Registry key {key}: allocation_id changed from "
+                    f"Metadata key {key}: allocation_id changed from "
                     f"{preserved.allocation_id} to {allocation_id}"
                 )
 
             # Check offset matches
             if offset_bytes != preserved.offset_bytes:
                 raise StaleWeightsError(
-                    f"Registry key {key}: offset changed from "
+                    f"Metadata key {key}: offset changed from "
                     f"{preserved.offset_bytes} to {offset_bytes}"
                 )
 
@@ -765,23 +621,23 @@ class RPCCumemAllocator:
 
                 if shape != preserved.shape:
                     raise StaleWeightsError(
-                        f"Registry key {key}: shape changed from "
+                        f"Metadata key {key}: shape changed from "
                         f"{preserved.shape} to {shape}"
                     )
                 if dtype != preserved.dtype:
                     raise StaleWeightsError(
-                        f"Registry key {key}: dtype changed from "
+                        f"Metadata key {key}: dtype changed from "
                         f"{preserved.dtype} to {dtype}"
                     )
                 if stride != preserved.stride:
                     raise StaleWeightsError(
-                        f"Registry key {key}: stride changed from "
+                        f"Metadata key {key}: stride changed from "
                         f"{preserved.stride} to {stride}"
                     )
             except StaleWeightsError:
                 raise
             except Exception as e:
-                logger.warning(f"Failed to validate registry spec for {key}: {e}")
+                logger.warning(f"Failed to validate metadata spec for {key}: {e}")
 
     # ==================== Cleanup ====================
 
@@ -803,10 +659,10 @@ class RPCCumemAllocator:
         self._sleeping = False
         self._va_preserved = False
         self._preserved_allocation_ids.clear()
-        self._preserved_registry_specs.clear()
-        self._preserved_registry_prefix = None
+        self._preserved_metadata_specs.clear()
+        self._preserved_metadata_prefix = None
 
-    def __enter__(self) -> "RPCCumemAllocator":
+    def __enter__(self) -> "GMSClientMemoryManager":
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -818,15 +674,15 @@ class RPCCumemAllocator:
     def _require_connected(self) -> None:
         if self._client is None:
             if self._sleeping:
-                raise RuntimeError("Allocator is sleeping")
-            raise RuntimeError("Allocator is not connected")
+                raise RuntimeError("Memory manager is sleeping")
+            raise RuntimeError("Memory manager is not connected")
 
     def _track_mapping(self, m: LocalMapping) -> None:
         self._mappings[m.va] = m
         self._allocation_id_to_va[m.allocation_id] = m.va
 
     def _set_access(self, va: int, size: int, *, access: Literal["ro", "rw"]) -> None:
-        cuda = _get_cuda()
+        cuda = get_cuda_driver()
         acc = CUmemAccessDesc()
         acc.location.type = CU_MEM_LOCATION_TYPE_DEVICE
         acc.location.id = self.device
@@ -835,7 +691,7 @@ class RPCCumemAllocator:
             if access == "ro"
             else CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         )
-        _check(
+        check_cuda_result(
             cuda.cuMemSetAccess(
                 CUdeviceptr(va), c_size_t(size), byref(acc), c_size_t(1)
             ),
@@ -848,7 +704,7 @@ class RPCCumemAllocator:
         This keeps the VA reservation intact so tensors maintain stable pointers.
         On wake, we can remap to the same VAs.
         """
-        cuda = _get_cuda()
+        cuda = get_cuda_driver()
         unmapped_count = 0
         total_bytes = 0
         for va, mapping in list(self._mappings.items()):
@@ -915,7 +771,7 @@ class RPCCumemAllocator:
             return va  # Already mapped
 
         assert self._client is not None
-        cuda = _get_cuda()
+        cuda = get_cuda_driver()
 
         # Validate allocation still exists and size matches
         try:
@@ -936,7 +792,7 @@ class RPCCumemAllocator:
         fd = self._client.export(allocation_id)
         try:
             handle = CUmemGenericAllocationHandle()
-            _check(
+            check_cuda_result(
                 cuda.cuMemImportFromShareableHandle(
                     byref(handle),
                     c_void_p(fd),
@@ -949,7 +805,7 @@ class RPCCumemAllocator:
             os.close(fd)
 
         # Map to the SAME VA (which is still reserved)
-        _check(
+        check_cuda_result(
             cuda.cuMemMap(
                 CUdeviceptr(va),
                 c_size_t(mapping.aligned_size),
@@ -1000,7 +856,7 @@ class RPCCumemAllocator:
 
     def _unmap_all(self) -> None:
         """Unmap and release all local mappings including VA reservations."""
-        cuda = _get_cuda()
+        cuda = get_cuda_driver()
         for va, mapping in list(self._mappings.items()):
             try:
                 if mapping.handle != 0:
