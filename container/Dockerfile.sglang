@@ -21,7 +21,7 @@
 # DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
 #   /workspace            - Users create/modify project files
 #   /home/dynamo          - Users create config/cache files
-#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
+#   /home/dynamo/.local   - SGLang uses /usr/local/lib/python3.12/dist-packages for pip install
 #
 # HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
 # 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
