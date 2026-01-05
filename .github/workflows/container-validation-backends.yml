@@ -48,7 +48,7 @@ jobs:
           files_yaml_from_source_file: .github/filters.yaml
       - name: Debug changed files
         run: |
-          echo "=== All Changed Files ==="
+          echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
           echo "${{ steps.filter.outputs.all_all_changed_files }}"
           echo ""
           echo "=== Filters That Matched ==="
