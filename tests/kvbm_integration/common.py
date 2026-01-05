@@ -59,7 +59,9 @@ class ApiTester:
         self.base_url = (
             base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
         )
-        self.model_id = model_id or os.environ.get("KVBM_MODEL_ID") or "Qwen/Qwen3-0.6B"
+        self.model_id = model_id or os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
 
     def make_request(
         self,
@@ -555,7 +557,7 @@ def llm_server_kvbm(request, runtime_services):
 
     Usage in test files:
         @pytest.mark.parametrize("llm_server_kvbm",
-            [{"cpu_blocks": 100, "gpu_blocks": 10}], indirect=True)
+            [{"cpu_blocks": 100, "gpu_blocks": 10, "model": "Qwen/Qwen3-0.6B"}], indirect=True)
         def test_example(llm_server_kvbm):
             ...
     """
@@ -565,10 +567,14 @@ def llm_server_kvbm(request, runtime_services):
 
     from tests.utils.managed_process import ManagedProcess
 
-    # Get cache configuration from request.param
+    # Get configuration from request.param
     params = getattr(request, "param", {})
     cpu_blocks = params.get("cpu_blocks", 100)
     gpu_blocks = params.get("gpu_blocks", 10)
+    model = params.get(
+        "model",
+        os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
+    )
 
     # Detect available server type
     if importlib.util.find_spec("vllm") is not None:
@@ -583,7 +589,6 @@ def llm_server_kvbm(request, runtime_services):
 
     # Build vLLM command
     port = 8000
-    model = os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B")
     command = [
         "vllm",
         "serve",
