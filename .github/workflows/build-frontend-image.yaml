@@ -23,9 +23,6 @@ jobs:
           - { arch: amd64, runner: gpu-l40-amd64 }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     runs-on: ${{ matrix.platform.runner }}
-    env:
-      FRAMEWORK: none
-      INFERENCE_EXTENSION_VERSION: v0.5.1
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -53,70 +50,28 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           # Install cbindgen (needed in build-epp-dynamo.sh)
           "$HOME/.cargo/bin/cargo" install cbindgen
-      - name: Clone GAIE repo into separate folder and set environment
-        shell: bash
-        run: |
-          set -euo pipefail
-          GAIE_CLONE_DIR="${{ github.workspace }}/external/gateway-api-inference-extension"
-          rm -rf "${GAIE_CLONE_DIR}"
-          mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
-          git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git "${GAIE_CLONE_DIR}"
-          cd "${GAIE_CLONE_DIR}"
-          git checkout ${INFERENCE_EXTENSION_VERSION}
-          echo "GAIE_DIR=${GAIE_CLONE_DIR}" >> $GITHUB_ENV
-          echo "DYNAMO_DIR=${{ github.workspace }}" >> $GITHUB_ENV
-      - name: Login to Azure ACR for EPP Image
-        shell: bash
-        run: |
-          echo "${{ secrets.AZURE_ACR_PASSWORD }}" | docker login ${{ secrets.AZURE_ACR_HOSTNAME }} --username ${{ secrets.AZURE_ACR_USER }} --password-stdin
-      
-      - name: Run build-epp-dynamo.sh
-        shell: bash
-        env:
-          GAIE_DIR: ${{ env.GAIE_DIR }}
-          DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
-          PLATFORMS: linux/${{ matrix.platform.arch }}
-          TARGETARCH: ${{ matrix.platform.arch }}
-        run: |
-          set -euo pipefail
-          echo "GAIE_DIR=${GAIE_DIR}"
-          echo "DYNAMO_DIR=${DYNAMO_DIR}"
-          cd ${DYNAMO_DIR}/deploy/inference-gateway
-          ./build-epp-dynamo.sh
-          EPP_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}-${{ matrix.platform.arch }}"
-          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${EPP_IMAGE}
-          docker push ${EPP_IMAGE}
-          echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
-      - name: Build Dynamo Base Container
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Frontend Container
         id: build-image
         uses: ./.github/actions/docker-build
         with:
           framework: none
-          target: dev
+          target: frontend
           platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Build Frontend Image
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd ${{ github.workspace }}
-          pwd
-          FRONTEND_IMAGE_TAG="dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}"
-          docker buildx build --load \
-            --platform 'linux/${{ matrix.platform.arch }}' \
-            --build-arg DYNAMO_BASE_IMAGE=${{ steps.build-image.outputs.image_tag }} \
-            --build-arg EPP_IMAGE=${{ env.EPP_IMAGE }} \
-            --build-arg PYTHON_VERSION=3.12 \
-            -f container/Dockerfile.frontend \
-            -t ${FRONTEND_IMAGE_TAG} \
-            .
-          echo "FRONTEND_IMAGE_TAG=${FRONTEND_IMAGE_TAG}" >> $GITHUB_ENV
       - name: Docker Tag and Push Frontend Image
         uses: ./.github/actions/docker-tag-push
         with:

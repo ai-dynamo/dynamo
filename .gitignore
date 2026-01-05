@@ -99,6 +99,7 @@ generated-values.yaml
 .build/
 **/.devcontainer/.env
 TensorRT-LLM
+external/
 
 # Ruler Generated Files
 /.cursor/instructions.md

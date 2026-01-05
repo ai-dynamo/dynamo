@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["FRONTEND"]=5)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4)
 
 DEFAULT_FRAMEWORK=VLLM
 
@@ -120,9 +120,6 @@ SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_PYTHON_VERSION="3.10"
-
-FRONTEND_BASE_IMAGE="nvcr.io/nvidia/base/ubuntu"
-FRONTEND_BASE_IMAGE_TAG="noble-20250619"
 
 # GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
 GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
@@ -561,8 +558,6 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
-elif [[ $FRAMEWORK == "FRONTEND" ]]; then
-    DOCKERFILE=${SOURCE_DIR}/Dockerfile
 fi
 
 # Add NIXL_REF as a build argument
@@ -945,22 +940,13 @@ fi
 
 show_image_options
 
-# Handle FRONTEND framework: build base dynamo image and EPP image first
-if [[ $FRAMEWORK == "FRONTEND" ]]; then
-    echo "Building FRONTEND image - requires base dynamo image and EPP image"
+# Handle FRONTEND target: build EPP image first
+if [[ ${TARGET^^} == "FRONTEND" ]]; then
+    echo "Building FRONTEND image - requires EPP image"
     
     # Build base dynamo image first (framework=NONE, target=dev)
     echo ""
-    echo "Building base dynamo image for frontend..."
-    
-    { set +x; } 2>/dev/null
-    
-    if [ ${BASE_BUILD_EXIT_CODE} -ne 0 ]; then
-        error "ERROR: Failed to build base dynamo image for frontend"
-    fi
-    
-    echo "Successfully built base dynamo image: ${BASE_DYNAMO_TAG}"
-    
+    echo "Building EPP image for Frontend..."
     # Set up paths for GAIE
     GAIE_CLONE_DIR="${BUILD_CONTEXT}/external/gateway-api-inference-extension"
     
@@ -993,7 +979,6 @@ if [[ $FRAMEWORK == "FRONTEND" ]]; then
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
     
     # Add build args for frontend image
-    BUILD_ARGS+=" --build-arg DYNAMO_BASE_IMAGE=${BASE_DYNAMO_TAG}"
     BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
 fi
 

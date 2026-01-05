@@ -23,6 +23,7 @@
 
 ARG BASE_IMAGE
 ARG BASE_IMAGE_TAG
+ARG EPP_IMAGE
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
@@ -539,12 +540,11 @@ ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
 
 ##############################################
-########## Dev entrypoint image ##############
+########## Frontend entrypoint image #########
 ##############################################
+FROM ${EPP_IMAGE} AS epp
 
 FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
-
-ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty"
 
 ARG PYTHON_VERSION
 RUN apt-get update -y \
@@ -590,9 +590,9 @@ ENV PATH="/opt/dynamo/venv/bin:$PATH"
 # Copy virtual environment directly from dynamo_base (dev image)
 # This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
 # Copy uv to system /bin
-COPY --from=runtime /bin/uv /bin/uvx /bin/
+COPY --from=dev /bin/uv /bin/uvx /bin/
 RUN uv python install $PYTHON_VERSION
-COPY --chown=dynamo: /opt/dynamo/venv/ /opt/dynamo/venv/
+COPY --chown=dynamo: --from=dev /opt/dynamo/venv/ /opt/dynamo/venv/
 
 # Setup environment for all users
 USER root
