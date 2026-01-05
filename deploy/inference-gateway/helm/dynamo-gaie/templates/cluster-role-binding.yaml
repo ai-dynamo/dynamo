@@ -23,3 +23,4 @@ subjects:
 roleRef:
   kind: ClusterRole
   name: pod-read
+  apiGroup: rbac.authorization.k8s.io

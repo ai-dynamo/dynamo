@@ -182,7 +182,7 @@ You can either use the special FrontEnd image for the EPP_IMAGE in the Helm depl
 
 
 **Note**
-You can also use the standard EPP image i.e. `us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0` for the basic black box integration.
+You can also use the standard EPP image i.e. `us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v1.2.1` for the basic black box integration.
 
 ```bash
 cd deploy/inference-gateway
