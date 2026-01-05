@@ -67,6 +67,7 @@ class EncodeWorkerHandler:
         self._connector = None
         self._accumulated_time = 0.0
         self._processed_requests = 0
+        self.readables = []
 
     def cleanup(self):
         pass
@@ -104,7 +105,6 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
-            readables = []
             for idx in range(len(request.multimodal_inputs)):
                 if not request.multimodal_inputs[idx].multimodal_input.image_url:
                     raise ValueError("image_url is required for the encode worker.")
@@ -163,8 +163,10 @@ class EncodeWorkerHandler:
                 else:
                     # [gluo FIXME] nixl_connector path needs to be update to handle multiple embeddings
                     descriptor = connect.Descriptor(embeddings_cpu)
-                    readables.append(self._connector.create_readable(descriptor))
-                    request.multimodal_inputs[idx].serialized_request = readables[
+                    self.readables.append(
+                        await self._connector.create_readable(descriptor)
+                    )
+                    request.multimodal_inputs[idx].serialized_request = self.readables[
                         -1
                     ].metadata()
 
@@ -190,7 +192,7 @@ class EncodeWorkerHandler:
                 response_generator = await self.pd_worker_client.round_robin(
                     request.model_dump_json(), context=context
                 )
-                for readable in readables:
+                for readable in self.readables:
                     await readable.wait_for_completion()
 
                 async for response in response_generator:

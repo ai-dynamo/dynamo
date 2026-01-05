@@ -106,6 +106,9 @@ class ProcessorHandler(ProcessMixIn):
             multimodal_inputs=[],
         )
 
+        # [gluo WIP] experiment with batching..
+        ENCODE_BATCH_SIZE = 1
+        encode_res_gen = []
         for mm_type, urls in multimodal_inputs.items():
             for url in urls:
                 multimodal_input = MultiModalInput()
@@ -119,13 +122,23 @@ class ProcessorHandler(ProcessMixIn):
                     MultiModalGroup(multimodal_input=multimodal_input)
                 )
 
-        # model_dump_json() serializes the request to JSON string
-        # This API could accept Pydantic class, but SamplingParams
-        # in vLLMMultimodalRequest is not a Pydantic class and will
-        # cause TypeError: unsupported type SamplingParams
-        response_generator = await self.encode_worker_client.round_robin(
-            encode_request.model_dump_json()
-        )
+                if len(encode_request.multimodal_inputs) >= ENCODE_BATCH_SIZE:
+                    # model_dump_json() serializes the request to JSON string
+                    # This API could accept Pydantic class, but SamplingParams
+                    # in vLLMMultimodalRequest is not a Pydantic class and will
+                    # cause TypeError: unsupported type SamplingParams
+                    encode_res_gen.append(
+                        await self.encode_worker_client.round_robin(
+                            encode_request.model_dump_json()
+                        )
+                    )
+                    encode_request.multimodal_inputs = []
+        if encode_request.multimodal_inputs:
+            encode_res_gen.append(
+                await self.encode_worker_client.round_robin(
+                    encode_request.model_dump_json()
+                )
+            )
         # Gather transformed requests
         worker_request = vLLMMultimodalRequest(
             engine_prompt=PatchedTokensPrompt(
@@ -135,10 +148,11 @@ class ProcessorHandler(ProcessMixIn):
             request_id=request_id,
             multimodal_inputs=[],  # will be filled in next
         )
-        async for response in response_generator:
-            logger.debug(f"Received response from encode worker: {response}")
-            output = vLLMMultimodalRequest.model_validate_json(response.data())
-            worker_request.multimodal_inputs.extend(output.multimodal_inputs)
+        for encode_res in encode_res_gen:
+            async for response in encode_res:
+                logger.debug(f"Received response from encode worker: {response}")
+                output = vLLMMultimodalRequest.model_validate_json(response.data())
+                worker_request.multimodal_inputs.extend(output.multimodal_inputs)
 
         response_generator = await self.pd_worker_client.round_robin(
             worker_request.model_dump_json(), context=context
