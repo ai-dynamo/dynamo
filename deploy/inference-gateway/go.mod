@@ -104,6 +104,6 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// Use local checkout of GAIE which is more up-to-date than v1.2.1 release
-// This enables access to packages not yet in the published release
-replace sigs.k8s.io/gateway-api-inference-extension => /home/atchernych/code/gaie_latest/gateway-api-inference-extension
+// NOTE: For local development, uncomment the replace directive below.
+// For Docker builds, keep it commented out to use the published v1.2.1 release.
+// replace sigs.k8s.io/gateway-api-inference-extension => ../../../gaie_latest/gateway-api-inference-extension

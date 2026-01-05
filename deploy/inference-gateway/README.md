@@ -178,18 +178,19 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 
 Dynamo provides a custom routing plugin `pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go` to perform efficient kv routing.
 The Dynamo router is built as a static library, the EPP router will call to provide fast inference.
-You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
-
+You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can [build the image yourself](#building-your-own-dynamo-epp-custom-image).
 
 
 **Note**
-You can also use the standard EPP image`us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0`. For the basic black box integration run:
+You can also use the standard EPP image i.e. `us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0` for the basic black box integration.
 
 ```bash
 cd deploy/inference-gateway
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
+
 # Optionally export the standard EPP image if you do not want to use the default we suggest.
 export EPP_IMAGE=us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
-helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set epp.useDynamo=false
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set epp.useDynamo=false --set-string extension.image=$EPP_IMAGE
 # Optionally overwrite the image --set-string extension.image=$EPP_IMAGE
 ```
 
@@ -359,9 +360,8 @@ The v1.2.1 release introduces breaking changes to the plugin interfaces:
 
 The plugin code for v1.2.1 is in:
 - `pkg/plugins/dynamo_kv_scorer/plugin.go`
-- `pkg/plugins/dynamo_cleanup/plugin.go`
 
-#### Build Commands
+#### Building your own Dynamo EPP custom image
 
 ```bash
 # Build Dynamo library and copy to project
@@ -372,6 +372,9 @@ make image-local-load
 
 # Or do everything in one command
 make all
+
+# Check image tag
+make info
 ```
 
 #### All-in-one Targets
