@@ -40,6 +40,7 @@ httpRoute:
   enabled: true
   # Gateway parent reference configuration
   gatewayName: "inference-gateway"
+  gatewayNamespace: "default"  # Namespace where the Gateway resource is deployed
   # Path matching configuration
   path:
     prefix: "/"
@@ -51,7 +52,7 @@ extension:
   # EPP image for the GAIE extension (Dynamo EPP image by default)
   image: "" # leave empty to use defaults below
   standardImage: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v1.2.1
-  dynamoImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
+  dynamoImage: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:lua-1
 
 # generic knobs you may want in both modes
 imagePullSecrets:

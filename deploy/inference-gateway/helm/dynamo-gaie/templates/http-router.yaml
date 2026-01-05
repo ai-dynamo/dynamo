@@ -24,9 +24,10 @@ spec:
   - group: gateway.networking.k8s.io
     kind: Gateway
     name: {{ .Values.httpRoute.gatewayName }}
+    namespace: {{ .Values.httpRoute.gatewayNamespace }}
   rules:
   - backendRefs:
-    - group: inference.networking.x-k8s.io
+    - group: inference.networking.k8s.io
       kind: InferencePool
       name: {{ .Values.model.shortName }}-pool
       namespace: {{ .Release.Namespace }}
