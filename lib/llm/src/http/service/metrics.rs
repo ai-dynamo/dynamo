@@ -986,6 +986,7 @@ pub fn process_response_and_observe_metrics<T>(
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_cached_tokens(metrics.cached_tokens);
 
         // Drop http_queue_guard on first token for non-streaming (same as streaming)
         if response_collector.is_first_token()
@@ -1536,6 +1537,58 @@ mod tests {
 
         // Should return Ok(None) for metrics annotation events
         assert!(matches!(result, Ok(None)));
+
+        // Should have observed the cached tokens from the metrics annotation event
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_non_streaming_path_observes_cached_tokens() {
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create a metrics annotation event
+        let mut annotated = Annotated::<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        > {
+            id: None,
+            data: None,
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: None,
+        };
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+        };
+
+        let annotation = llm_metrics.to_annotation::<()>().unwrap();
+        annotated.event = annotation.event;
+        annotated.comment = annotation.comment;
+
+        // Process via the non-streaming metrics hook
+        let mut http_queue_guard = None;
+        process_response_and_observe_metrics(&annotated, &mut collector, &mut http_queue_guard);
 
         // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();
