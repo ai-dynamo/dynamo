@@ -356,12 +356,13 @@ impl KvRouter {
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
             // model_manager guarantees workers_with_configs is populated
-            let count = workers_with_configs.configs.len();
-            assert!(
-                count > 0,
-                "workers_with_configs should have at least one worker"
-            );
+            // Wait for at least one worker before starting the subscriber
+            while workers_with_configs.configs.is_empty() {
+                tracing::info!("KV router waiting for at least one worker...");
+                workers_with_configs.notify.notified().await;
+            }
 
+            let count = workers_with_configs.configs.len();
             let all_local_indexer = workers_with_configs
                 .configs
                 .iter()
