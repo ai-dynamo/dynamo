@@ -1587,6 +1587,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "utoipa",
  "uuid",
 ]
 
@@ -7792,6 +7793,8 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.110",
+ "url",
+ "uuid",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -84,7 +84,6 @@ def get_aiperf_cmd(
         str(num_prefix_prompts),
         "--artifact-dir",
         artifact_dir,
-        "-v",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
