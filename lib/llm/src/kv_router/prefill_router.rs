@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::{Arc, OnceLock};
@@ -6,7 +6,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use futures::StreamExt;
 use rand::Rng;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
@@ -15,7 +15,7 @@ use dynamo_runtime::{
         AsyncEngine, AsyncEngineContextProvider, Context, ManyOut, Operator, PushRouter,
         RouterMode, ServerStreamingEngine, SingleIn, async_trait,
     },
-    protocols::{annotated::Annotated, maybe_error::MaybeError},
+    protocols::{EndpointId, annotated::Annotated, maybe_error::MaybeError},
 };
 
 use crate::{
@@ -23,8 +23,7 @@ use crate::{
     kv_router::{KvPushRouter, KvRouterConfig, RouterConfigOverride},
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
     protocols::common::preprocessor::{BootstrapInfo, PrefillResult},
-    protocols::common::timing::RequestPhase,
-    protocols::openai::nvext::WorkerIdInfo,
+    protocols::common::timing::{RequestPhase, RequestTracker},
 };
 
 /// Errors that can occur during prefill routing
@@ -54,14 +53,29 @@ enum InnerPrefillRouter {
 }
 
 impl InnerPrefillRouter {
-    /// Execute prefill generation through the underlying router
-    async fn generate(
+    /// Generate with optional direct routing to specific worker.
+    /// For KvRouter, target_worker is ignored since prefill_worker_id is already set on the request.
+    /// For SimpleRouter, target_worker triggers direct routing via router.direct().
+    async fn generate_to_worker(
         &self,
         request: SingleIn<PreprocessedRequest>,
+        target_worker: Option<u64>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
+        match (self, target_worker) {
+            // KvRouter: prefill_worker_id already set on request, KvPushRouter::select_worker uses it
+            (InnerPrefillRouter::KvRouter(router), _) => router.generate(request).await,
+            (InnerPrefillRouter::SimpleRouter(router), Some(worker_id)) => {
+                router.direct(request, worker_id).await
+            }
+            (InnerPrefillRouter::SimpleRouter(router), None) => router.generate(request).await,
+        }
+    }
+
+    /// Select next worker (for non-KV modes only)
+    fn select_next_worker(&self) -> Option<u64> {
         match self {
-            InnerPrefillRouter::KvRouter(router) => router.generate(request).await,
-            InnerPrefillRouter::SimpleRouter(router) => router.generate(request).await,
+            InnerPrefillRouter::SimpleRouter(router) => router.select_next_worker(),
+            InnerPrefillRouter::KvRouter(_) => None,
         }
     }
 }
@@ -70,12 +84,14 @@ impl InnerPrefillRouter {
 /// It optionally calls a prefill worker before routing to decode, extracting disaggregated_params
 /// from the prefill response and injecting them into the decode request.
 ///
-/// Supports regular Dynamo and GAIE integrated mode via query_instance_id state machine:
-/// - GAIE Stage 1: query_instance_id transitions "" -> "prefill" -> "decode", returns only worker IDs
-/// - GAIE Stage 2: routing.prefill_worker_id/routing.decode_worker_id are set, full execution with specified workers
-/// - Non-GAIE: like GAIE Stage 2 but the worker ids have to be determined.
+/// Modes:
+/// - Query-only: `query_instance_id` annotation present → returns worker IDs without execution
+/// - Pre-routed: `prefill_worker_id`/`decode_worker_id` set → routes to specified workers
+/// - Normal: Worker IDs determined by router based on KV cache state
 pub struct PrefillRouter {
     prefill_router: OnceLock<InnerPrefillRouter>,
+    model_manager: Arc<ModelManager>,
+    endpoint_id: OnceLock<EndpointId>,
     cancel_token: CancellationToken,
     router_mode: RouterMode,
     enforce_disagg: bool,
@@ -83,9 +99,15 @@ pub struct PrefillRouter {
 
 impl PrefillRouter {
     /// Create a disabled prefill router that will never activate (passthrough only)
-    pub fn disabled(router_mode: RouterMode, enforce_disagg: bool) -> Arc<Self> {
+    pub fn disabled(
+        model_manager: Arc<ModelManager>,
+        router_mode: RouterMode,
+        enforce_disagg: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             prefill_router: OnceLock::new(),
+            model_manager,
+            endpoint_id: OnceLock::new(),
             cancel_token: CancellationToken::new(),
             router_mode,
             enforce_disagg,
@@ -105,6 +127,8 @@ impl PrefillRouter {
 
         let router = Arc::new(Self {
             prefill_router,
+            model_manager: model_manager.clone(),
+            endpoint_id: OnceLock::new(),
             cancel_token: cancel_token.clone(),
             router_mode,
             enforce_disagg,
@@ -150,6 +174,15 @@ impl PrefillRouter {
             router_mode = ?self.router_mode,
             "Activating prefill router"
         );
+
+        // Store endpoint_id for later use in build_bootstrap_info
+        let _ = self.endpoint_id.set(endpoint.id());
+
+        // Start runtime config watcher for this endpoint (needed for get_disaggregated_endpoint)
+        // This must be done before creating the router so bootstrap info is available
+        model_manager
+            .get_or_create_runtime_config_watcher(&endpoint)
+            .await?;
 
         let inner_router = if self.router_mode.is_kv_routing() {
             // Create KV chooser using the endpoint
@@ -198,28 +231,18 @@ impl PrefillRouter {
         Ok(())
     }
 
-    /// Generate a unique bootstrap room ID for disaggregated serving
-    fn generate_bootstrap_room() -> u64 {
-        rand::rng().random()
-    }
-
     /// Build bootstrap_info for disaggregated serving
     /// If preselected_worker is provided (GAIE Stage 2), use it directly.
-    /// Otherwise, query for the best worker.
+    /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
+        let endpoint_id = self.endpoint_id.get()?;
         let prefill_router = self.prefill_router.get()?;
 
-        // Only works with KvRouter
-        let kv_router = match prefill_router {
-            InnerPrefillRouter::KvRouter(r) => r,
-            InnerPrefillRouter::SimpleRouter(_) => return None,
-        };
-
-        // Use pre-selected worker (GAIE Stage 2) or query for best worker
+        // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
             let dp_rank = req.routing.as_ref().and_then(|r| r.dp_rank).unwrap_or(0);
             tracing::debug!(
@@ -228,7 +251,12 @@ impl PrefillRouter {
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
-        } else {
+        } else if self.router_mode.is_kv_routing() {
+            // KV mode: use find_best_match
+            let kv_router = match prefill_router {
+                InnerPrefillRouter::KvRouter(r) => r,
+                _ => return None,
+            };
             match kv_router
                 .chooser
                 .find_best_match(None, &req.token_ids, None, false)
@@ -237,17 +265,20 @@ impl PrefillRouter {
                 Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
                 Err(_) => return None,
             }
+        } else {
+            // Non-KV mode: use PushRouter's stateful selection
+            let worker_id = prefill_router.select_next_worker()?;
+            (worker_id, 0)
         };
 
-        // Look up bootstrap endpoint from discovery
-        let endpoint = kv_router
-            .chooser
-            .get_disaggregated_endpoint(worker_id)
-            .await?;
+        // Get bootstrap info from ModelManager (works for ANY mode)
+        let endpoint = self
+            .model_manager
+            .get_disaggregated_endpoint(endpoint_id, worker_id)?;
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room = Self::generate_bootstrap_room();
+        let bootstrap_room: u64 = rand::rng().random();
 
         tracing::info!(
             worker_id = worker_id,
@@ -255,6 +286,7 @@ impl PrefillRouter {
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
+            router_mode = ?self.router_mode,
             "Built bootstrap_info upfront before prefill"
         );
 
@@ -269,16 +301,28 @@ impl PrefillRouter {
         ))
     }
 
-    /// Execute prefill with the given router and extract structured result
+    /// Execute prefill with the given router and extract structured result.
+    ///
+    /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
+    ///
+    /// If `phase_permit` is provided, it is dropped after the first output is received,
+    /// allowing subsequent `set_phase` calls to proceed. This is used in the bootstrap
+    /// optimization path to ensure `record_worker` completes before the phase changes.
     async fn execute_prefill(
         router: Option<InnerPrefillRouter>,
         request: SingleIn<PreprocessedRequest>,
+        target_worker: Option<u64>,
+        phase_permit: Option<OwnedSemaphorePermit>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         let router = router.ok_or(PrefillError::NotActivated)?;
         let mut prefill_response = router
-            .generate(request)
+            .generate_to_worker(request, target_worker)
             .await
             .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+
+        // Drop phase permit now - routing is complete, record_worker was called in select_worker.
+        // This unblocks set_phase(Decode) in the main task without waiting for prefill output.
+        drop(phase_permit);
 
         let Some(first_output) = prefill_response.next().await else {
             return Err(PrefillError::PrefillError(
@@ -338,12 +382,24 @@ impl PrefillRouter {
         ))
     }
 
-    /// Spawn prefill as a background task
-    fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
+    /// Spawn prefill as a background task.
+    ///
+    /// Uses direct routing to target_worker when specified (for non-KV modes with bootstrap optimization).
+    ///
+    /// The `phase_permit` is passed to the spawned task and dropped after the first output,
+    /// allowing the main task's `set_phase(Decode)` to proceed.
+    fn spawn_prefill_task(
+        &self,
+        prefill_request: SingleIn<PreprocessedRequest>,
+        target_worker: Option<u64>,
+        phase_permit: OwnedSemaphorePermit,
+    ) {
         let router = self.prefill_router.get().cloned();
 
         tokio::spawn(async move {
-            match Self::execute_prefill(router, prefill_request).await {
+            match Self::execute_prefill(router, prefill_request, target_worker, Some(phase_permit))
+                .await
+            {
                 Ok(_) => {
                     tracing::debug!("Prefill background task completed");
                 }
@@ -354,66 +410,17 @@ impl PrefillRouter {
         });
     }
 
-    /// Call the prefill router and extract structured prefill result and worker ID
+    /// Call the prefill router and extract structured prefill result and worker ID.
+    ///
+    /// This is the synchronous prefill path - we wait for prefill to complete before proceeding.
+    /// No phase permit is needed since `record_worker` completes before we return.
     async fn call_prefill(
         &self,
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
-        Self::execute_prefill(self.prefill_router.get().cloned(), request).await
-    }
-}
-
-/// GAIE helper functions for preparing prefill requests
-impl PrefillRouter {
-    /// Prepare prefill request for GAIE flows
-    /// - Stage 1: Sets query_instance_id:prefill annotation
-    /// - Stage 2: Sets backend_instance_id to target prefill worker
-    fn prepare_prefill_for_gaie(prefill_req: &mut PreprocessedRequest, is_gaie_stage1: bool) {
-        if is_gaie_stage1 {
-            // GAIE Stage 1: Set query_instance_id to "prefill" for prefill worker selection
-            prefill_req
-                .annotations
-                .retain(|a| !a.starts_with("query_instance_id"));
-            prefill_req
-                .annotations
-                .push(format!("query_instance_id:{}", RequestPhase::Prefill));
-        } else if let Some(prefill_worker_id) = prefill_req
-            .routing
-            .as_ref()
-            .and_then(|r| r.prefill_worker_id)
-        {
-            // GAIE Stage 2: Route to pre-selected prefill worker from the stage 1
-            tracing::debug!(
-                prefill_worker_id = prefill_worker_id,
-                "GAIE Stage 2: Routing prefill to pre-selected worker"
-            );
-            prefill_req.routing_mut().backend_instance_id = Some(prefill_worker_id);
-        }
-    }
-
-    /// Prepare decode request for GAIE Stage 1
-    /// Extracts prefill_worker_id from prefill result and sets decode annotations
-    fn prepare_decode_for_gaie_stage1(
-        decode_req: &mut PreprocessedRequest,
-        prefill_result: &PrefillResult,
-    ) {
-        let prefill_worker_id = prefill_result
-            .disaggregated_params
-            .get("worker_id")
-            .and_then(|v| serde_json::from_value::<WorkerIdInfo>(v.clone()).ok())
-            .and_then(|info| info.prefill_worker_id);
-
-        if let Some(worker_id) = prefill_worker_id {
-            decode_req
-                .annotations
-                .retain(|a| !a.starts_with("query_instance_id"));
-            decode_req
-                .annotations
-                .push(format!("query_instance_id:{}", RequestPhase::Decode));
-            decode_req
-                .annotations
-                .push(format!("prefill_worker_id:{worker_id}"));
-        }
+        // For call_prefill path, routing is handled by the router itself (no direct routing needed)
+        // No phase permit needed - we wait for completion before changing phase
+        Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
     }
 }
 
@@ -439,104 +446,73 @@ impl
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         // Extract request data while preserving context
-        let (req, context) = request.into_parts();
+        let (mut req, context) = request.into_parts();
         let request_id = context.id().to_string();
         let engine_ctx = context.context();
-
-        // GAIE Stage 1: the presence of the empty query_instance_id signals query-only mode
-        // State machine: "" -> "prefill" -> "decode" (disagg) OR "" -> aggregated worker (agg fallback)
-        let is_gaie_stage1 = req
-            .get_annotation_value("query_instance_id")
-            .is_some_and(|s| s.is_empty());
 
         // Save original max_tokens for decode
         let original_max_tokens = req.stop_conditions.max_tokens;
 
-        // Prepare prefill request with max_tokens = 1
+        // If prefill router is not activated, skip directly to decode
+        if self.prefill_router.get().is_none() {
+            if self.enforce_disagg {
+                return Err(anyhow::anyhow!(PrefillError::NotActivated));
+            }
+            return next.generate(context.map(|_| req)).await;
+        }
+
+        // Ensure tracker exists for routing decisions in disaggregated mode.
+        // Create one if not provided by the upstream DeltaGenerator.
+        if req.tracker.is_none() {
+            req.tracker = Some(Arc::new(RequestTracker::new()));
+        }
+        let tracker = req.tracker.as_ref().unwrap();
+        let prefill_phase_permit = tracker.set_phase(RequestPhase::Prefill).await;
+        tracker.record_prefill_start();
+
+        // Prepare prefill request with max_tokens = 1 (clone after tracker is set)
         let mut prefill_req = req.clone();
         prefill_req.stop_conditions.max_tokens = Some(1);
 
-        // Prepare prefill request for GAIE flows (Stage 1 or Stage 2)
-        Self::prepare_prefill_for_gaie(&mut prefill_req, is_gaie_stage1);
-
-        // Try build_bootstrap_info optimization (skip for GAIE Stage 1 which needs query-only flow)
-        // For GAIE Stage 2, use prefill_worker_id if provided
+        // Try build_bootstrap_info optimization: if we can get bootstrap info upfront,
+        // spawn prefill in background and proceed to decode immediately.
         let preselected_worker = prefill_req
             .routing
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
-        let prefill_result = if !is_gaie_stage1 {
-            if let Some((worker_id, dp_rank, bootstrap_info)) = self
-                .build_bootstrap_info(&prefill_req, preselected_worker)
-                .await
-            {
-                let bootstrap_room = bootstrap_info.bootstrap_room;
 
-                // Prepare request with bootstrap_room and force routing to specific worker
-                let routing = prefill_req.routing_mut();
-                routing.backend_instance_id = Some(worker_id);
-                routing.dp_rank = Some(dp_rank);
-                let extra_args = prefill_req
-                    .extra_args
-                    .get_or_insert_with(|| serde_json::json!({}));
-                if let Some(obj) = extra_args.as_object_mut() {
-                    obj.insert(
-                        "bootstrap_room".to_string(),
-                        serde_json::json!(bootstrap_room),
-                    );
-                }
+        let prefill_result = if let Some((worker_id, dp_rank, bootstrap_info)) = self
+            .build_bootstrap_info(&prefill_req, preselected_worker)
+            .await
+        {
+            // Bootstrap optimization path: spawn prefill in background
+            let routing = prefill_req.routing_mut();
+            routing.prefill_worker_id = Some(worker_id);
+            routing.dp_rank = Some(dp_rank);
+            prefill_req.bootstrap_info = Some(bootstrap_info.clone());
 
-                // Set phase to Prefill and record prefill start time if tracking is enabled
-                if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Prefill);
-                    tracker.record_prefill_start();
-                }
+            let prefill_context = Context::with_id(prefill_req, request_id.clone());
+            engine_ctx.link_child(prefill_context.context());
 
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
+            // Pass phase permit to spawned task - it drops after first output (record_worker complete)
+            // This allows set_phase(Decode) below to proceed only after prefill routing is done
+            self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
 
-                self.spawn_prefill_task(prefill_context);
-
-                Ok((None, Some(worker_id), Some(bootstrap_info)))
-            } else {
-                // Fallback to original: Wait for prefill to complete
-                tracing::debug!("Using original prefill path");
-
-                // Set phase to Prefill and record prefill start time if tracking is enabled
-                if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Prefill);
-                    tracker.record_prefill_start();
-                }
-
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
-
-                self.call_prefill(prefill_context)
-                    .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
-            }
+            Ok((None, Some(worker_id), Some(bootstrap_info)))
         } else {
-            // GAIE Stage 1: Use original path (no bootstrap optimization)
-            // But first check if prefill router is activated - if not, skip to avoid setting phase
-            if self.prefill_router.get().is_none() {
-                tracing::debug!("GAIE Stage 1: Prefill router not activated, skipping to decode");
-                Err(PrefillError::NotActivated)
-            } else {
-                tracing::debug!("Using original prefill path (GAIE Stage 1)");
+            // Original prefill path: wait for prefill to complete
+            tracing::debug!("Using original prefill path");
 
-                // Set phase to Prefill and record prefill start time if tracking is enabled
-                if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Prefill);
-                    tracker.record_prefill_start();
-                }
+            // Drop the phase permit before calling call_prefill - we wait for completion
+            // so there's no race with set_phase(Decode) below
+            drop(prefill_phase_permit);
 
-                let prefill_context = Context::with_id(prefill_req, request_id.clone());
-                engine_ctx.link_child(prefill_context.context());
+            let prefill_context = Context::with_id(prefill_req, request_id.clone());
+            engine_ctx.link_child(prefill_context.context());
 
-                self.call_prefill(prefill_context)
-                    .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
-            }
+            self.call_prefill(prefill_context)
+                .await
+                .map(|(result, worker_id)| (Some(result), worker_id, None))
         };
 
         // Abort if cancelled during prefill
@@ -553,20 +529,18 @@ impl
             Ok((maybe_prefill_result, _prefill_worker_id, bootstrap_info)) => {
                 tracing::debug!("Prefill completed, proceeding to decode");
 
-                // Set phase to Decode for the decode request
+                // Set phase to Decode for the decode request.
+                // In bootstrap path, this blocks until the spawned prefill task drops its permit
+                // (after first output / record_worker completes), ensuring correct phase for routing.
                 if let Some(ref tracker) = req.tracker {
-                    tracker.set_phase(RequestPhase::Decode);
+                    let _decode_permit = tracker.set_phase(RequestPhase::Decode).await;
+                    // Permit is dropped immediately - decode proceeds, no need to hold it
                 }
 
                 let mut decode_req = req;
 
                 // Update request with prefill result
-                if is_gaie_stage1 {
-                    if let Some(ref prefill_result) = maybe_prefill_result {
-                        Self::prepare_decode_for_gaie_stage1(&mut decode_req, prefill_result);
-                    }
-                } else if let Some(prefill_result) = maybe_prefill_result {
-                    // Normal or GAIE Stage 2: Set prefill_result for decode
+                if let Some(prefill_result) = maybe_prefill_result {
                     decode_req.prefill_result = Some(prefill_result);
                 }
 
@@ -584,17 +558,6 @@ impl
                     overlap_score_weight: Some(0.0),
                     ..existing_override.unwrap_or_default()
                 });
-
-                // GAIE Stage 2: Route to pre-selected decode worker if specified
-                if let Some(decode_worker_id) =
-                    decode_req.routing.as_ref().and_then(|r| r.decode_worker_id)
-                {
-                    decode_req.routing_mut().backend_instance_id = Some(decode_worker_id);
-                    tracing::debug!(
-                        decode_worker_id = decode_worker_id,
-                        "GAIE Stage 2: Routing decode to pre-selected worker"
-                    );
-                }
 
                 // Map the modified request through with preserved context
                 let decode_request = context.map(|_| decode_req);
