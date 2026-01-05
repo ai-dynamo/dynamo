@@ -530,17 +530,13 @@ USER root
 
 # Fix directory permissions: COPY --chmod only affects contents, not the directory itself
 RUN chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
-RUN ln -s /workspace /sgl-workspace/dynamo
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
+    ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
-# Packages are installed system-wide in /usr/local/lib/python3.12/dist-packages
-# PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
-# ENV PYTHONPATH=/usr/local/lib/python3.12/dist-packages:$PYTHONPATH  # Not needed as this is default system path
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
