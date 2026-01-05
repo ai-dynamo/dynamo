@@ -41,6 +41,9 @@ ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
+# Cache-busting argument - change this value to force rebuild
+ARG CACHE_BUSTER=2025-01-06
+
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
