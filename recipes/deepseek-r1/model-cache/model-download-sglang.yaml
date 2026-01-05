@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      tolerations: []
+      containers:
+        - name: model-download
+          image: python:3.10-slim
+          command: ["sh", "-c"]
+          env:
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: HF_HOME
+              value: /opt/model-cache
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub hf_transfer
+              hf download deepseek-ai/DeepSeek-R1
+          volumeMounts:
+            - name: model-cache
+              mountPath: /opt/model-cache
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: model-cache
