@@ -108,6 +108,7 @@ import (
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
+	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
 	schedtypes "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/types"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -119,6 +120,9 @@ const (
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefiller-host-port"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
+
+	// stateKey is the key used to store routing state in PluginState
+	stateKey = "dynamo-routing-state"
 )
 
 // --------------------------- config / env ---------------------------
@@ -128,26 +132,56 @@ var warmupErr error
 
 type params struct{}
 
+// DynamoRoutingState holds routing information passed from Score() to PreRequest().
+// This is stored in PluginState keyed by request ID.
+type DynamoRoutingState struct {
+	WorkerID        string
+	PrefillWorkerID string
+	// TokenData holds the token IDs from the router.
+	// Currently unused but stored for future implementation where tokens
+	// may be passed to the worker via request body instead of headers.
+	TokenData []int64
+}
+
+// Clone implements plugins.StateData interface.
+func (s *DynamoRoutingState) Clone() plugins.StateData {
+	if s == nil {
+		return nil
+	}
+	clone := &DynamoRoutingState{
+		WorkerID:        s.WorkerID,
+		PrefillWorkerID: s.PrefillWorkerID,
+	}
+	if s.TokenData != nil {
+		clone.TokenData = make([]int64, len(s.TokenData))
+		copy(clone.TokenData, s.TokenData)
+	}
+	return clone
+}
+
 type KVAwareScorer struct {
-	typedName plugins.TypedName
+	typedName   plugins.TypedName
+	pluginState *plugins.PluginState
 }
 
 var _ plugins.Plugin = (*KVAwareScorer)(nil)
 var _ framework.Scorer = (*KVAwareScorer)(nil)
+var _ rc.PreRequest = (*KVAwareScorer)(nil)
 
-func NewKVAwareScorer() *KVAwareScorer {
+func NewKVAwareScorer(ctx context.Context) *KVAwareScorer {
 	return &KVAwareScorer{
-		typedName: plugins.TypedName{Type: KVAwareScorerType, Name: PluginName},
+		typedName:   plugins.TypedName{Type: KVAwareScorerType, Name: PluginName},
+		pluginState: plugins.NewPluginState(ctx),
 	}
 }
 
 func (k *KVAwareScorer) WithName(name string) *KVAwareScorer { k.typedName.Name = name; return k }
 
-func KVAwareScorerFactory(name string, raw json.RawMessage, _ plugins.Handle) (plugins.Plugin, error) {
+func KVAwareScorerFactory(name string, raw json.RawMessage, handle plugins.Handle) (plugins.Plugin, error) {
 	p := params{}
 	_ = json.Unmarshal(raw, &p)
 
-	s := NewKVAwareScorer().WithName(name)
+	s := NewKVAwareScorer(handle.Context()).WithName(name)
 
 	// one-time FFI init (runtime + persistent pipeline)
 	warmupOnce.Do(func() {
@@ -337,22 +371,18 @@ func (k *KVAwareScorer) Score(
 			req.Headers[RoutingModeHeader] = "aggregated"
 		}
 
-		// Token data may be passed in the request body in future versions.
-		// if len(tokenData) > 0 {
-		// 	if tokenDataJSON, jsonErr := json.Marshal(tokenData); jsonErr == nil {
-		// 		req.Body[TokenDataKey] = string(tokenDataJSON)
-		// 	}
-		// }
-
-		// Register request with router bookkeeping
-		requestID := req.RequestId
-		if requestID != "" {
-			if addErr := k.callAddRequest(ctx, requestID, tokenData, workerID, prefillWorkerID); addErr != nil {
-				logger.V(logutil.DEFAULT).Error(addErr, "Failed to add request to router bookkeeping",
-					"requestID", requestID)
+		// Store routing state for PreRequest to register with router bookkeeping.
+		// This is the correct place to store state - PreRequest is called AFTER
+		// scheduling is finalized, ensuring we only register committed requests.
+		if req.RequestId != "" {
+			routingState := &DynamoRoutingState{
+				WorkerID:        workerID,
+				PrefillWorkerID: prefillWorkerID,
+				// TokenData is stored for future use. Currently not passed to workers
+				// via headers (too large). May be passed via request body in future.
+				TokenData: tokenData,
 			}
-		} else {
-			logger.V(logutil.VERBOSE).Info("No request ID available, skipping router bookkeeping")
+			k.pluginState.Write(req.RequestId, plugins.StateKey(stateKey), routingState)
 		}
 	}
 
@@ -361,6 +391,49 @@ func (k *KVAwareScorer) Score(
 		out[p] = 1.0
 	}
 	return out
+}
+
+// PreRequest is called after scheduling is finalized and before the request is sent to the worker.
+// This is the correct place to register the request with the Dynamo router's bookkeeping,
+// as we know the request WILL be dispatched (avoiding phantom bookkeeping entries).
+func (k *KVAwareScorer) PreRequest(
+	ctx context.Context,
+	request *schedtypes.LLMRequest,
+	schedulingResult *schedtypes.SchedulingResult,
+) {
+	logger := log.FromContext(ctx)
+
+	if request == nil || request.RequestId == "" {
+		logger.V(logutil.DEBUG).Info("PreRequest: no request ID, skipping router bookkeeping")
+		return
+	}
+
+	// Read and delete the routing state stored by Score()
+	state, err := plugins.ReadPluginStateKey[*DynamoRoutingState](
+		k.pluginState, request.RequestId, plugins.StateKey(stateKey),
+	)
+	k.pluginState.Delete(request.RequestId) // Clean up state after reading
+
+	if err != nil {
+		// No state found means Score() didn't store routing info (e.g., router call failed)
+		logger.V(logutil.DEBUG).Info("PreRequest: no routing state found, skipping router bookkeeping",
+			"requestID", request.RequestId)
+		return
+	}
+
+	// Register request with router bookkeeping now that scheduling is committed
+	if addErr := k.callAddRequest(ctx, request.RequestId, state.TokenData, state.WorkerID, state.PrefillWorkerID); addErr != nil {
+		logger.V(logutil.DEFAULT).Error(addErr, "PreRequest: failed to add request to router bookkeeping",
+			"requestID", request.RequestId)
+		return
+	}
+
+	logger.V(logutil.VERBOSE).Info("PreRequest: registered request with router bookkeeping",
+		"requestID", request.RequestId,
+		"workerID", state.WorkerID,
+		"prefillWorkerID", state.PrefillWorkerID,
+		"tokenCount", len(state.TokenData),
+	)
 }
 
 // --------------------------- router call (persistent only) ---------------------------
