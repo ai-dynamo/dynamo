@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -9,7 +9,7 @@ import secrets
 import shlex
 import time
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import kr8s
 import requests
@@ -17,6 +17,15 @@ import yaml
 from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
+
+# Try to import HW fault helpers (optional dependency)
+try:
+    from tests.utils.hw_fault_helpers import HWFaultConfig, HWFaultManager
+    HW_FAULTS_AVAILABLE = True
+except ImportError:
+    HW_FAULTS_AVAILABLE = False
+    HWFaultConfig = None
+    HWFaultManager = None
 
 
 def _get_workspace_dir() -> str:
@@ -264,6 +273,36 @@ class DeploymentSpec:
         for service in services:
             service.image = image
 
+    def set_dynamo_namespace(self, dynamo_ns: str, service_name: Optional[str] = None):
+        """Set the Dynamo namespace for service discovery (etcd-based).
+
+        Args:
+            dynamo_ns: The logical namespace used by Dynamo components for service discovery
+            service_name: Optional specific service to update (updates all if None)
+        """
+        services_dict = self._deployment_spec.get("spec", {}).get("services", {})
+        if service_name:
+            if service_name in services_dict:
+                services_dict[service_name]["dynamoNamespace"] = dynamo_ns
+        else:
+            for svc_name in services_dict:
+                services_dict[svc_name]["dynamoNamespace"] = dynamo_ns
+
+    def remove_env_from_secret(self, service_name: Optional[str] = None):
+        """Remove envFromSecret from services (for open-source models that don't need HF token).
+
+        Args:
+            service_name: Optional specific service to update (updates all if None)
+        """
+        services_dict = self._deployment_spec.get("spec", {}).get("services", {})
+        if service_name:
+            if service_name in services_dict and "envFromSecret" in services_dict[service_name]:
+                del services_dict[service_name]["envFromSecret"]
+        else:
+            for svc_name in services_dict:
+                if "envFromSecret" in services_dict[svc_name]:
+                    del services_dict[svc_name]["envFromSecret"]
+
     def set_tensor_parallel(self, tp_size: int, service_names: Optional[list] = None):
         """Scale deployment for different tensor parallel configurations
 
@@ -358,6 +397,15 @@ class DeploymentSpec:
             ServiceSpec(svc, spec)
             for svc, spec in self._deployment_spec["spec"]["services"].items()
         ]
+
+    def get_service_replicas(self, service_name: str) -> int | None:
+        """Get expected replica count for a service."""
+        services = self._deployment_spec["spec"].get("services", {})
+        # Case-insensitive lookup
+        for name, spec in services.items():
+            if name.lower() == service_name.lower():
+                return spec.get("replicas", 1)
+        return None
 
     def __getitem__(self, service_name: str) -> ServiceSpec:
         """Allow dict-like access: d['Frontend']"""
@@ -496,6 +544,10 @@ class ManagedDeployment:
     frontend_service_name: str = "Frontend"
     skip_service_restart: bool = False
 
+    # Hardware fault injection support
+    enable_hw_faults: bool = False
+    hw_fault_config: Optional[Dict[str, Any]] = None
+
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
     _in_cluster: bool = False
@@ -504,6 +556,7 @@ class ManagedDeployment:
     _deployment_name: Optional[str] = None
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
+    _hw_fault_manager: Optional[Any] = None
 
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
@@ -577,15 +630,18 @@ class ManagedDeployment:
             timeout, sleep, log_interval, False, "pending"
         )
 
-    async def _wait_for_ready(self, timeout: int = 1800, sleep=1, log_interval=60):
+    async def _wait_for_ready(
+        self, timeout: int = 1800, sleep=1, log_interval=60, force_pod_check: bool = False
+    ):
         """
         Wait for the custom resource to be ready.
 
         Args:
             timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
+            force_pod_check: If True, always use pod-level readiness check instead of DGD status.
         """
         return await self._wait_for_condition(
-            timeout, sleep, log_interval, True, "successful"
+            timeout, sleep, log_interval, True, "successful", force_pod_check
         )
 
     async def _wait_for_condition(
@@ -595,6 +651,7 @@ class ManagedDeployment:
         log_interval=60,
         desired_ready_condition_val: bool = True,
         desired_state_val: str = "successful",
+        force_pod_check: bool = False,
     ):
         start_time = time.time()
 
@@ -633,14 +690,35 @@ class ManagedDeployment:
 
                 observed_state_val = status_obj.get("state")  # type: ignore[attr-defined]
 
-                if (
+                elapsed = time.time() - start_time
+
+                # When force_pod_check is True, always verify at pod level
+                # This is needed after operations that force-delete pods (e.g., CUDA setup)
+                # where DGD status may be stale and show "successful" briefly
+                if force_pod_check:
+                    pods_ready = await self._check_all_pods_ready()
+                    if pods_ready:
+                        self._logger.info(
+                            f"[force_pod_check] All pods ready at pod level"
+                        )
+                        self._logger.info(f"Current deployment state: {current_state}")
+                        self._logger.info(
+                            f"Elapsed time: {elapsed:.1f}s / {timeout}s"
+                        )
+                        return True
+                    elif attempt % log_interval == 0:
+                        self._logger.info(
+                            f"[force_pod_check] Waiting for pods... "
+                            f"Elapsed: {elapsed:.1f}s / {timeout}s"
+                        )
+                elif (
                     observed_ready_condition_val == str(desired_ready_condition_val)
                     and observed_state_val == desired_state_val
                 ):
                     self._logger.info(f"Current deployment state: {current_state}")
                     self._logger.info(f"Current conditions: {conditions}")
                     self._logger.info(
-                        f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s"
+                        f"Elapsed time: {elapsed:.1f}s / {timeout}s"
                     )
 
                     self._logger.info(
@@ -648,6 +726,27 @@ class ManagedDeployment:
                     )
                     return True
                 else:
+                    # Fallback: check actual pod readiness when DGD status may be stale
+                    # Only use fallback after 120s grace period to avoid stale data
+                    # (e.g., after pod restarts, old pods may briefly appear ready)
+                    if (
+                        desired_ready_condition_val
+                        and desired_state_val == "successful"
+                        and elapsed > 120  # Grace period before fallback
+                    ):
+                        pods_ready = await self._check_all_pods_ready()
+                        if pods_ready:
+                            self._logger.warning(
+                                "DGD status appears stale - pods are ready but DGD shows not ready. "
+                                "Using pod-level readiness as fallback."
+                            )
+                            self._logger.info(f"Current deployment state: {current_state}")
+                            self._logger.info(f"Current conditions: {conditions}")
+                            self._logger.info(
+                                f"Elapsed time: {elapsed:.1f}s / {timeout}s"
+                            )
+                            return True
+
                     if attempt % log_interval == 0:
                         self._logger.info(f"Current deployment state: {current_state}")
                         self._logger.info(f"Current conditions: {conditions}")
@@ -669,6 +768,68 @@ class ManagedDeployment:
                 )
             await asyncio.sleep(sleep)
         raise TimeoutError("Deployment failed to become ready within timeout")
+
+    async def _check_all_pods_ready(self) -> bool:
+        """
+        Check if all pods for the deployment are actually ready at the pod level.
+        This is a fallback for when DGD status is stale due to operator caching issues.
+        Strict checks to avoid false positives from terminating/initializing pods.
+        """
+        try:
+            pods = self.get_pods()
+            if not pods:
+                return False
+
+            for service_name, service_pods in pods.items():
+                expected_replicas = self.deployment_spec.get_service_replicas(
+                    service_name
+                )
+                if expected_replicas is None:
+                    continue
+
+                ready_count = 0
+                for pod in service_pods:
+                    status = pod.raw.get("status", {})
+                    phase = status.get("phase", "")
+
+                    # Skip non-running pods
+                    if phase != "Running":
+                        continue
+
+                    # Skip pods being deleted (have deletionTimestamp)
+                    if pod.raw.get("metadata", {}).get("deletionTimestamp"):
+                        continue
+
+                    # Check all containers are ready (not just started)
+                    container_statuses = status.get("containerStatuses", [])
+                    if not container_statuses:
+                        continue
+
+                    # Verify: ready=True AND no waiting state (PodInitializing, etc.)
+                    all_ready = True
+                    for cs in container_statuses:
+                        if not cs.get("ready", False):
+                            all_ready = False
+                            break
+                        # Check not in waiting state
+                        state = cs.get("state", {})
+                        if "waiting" in state:
+                            all_ready = False
+                            break
+
+                    if all_ready:
+                        ready_count += 1
+
+                if ready_count < expected_replicas:
+                    self._logger.debug(
+                        f"Service {service_name}: {ready_count}/{expected_replicas} pods ready"
+                    )
+                    return False
+
+            return True
+        except Exception as e:
+            self._logger.debug(f"Pod readiness check failed: {e}")
+            return False
 
     async def _restart_nats(self):
         NATS_STS_NAME = "dynamo-platform-nats"
@@ -1003,6 +1164,72 @@ class ManagedDeployment:
         finally:
             await self._delete_deployment()
 
+    async def _ensure_namespace_exists(self):
+        """Create namespace if it doesn't exist (ephemeral test support)."""
+        try:
+            assert self._core_api is not None, "Kubernetes API not initialized"
+            await self._core_api.read_namespace(self.namespace)
+            self._logger.info(f"Namespace {self.namespace} already exists")
+        except exceptions.ApiException as e:
+            if e.status == 404:
+                self._logger.info(f"Creating namespace {self.namespace}")
+                ns = client.V1Namespace(
+                    metadata=client.V1ObjectMeta(name=self.namespace)
+                )
+                await self._core_api.create_namespace(ns)
+                self._logger.info(f"Namespace {self.namespace} created")
+            else:
+                raise
+
+    async def _nats_etcd_exist(self) -> bool:
+        """Check if NATS and etcd StatefulSets exist in the namespace."""
+        try:
+            assert self._apps_v1 is not None, "Kubernetes API not initialized"
+            await self._apps_v1.read_namespaced_stateful_set(
+                "dynamo-platform-nats", self.namespace
+            )
+            await self._apps_v1.read_namespaced_stateful_set(
+                "dynamo-platform-etcd", self.namespace
+            )
+            return True
+        except exceptions.ApiException as e:
+            if e.status == 404:
+                return False
+            raise
+
+    async def _deploy_dynamo_platform(self):
+        """Deploy dynamo-platform (NATS/etcd) to namespace using Helm."""
+        import subprocess
+
+        self._logger.info(f"Deploying dynamo-platform to namespace {self.namespace}...")
+
+        # Use Helm to deploy dynamo-platform (NATS + etcd only, no operator)
+        # Use the helm repo name instead of direct URL for better compatibility
+        cmd = [
+            "helm", "upgrade", "--install", "dynamo-platform",
+            "nvidia-ai-dynamo/dynamo-platform",
+            "--namespace", self.namespace,
+            "--set", "dynamo-operator.enabled=false",  # Don't deploy operator (cluster-wide exists)
+            "--set", "nats.enabled=true",
+            "--set", "etcd.enabled=true",
+            "--wait", "--timeout", "5m",
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
+            if result.returncode != 0:
+                self._logger.error(f"Helm install failed: {result.stderr}")
+                raise RuntimeError(f"Failed to deploy dynamo-platform: {result.stderr}")
+            self._logger.info("dynamo-platform deployed successfully")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Helm install timed out")
+        except FileNotFoundError:
+            self._logger.warning("Helm not found - cannot deploy dynamo-platform automatically")
+            raise RuntimeError(
+                "Helm CLI not found. Either install Helm or use a namespace with "
+                "existing dynamo-platform (e.g., --namespace=fault-tolerance)"
+            )
+
     async def __aenter__(self):
         try:
             self._logger = logging.getLogger(self.__class__.__name__)
@@ -1011,22 +1238,200 @@ class ManagedDeployment:
             logging.getLogger("httpx").setLevel(logging.WARNING)
             await self._init_kubernetes()
 
+            # Create namespace if it doesn't exist (ephemeral test support)
+            await self._ensure_namespace_exists()
+
+            # Check if dynamo-platform (NATS/etcd) exists, deploy if needed
+            nats_etcd_exist = await self._nats_etcd_exist()
+            if not nats_etcd_exist:
+                self._logger.info("NATS/etcd not found - deploying dynamo-platform...")
+                await self._deploy_dynamo_platform()
+
             # Run delete deployment and service restarts in parallel
             tasks = [self._delete_deployment()]
-            if not self.skip_service_restart:
+            if not self.skip_service_restart and nats_etcd_exist:
+                # Only restart if they existed before (not freshly deployed)
                 tasks.extend([self._restart_etcd(), self._restart_nats()])
             await asyncio.gather(*tasks)
 
             await self._create_deployment()
             await self._wait_for_ready()
 
+            # Initialize hardware fault manager if enabled
+            if self.enable_hw_faults:
+                await self._init_hw_fault_manager()
+
         except:
             await self._cleanup()
             raise
         return self
 
+    async def _init_hw_fault_manager(self):
+        """Initialize hardware fault injection manager."""
+        if not HW_FAULTS_AVAILABLE:
+            self._logger.warning(
+                "[HW Faults] hw_fault_helpers not available - HW fault features disabled"
+            )
+            return
+
+        self._logger.info("[HW Faults] Initializing hardware fault manager...")
+
+        # Create config from dict if provided
+        config = (
+            HWFaultConfig.from_dict(self.hw_fault_config)
+            if self.hw_fault_config
+            else HWFaultConfig()
+        )
+
+        self._hw_fault_manager = HWFaultManager(
+            deployment_name=self._deployment_name,
+            namespace=self.namespace,
+            config=config,
+            in_cluster=self._in_cluster,
+            logger=self._logger,
+        )
+
+        # Setup CUDA fault injection library
+        if not await self._hw_fault_manager.setup():
+            self._logger.warning("[HW Faults] Setup failed - some features may be unavailable")
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._cleanup()
+
+    # =========================================================================
+    # Hardware Fault Injection Delegate Methods
+    # =========================================================================
+
+    def get_hw_fault_target_node(self) -> Optional[str]:
+        """Get the target node for hardware fault injection (auto-detected from pods)."""
+        # If already set, return it
+        if self._hw_fault_manager and self._hw_fault_manager._target_node:
+            return self._hw_fault_manager._target_node
+        
+        # Auto-detect from running pods (kr8s uses pod.raw dict access)
+        pods = self.get_pods()
+        for service_name, service_pods in pods.items():
+            for pod in service_pods:
+                # Check for GPU worker pods (not frontend)
+                if "worker" in service_name.lower():
+                    node = pod.raw.get("spec", {}).get("nodeName")
+                    if node:
+                        self._logger.info(f"[HW Faults] Auto-detected target node from {service_name}: {node}")
+                        if self._hw_fault_manager:
+                            self._hw_fault_manager.set_target_node(node)
+                        return node
+        
+        # Fallback: any pod with a node
+        for service_name, service_pods in pods.items():
+            for pod in service_pods:
+                node = pod.raw.get("spec", {}).get("nodeName")
+                if node:
+                    self._logger.info(f"[HW Faults] Auto-detected target node (fallback): {node}")
+                    if self._hw_fault_manager:
+                        self._hw_fault_manager.set_target_node(node)
+                    return node
+        
+        self._logger.warning("[HW Faults] Could not auto-detect target node from pods")
+        return None
+
+    async def setup_cuda_passthrough(self, xid_type: int = 79) -> bool:
+        """Setup CUDA library in passthrough mode (faults disabled initially)."""
+        if not self._hw_fault_manager:
+            self._logger.error("[HW Faults] HW fault manager not initialized")
+            return False
+        
+        # Auto-detect target node if not set
+        if not self._hw_fault_manager._target_node:
+            target = self.get_hw_fault_target_node()
+            if target:
+                self._hw_fault_manager.set_target_node(target)
+        
+        return await self._hw_fault_manager.setup_cuda_passthrough(xid_type=xid_type)
+
+    async def inject_hw_fault(
+        self, fault_type: str = "xid", xid_type: int = 79, gpu_id: int = 0
+    ) -> Optional[str]:
+        """Inject a hardware fault (XID error)."""
+        if not self._hw_fault_manager:
+            self._logger.warning("[HW Faults] HW fault manager not initialized - skipping injection")
+            return None
+        return await self._hw_fault_manager.inject_xid_fault(xid_type=xid_type, gpu_id=gpu_id)
+
+    async def toggle_cuda_faults(self, enable: bool = True) -> bool:
+        """Toggle CUDA faults ON/OFF without restarting pods."""
+        if not self._hw_fault_manager:
+            self._logger.error("[HW Faults] HW fault manager not initialized")
+            return False
+        return await self._hw_fault_manager.toggle_cuda_faults(enable=enable)
+
+    def is_node_cordoned(self, node_name: str) -> bool:
+        """Check if a node is cordoned."""
+        if self._hw_fault_manager:
+            return self._hw_fault_manager.is_node_cordoned(node_name)
+        # Fallback implementation
+        try:
+            import kr8s
+            node = kr8s.get("node", node_name)
+            return node.spec.get("unschedulable", False)
+        except Exception:
+            return False
+
+    async def cleanup_cuda_spec_without_restart(self) -> bool:
+        """Clean up CUDA injection from DGD spec without deleting pods."""
+        if not self._hw_fault_manager:
+            self._logger.error("[HW Faults] HW fault manager not initialized")
+            return False
+        return await self._hw_fault_manager.cleanup_cuda_spec_without_restart()
+
+    async def wait_for_pods_on_healthy_nodes(
+        self, exclude_node: str, timeout: int = 600
+    ) -> bool:
+        """Wait for all pods to be scheduled on nodes other than the excluded one."""
+        import asyncio
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            pods = self.get_pods()
+            all_off_excluded = True
+            
+            for service_name, service_pods in pods.items():
+                for pod in service_pods:
+                    node = getattr(pod.spec, "nodeName", None) or getattr(pod.spec, "node_name", None)
+                    if node == exclude_node:
+                        all_off_excluded = False
+                        break
+                if not all_off_excluded:
+                    break
+            
+            if all_off_excluded and sum(len(p) for p in pods.values()) > 0:
+                self._logger.info(f"[HW Faults] All pods on healthy nodes (not on {exclude_node})")
+                return True
+            
+            await asyncio.sleep(10)
+            elapsed = int(time.time() - start_time)
+            if elapsed % 60 == 0:
+                self._logger.info(f"[{elapsed}s] Waiting for pods to schedule off {exclude_node}...")
+        
+        self._logger.warning(f"Timeout waiting for pods on healthy nodes")
+        return False
+
+    async def wait_for_all_pods_ready(
+        self, timeout: int = 600, force_pod_check: bool = False
+    ) -> bool:
+        """
+        Wait for all deployment pods to be ready.
+
+        Args:
+            timeout: Maximum time to wait in seconds
+            force_pod_check: If True, always verify at pod level instead of trusting
+                            DGD status. Use after operations that force-delete pods.
+        """
+        return await self._wait_for_ready(timeout=timeout, force_pod_check=force_pod_check)
+
+    def collect_metrics(self, phase: str = ""):
+        """Collect metrics for the current phase (stub for now)."""
+        self._logger.info(f"[Metrics] Collecting metrics for phase: {phase}")
+        # TODO: Implement actual metric collection
 
 
 async def main():
