@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
@@ -44,7 +44,12 @@ pub struct NvCreateChatCompletionRequest {
     pub nvext: Option<NvExt>,
 
     /// Extra args to pass to the chat template rendering context
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepts "chat_template_kwargs" as an alias for compatibility
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
 
     /// Runtime media decoding parameters.

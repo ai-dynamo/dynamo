@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # NOTE FOR dynamo_base AND wheel_builder STAGES:
@@ -154,7 +154,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -173,6 +176,12 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         # Libfabric support
         hwloc \
         hwloc-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
 
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -510,10 +519,19 @@ COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
 # Our scripting assumes /workspace is where dynamo is located
 # In order to maintain the ability to have sglang and dynamo
 # in the same workspace, symlink /workspace to /sgl-workspace/dynamo
 USER root
+
+# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
 RUN ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
