@@ -400,11 +400,10 @@ The plugins set HTTP headers that are forwarded to the backend workers.
 | `x-dynamo-routing-mode` | `aggregated` or `disaggregated` | kv-aware-scorer |
 
 
-## Lua Body Injector
+## Body Injector
 
 Dynamo backend workers require the `nvext` field in the JSON body (instead of reading headers).
-You must deploy a **Lua filter** that runs inside the gateway. This filter reads the headers set
-by the Dynamo plugins and injects the `nvext` field into the request body.
+You must deploy a **TrafficPolicy** that uses kGateway's transformation feature to read the headers set by the Dynamo plugins and inject the `nvext` field into the request body.
 
 ### How It Works
 
@@ -422,10 +421,9 @@ by the Dynamo plugins and injects the `nvext` field into the request body.
 │       x-worker-instance-id: 42                                       │
 │       x-dynamo-routing-mode: aggregated                              │
 │                                                                      │
-│  3. Lua Filter reads headers and modifies body:                      │
+│  3. TrafficPolicy transformation reads headers and modifies body:    │
 │     Body: {"model": "llama", "messages": [...],                      │
-│            "nvext": {"backend_instance_id": 42,                      │
-│                     }}                                               │
+│            "nvext": {"backend_instance_id": 42}}                     │
 │                                                                      │
 │  4. Modified request forwarded to model server                       │
 │                                                                      │
@@ -434,7 +432,7 @@ by the Dynamo plugins and injects the `nvext` field into the request body.
 
 ### Body Modification
 
-The Lua filter injects an `nvext` field into the JSON request body:
+The transformation injects an `nvext` field into the JSON request body:
 
 **Aggregated Mode (default):**
 ```json
@@ -442,7 +440,7 @@ The Lua filter injects an `nvext` field into the JSON request body:
   "model": "llama",
   "messages": [...],
   "nvext": {
-    "backend_instance_id": 42,
+    "backend_instance_id": 42
   }
 }
 ```
@@ -454,55 +452,26 @@ The Lua filter injects an `nvext` field into the JSON request body:
   "messages": [...],
   "nvext": {
     "prefill_worker_id": 10,
-    "decode_worker_id": 42,
+    "decode_worker_id": 42
   }
 }
 ```
 
 ### Installation for kGateway
 
-The Lua filter configuration is in `config/lua-filter/kgateway-lua-filter.yaml`.
+The TrafficPolicy configuration is in `config/lua-filter/kgateway-lua-filter.yaml`.
 
-1. **Customize the configuration** for your environment:
-
-The namespace must match where your **Gateway resource** is deployed (not the kGateway controller namespace):
-- If you ran `kubectl apply -f gateway.yaml` without `-n` → use `default`
-- If you ran `kubectl apply -f gateway.yaml -n my-model` → use `my-model`
-
-```bash
-# Update namespace and gateway name if different from defaults
-sed -i 's/namespace: default/namespace: my-model/g' config/lua-filter/kgateway-lua-filter.yaml
-sed -i 's/name: inference-gateway/name: my-gateway/g' config/lua-filter/kgateway-lua-filter.yaml
-```
-
-2. **Apply the Lua filter:**
+1. **Apply the TrafficPolicy:**
 
 ```bash
 kubectl apply -f config/lua-filter/kgateway-lua-filter.yaml
 ```
 
-3. **Verify the filter is applied:**
+2. **Verify the policy is applied:**
 
 ```bash
 kubectl get trafficpolicy dynamo-body-injector -o yaml
 ```
 
-### Files
-
-| File | Description |
-|------|-------------|
-| `lua/body_injector.lua` | Standalone Lua script (for reference) |
-| `config/lua-filter/kgateway-lua-filter.yaml` | kGateway TrafficPolicy configuration |
-
-### Debugging
-
-Check gateway logs for `[DBI]` messages:
-
-```bash
-# Find the gateway pod
-kubectl get pods -l gateway.networking.k8s.io/gateway-name=inference-gateway
-
-# Check logs
-kubectl logs <gateway-pod> -c envoy | grep DBI
-```
+The status should show `Accepted: True` and `Attached: True`.
 
