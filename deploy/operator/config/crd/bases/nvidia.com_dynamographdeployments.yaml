@@ -10414,12 +10414,12 @@ spec:
                           When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
                           the service using the Scale subresource. When disabled, replicas can be modified directly.
                         properties:
-                          disable:
+                          enabled:
                             default: false
                             description: |-
-                              Disable indicates whether the ScalingAdapter should be disabled for this service.
-                              When false (default), a DGDSA is created and owns the replicas field.
-                              When true, no DGDSA is created and replicas can be modified directly in the DGD.
+                              Enabled indicates whether the ScalingAdapter should be enabled for this service.
+                              When true, a DGDSA is created and owns the replicas field.
+                              When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
                             type: boolean
                         type: object
                       serviceName:
