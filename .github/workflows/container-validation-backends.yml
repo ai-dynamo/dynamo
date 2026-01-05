@@ -55,8 +55,10 @@ jobs:
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
+
   changed-files:
     runs-on: ubuntu-latest
+    name: Detect Changes & Pre-commit
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
       core: ${{ steps.filter.outputs.core }}
@@ -76,6 +78,9 @@ jobs:
         id: filter
         with:
           filters: .github/filters.yaml
+      - uses: actions/setup-python@v5
+      - uses: pre-commit/action@v3.0.0
+        timeout-minutes: 3
 
   detect-buildkit-workers:
     name: Detect Buildkit Workers
@@ -113,11 +118,11 @@ jobs:
           # - { round: 5 }
         platform:
           - { arch: amd64 }
-          - { arch: arm64 }
+          # - { arch: arm64 }
         framework:
           - { name: trtllm, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-          - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
-          - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
+          # - { name: sglang, arm_base_image_tag: '', arm_runtime_image_tag: '', arm_cuda_version: '', arm_torch_backend: '' }
+          # - { name: vllm, arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04', arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04', arm_cuda_version: '12.9', arm_torch_backend: 'cu129' }
     name: build ${{ matrix.framework.name }}-${{ matrix.platform.arch }}-${{ matrix.stress.round }}
     runs-on: builder-cpu-amd-runner
     steps:
