@@ -27,7 +27,14 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import RequestPrompt
+
+try:
+    # vLLM >= 0.13.0
+    from vllm.entrypoints.openai.serving_engine import PromptType as RequestPrompt
+except ImportError:
+    # vLLM < 0.13.0
+    from vllm.entrypoints.openai.serving_engine import RequestPrompt
+
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams

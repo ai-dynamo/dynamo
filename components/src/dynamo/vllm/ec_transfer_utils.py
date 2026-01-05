@@ -7,8 +7,6 @@ Utilities for configuring vLLM's ECTransferConfig for encoder disaggregation.
 ECTransferConfig enables encoder/consumer separation where:
 - Producer (encoder worker): Executes multimodal encoder and saves to storage
 - Consumer (PD worker): Loads encoder outputs from storage
-
-Supports multiple storage backends: disk (ECExampleConnector), Redis, S3, etc.
 """
 
 import json
@@ -39,9 +37,6 @@ def create_ec_transfer_config(
 
     Returns:
         ECTransferConfig configured for the specified role
-
-    Raises:
-        ValueError: If required config is missing
     """
     # Parse extra config if provided
     extra_config: Dict[str, Any] = {}
@@ -57,7 +52,10 @@ def create_ec_transfer_config(
         extra_config["storage_path"] = ec_storage_path
 
     # Validate required fields
-    if ec_connector_backend == "ECExampleConnector" and "storage_path" not in extra_config:
+    if (
+        ec_connector_backend == "ECExampleConnector"
+        and "storage_path" not in extra_config
+    ):
         raise ValueError(
             "ECExampleConnector requires 'storage_path' in config. "
             "Provide via --ec-storage-path or --ec-extra-config"
@@ -112,4 +110,3 @@ def get_pd_engine_id(namespace: str, component: str, instance_id: int) -> str:
     engine_id = f"{namespace}.{component}.pd.{instance_id}"
     logger.debug(f"Generated PD engine_id: {engine_id}")
     return engine_id
-

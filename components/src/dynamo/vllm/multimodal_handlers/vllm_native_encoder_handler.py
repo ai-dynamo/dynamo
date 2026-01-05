@@ -1,22 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-"""
-vLLM-Native Encoder Worker Handler (ECConnector Mode Only)
-
-This handler is a minimal wrapper around vLLM's native encoder execution.
-When configured as a producer (ec_role=ec_producer), vLLM automatically:
-1. Executes multimodal encoder via _execute_mm_encoder()
-2. Caches outputs by mm_hash in encoder_cache
-3. Saves to ECConnector storage via save_caches()
-4. Returns empty output (no text generation)
-
-The handler only needs to:
-1. Load media (image/video/audio) from URL
-2. Call engine_client.generate() with multimodal data
-3. Return metadata (mm_hash, shape, modality) for PD workers
-"""
-
 import logging
 import shutil
 from typing import AsyncGenerator
@@ -37,9 +20,6 @@ logger = logging.getLogger(__name__)
 class VLLMNativeEncoderWorkerHandler:
     """
     Handler for vLLM-native encoder worker using ECConnector.
-    
-    This is a minimal wrapper that triggers vLLM's encoder execution.
-    vLLM handles all the heavy lifting: encoding, caching, and storage.
     """
 
     def __init__(self, runtime, component, engine_client, config):
@@ -58,7 +38,7 @@ class VLLMNativeEncoderWorkerHandler:
         self.config = config
         self.temp_dirs = []
         self.image_loader = ImageLoader()
-        
+
         logger.info(
             f"VLLMNativeEncoderWorkerHandler initialized with "
             f"backend={config.ec_connector_backend}, "
@@ -70,9 +50,7 @@ class VLLMNativeEncoderWorkerHandler:
         if temp_dir:
             self.temp_dirs.append(temp_dir)
 
-    async def generate(
-        self, request, context
-    ) -> AsyncGenerator[str, None]:
+    async def generate(self, request, context) -> AsyncGenerator[str, None]:
         """
         Process encoder request and trigger vLLM encoder execution.
 
@@ -102,8 +80,7 @@ class VLLMNativeEncoderWorkerHandler:
         )
 
         # Load media (image/video/audio)
-        # For now, we only support images via image_url
-        # TODO: Add support for video_url and audio when needed
+        # TODO: Add support for video_url and audio
         if request.multimodal_input.image_url:
             media = await self.image_loader.load_image(
                 request.multimodal_input.image_url
@@ -114,12 +91,10 @@ class VLLMNativeEncoderWorkerHandler:
                 "No media URL provided. Specify image_url in multimodal_input."
             )
 
-        # Compute mm_hash using vLLM's hasher (BEFORE calling vLLM)
-        # This ensures consistency with vLLM's internal hash computation
+        # Compute mm_hash using vLLM's hasher
         try:
             mm_hash = MultiModalHasher.hash_kwargs(
-                model_id=self.config.model,
-                **{media_key: media}
+                model_id=self.config.model, **{media_key: media}
             )
             logger.debug(f"Computed mm_hash: {mm_hash}")
         except Exception as e:
@@ -131,28 +106,25 @@ class VLLMNativeEncoderWorkerHandler:
         try:
             gen = self.engine_client.generate(
                 prompt=TokensPrompt(
-                    prompt_token_ids=[],  # Empty tokens for encoder-only
-                    multi_modal_data={media_key: media}  # vLLM processes this
+                    prompt_token_ids=[], multi_modal_data={media_key: media}
                 ),
-                sampling_params=SamplingParams(
-                    max_tokens=0,  # Encoder-only, no text generation
-                    min_tokens=0
-                ),
-                request_id=request.request_id
+                sampling_params=SamplingParams(max_tokens=0, min_tokens=0),
+                request_id=request.request_id,
             )
 
             # Consume generator to trigger encoder execution
             async for _ in gen:
                 pass
 
-            logger.info(f"Encoder execution completed for request_id={request.request_id}")
+            logger.info(
+                f"Encoder execution completed for request_id={request.request_id}"
+            )
 
         except Exception as e:
             logger.error(f"Encoder execution failed: {e}")
             raise
 
         # TODO: Get actual embeddings shape from vLLM instead of hardcoded value
-        # For now, using typical Llama 3.2 Vision shape as placeholder
         embeddings_shape = (1, 576, 4096)
 
         # Return metadata for PD workers
@@ -163,8 +135,8 @@ class VLLMNativeEncoderWorkerHandler:
             embeddings_shape=embeddings_shape,
             connector_metadata={
                 "ec_connector": self.config.ec_connector_backend,
-                "storage_path": self.config.ec_storage_path
-            }
+                "storage_path": self.config.ec_storage_path,
+            },
         )
 
         logger.debug(f"Returning response: {response}")
@@ -173,7 +145,7 @@ class VLLMNativeEncoderWorkerHandler:
     def cleanup(self):
         """Cleanup resources."""
         logger.info("Cleaning up VLLMNativeEncoderWorkerHandler")
-        
+
         # Clean up temporary directories
         for temp_dir in self.temp_dirs:
             try:
@@ -181,4 +153,3 @@ class VLLMNativeEncoderWorkerHandler:
                 logger.debug(f"Cleaned up temp directory: {temp_dir}")
             except Exception as e:
                 logger.warning(f"Failed to cleanup {temp_dir}: {e}")
-

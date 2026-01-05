@@ -566,7 +566,9 @@ def overwrite_args(config):
             setattr(config.engine_args, key, value)
             logger.debug(f" engine_args.{key} = {value}")
         else:
-            raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
+            logger.debug(
+                f" Skipping engine_args.{key} (not available in this vLLM version)"
+            )
 
 
 def get_host_ip() -> str:
