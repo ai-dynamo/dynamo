@@ -214,8 +214,16 @@ where
                 if let Some(child_parent) = parents.get_mut(&child) {
                     *child_parent = None;
                 }
+                // Remove old eviction entry with stale priority
+                leaves.retain(|e| e.key != child);
                 if let Some(child_depth) = depths.get_mut(&child) {
                     *child_depth = 0;
+                    // Re-insert with updated priority (depth 0)
+                    leaves.insert(EvictionEntry {
+                        priority: 0,
+                        insertion_id: self.insertion_counter.fetch_add(1, Ordering::Relaxed),
+                        key: child,
+                    });
                 }
             }
         }

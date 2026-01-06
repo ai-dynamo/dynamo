@@ -341,7 +341,7 @@ registry/
     +-- codec.rs        # RegistryCodec trait + BinaryCodec (versioned)
     +-- registry.rs     # Registry trait + RegistryClient
     +-- hub.rs          # Generic RegistryHub with lease management
-    +-- lease.rs        # LeaseManager for race condition prevention and unecessary writes
+    +-- lease.rs        # LeaseManager for race condition prevention and unnecessary writes
     +-- error.rs        # RegistryError types
     +-- zmq_transport.rs  # ZMQ client transport (with HWM)
     +-- zmq_hub.rs        # ZMQ hub server

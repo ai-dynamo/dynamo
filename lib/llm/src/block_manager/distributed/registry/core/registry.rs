@@ -215,7 +215,7 @@ where
 
         let mut buf = Vec::new();
         self.codec
-            .encode_query(&QueryType::CanOffload(keys.to_vec()), &mut buf);
+            .encode_query(&QueryType::CanOffload(keys.to_vec()), &mut buf)?;
 
         let response = self.transport.request(&buf).await?;
         let decoded = self
@@ -246,7 +246,7 @@ where
 
         let mut buf = Vec::new();
         self.codec
-            .encode_query(&QueryType::Match(keys.to_vec()), &mut buf);
+            .encode_query(&QueryType::Match(keys.to_vec()), &mut buf)?;
 
         let response = self.transport.request(&buf).await?;
         let decoded = self
@@ -271,7 +271,7 @@ where
         }
 
         let mut buf = Vec::new();
-        self.codec.encode_register(&entries, &mut buf);
+        self.codec.encode_register(&entries, &mut buf)?;
         self.transport.publish(&buf).await
     }
 }
@@ -313,7 +313,7 @@ mod tests {
                         })
                         .collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf);
+                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).unwrap();
                     buf
                 }
                 _ => Vec::new(),
@@ -348,7 +348,7 @@ mod tests {
                         })
                         .collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf);
+                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).unwrap();
                     buf
                 }
                 _ => Vec::new(),
@@ -378,7 +378,7 @@ mod tests {
                         .map(|k| (k, k * 100, NoMetadata))
                         .collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::Match(entries), &mut buf);
+                    codec.encode_response(&ResponseType::Match(entries), &mut buf).unwrap();
                     buf
                 }
                 _ => Vec::new(),

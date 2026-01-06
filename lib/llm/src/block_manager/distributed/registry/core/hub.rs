@@ -202,8 +202,12 @@ where
                     "Processed can_offload query"
                 );
 
-                self.codec
-                    .encode_response(&ResponseType::CanOffload(statuses), &mut response_buf);
+                if let Err(e) = self
+                    .codec
+                    .encode_response(&ResponseType::CanOffload(statuses), &mut response_buf)
+                {
+                    warn!("Failed to encode response: {}", e);
+                }
             }
             QueryType::Match(keys) => {
                 let entries: Vec<_> = keys
@@ -217,8 +221,12 @@ where
                     "Processed match query"
                 );
 
-                self.codec
-                    .encode_response(&ResponseType::Match(entries), &mut response_buf);
+                if let Err(e) = self
+                    .codec
+                    .encode_response(&ResponseType::Match(entries), &mut response_buf)
+                {
+                    warn!("Failed to encode response: {}", e);
+                }
             }
         }
 
@@ -317,7 +325,7 @@ mod tests {
         // Client query
         let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
         let mut query_buf = Vec::new();
-        client_codec.encode_query(&QueryType::CanOffload(vec![1, 2, 3, 4]), &mut query_buf);
+        client_codec.encode_query(&QueryType::CanOffload(vec![1, 2, 3, 4]), &mut query_buf).unwrap();
 
         let response = handle.request(&query_buf).await.unwrap();
         let decoded: ResponseType<u64, u64, NoMetadata> =
@@ -357,7 +365,7 @@ mod tests {
 
         let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
         let mut query_buf = Vec::new();
-        client_codec.encode_query(&QueryType::CanOffload(vec![1, 2]), &mut query_buf);
+        client_codec.encode_query(&QueryType::CanOffload(vec![1, 2]), &mut query_buf).unwrap();
 
         let response = handle.request(&query_buf).await.unwrap();
         let decoded: ResponseType<u64, u64, NoMetadata> =
@@ -397,7 +405,7 @@ mod tests {
         // Register the key
         let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
         let mut reg_buf = Vec::new();
-        client_codec.encode_register(&[(1, 100, NoMetadata)], &mut reg_buf);
+        client_codec.encode_register(&[(1, 100, NoMetadata)], &mut reg_buf).unwrap();
 
         handle.publish(&reg_buf).unwrap();
 
@@ -427,7 +435,7 @@ mod tests {
 
         let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
         let mut query_buf = Vec::new();
-        client_codec.encode_query(&QueryType::Match(vec![1, 2, 5]), &mut query_buf);
+        client_codec.encode_query(&QueryType::Match(vec![1, 2, 5]), &mut query_buf).unwrap();
 
         let response = handle.request(&query_buf).await.unwrap();
         let decoded: ResponseType<u64, u64, NoMetadata> =
@@ -462,7 +470,7 @@ mod tests {
 
         let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
         let mut reg_buf = Vec::new();
-        client_codec.encode_register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)], &mut reg_buf);
+        client_codec.encode_register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)], &mut reg_buf).unwrap();
 
         handle.publish(&reg_buf).unwrap();
 

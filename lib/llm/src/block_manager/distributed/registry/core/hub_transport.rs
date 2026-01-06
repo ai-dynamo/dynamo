@@ -90,11 +90,6 @@ impl InProcessHubTransport {
     }
 }
 
-impl Default for InProcessHubTransport {
-    fn default() -> Self {
-        Self::new().0
-    }
-}
 
 impl InProcessClientHandle {
     /// Send a query and wait for response.

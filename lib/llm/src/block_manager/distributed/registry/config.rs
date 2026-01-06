@@ -118,11 +118,22 @@ pub struct RegistryClientConfig {
     /// Example: "tcp://leader:5556" or "tcp://192.168.1.100:5556"
     pub hub_register_addr: String,
 
+    /// Worker rank (0-indexed).
+    ///
+    /// Used to generate the default namespace if not explicitly set.
+    pub rank: Option<usize>,
+
+    /// Total number of workers.
+    ///
+    /// Used to generate the default namespace if not explicitly set.
+    pub world_size: Option<usize>,
+
     /// Namespace for this worker's storage.
     ///
     /// Used as part of the registry key to enable cross-instance deduplication.
     /// Can represent a bucket, directory, or any storage-specific identifier.
-    /// Example: "worker-0", "instance-abc123", "/mnt/cache/worker-0"
+    /// If not set, defaults to "worker-{rank}-{world_size}" or "worker-{pid}".
+    /// Example: "worker-0-8", "instance-abc123", "/mnt/cache/worker-0"
     pub namespace: String,
 
     /// Batch size for registrations before auto-flush.
@@ -154,12 +165,26 @@ impl Default for RegistryClientConfig {
         Self {
             hub_query_addr: "tcp://localhost:5555".to_string(),
             hub_register_addr: "tcp://localhost:5556".to_string(),
-            namespace: "default".to_string(),
+            rank: None,
+            world_size: None,
+            namespace: default_namespace(None, None),
             batch_size: 100,
             batch_timeout: Duration::from_millis(10),
             request_timeout: Duration::from_secs(5),
             local_cache_capacity: 0,
         }
+    }
+}
+
+/// Generate a unique default namespace to prevent accidental cross-worker deduplication.
+///
+/// Format: `worker-{rank}-{world_size}` (e.g., "worker-0-8")
+/// Falls back to `worker-{pid}` if rank/world_size are unavailable.
+fn default_namespace(rank: Option<usize>, world_size: Option<usize>) -> String {
+    match (rank, world_size) {
+        (Some(r), Some(ws)) => format!("worker-{}-{}", r, ws),
+        (Some(r), None) => format!("worker-{}", r),
+        _ => format!("worker-{}", std::process::id()),
     }
 }
 
@@ -188,19 +213,24 @@ impl RegistryClientConfig {
     /// - `DYN_REGISTRY_ENABLE`: Set to "1" or "true" to enable distributed registry
     /// - `DYN_REGISTRY_CLIENT_QUERY_ADDR`: Query address (default: tcp://localhost:5555)
     /// - `DYN_REGISTRY_CLIENT_REGISTER_ADDR`: Register address (default: tcp://localhost:5556)
-    /// - `DYN_REGISTRY_CLIENT_NAMESPACE`: Namespace identifier (default: "default")
+    /// - `DYN_REGISTRY_CLIENT_NAMESPACE`: Namespace identifier (default: "worker-{pid}")
     /// - `DYN_REGISTRY_CLIENT_BATCH_SIZE`: Batch size (default: 100)
     /// - `DYN_REGISTRY_CLIENT_BATCH_TIMEOUT_MS`: Batch timeout in ms (default: 10)
     /// - `DYN_REGISTRY_CLIENT_REQUEST_TIMEOUT_MS`: Request timeout in ms (default: 5000)
     /// - `DYN_REGISTRY_CLIENT_LOCAL_CACHE`: Local cache capacity (default: 0)
+    ///
+    /// Note: For rank/world_size-based namespaces, use `with_rank_and_world_size()`
+    /// after calling `from_env()`.
     pub fn from_env() -> Self {
         Self {
             hub_query_addr: std::env::var("DYN_REGISTRY_CLIENT_QUERY_ADDR")
                 .unwrap_or_else(|_| "tcp://localhost:5555".to_string()),
             hub_register_addr: std::env::var("DYN_REGISTRY_CLIENT_REGISTER_ADDR")
                 .unwrap_or_else(|_| "tcp://localhost:5556".to_string()),
+            rank: None,
+            world_size: None,
             namespace: std::env::var("DYN_REGISTRY_CLIENT_NAMESPACE")
-                .unwrap_or_else(|_| "default".to_string()),
+                .unwrap_or_else(|_| default_namespace(None, None)),
             batch_size: std::env::var("DYN_REGISTRY_CLIENT_BATCH_SIZE")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -242,9 +272,19 @@ impl RegistryClientConfig {
         self
     }
 
-    /// Set namespace.
+    /// Set namespace explicitly.
     pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
         self.namespace = namespace.into();
+        self
+    }
+
+    /// Set rank and world size, updating the namespace accordingly.
+    ///
+    /// This generates a namespace of the form "worker-{rank}-{world_size}".
+    pub fn with_rank_and_world_size(mut self, rank: usize, world_size: usize) -> Self {
+        self.rank = Some(rank);
+        self.world_size = Some(world_size);
+        self.namespace = default_namespace(self.rank, self.world_size);
         self
     }
 }
@@ -294,5 +334,22 @@ mod tests {
         assert_eq!(config.local_cache_capacity, 10_000);
         assert_eq!(config.batch_size, 50);
         assert_eq!(config.request_timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_client_config_with_rank_and_world_size() {
+        let config = RegistryClientConfig::default().with_rank_and_world_size(3, 8);
+
+        assert_eq!(config.rank, Some(3));
+        assert_eq!(config.world_size, Some(8));
+        assert_eq!(config.namespace, "worker-3-8");
+    }
+
+    #[test]
+    fn test_default_namespace_fallback() {
+        // When no rank/world_size, falls back to PID-based namespace
+        let config = RegistryClientConfig::default();
+        assert!(config.namespace.starts_with("worker-"));
+        assert!(config.namespace.contains(&std::process::id().to_string()));
     }
 }

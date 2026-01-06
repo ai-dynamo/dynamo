@@ -77,13 +77,13 @@ where
     V: RegistryValue,
     M: RegistryMetadata,
 {
-    fn encode_register(&self, entries: &[(K, V, M)], buf: &mut Vec<u8>);
+    fn encode_register(&self, entries: &[(K, V, M)], buf: &mut Vec<u8>) -> RegistryResult<()>;
     fn decode_register(&self, data: &[u8]) -> Option<Vec<(K, V, M)>>;
 
-    fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>);
+    fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>) -> RegistryResult<()>;
     fn decode_query(&self, data: &[u8]) -> Option<QueryType<K>>;
 
-    fn encode_response(&self, response: &ResponseType<K, V, M>, buf: &mut Vec<u8>);
+    fn encode_response(&self, response: &ResponseType<K, V, M>, buf: &mut Vec<u8>) -> RegistryResult<()>;
     fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V, M>>;
 
     /// Decode with detailed error information.
@@ -170,7 +170,12 @@ where
     V: RegistryValue,
     M: RegistryMetadata,
 {
-    fn encode_register(&self, entries: &[(K, V, M)], buf: &mut Vec<u8>) {
+    fn encode_register(&self, entries: &[(K, V, M)], buf: &mut Vec<u8>) -> RegistryResult<()> {
+        if entries.len() > u32::MAX as usize {
+            return Err(RegistryError::EncodeError {
+                context: "entry count exceeds u32::MAX",
+            });
+        }
         buf.push(PROTOCOL_VERSION);
         buf.push(MessageType::Register as u8);
         buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
@@ -178,6 +183,21 @@ where
             let kb = k.to_bytes();
             let vb = v.to_bytes();
             let mb = m.to_bytes();
+            if kb.len() > u16::MAX as usize {
+                return Err(RegistryError::EncodeError {
+                    context: "key size exceeds u16::MAX",
+                });
+            }
+            if vb.len() > u16::MAX as usize {
+                return Err(RegistryError::EncodeError {
+                    context: "value size exceeds u16::MAX",
+                });
+            }
+            if mb.len() > u16::MAX as usize {
+                return Err(RegistryError::EncodeError {
+                    context: "metadata size exceeds u16::MAX",
+                });
+            }
             buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
             buf.extend_from_slice(&kb);
             buf.extend_from_slice(&(vb.len() as u16).to_le_bytes());
@@ -185,6 +205,7 @@ where
             buf.extend_from_slice(&(mb.len() as u16).to_le_bytes());
             buf.extend_from_slice(&mb);
         }
+        Ok(())
     }
 
     fn decode_register(&self, data: &[u8]) -> Option<Vec<(K, V, M)>> {
@@ -239,28 +260,34 @@ where
         Some(entries)
     }
 
-    fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>) {
+    fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>) -> RegistryResult<()> {
         buf.push(PROTOCOL_VERSION);
         match query {
-            QueryType::CanOffload(keys) => {
-                buf.push(MessageType::CanOffload as u8);
-                buf.extend_from_slice(&(keys.len() as u32).to_le_bytes());
-                for k in keys {
-                    let kb = k.to_bytes();
-                    buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(&kb);
+            QueryType::CanOffload(keys) | QueryType::Match(keys) => {
+                if keys.len() > u32::MAX as usize {
+                    return Err(RegistryError::EncodeError {
+                        context: "key count exceeds u32::MAX",
+                    });
                 }
-            }
-            QueryType::Match(keys) => {
-                buf.push(MessageType::Match as u8);
+                let msg_type = match query {
+                    QueryType::CanOffload(_) => MessageType::CanOffload,
+                    QueryType::Match(_) => MessageType::Match,
+                };
+                buf.push(msg_type as u8);
                 buf.extend_from_slice(&(keys.len() as u32).to_le_bytes());
                 for k in keys {
                     let kb = k.to_bytes();
+                    if kb.len() > u16::MAX as usize {
+                        return Err(RegistryError::EncodeError {
+                            context: "key size exceeds u16::MAX",
+                        });
+                    }
                     buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
                     buf.extend_from_slice(&kb);
                 }
             }
         }
+        Ok(())
     }
 
     fn decode_query(&self, data: &[u8]) -> Option<QueryType<K>> {
@@ -296,10 +323,15 @@ where
         }
     }
 
-    fn encode_response(&self, response: &ResponseType<K, V, M>, buf: &mut Vec<u8>) {
+    fn encode_response(&self, response: &ResponseType<K, V, M>, buf: &mut Vec<u8>) -> RegistryResult<()> {
         buf.push(PROTOCOL_VERSION);
         match response {
             ResponseType::CanOffload(statuses) => {
+                if statuses.len() > u32::MAX as usize {
+                    return Err(RegistryError::EncodeError {
+                        context: "status count exceeds u32::MAX",
+                    });
+                }
                 buf.push(MessageType::CanOffloadResponse as u8);
                 buf.extend_from_slice(&(statuses.len() as u32).to_le_bytes());
                 for s in statuses {
@@ -307,12 +339,32 @@ where
                 }
             }
             ResponseType::Match(entries) => {
+                if entries.len() > u32::MAX as usize {
+                    return Err(RegistryError::EncodeError {
+                        context: "entry count exceeds u32::MAX",
+                    });
+                }
                 buf.push(MessageType::MatchResponse as u8);
                 buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
                 for (k, v, m) in entries {
                     let kb = k.to_bytes();
                     let vb = v.to_bytes();
                     let mb = m.to_bytes();
+                    if kb.len() > u16::MAX as usize {
+                        return Err(RegistryError::EncodeError {
+                            context: "key size exceeds u16::MAX",
+                        });
+                    }
+                    if vb.len() > u16::MAX as usize {
+                        return Err(RegistryError::EncodeError {
+                            context: "value size exceeds u16::MAX",
+                        });
+                    }
+                    if mb.len() > u16::MAX as usize {
+                        return Err(RegistryError::EncodeError {
+                            context: "metadata size exceeds u16::MAX",
+                        });
+                    }
                     buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
                     buf.extend_from_slice(&kb);
                     buf.extend_from_slice(&(vb.len() as u16).to_le_bytes());
@@ -322,6 +374,7 @@ where
                 }
             }
         }
+        Ok(())
     }
 
     fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V, M>> {
@@ -405,7 +458,7 @@ mod tests {
         let entries = vec![(1u64, 100u64, NoMetadata), (2, 200, NoMetadata)];
 
         let mut buf = Vec::new();
-        codec.encode_register(&entries, &mut buf);
+        codec.encode_register(&entries, &mut buf).unwrap();
 
         // Check version byte is present
         assert_eq!(buf[0], PROTOCOL_VERSION);
@@ -424,7 +477,7 @@ mod tests {
 
         let query = QueryType::CanOffload(vec![1u64, 2, 3]);
         let mut buf = Vec::new();
-        codec.encode_query(&query, &mut buf);
+        codec.encode_query(&query, &mut buf).unwrap();
 
         // Check version byte is present
         assert_eq!(buf[0], PROTOCOL_VERSION);
@@ -437,7 +490,7 @@ mod tests {
 
         let query = QueryType::Match(vec![4u64, 5]);
         buf.clear();
-        codec.encode_query(&query, &mut buf);
+        codec.encode_query(&query, &mut buf).unwrap();
         let decoded = codec.decode_query(&buf).unwrap();
         match decoded {
             QueryType::Match(keys) => assert_eq!(keys, vec![4, 5]),
@@ -455,7 +508,7 @@ mod tests {
             OffloadStatus::Leased,
         ]);
         let mut buf = Vec::new();
-        codec.encode_response(&response, &mut buf);
+        codec.encode_response(&response, &mut buf).unwrap();
 
         // Check version byte is present
         assert_eq!(buf[0], PROTOCOL_VERSION);
@@ -474,7 +527,7 @@ mod tests {
         let response: ResponseType<u64, u64, NoMetadata> =
             ResponseType::Match(vec![(1, 100, NoMetadata), (2, 200, NoMetadata)]);
         buf.clear();
-        codec.encode_response(&response, &mut buf);
+        codec.encode_response(&response, &mut buf).unwrap();
         let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&buf).unwrap();
         match decoded {
             ResponseType::Match(entries) => {
