@@ -251,8 +251,9 @@ else
                     VLLM_ARGS+=("--is-decode-worker")
                 fi
                 VLLM_ARGS+=("${EXTRA_ARGS[@]}")
+                VLLM_ARGS+=("--request-plane" "nats")
 
-                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES python3 -m dynamo.vllm \
+                exec env PYTHONHASHSEED=0 CUDA_VISIBLE_DEVICES=$GPU_DEVICES DYN_VLLM_KV_EVENT_PORT=$((20080 + i)) VLLM_NIXL_SIDE_CHANNEL_PORT=$((20096 + i)) python3 -m dynamo.vllm \
                     "${VLLM_ARGS[@]}"
             fi
         } &
