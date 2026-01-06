@@ -71,10 +71,12 @@ The CR is named after the pod and includes an owner reference for automatic garb
 
 #### EndpointSlices
 
-The operator creates Services for each component with labels `nvidia.com/dynamo-discovery-backend: kubernetes` and `nvidia.com/dynamo-discovery-enabled: true`.
-The Kubernetes controller creates and maintains EndpointSlice resources that keep track of the readiness of the pods targeted by the Service. Watching these slices gives us an up-to-date snapshot of which Dynamo components are ready to serve traffic.
+While DynamoWorkerMetadata resources provide an up-to-date snapshot of a component's capabilities, EndpointSlices give a snapshot of health of the various Dynamo components.
 
-A pod is marked ready if the readiness probe succeeds. On Dynamo workers, this is when the `generate` endpoint is available and healthy.
+The operator creates a Kubernetes Service targeting the Dynamo components. The Kubernetes controller in turn creates and maintains EndpointSlice resources that keep track of the readiness of the pods targeted by the Service. Watching these slices gives us an up-to-date snapshot of which Dynamo components are ready to serve traffic.
+
+##### Readiness Probes
+A pod is marked ready if the readiness probe succeeds. On Dynamo workers, this is when the `generate` endpoint is available and healthy. These probes are configured by the Dynamo operator for each pod/component.
 
 #### RBAC
 
