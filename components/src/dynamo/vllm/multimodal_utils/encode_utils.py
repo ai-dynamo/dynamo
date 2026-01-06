@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -32,7 +33,7 @@ def get_embedding_hash(key: str) -> str:
     Returns:
         A unique hash string for the given key.
     """
-    return hash(key).__str__()
+    return hashlib.sha256(key.encode()).hexdigest()
 
 
 def get_qwen_image_features(

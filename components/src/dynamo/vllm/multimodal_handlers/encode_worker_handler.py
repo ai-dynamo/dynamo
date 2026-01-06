@@ -68,6 +68,7 @@ class EncodeWorkerHandler:
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables = []
+        self.cached_embeddings = {}
 
     def cleanup(self):
         pass
@@ -109,12 +110,29 @@ class EncodeWorkerHandler:
                 if not request.multimodal_inputs[idx].multimodal_input.image_url:
                     raise ValueError("image_url is required for the encode worker.")
 
-                image = await self.image_loader.load_image(
-                    request.multimodal_inputs[idx].multimodal_input.image_url
-                )
+                image_url = request.multimodal_inputs[idx].multimodal_input.image_url
+                # see if we have local cache
+                if image_url in self.cached_embeddings:
+                    (
+                        embedding_key,
+                        image_grid_thw,
+                        embeddings_shape,
+                    ) = self.cached_embeddings[image_url]
+                    # [gluo FIXME] need mechanism to clean up local files
+                    request.multimodal_inputs[
+                        idx
+                    ].serialized_request = (
+                        f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                    )
+                    request.multimodal_inputs[idx].multimodal_input.image_url = None
+                    request.multimodal_inputs[idx].image_grid_thw = image_grid_thw
+                    request.multimodal_inputs[idx].embeddings_shape = embeddings_shape
+                    continue
+
+                image = await self.image_loader.load_image(image_url)
 
                 logger.debug(
-                    f"Processing image {request.multimodal_inputs[idx].multimodal_input.image_url} for request: {{ id: {request_id} }}"
+                    f"Processing image {image_url} for request: {{ id: {request_id} }}"
                 )
                 image_embeds = self.image_processor(images=image, return_tensors="pt")
 
@@ -144,9 +162,7 @@ class EncodeWorkerHandler:
                 )
 
                 if TRANSFER_LOCAL:
-                    embedding_key = get_embedding_hash(
-                        request.multimodal_inputs[idx].multimodal_input.image_url
-                    )
+                    embedding_key = get_embedding_hash(image_url)
                     logger.info(
                         f"ENCODER: saving local safetensors file with key {embedding_key}, {embeddings_cpu.numel()} * {embeddings_cpu.element_size()} bytes"
                     )
@@ -159,6 +175,11 @@ class EncodeWorkerHandler:
                         idx
                     ].serialized_request = (
                         f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                    )
+                    self.cached_embeddings[image_url] = (
+                        embedding_key,
+                        request.multimodal_inputs[idx].image_grid_thw,
+                        request.multimodal_inputs[idx].embeddings_shape,
                     )
                 else:
                     # [gluo FIXME] nixl_connector path needs to be update to handle multiple embeddings
