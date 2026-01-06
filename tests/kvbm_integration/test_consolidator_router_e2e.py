@@ -78,7 +78,7 @@ def test_directory(request):
 
 def create_trtllm_config(test_directory: Path) -> Path:
     """Create TensorRT-LLM config YAML file with KVBM connector configuration."""
-    config_path = test_directory / "trtllm_config.yaml"
+    config_path = Path(os.path.join(test_directory, "trtllm_config.yaml"))
     config = {
         "backend": "pytorch",
         "cuda_graph_config": None,
@@ -218,9 +218,8 @@ def frontend_server(test_directory, runtime_services):
     )
 
     # Create separate log directory for frontend to avoid conflicts with vllm
-    frontend_log_dir = test_directory / "frontend"
+    frontend_log_dir = Path(os.path.join(test_directory, "frontend")).absolute()
     frontend_log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = frontend_log_dir / "python.log.txt"
 
     # Create managed process and start via context manager
     with ManagedProcess(
@@ -230,9 +229,11 @@ def frontend_server(test_directory, runtime_services):
         timeout=120,  # Increased timeout for frontend+router initialization
         working_dir=str(test_directory),
         display_output=False,
-        log_dir=str(frontend_log_dir),  # Separate log directory
+        log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
     ) as frontend_process:
-        logger.info(f"Frontend started on port {FRONTEND_PORT}")
+        # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
+        log_file = Path(frontend_process._log_path)
+        logger.info(f"Frontend started on port {FRONTEND_PORT}, log file: {log_file}")
 
         yield {
             "process": frontend_process,
@@ -309,9 +310,8 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
 
     # Create separate log directory for worker to avoid conflicts with frontend
-    worker_log_dir = test_directory / engine
+    worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
     worker_log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = worker_log_dir / "python.log.txt"
 
     # Create managed process and start via context manager
     with ManagedProcess(
@@ -321,9 +321,13 @@ def llm_worker(frontend_server, test_directory, runtime_services, engine_type):
         timeout=300,  # Increased timeout for model loading and consolidator init
         working_dir=str(test_directory),
         display_output=False,
-        log_dir=str(worker_log_dir),  # Separate log directory
+        log_dir=str(worker_log_dir),  # Absolute path keeps logs in test directory
         terminate_existing=False,
     ) as worker_process:
+        # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
+        log_file = Path(worker_process._log_path)
+        logger.info(f"Worker log file: {log_file}")
+
         logger.info(
             f"Waiting for {engine.upper()} worker and consolidator to initialize..."
         )
@@ -645,9 +649,8 @@ class TestConsolidatorRouterE2E:
             }
         )
 
-        frontend_log_dir = test_directory / "frontend"
+        frontend_log_dir = Path(os.path.join(test_directory, "frontend")).absolute()
         frontend_log_dir.mkdir(parents=True, exist_ok=True)
-        frontend_log = frontend_log_dir / "python.log.txt"
 
         with ManagedProcess(
             command=frontend_command,
@@ -656,8 +659,10 @@ class TestConsolidatorRouterE2E:
             timeout=120,
             working_dir=str(test_directory),
             display_output=False,
-            log_dir=str(frontend_log_dir),
+            log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
         ) as _frontend_process:
+            # Get actual log file path from ManagedProcess
+            frontend_log = Path(_frontend_process._log_path)
             logger.info(f"Frontend started on port {FRONTEND_PORT}")
 
             # Start worker with constrained GPU blocks but larger KVBM blocks
@@ -715,9 +720,8 @@ class TestConsolidatorRouterE2E:
             if engine == "trtllm":
                 worker_env["DYN_KVBM_TRTLLM_ZMQ_PORT"] = "20081"
 
-            worker_log_dir = test_directory / engine
+            worker_log_dir = Path(os.path.join(test_directory, engine)).absolute()
             worker_log_dir.mkdir(parents=True, exist_ok=True)
-            worker_log = worker_log_dir / "python.log.txt"
 
             with ManagedProcess(
                 command=worker_command,
@@ -726,9 +730,13 @@ class TestConsolidatorRouterE2E:
                 timeout=300,
                 working_dir=str(test_directory),
                 display_output=False,
-                log_dir=str(worker_log_dir),
+                log_dir=str(
+                    worker_log_dir
+                ),  # Absolute path keeps logs in test directory
                 terminate_existing=False,
             ) as _worker_process:
+                # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
+                worker_log = Path(_worker_process._log_path)
                 logger.info(f"Waiting for {engine.upper()} worker to initialize...")
 
                 # Wait for worker to register with frontend
