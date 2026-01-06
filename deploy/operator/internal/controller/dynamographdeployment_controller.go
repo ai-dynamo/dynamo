@@ -199,14 +199,19 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	message = reconcileResult.Message
 	dynamoDeployment.Status.Services = reconcileResult.ServiceStatus
 
-	restartStatus, err := r.reconcileRestart(ctx, dynamoDeployment)
-	if err != nil {
-		logger.Error(err, "failed to reconcile the restart")
-		reason = "failed_to_reconcile_the_restart"
-		return ctrl.Result{}, err
+	// For Grove pathway, restart status is computed during resource reconciliation.
+	// For DCD pathway, we still use reconcileRestart.
+	if reconcileResult.RestartStatus != nil {
+		dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
+	} else {
+		restartStatus, err := r.reconcileRestart(ctx, dynamoDeployment)
+		if err != nil {
+			logger.Error(err, "failed to reconcile the restart")
+			reason = "failed_to_reconcile_the_restart"
+			return ctrl.Result{}, err
+		}
+		dynamoDeployment.Status.Restart = restartStatus
 	}
-
-	dynamoDeployment.Status.Restart = restartStatus
 
 	return ctrl.Result{}, nil
 }
@@ -222,6 +227,7 @@ type ReconcileResult struct {
 	Reason        Reason
 	Message       Message
 	ServiceStatus map[string]nvidiacomv1alpha1.ServiceReplicaStatus
+	RestartStatus *nvidiacomv1alpha1.RestartStatus
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (ReconcileResult, error) {
@@ -465,7 +471,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpgdatedInProgress(ctx context.Cont
 	_ = logger
 
 	if r.isGrovePathway(ctx, dynamoDeployment) {
-		return r.getUpgdatedInProgressForGrove(ctx, dynamoDeployment, inProgress)
+		return nil, fmt.Errorf("getUpgdatedInProgress is not supported for Grove pathway")
 	}
 
 	updatedInProgress := make([]string, 0, len(inProgress))
@@ -570,57 +576,9 @@ func (r *DynamoGraphDeploymentReconciler) triggerServiceRestarts(ctx context.Con
 	_ = logger
 
 	if r.isGrovePathway(ctx, dynamoDeployment) {
-		return r.triggerServiceRestartsForGrove(ctx, dynamoDeployment, serviceNames)
+		return fmt.Errorf("triggerServiceRestarts is not supported for Grove pathway")
 	}
 	return r.triggerServiceRestartsForComponent(ctx, dynamoDeployment, serviceNames)
-}
-
-// TODO: for DCD and Grove, when we reconcile the resources themselves we need to ensure we are not removing the restart annotation
-func (r *DynamoGraphDeploymentReconciler) triggerServiceRestartsForGrove(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, serviceNames []string) error {
-	logger := log.FromContext(ctx)
-	_ = logger
-
-	for _, serviceName := range serviceNames {
-		component := dynamoDeployment.Spec.Services[serviceName]
-		resourceName := fmt.Sprintf("%s-0-%s", dynamoDeployment.Name, strings.ToLower(serviceName))
-		if component.GetNumberOfNodes() > 1 {
-			pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
-			err := r.Get(ctx, types.NamespacedName{
-				Name:      resourceName,
-				Namespace: dynamoDeployment.Namespace,
-			}, pcsg)
-			if err != nil {
-				return fmt.Errorf("failed to get PodCliqueScalingGroup %s: %w", resourceName, err)
-			}
-			if pcsg.Annotations == nil {
-				pcsg.Annotations = make(map[string]string)
-			}
-			pcsg.Annotations[consts.RestartAnnotation] = dynamoDeployment.Spec.Restart.At.Format(time.RFC3339)
-			err = r.Update(ctx, pcsg)
-			if err != nil {
-				return fmt.Errorf("failed to update PodCliqueScalingGroup %s to trigger restart: %w", resourceName, err)
-			}
-		} else {
-			podClique := &grovev1alpha1.PodClique{}
-			err := r.Get(ctx, types.NamespacedName{
-				Name:      resourceName,
-				Namespace: dynamoDeployment.Namespace,
-			}, podClique)
-			if err != nil {
-				return fmt.Errorf("failed to get PodClique %s: %w", resourceName, err)
-			}
-			if podClique.Annotations == nil {
-				podClique.Annotations = make(map[string]string)
-			}
-			podClique.Annotations[consts.RestartAnnotation] = dynamoDeployment.Spec.Restart.At.Format(time.RFC3339)
-			err = r.Update(ctx, podClique)
-			if err != nil {
-				return fmt.Errorf("failed to update PodClique %s to trigger restart: %w", resourceName, err)
-			}
-		}
-	}
-
-	return nil
 }
 
 // TODO: can we have some DCDs that succeed the restart and some that fail?
@@ -687,11 +645,11 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	return err
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (*commoncontroller.Resource, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.GroveRestartState) (*commoncontroller.Resource, error) {
 	logger := log.FromContext(ctx)
 
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever, restartState)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
@@ -772,7 +730,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment)
+	restartState := dynamo.DetermineGroveRestartState(dynamoDeployment)
+
+	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodClique Set")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodClique Set: %w", err)
@@ -882,7 +842,99 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 			}
 		}
 	}
-	return r.checkResourcesReadiness(resources), nil
+
+	// Check resource readiness
+	result := r.checkResourcesReadiness(resources)
+
+	// Compute restart status for Grove pathway
+	result.RestartStatus = r.computeGroveRestartStatus(ctx, dynamoDeployment, restartState)
+
+	return result, nil
+}
+
+// computeGroveRestartStatus computes the restart status for Grove pathway.
+// This is called after PCS is reconciled with restart annotations.
+// It checks which services are still restarting and returns the appropriate status.
+func (r *DynamoGraphDeploymentReconciler) computeGroveRestartStatus(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	restartState *dynamo.GroveRestartState,
+) *nvidiacomv1alpha1.RestartStatus {
+	logger := log.FromContext(ctx)
+
+	// No restart requested
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
+		// Preserve existing completed status if any
+		if dgd.Status.Restart != nil && dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted {
+			return dgd.Status.Restart
+		}
+		return nil
+	}
+
+	// If restart was already processed (completed or failed), return existing status
+	if isRestartAlreadyProcessed(dgd) {
+		return dgd.Status.Restart
+	}
+
+	specAt := dgd.Spec.Restart.At
+
+	// Determine which services should be checked for restart completion
+	var servicesToCheck []string
+	if restartState != nil {
+		for svc := range restartState.ServicesToAnnotate {
+			servicesToCheck = append(servicesToCheck, svc)
+		}
+	}
+	if len(servicesToCheck) == 0 {
+		// No services to restart, mark as completed
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseCompleted,
+		}
+	}
+
+	// Check which services are still restarting (not ready)
+	inProgress, err := r.getUpgdatedInProgressForGrove(ctx, dgd, servicesToCheck)
+	if err != nil {
+		logger.Error(err, "failed to check restart progress, treating as in-progress")
+		// On error, assume all services are still in progress
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+			InProgress: servicesToCheck,
+		}
+	}
+
+	// Check if restart is complete
+	if len(inProgress) == 0 {
+		// For sequential restart, check if we've processed all services
+		if !dynamo.IsParallelRestart(dgd) {
+			order := dynamo.GetRestartOrder(dgd)
+			// If we haven't processed all services yet, start the next batch
+			if restartState != nil && len(restartState.ServicesToAnnotate) < len(order) {
+				// More services to go - this will be handled on next reconcile
+				// when DetermineGroveRestartState includes the next service
+				logger.Info("Sequential restart: current batch complete, more services pending")
+				return &nvidiacomv1alpha1.RestartStatus{
+					ObservedAt: specAt,
+					Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+					InProgress: []string{}, // Will trigger next batch on next reconcile
+				}
+			}
+		}
+
+		logger.Info("Restart completed for all services")
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseCompleted,
+		}
+	}
+
+	return &nvidiacomv1alpha1.RestartStatus{
+		ObservedAt: specAt,
+		Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+		InProgress: inProgress,
+	}
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {

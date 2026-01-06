@@ -44,6 +44,140 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
+// GroveRestartState holds the restart state for Grove PCS generation.
+// It determines which services should have restart annotations applied.
+type GroveRestartState struct {
+	// Timestamp is the restart timestamp to apply as the annotation value.
+	// Format: RFC3339
+	Timestamp string
+	// ServicesToAnnotate is the set of service names that should have the restart annotation.
+	// For parallel restart: all services
+	// For sequential restart: only services that are pending or in progress
+	// For completed restart: all services (to preserve annotations)
+	ServicesToAnnotate map[string]bool
+}
+
+// ShouldAnnotateService returns true if the given service should have a restart annotation.
+func (s *GroveRestartState) ShouldAnnotateService(serviceName string) bool {
+	if s == nil || s.ServicesToAnnotate == nil {
+		return false
+	}
+	return s.ServicesToAnnotate[serviceName]
+}
+
+// DetermineGroveRestartState computes the restart state for Grove PCS generation.
+// This determines which services should have restart annotations and with what timestamp.
+func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment) *GroveRestartState {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
+		// Check if there's a completed restart we need to preserve
+		if dgd.Status.Restart != nil && dgd.Status.Restart.ObservedAt != nil {
+			return &GroveRestartState{
+				Timestamp:          dgd.Status.Restart.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
+				ServicesToAnnotate: getAllServiceNames(dgd),
+			}
+		}
+		// No restart ever requested
+		return nil
+	}
+
+	specAt := dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00")
+
+	isNewRestart := dgd.Status.Restart == nil ||
+		dgd.Status.Restart.ObservedAt == nil ||
+		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != dgd.Status.Restart.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
+
+	if !isNewRestart && dgd.Status.Restart.Phase == v1alpha1.RestartPhaseCompleted {
+		return &GroveRestartState{
+			Timestamp:          specAt,
+			ServicesToAnnotate: getAllServiceNames(dgd),
+		}
+	}
+
+	if IsParallelRestart(dgd) {
+		return &GroveRestartState{
+			Timestamp:          specAt,
+			ServicesToAnnotate: getAllServiceNames(dgd),
+		}
+	}
+
+	// Sequential restart (default or specified)
+	return &GroveRestartState{
+		Timestamp:          specAt,
+		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd),
+	}
+}
+
+// getAllServiceNames returns a map of all service names in the DGD.
+func getAllServiceNames(dgd *v1alpha1.DynamoGraphDeployment) map[string]bool {
+	services := make(map[string]bool, len(dgd.Spec.Services))
+	for serviceName := range dgd.Spec.Services {
+		services[serviceName] = true
+	}
+	return services
+}
+
+// IsParallelRestart returns true if the restart strategy is parallel.
+func IsParallelRestart(dgd *v1alpha1.DynamoGraphDeployment) bool {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.Strategy == nil {
+		return false // Default is sequential
+	}
+	return dgd.Spec.Restart.Strategy.Type == v1alpha1.RestartStrategyTypeParallel
+}
+
+// getServicesToAnnotateForSequentialRestart determines which services should be annotated
+// for a sequential restart in progress.
+func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment) map[string]bool {
+	services := make(map[string]bool)
+
+	order := GetRestartOrder(dgd)
+	if len(order) == 0 {
+		return services
+	}
+
+	// New restart or Pending phase - only first service
+	if dgd.Status.Restart == nil ||
+		dgd.Status.Restart.Phase == v1alpha1.RestartPhasePending ||
+		len(dgd.Status.Restart.InProgress) == 0 {
+		services[order[0]] = true
+		return services
+	}
+
+	inProgress := make(map[string]bool)
+	for _, svc := range dgd.Status.Restart.InProgress {
+		inProgress[svc] = true
+	}
+
+	maxIndex := -1
+	for i, svc := range order {
+		if inProgress[svc] {
+			maxIndex = i
+		}
+	}
+
+	if maxIndex >= 0 {
+		for i := 0; i <= maxIndex; i++ {
+			services[order[i]] = true
+		}
+	}
+
+	return services
+}
+
+// GetRestartOrder returns the order of services for sequential restart.
+// If not specified, returns a deterministic alphabetical order.
+func GetRestartOrder(dgd *v1alpha1.DynamoGraphDeployment) []string {
+	if dgd.Spec.Restart != nil && dgd.Spec.Restart.Strategy != nil && len(dgd.Spec.Restart.Strategy.Order) > 0 {
+		return dgd.Spec.Restart.Strategy.Order
+	}
+
+	order := make([]string, 0, len(dgd.Spec.Services))
+	for serviceName := range dgd.Spec.Services {
+		order = append(order, serviceName)
+	}
+	sort.Strings(order)
+	return order
+}
+
 // ServiceConfig represents the YAML configuration structure for a service
 type DynamoConfig struct {
 	Enabled       bool   `yaml:"enabled"`
@@ -959,6 +1093,7 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
+	restartState *GroveRestartState,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
@@ -1039,6 +1174,13 @@ func GenerateGrovePodCliqueSet(
 			annotations, err := generateAnnotations(component)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
+			}
+			// Apply restart annotation if this service should be restarted
+			if restartState.ShouldAnnotateService(serviceName) {
+				if annotations == nil {
+					annotations = make(map[string]string)
+				}
+				annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
 			}
 			clique.Annotations = annotations
 
