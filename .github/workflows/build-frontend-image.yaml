@@ -42,7 +42,7 @@ jobs:
         with:
           packages: git build-essential protobuf-compiler
           version: 1.0
-        
+
       - name: Install Rust
         shell: bash
         run: |
