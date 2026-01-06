@@ -23,13 +23,15 @@ pub mod zmq_transport;
 mod tests;
 
 // Codec
-pub use codec::{BinaryCodec, OffloadStatus, QueryType, RegistryCodec, ResponseType, PROTOCOL_VERSION};
+pub use codec::{
+    BinaryCodec, OffloadStatus, PROTOCOL_VERSION, QueryType, RegistryCodec, ResponseType,
+};
 
 // Error types
 pub use error::{RegistryError, RegistryResult};
 
 // Lease management
-pub use lease::{LeaseManager, LeaseInfo};
+pub use lease::{LeaseInfo, LeaseManager};
 
 // Storage & Eviction
 pub use eviction::{Eviction, NoEviction, TailEviction};
@@ -47,11 +49,13 @@ pub use zmq_transport::{ZmqTransport, ZmqTransportConfig};
 
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
-pub use hub_transport::{ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport, ZmqHubTransport, ZmqHubConfig};
+pub use hub_transport::{
+    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport, ZmqHubConfig,
+    ZmqHubTransport,
+};
 
 // Builder
 pub use builder::{ClientBuilder, HubBuilder, client, hub};
 
 // ZMQ Hub
 pub use zmq_hub::{ZmqHub, ZmqHubConfig as ZmqHubServerConfig};
-

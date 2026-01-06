@@ -334,4 +334,3 @@ mod tests {
         assert_eq!(stats.active, 1);
     }
 }
-

@@ -296,4 +296,3 @@ mod tests {
         assert_eq!(config.request_timeout, Duration::from_secs(10));
     }
 }
-

@@ -4,8 +4,8 @@
 //! Registry hub (server-side) implementation.
 
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -187,9 +187,18 @@ where
 
                 debug!(
                     num_keys = keys.len(),
-                    granted = statuses.iter().filter(|s| **s == OffloadStatus::Granted).count(),
-                    already_stored = statuses.iter().filter(|s| **s == OffloadStatus::AlreadyStored).count(),
-                    leased = statuses.iter().filter(|s| **s == OffloadStatus::Leased).count(),
+                    granted = statuses
+                        .iter()
+                        .filter(|s| **s == OffloadStatus::Granted)
+                        .count(),
+                    already_stored = statuses
+                        .iter()
+                        .filter(|s| **s == OffloadStatus::AlreadyStored)
+                        .count(),
+                    leased = statuses
+                        .iter()
+                        .filter(|s| **s == OffloadStatus::Leased)
+                        .count(),
                     "Processed can_offload query"
                 );
 
@@ -267,7 +276,8 @@ where
 }
 
 /// Create a simple hub with HashMap storage and binary codec.
-pub fn simple_hub<K, V, M>() -> RegistryHub<K, V, M, super::storage::HashMapStorage<K, V>, super::codec::BinaryCodec<K, V, M>>
+pub fn simple_hub<K, V, M>()
+-> RegistryHub<K, V, M, super::storage::HashMapStorage<K, V>, super::codec::BinaryCodec<K, V, M>>
 where
     K: RegistryKey,
     V: RegistryValue,
@@ -282,10 +292,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_manager::distributed::registry::core::hub_transport::InProcessHubTransport;
     use crate::block_manager::distributed::registry::core::{
         BinaryCodec, HashMapStorage, NoMetadata,
     };
-    use crate::block_manager::distributed::registry::core::hub_transport::InProcessHubTransport;
 
     #[tokio::test]
     async fn test_hub_can_offload() {
@@ -310,7 +320,8 @@ mod tests {
         client_codec.encode_query(&QueryType::CanOffload(vec![1, 2, 3, 4]), &mut query_buf);
 
         let response = handle.request(&query_buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> = client_codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64, NoMetadata> =
+            client_codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
@@ -349,7 +360,8 @@ mod tests {
         client_codec.encode_query(&QueryType::CanOffload(vec![1, 2]), &mut query_buf);
 
         let response = handle.request(&query_buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> = client_codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64, NoMetadata> =
+            client_codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
@@ -418,7 +430,8 @@ mod tests {
         client_codec.encode_query(&QueryType::Match(vec![1, 2, 5]), &mut query_buf);
 
         let response = handle.request(&query_buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> = client_codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64, NoMetadata> =
+            client_codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::Match(entries) => {

@@ -9,10 +9,9 @@ mod integration {
     use std::time::Duration;
 
     use crate::block_manager::distributed::registry::core::{
-        BinaryCodec, HashMapStorage, InProcessHubTransport, InProcessTransport,
-        NoMetadata, OffloadStatus, QueryType, Registry, RegistryCodec,
-        RegistryTransport, ResponseType, Storage,
-        client, hub,
+        BinaryCodec, HashMapStorage, InProcessHubTransport, InProcessTransport, NoMetadata,
+        OffloadStatus, QueryType, Registry, RegistryCodec, RegistryTransport, ResponseType,
+        Storage, client, hub,
     };
 
     /// Full end-to-end test: Client <-> Hub using in-process transport.
@@ -193,9 +192,7 @@ mod integration {
 
         // Start hub
         let hub_cancel = cancel.clone();
-        let hub_handle = tokio::spawn(async move {
-            hub.serve(hub_cancel).await
-        });
+        let hub_handle = tokio::spawn(async move { hub.serve(hub_cancel).await });
 
         // Wait for hub to bind
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -241,4 +238,3 @@ mod integration {
         let _ = tokio::time::timeout(Duration::from_secs(1), hub_handle).await;
     }
 }
-

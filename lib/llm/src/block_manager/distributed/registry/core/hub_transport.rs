@@ -5,11 +5,11 @@
 
 use std::collections::VecDeque;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::Mutex;
-use tmq::{pull, router, Context, Message, Multipart};
+use tmq::{Context, Message, Multipart, pull, router};
 use tokio::sync::mpsc;
 
 /// Opaque client identifier for routing responses.
@@ -330,4 +330,3 @@ mod tests {
         hub_task.await.unwrap();
     }
 }
-

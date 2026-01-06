@@ -10,9 +10,9 @@ use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use futures_util::{SinkExt, StreamExt};
-use tmq::{pull, router, Context, Message, Multipart};
+use tmq::{Context, Message, Multipart, pull, router};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -292,7 +292,10 @@ where
 
                 debug!(
                     keys = keys.len(),
-                    granted = statuses.iter().filter(|s| **s == OffloadStatus::Granted).count(),
+                    granted = statuses
+                        .iter()
+                        .filter(|s| **s == OffloadStatus::Granted)
+                        .count(),
                     "can_offload query"
                 );
 
@@ -365,9 +368,7 @@ mod tests {
 
         // Start hub
         let hub_cancel = cancel.clone();
-        let hub_handle = tokio::spawn(async move {
-            hub.serve(hub_cancel).await
-        });
+        let hub_handle = tokio::spawn(async move { hub.serve(hub_cancel).await });
 
         // Wait for hub to bind
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -397,4 +398,3 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(1), hub_handle).await;
     }
 }
-

@@ -214,10 +214,13 @@ where
         }
 
         let mut buf = Vec::new();
-        self.codec.encode_query(&QueryType::CanOffload(keys.to_vec()), &mut buf);
+        self.codec
+            .encode_query(&QueryType::CanOffload(keys.to_vec()), &mut buf);
 
         let response = self.transport.request(&buf).await?;
-        let decoded = self.codec.decode_response(&response)
+        let decoded = self
+            .codec
+            .decode_response(&response)
             .ok_or_else(|| anyhow::anyhow!("invalid response"))?;
 
         match decoded {
@@ -242,10 +245,13 @@ where
         }
 
         let mut buf = Vec::new();
-        self.codec.encode_query(&QueryType::Match(keys.to_vec()), &mut buf);
+        self.codec
+            .encode_query(&QueryType::Match(keys.to_vec()), &mut buf);
 
         let response = self.transport.request(&buf).await?;
-        let decoded = self.codec.decode_response(&response)
+        let decoded = self
+            .codec
+            .decode_response(&response)
             .ok_or_else(|| anyhow::anyhow!("invalid response"))?;
 
         match decoded {
@@ -284,9 +290,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_manager::distributed::registry::core::codec::BinaryCodec;
     use crate::block_manager::distributed::registry::core::metadata::NoMetadata;
     use crate::block_manager::distributed::registry::core::transport::InProcessTransport;
-    use crate::block_manager::distributed::registry::core::codec::BinaryCodec;
 
     #[tokio::test]
     async fn test_registry_client_can_offload() {
@@ -296,13 +302,16 @@ mod tests {
             let query = codec.decode_query(data);
             match query {
                 Some(QueryType::CanOffload(keys)) => {
-                    let statuses: Vec<_> = keys.iter().map(|k| {
-                        if *k % 2 == 0 {
-                            OffloadStatus::AlreadyStored
-                        } else {
-                            OffloadStatus::Granted
-                        }
-                    }).collect();
+                    let statuses: Vec<_> = keys
+                        .iter()
+                        .map(|k| {
+                            if *k % 2 == 0 {
+                                OffloadStatus::AlreadyStored
+                            } else {
+                                OffloadStatus::Granted
+                            }
+                        })
+                        .collect();
                     let mut buf = Vec::new();
                     codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf);
                     buf
@@ -328,13 +337,16 @@ mod tests {
             let query = codec.decode_query(data);
             match query {
                 Some(QueryType::CanOffload(keys)) => {
-                    let statuses: Vec<_> = keys.iter().map(|k| {
-                        if *k == 1 {
-                            OffloadStatus::Leased
-                        } else {
-                            OffloadStatus::Granted
-                        }
-                    }).collect();
+                    let statuses: Vec<_> = keys
+                        .iter()
+                        .map(|k| {
+                            if *k == 1 {
+                                OffloadStatus::Leased
+                            } else {
+                                OffloadStatus::Granted
+                            }
+                        })
+                        .collect();
                     let mut buf = Vec::new();
                     codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf);
                     buf
@@ -360,7 +372,8 @@ mod tests {
             let query = codec.decode_query(data);
             match query {
                 Some(QueryType::Match(keys)) => {
-                    let entries: Vec<_> = keys.into_iter()
+                    let entries: Vec<_> = keys
+                        .into_iter()
                         .take(2)
                         .map(|k| (k, k * 100, NoMetadata))
                         .collect();
@@ -403,7 +416,10 @@ mod tests {
             RegistryClient::new(transport, BinaryCodec::new()).with_batch_size(3);
 
         // Add 2 entries (below threshold)
-        client.register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)]).await.unwrap();
+        client
+            .register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)])
+            .await
+            .unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         assert_eq!(flush_count.load(Ordering::SeqCst), 0);
 
@@ -433,7 +449,7 @@ mod tests {
         let client = Arc::new(
             RegistryClient::<u64, u64, NoMetadata, _, _>::new(transport, BinaryCodec::new())
                 .with_batch_size(100) // High batch size
-                .with_batch_timeout(Duration::from_millis(50)) // Short timeout
+                .with_batch_timeout(Duration::from_millis(50)), // Short timeout
         );
 
         let cancel = tokio_util::sync::CancellationToken::new();

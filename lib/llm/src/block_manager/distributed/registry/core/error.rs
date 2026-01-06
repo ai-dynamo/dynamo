@@ -54,16 +54,28 @@ impl fmt::Display for RegistryError {
                 expected,
                 got,
             } => {
-                write!(f, "decode error in {}: expected {}, got {}", context, expected, got)
+                write!(
+                    f,
+                    "decode error in {}: expected {}, got {}",
+                    context, expected, got
+                )
             }
             Self::VersionMismatch { expected, got } => {
-                write!(f, "protocol version mismatch: expected {}, got {}", expected, got)
+                write!(
+                    f,
+                    "protocol version mismatch: expected {}, got {}",
+                    expected, got
+                )
             }
             Self::InvalidMessageType { got } => {
                 write!(f, "invalid message type: {}", got)
             }
             Self::MessageTooShort { expected, got } => {
-                write!(f, "message too short: expected {} bytes, got {}", expected, got)
+                write!(
+                    f,
+                    "message too short: expected {} bytes, got {}",
+                    expected, got
+                )
             }
             Self::TransportError { message } => {
                 write!(f, "transport error: {}", message)
@@ -106,8 +118,10 @@ mod tests {
 
     #[test]
     fn test_version_mismatch() {
-        let err = RegistryError::VersionMismatch { expected: 1, got: 2 };
+        let err = RegistryError::VersionMismatch {
+            expected: 1,
+            got: 2,
+        };
         assert!(err.to_string().contains("version mismatch"));
     }
 }
-

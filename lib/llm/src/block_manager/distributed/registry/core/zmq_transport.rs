@@ -8,10 +8,10 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
-use tmq::{dealer, push, Context, Message, Multipart};
+use tmq::{Context, Message, Multipart, dealer, push};
 use tokio::sync::Mutex;
 
 use super::transport::RegistryTransport;
@@ -149,11 +149,17 @@ impl ZmqTransport {
     }
 
     /// Connect to specific host and ports with custom HWM.
-    pub fn connect_to_with_hwm(host: &str, query_port: u16, publish_port: u16, hwm: i32) -> Result<Self> {
+    pub fn connect_to_with_hwm(
+        host: &str,
+        query_port: u16,
+        publish_port: u16,
+        hwm: i32,
+    ) -> Result<Self> {
         let config = ZmqTransportConfig::new(
             format!("tcp://{}:{}", host, query_port),
             format!("tcp://{}:{}", host, publish_port),
-        ).with_hwm(hwm);
+        )
+        .with_hwm(hwm);
         Self::connect(config)
     }
 }
@@ -165,7 +171,9 @@ impl RegistryTransport for ZmqTransport {
 
         let mut msg = VecDeque::new();
         msg.push_back(Message::from(data.to_vec()));
-        socket.send(Multipart(msg)).await
+        socket
+            .send(Multipart(msg))
+            .await
             .map_err(|e| anyhow!("Failed to send request: {}", e))?;
 
         let response = tokio::time::timeout(self.config.request_timeout, async {
@@ -192,7 +200,9 @@ impl RegistryTransport for ZmqTransport {
 
         let mut msg = VecDeque::new();
         msg.push_back(Message::from(data.to_vec()));
-        socket.send(Multipart(msg)).await
+        socket
+            .send(Multipart(msg))
+            .await
             .map_err(|e| anyhow!("Failed to push: {}", e))?;
 
         Ok(())

@@ -332,4 +332,3 @@ mod tests {
         assert_eq!(evicted, vec![1]);
     }
 }
-

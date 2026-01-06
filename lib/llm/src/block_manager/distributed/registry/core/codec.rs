@@ -88,29 +88,32 @@ where
 
     /// Decode with detailed error information.
     fn decode_register_result(&self, data: &[u8]) -> RegistryResult<Vec<(K, V, M)>> {
-        self.decode_register(data).ok_or_else(|| RegistryError::DecodeError {
-            context: "register",
-            expected: "valid register message".to_string(),
-            got: format!("{} bytes", data.len()),
-        })
+        self.decode_register(data)
+            .ok_or_else(|| RegistryError::DecodeError {
+                context: "register",
+                expected: "valid register message".to_string(),
+                got: format!("{} bytes", data.len()),
+            })
     }
 
     /// Decode query with detailed error information.
     fn decode_query_result(&self, data: &[u8]) -> RegistryResult<QueryType<K>> {
-        self.decode_query(data).ok_or_else(|| RegistryError::DecodeError {
-            context: "query",
-            expected: "valid query message".to_string(),
-            got: format!("{} bytes", data.len()),
-        })
+        self.decode_query(data)
+            .ok_or_else(|| RegistryError::DecodeError {
+                context: "query",
+                expected: "valid query message".to_string(),
+                got: format!("{} bytes", data.len()),
+            })
     }
 
     /// Decode response with detailed error information.
     fn decode_response_result(&self, data: &[u8]) -> RegistryResult<ResponseType<K, V, M>> {
-        self.decode_response(data).ok_or_else(|| RegistryError::DecodeError {
-            context: "response",
-            expected: "valid response message".to_string(),
-            got: format!("{} bytes", data.len()),
-        })
+        self.decode_response(data)
+            .ok_or_else(|| RegistryError::DecodeError {
+                context: "response",
+                expected: "valid response message".to_string(),
+                got: format!("{} bytes", data.len()),
+            })
     }
 }
 

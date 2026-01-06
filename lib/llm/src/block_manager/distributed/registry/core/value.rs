@@ -107,4 +107,3 @@ mod tests {
         assert_eq!(decoded.size_bytes, loc.size_bytes);
     }
 }
-

@@ -87,8 +87,16 @@ impl RegistryMetadata for PositionMetadata {
 
         Some(Self {
             position,
-            parent_hash: if parent_raw == 0 { None } else { Some(parent_raw) },
-            sequence_length: if seq_len_raw == 0 { None } else { Some(seq_len_raw) },
+            parent_hash: if parent_raw == 0 {
+                None
+            } else {
+                Some(parent_raw)
+            },
+            sequence_length: if seq_len_raw == 0 {
+                None
+            } else {
+                Some(seq_len_raw)
+            },
             created_at,
         })
     }
@@ -134,4 +142,3 @@ mod tests {
         assert_eq!(decoded.created_at, meta.created_at);
     }
 }
-

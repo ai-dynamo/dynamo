@@ -132,4 +132,3 @@ mod tests {
         assert_eq!(PositionalKey::from_bytes(&bytes), Some(key));
     }
 }
-

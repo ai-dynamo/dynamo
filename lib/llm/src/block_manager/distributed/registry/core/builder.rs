@@ -21,7 +21,6 @@ use super::storage::Storage;
 use super::transport::RegistryTransport;
 use super::value::RegistryValue;
 
-
 /// Builder for constructing a `RegistryClient`.
 ///
 /// # Example
@@ -185,9 +184,7 @@ where
 ///     .batch_size(50)
 ///     .build();
 /// ```
-pub fn client<K, V, M, T>(
-    transport: T,
-) -> ClientBuilder<K, V, M, T, BinaryCodec<K, V, M>>
+pub fn client<K, V, M, T>(transport: T) -> ClientBuilder<K, V, M, T, BinaryCodec<K, V, M>>
 where
     K: RegistryKey,
     V: RegistryValue,
@@ -206,9 +203,7 @@ where
 ///     .lease_ttl(Duration::from_secs(60))
 ///     .build();
 /// ```
-pub fn hub<K, V, M, S>(
-    storage: S,
-) -> HubBuilder<K, V, M, S, BinaryCodec<K, V, M>>
+pub fn hub<K, V, M, S>(storage: S) -> HubBuilder<K, V, M, S, BinaryCodec<K, V, M>>
 where
     K: RegistryKey,
     V: RegistryValue,
@@ -222,8 +217,8 @@ where
 mod tests {
     use super::*;
     use crate::block_manager::distributed::registry::core::{
-        HashMapStorage, NoMetadata, InProcessTransport, QueryType, OffloadStatus, ResponseType,
-        Registry,
+        HashMapStorage, InProcessTransport, NoMetadata, OffloadStatus, QueryType, Registry,
+        ResponseType,
     };
 
     #[tokio::test]
