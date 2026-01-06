@@ -153,7 +153,6 @@ You can either use the special FrontEnd image for the EPP_IMAGE in the Helm depl
 If you choose to build your own image, use the `container/build.sh` script with the `--target frontend` option:
 
 ```bash
-cd <dynamo-source-root>
 ./container/build.sh --framework none --target frontend
 ```
 
