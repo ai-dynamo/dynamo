@@ -13,22 +13,24 @@
 #   use in GitHub Actions workflows.
 #
 # USAGE:
-#   ./route_buildkit.sh --amd    # Route AMD64 BuildKit workers
-#   ./route_buildkit.sh --arm    # Route ARM64 BuildKit workers
+#   ./route_buildkit.sh --arch amd --flavor all      # Route all flavors for AMD64
+#   ./route_buildkit.sh --arch arm --flavor vllm     # Route vllm for ARM64
+#   ./route_buildkit.sh --arch all --flavor all      # Route all flavors for both architectures
 #
 # ARGUMENTS:
-#   --amd   Target AMD64 architecture BuildKit pods
-#   --arm   Target ARM64 architecture BuildKit pods
+#   --arch <arch>     Target architecture: amd, arm, or all
+#   --flavor <flavor> Target flavor: vllm, trtllm, sglang, general, or all
 #
 # ENVIRONMENT VARIABLES:
 #   MAX_RETRIES   Max attempts to wait for pods (default: 8)
 #   RETRY_DELAY   Seconds between retry attempts (default: 30)
 #
 # OUTPUTS (written to GITHUB_OUTPUT):
-#   vllm_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
-#   trtllm_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
-#   sglang_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
-#   general_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
+#   <flavor>_<arch>=tcp://<pod>.<svc>.<ns>.svc.cluster.local:<port>[,...]
+#
+#   Examples:
+#     vllm_amd64=tcp://buildkit-amd64-0.buildkit-amd64-headless.buildkit.svc.cluster.local:1234
+#     trtllm_arm64=tcp://buildkit-arm64-1.buildkit-arm64-headless.buildkit.svc.cluster.local:1234
 #
 # ROUTING STRATEGY:
 #   Pods are assigned to flavors based on pod index modulo 3:
@@ -48,8 +50,16 @@
 #   # In GitHub Actions workflow:
 #   - name: Route Buildkit Workers
 #     run: |
-#       .github/scripts/route_buildkit.sh --amd
-#       .github/scripts/route_buildkit.sh --arm
+#       .github/scripts/route_buildkit.sh --arch amd --flavor all
+#       .github/scripts/route_buildkit.sh --arch arm --flavor all
+#
+#   # Route specific flavor for specific arch:
+#   - name: Route vllm for AMD64
+#     run: .github/scripts/route_buildkit.sh --arch amd --flavor vllm
+#
+#   # Route all flavors for all architectures:
+#   - name: Route all
+#     run: .github/scripts/route_buildkit.sh --arch all --flavor all
 #
 #   # Then use outputs:
 #   buildkit_worker_addresses: ${{ steps.route.outputs.vllm_amd64 }}
@@ -59,38 +69,75 @@
 set -e
 
 # --- ARGUMENT PARSING ---
-ARCH=""
+ARCH_INPUT=""
+FLAVOR_INPUT=""
+ALL_FLAVORS=("vllm" "trtllm" "sglang" "general")
+
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --amd)
-      ARCH="amd64"
-      shift
+    --arch)
+      ARCH_INPUT="$2"
+      shift 2
       ;;
-    --arm)
-      ARCH="arm64"
-      shift
+    --flavor)
+      FLAVOR_INPUT="$2"
+      shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --amd or --arm."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd|arm|all> --flavor <vllm|trtllm|sglang|general|all>."
       exit 1
       ;;
   esac
 done
 
-if [ -z "$ARCH" ]; then
-  echo "❌ Error: Must specify --amd or --arm."
+if [ -z "$ARCH_INPUT" ]; then
+  echo "❌ Error: Must specify --arch <amd|arm|all>."
   exit 1
 fi
 
-# --- CONFIGURATION ---
-SERVICE_NAME="buildkit-${ARCH}-headless"
-NAMESPACE="buildkit"
-POD_PREFIX="buildkit-${ARCH}"
-PORT="1234"
-FLAVORS=("vllm" "trtllm" "sglang" "general")
-# ---------------------
+if [ -z "$FLAVOR_INPUT" ]; then
+  echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|general|all>."
+  exit 1
+fi
 
-echo "🔍 Discovering Buildkit pods via DNS..."
+# Validate arch input
+case $ARCH_INPUT in
+  amd|arm|all) ;;
+  *)
+    echo "❌ Error: Invalid arch '$ARCH_INPUT'. Must be amd, arm, or all."
+    exit 1
+    ;;
+esac
+
+# Validate flavor input
+case $FLAVOR_INPUT in
+  vllm|trtllm|sglang|general|all) ;;
+  *)
+    echo "❌ Error: Invalid flavor '$FLAVOR_INPUT'. Must be vllm, trtllm, sglang, general, or all."
+    exit 1
+    ;;
+esac
+
+# Determine architectures to process
+if [ "$ARCH_INPUT" = "all" ]; then
+  ARCHS=("amd64" "arm64")
+elif [ "$ARCH_INPUT" = "amd" ]; then
+  ARCHS=("amd64")
+else
+  ARCHS=("arm64")
+fi
+
+# Determine flavors to process
+if [ "$FLAVOR_INPUT" = "all" ]; then
+  FLAVORS=("${ALL_FLAVORS[@]}")
+else
+  FLAVORS=("$FLAVOR_INPUT")
+fi
+
+# --- CONFIGURATION ---
+NAMESPACE="buildkit"
+PORT="1234"
+# ---------------------
 
 if ! command -v nslookup &> /dev/null; then
     echo "❌ Error: nslookup not found. Please install dnsutils or bind-tools."
@@ -102,39 +149,13 @@ MAX_RETRIES=${MAX_RETRIES:-8}
 RETRY_DELAY=${RETRY_DELAY:-30}
 # ---------------------------
 
-# Function to count active IPs for the headless service
+# Function to count active IPs for a headless service
 get_pod_count() {
+  local service_name=$1
   local ip_count
-  ip_count=$(nslookup ${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local 2>/dev/null | grep -i "Address" | grep -v "#53" | wc -l)
+  ip_count=$(nslookup ${service_name}.${NAMESPACE}.svc.cluster.local 2>/dev/null | grep -i "Address" | grep -v "#53" | wc -l)
   echo $((ip_count))
 }
-
-# Initial count
-COUNT=$(get_pod_count)
-
-# Retry loop if no pods found
-if [ "$COUNT" -eq "0" ]; then
-  echo "⚠️  DNS returned 0 records. KEDA should be triggering a new buildkit pod."
-
-  for (( retry=1; retry<=MAX_RETRIES; retry++ )); do
-    echo "⏳ Waiting ${RETRY_DELAY}s for BuildKit pods to become available (attempt ${retry}/${MAX_RETRIES})..."
-    sleep "$RETRY_DELAY"
-
-    COUNT=$(get_pod_count)
-    if [ "$COUNT" -gt "0" ]; then
-      echo "✅ BuildKit pods are now available!"
-      break
-    fi
-
-    if [ "$retry" -eq "$MAX_RETRIES" ]; then
-      echo "❌ Error: No BuildKit pods available after ${MAX_RETRIES} attempts ($(( MAX_RETRIES * RETRY_DELAY ))s total)."
-      echo "   Please check KEDA scaling configuration and BuildKit deployment status."
-      exit 1
-    fi
-  done
-fi
-
-echo "✅ Found $COUNT active pod(s) in service $SERVICE_NAME."
 
 # Function to get all pod indices for a flavor based on Modulo 3
 get_target_indices() {
@@ -171,24 +192,58 @@ get_target_indices() {
   echo "${candidates[@]}"
 }
 
-# Iterate over flavors and set outputs
+# Process each architecture
+for ARCH in "${ARCHS[@]}"; do
+  SERVICE_NAME="buildkit-${ARCH}-headless"
+  POD_PREFIX="buildkit-${ARCH}"
 
-for flavor in "${FLAVORS[@]}"; do
-  TARGET_INDICES=($(get_target_indices "$flavor" "$COUNT"))
+  echo "🔍 Discovering Buildkit pods for ${ARCH} via DNS..."
 
-  ADDRS=""
-  for idx in "${TARGET_INDICES[@]}"; do
-    POD_NAME="${POD_PREFIX}-${idx}"
-    ADDR="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
-    if [ -z "$ADDRS" ]; then
-      ADDRS="$ADDR"
-    else
-      ADDRS="${ADDRS},${ADDR}"
-    fi
+  # Initial count
+  COUNT=$(get_pod_count "$SERVICE_NAME")
+
+  # Retry loop if no pods found
+  if [ "$COUNT" -eq "0" ]; then
+    echo "⚠️  DNS returned 0 records for ${ARCH}. KEDA should be triggering a new buildkit pod."
+
+    for (( retry=1; retry<=MAX_RETRIES; retry++ )); do
+      echo "⏳ Waiting ${RETRY_DELAY}s for BuildKit pods to become available (attempt ${retry}/${MAX_RETRIES})..."
+      sleep "$RETRY_DELAY"
+
+      COUNT=$(get_pod_count "$SERVICE_NAME")
+      if [ "$COUNT" -gt "0" ]; then
+        echo "✅ BuildKit pods for ${ARCH} are now available!"
+        break
+      fi
+
+      if [ "$retry" -eq "$MAX_RETRIES" ]; then
+        echo "❌ Error: No BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts ($(( MAX_RETRIES * RETRY_DELAY ))s total)."
+        echo "   Please check KEDA scaling configuration and BuildKit deployment status."
+        exit 1
+      fi
+    done
+  fi
+
+  echo "✅ Found $COUNT active pod(s) in service $SERVICE_NAME."
+
+  # Iterate over flavors and set outputs
+  for flavor in "${FLAVORS[@]}"; do
+    TARGET_INDICES=($(get_target_indices "$flavor" "$COUNT"))
+
+    ADDRS=""
+    for idx in "${TARGET_INDICES[@]}"; do
+      POD_NAME="${POD_PREFIX}-${idx}"
+      ADDR="tcp://${POD_NAME}.${SERVICE_NAME}.${NAMESPACE}.svc.cluster.local:${PORT}"
+      if [ -z "$ADDRS" ]; then
+        ADDRS="$ADDR"
+      else
+        ADDRS="${ADDRS},${ADDR}"
+      fi
+    done
+
+    echo "   -> Routing ${flavor}_${ARCH} to pod indices: ${TARGET_INDICES[*]}"
+
+    # Write to GitHub Output
+    echo "${flavor}_${ARCH}=$ADDRS" >> "$GITHUB_OUTPUT"
   done
-
-  echo "   -> Routing $flavor to pod indices: ${TARGET_INDICES[*]}"
-
-  # Write to GitHub Output
-  echo "${flavor}_${ARCH}=$ADDRS" >> "$GITHUB_OUTPUT"
 done

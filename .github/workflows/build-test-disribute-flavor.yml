@@ -202,10 +202,12 @@ jobs:
   # COPY TO ACR
   # ============================================================================
   copy-to-acr:
-    # if: inputs.copy_to_acr
     needs: [build, test]
-    # Handle case where tests are skipped
-    # This uses always() to run even if test was skipped, but checks build succeeded
+    # Run if build succeeded AND (test succeeded OR test was skipped)
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
     strategy:
       fail-fast: true
       matrix:
