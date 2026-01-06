@@ -50,15 +50,6 @@ on:
         required: false
         type: string
         default: 'remote-buildkit'
-      buildkit_amd64_addresses:
-        description: 'Comma-separated buildkit worker addresses for amd64'
-        required: true
-        type: string
-      buildkit_arm64_addresses:
-        description: 'Comma-separated buildkit worker addresses for arm64'
-        required: false
-        type: string
-        default: ''
       extra_tags:
         description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
         required: false
@@ -140,12 +131,17 @@ jobs:
             echo "tags=" >> $GITHUB_OUTPUT
           fi
 
+      - name: Route buildkit workers
+        id: route-buildkit
+        shell: bash
+        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ inputs.framework }}
+
       - name: Build with Remote Buildkit
         id: build-image
         uses: ./.github/actions/build-with-buildkit
         with:
           builder_name: ${{ inputs.builder_name }}
-          buildkit_worker_addresses: ${{ matrix.platform == 'amd64' && inputs.buildkit_amd64_addresses || inputs.buildkit_arm64_addresses }}
+          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.framework, matrix.platform)] }}
           image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: runtime

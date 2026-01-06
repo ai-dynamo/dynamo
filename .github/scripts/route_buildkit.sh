@@ -13,12 +13,12 @@
 #   use in GitHub Actions workflows.
 #
 # USAGE:
-#   ./route_buildkit.sh --arch amd --flavor all      # Route all flavors for AMD64
-#   ./route_buildkit.sh --arch arm --flavor vllm     # Route vllm for ARM64
+#   ./route_buildkit.sh --arch amd64 --flavor all    # Route all flavors for AMD64
+#   ./route_buildkit.sh --arch arm64 --flavor vllm   # Route vllm for ARM64
 #   ./route_buildkit.sh --arch all --flavor all      # Route all flavors for both architectures
 #
 # ARGUMENTS:
-#   --arch <arch>     Target architecture: amd, arm, or all
+#   --arch <arch>     Target architecture: amd64, arm64, or all
 #   --flavor <flavor> Target flavor: vllm, trtllm, sglang, general, or all
 #
 # ENVIRONMENT VARIABLES:
@@ -50,12 +50,12 @@
 #   # In GitHub Actions workflow:
 #   - name: Route Buildkit Workers
 #     run: |
-#       .github/scripts/route_buildkit.sh --arch amd --flavor all
-#       .github/scripts/route_buildkit.sh --arch arm --flavor all
+#       .github/scripts/route_buildkit.sh --arch amd64 --flavor all
+#       .github/scripts/route_buildkit.sh --arch arm64 --flavor all
 #
 #   # Route specific flavor for specific arch:
 #   - name: Route vllm for AMD64
-#     run: .github/scripts/route_buildkit.sh --arch amd --flavor vllm
+#     run: .github/scripts/route_buildkit.sh --arch amd64 --flavor vllm
 #
 #   # Route all flavors for all architectures:
 #   - name: Route all
@@ -84,14 +84,14 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd|arm|all> --flavor <vllm|trtllm|sglang|general|all>."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all>."
       exit 1
       ;;
   esac
 done
 
 if [ -z "$ARCH_INPUT" ]; then
-  echo "❌ Error: Must specify --arch <amd|arm|all>."
+  echo "❌ Error: Must specify --arch <amd64|arm64|all>."
   exit 1
 fi
 
@@ -102,9 +102,9 @@ fi
 
 # Validate arch input
 case $ARCH_INPUT in
-  amd|arm|all) ;;
+  amd64|arm64|all) ;;
   *)
-    echo "❌ Error: Invalid arch '$ARCH_INPUT'. Must be amd, arm, or all."
+    echo "❌ Error: Invalid arch '$ARCH_INPUT'. Must be amd64, arm64, or all."
     exit 1
     ;;
 esac
@@ -121,10 +121,8 @@ esac
 # Determine architectures to process
 if [ "$ARCH_INPUT" = "all" ]; then
   ARCHS=("amd64" "arm64")
-elif [ "$ARCH_INPUT" = "amd" ]; then
-  ARCHS=("amd64")
 else
-  ARCHS=("arm64")
+  ARCHS=("$ARCH_INPUT")
 fi
 
 # Determine flavors to process

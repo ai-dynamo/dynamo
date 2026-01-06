@@ -139,33 +139,11 @@ jobs:
       # - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
       #   timeout-minutes: 3
 
-  detect-buildkit-workers:
-    name: Detect Buildkit Workers
-    runs-on: builder-cpu-amd-runner
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
-    - name: Route Buildkit Workers
-      id: route-buildkit-workers
-      shell: bash
-      run: |
-        .github/scripts/route_buildkit.sh --arch all --flavor all
-    outputs:
-      vllm_amd64: ${{ steps.route-buildkit-workers.outputs.vllm_amd64 }}
-      vllm_arm64: ${{ steps.route-buildkit-workers.outputs.vllm_arm64 }}
-      trtllm_amd64: ${{ steps.route-buildkit-workers.outputs.trtllm_amd64 }}
-      trtllm_arm64: ${{ steps.route-buildkit-workers.outputs.trtllm_arm64 }}
-      sglang_amd64: ${{ steps.route-buildkit-workers.outputs.sglang_amd64 }}
-      sglang_arm64: ${{ steps.route-buildkit-workers.outputs.sglang_arm64 }}
-      general_amd64: ${{ steps.route-buildkit-workers.outputs.general_amd64 }}
-      general_arm64: ${{ steps.route-buildkit-workers.outputs.general_arm64 }}
-
   # ============================================================================
   # Operator
   # ============================================================================
   operator:
-    needs: [detect-buildkit-workers, changed-files]
+    needs: [changed-files]
     # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: false
@@ -176,10 +154,16 @@ jobs:
     name: operator (${{ matrix.platform.arch }})
     runs-on: builder-cpu-amd-runner
     steps:
-      - name: define buildkit builders
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Route buildkit workers
+        id: route-buildkit
+        shell: bash
+        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
+      - name: Define buildkit builders
         shell: bash
         run: |
-          ADDRS="${{ needs.detect-buildkit-workers.outputs[format('general_{0}', matrix.platform.arch)] }}"
+          ADDRS="${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}"
           IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
           FIRST=true
           for addr in "${ADDR_LIST[@]}"; do
@@ -191,8 +175,6 @@ jobs:
             fi
           done
           docker buildx inspect --bootstrap
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -298,7 +280,7 @@ jobs:
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
   vllm-pipeline:
-    needs: [detect-buildkit-workers, changed-files]
+    needs: [changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
     # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
@@ -307,8 +289,6 @@ jobs:
       arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
       arm_cuda_version: '12.9'
       arm_torch_backend: 'cu129'
-      buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.vllm_amd64 }}
-      buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.vllm_arm64 }}
       build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
@@ -318,13 +298,11 @@ jobs:
     secrets: inherit
 
   sglang-pipeline:
-    needs: [detect-buildkit-workers, changed-files]
+    needs: [changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
     # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: sglang
-      buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_amd64 }}
-      buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_arm64 }}
       build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
@@ -334,13 +312,11 @@ jobs:
     secrets: inherit
 
   trtllm-pipeline:
-    needs: [detect-buildkit-workers, changed-files]
+    needs: [changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
     # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: trtllm
-      buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_amd64 }}
-      buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_arm64 }}
       build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
