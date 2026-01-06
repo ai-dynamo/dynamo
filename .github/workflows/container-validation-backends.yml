@@ -30,20 +30,73 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      core: ${{ steps.filter.outputs.core }}
-      operator: ${{ steps.filter.outputs.operator }}
-      deploy: ${{ steps.filter.outputs.deploy }}
-      vllm: ${{ steps.filter.outputs.vllm }}
-      sglang: ${{ steps.filter.outputs.sglang }}
-      trtllm: ${{ steps.filter.outputs.trtllm }}
+      core: ${{ steps.filter.outputs.core_any_changed }}
+      operator: ${{ steps.filter.outputs.operator_any_changed }}
+      deploy: ${{ steps.filter.outputs.deploy_any_changed }}
+      vllm: ${{ steps.filter.outputs.vllm_any_changed }}
+      sglang: ${{ steps.filter.outputs.sglang_any_changed }}
+      trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Get merge base
+        id: merge-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # For PR branches, compare against merge-base with PR's target branch
+          # For main/release branches, use default behavior (previous commit)
+          if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+            PR_NUMBER="${BASH_REMATCH[1]}"
+            BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+            echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
+            BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
+            echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+          else
+            echo "base_sha=" >> $GITHUB_OUTPUT
+            echo "Using default comparison (previous commit)"
+          fi
       - name: Check for changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
         id: filter
         with:
-          filters: .github/filters.yaml
+          files_yaml_from_source_file: .github/filters.yaml
+          base_sha: ${{ steps.merge-base.outputs.base_sha }}
+      - name: Debug changed files
+        run: |
+          echo "=== Base SHA Used ==="
+          echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
+          echo ""
+          echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
+          echo "${{ steps.filter.outputs.all_all_changed_files }}"
+          echo ""
+          echo "=== Filters That Matched ==="
+          echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
+          echo ""
+          echo "=== Filter Results (any_changed) ==="
+          echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"
+          echo "ci: ${{ steps.filter.outputs.ci_any_changed }}"
+          echo "core: ${{ steps.filter.outputs.core_any_changed }}"
+          echo "operator: ${{ steps.filter.outputs.operator_any_changed }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_any_changed }}"
+          echo "planner: ${{ steps.filter.outputs.planner_any_changed }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_any_changed }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_any_changed }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}"
+          echo ""
+          echo "=== Files Matching Each Filter ==="
+          echo "docs: ${{ steps.filter.outputs.docs_all_changed_files }}"
+          echo "ci: ${{ steps.filter.outputs.ci_all_changed_files }}"
+          echo "core: ${{ steps.filter.outputs.core_all_changed_files }}"
+          echo "operator: ${{ steps.filter.outputs.operator_all_changed_files }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_all_changed_files }}"
+          echo "planner: ${{ steps.filter.outputs.planner_all_changed_files }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_all_changed_files }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_all_changed_files }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_all_changed_files }}"
 
   backend-status-check:
     runs-on: ubuntu-latest
