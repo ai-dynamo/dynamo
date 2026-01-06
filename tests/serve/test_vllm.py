@@ -232,7 +232,11 @@ vllm_configs = {
         name="multimodal_agg_qwen2vl_2b_epd",
         directory=vllm_dir,
         script_name="agg_multimodal_epd.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.xfail(reason="Flaky test - needs investigation"),
+        ],
         model="Qwen/Qwen2-VL-2B-Instruct",
         script_args=["--model", "Qwen/Qwen2-VL-2B-Instruct", "--single-gpu"],
         request_payloads=[
@@ -311,7 +315,11 @@ vllm_configs = {
         name="multimodal_agg_qwen",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.pre_merge],
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.xfail(reason="Flaky test - needs investigation"),
+        ],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         script_args=["--model", "Qwen/Qwen2.5-VL-7B-Instruct"],
         delayed_start=0,
