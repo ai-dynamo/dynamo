@@ -450,13 +450,13 @@ impl MigrationContext {
         running_request: &PreprocessedRequest,
         parent_ctx: &Arc<dyn AsyncEngineContext>,
     ) -> Result<MigrationContext> {
-
         // If we've reached the end of the current tier, migrate to the next tier
         if running_request.token_ids.len() >= self.current_tier.seqlen as usize {
             // We've reached the end of the current tier, so migrate to the next tier
             tracing::info!(
                 request_token_count = running_request.token_ids.len(),
                 current_tier_seqlen = self.current_tier.seqlen,
+                request_id = request_id,
                 "Reached the end of the current tier, migrating to the next tier",
             );
             let Some(new_tier) = find_tier(tiers, (running_request.token_ids.len() + 1) as u32)
@@ -487,6 +487,7 @@ impl MigrationContext {
                 bootstrap_room = response.bootstrap_info.bootstrap_room,
                 tokens_seen = tokens_seen,
                 pending_outputs_count = response.pending_outputs.len(),
+                request_id = request_id,
                 "Migration response received",
             );
 
@@ -529,6 +530,7 @@ impl MigrationContext {
                     original_max_tokens = max_tokens,
                     tokens_generated = tokens_generated,
                     remaining_max_tokens = remaining_tokens,
+                    request_id = request_id,
                     "Adjusted max_tokens for migrated request",
                 );
             }
@@ -540,6 +542,7 @@ impl MigrationContext {
                 tracing::info!(
                     original_min_tokens = min_tokens,
                     remaining_min_tokens = remaining_min,
+                    request_id = request_id,
                     "Adjusted min_tokens for migrated request",
                 );
             }
@@ -563,6 +566,7 @@ impl MigrationContext {
                 new_instance_id = new_instance_id,
                 new_tier_seqlen = new_tier.seqlen,
                 pending_chunks = pending_chunks.len(),
+                request_id = request_id,
                 "Created new stream for next tier",
             );
 
@@ -590,15 +594,16 @@ impl MigrationContext {
         Ok(self)
     }
 
-    /// Returns the next chunk(s) from the stream.
-    /// If there are pending chunks from a migration drain, returns all of them.
-    /// Otherwise, returns the next chunk from the current stream.
-    /// Returns empty Vec when the stream is done.
+    /// Wait for the next chunk from the current stream.
+    /// ALWAYS pulls a chunk from the current stream.
+    /// If there any pending chunks from a migration drain, prepend them to the current stream's chunks.
     pub async fn tock(
         &mut self,
         running_request: &mut PreprocessedRequest,
-    ) -> Vec<Annotated<LLMEngineOutput>> {
+        request_id: &str,
+    ) -> (StreamResult, Vec<Annotated<LLMEngineOutput>>) {
         // First, return any pending chunks from the migration drain
+        let mut chunks_to_return = Vec::new();
         if !self.pending_chunks.is_empty() {
             let chunks = std::mem::take(&mut self.pending_chunks);
             for chunk in &chunks {
@@ -606,12 +611,25 @@ impl MigrationContext {
                     running_request.token_ids.extend(data.token_ids.iter());
                 }
             }
-            return chunks;
+            tracing::info!(
+                pending_chunks = chunks.len(),
+                request_id = request_id,
+                "Found pending chunks from migration drain",
+            );
+            chunks_to_return.extend(chunks);
         }
 
         let Some(chunk) = self.current_stream.next().await else {
-            return Vec::new();
+            // No more chunks from the current stream, so we're done
+            return (StreamResult::Stop, chunks_to_return);
         };
+
+        if let Some(ref data) = chunk.data {
+            // Keep track of the request + tokens we've received so far
+            running_request.token_ids.extend(data.token_ids.iter());
+        }
+
+        chunks_to_return.push(chunk);
 
         // Record migration duration if we just migrated
         if let Some((migration_start, from_seqlen)) = self.migration_started_at.take() {
@@ -620,6 +638,7 @@ impl MigrationContext {
                 duration_ms = duration.as_millis(),
                 from_seqlen = from_seqlen,
                 to_seqlen = self.current_tier.seqlen,
+                request_id = request_id,
                 "Migration completed, received first token from new tier"
             );
 
@@ -630,21 +649,20 @@ impl MigrationContext {
                 self.current_tier.seqlen,
                 duration.as_secs_f64(),
             );
-
-            // Now that we've received the first token from the new tier, it's safe to
-            // drop the previous stream. This ensures the old context isn't cancelled
-            // before the KV transfer completes.
-            if let Some(previous_stream) = self.previous_stream.take() {
-                drop(previous_stream);
-            }
         }
 
-        if let Some(ref data) = chunk.data {
-            // Keep track of the request + tokens we've received so far
-            running_request.token_ids.extend(data.token_ids.iter());
+        if let Some(previous_stream) = self.previous_stream.take() {
+            drop(previous_stream);
         }
-        vec![chunk]
+
+        (StreamResult::Continue, chunks_to_return)
     }
+}
+
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+enum StreamResult {
+    Continue,
+    Stop,
 }
 
 impl Drop for DecodeDisagger {
@@ -722,12 +740,12 @@ impl
                         break;
                     }
                 };
-                let chunks = migration_context.tock(&mut running_request).await;
-                if chunks.is_empty() {
-                    break;
-                }
+                let (result, chunks) = migration_context.tock(&mut running_request, &request_id).await;
                 for chunk in chunks {
                     yield chunk;
+                }
+                if result == StreamResult::Stop {
+                    break;
                 }
             }
             // Decrement inflight for the final tier when stream completes
