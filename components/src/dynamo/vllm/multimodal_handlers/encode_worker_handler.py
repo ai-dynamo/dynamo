@@ -15,7 +15,6 @@ from dynamo.runtime import Client, DistributedRuntime
 
 from ..multimodal_utils import (
     ImageLoader,
-    MyRequestOutput,
     encode_image_embeddings,
     get_embedding_hash,
     get_encoder_components,
@@ -163,7 +162,7 @@ class EncodeWorkerHandler:
 
                 if TRANSFER_LOCAL:
                     embedding_key = get_embedding_hash(image_url)
-                    logger.info(
+                    logger.debug(
                         f"ENCODER: saving local safetensors file with key {embedding_key}, {embeddings_cpu.numel()} * {embeddings_cpu.element_size()} bytes"
                     )
                     tensors = {"ec_cache": embeddings_cpu}
@@ -196,36 +195,16 @@ class EncodeWorkerHandler:
 
             logger.debug(f"Request: {request.model_dump_json()}")
 
-            # [gluo FIXME] move counter out
             time_end = time.perf_counter()
             self._accumulated_time += time_end - time_start
             self._processed_requests += 1
-            logger.info(
+            logger.debug(
                 f"Encoded image(s) for request {{ id: {request_id} }} in {time_end - time_start:.4f} seconds. "
                 f"Average encoding time: {self._accumulated_time / self._processed_requests:.4f} seconds over {self._processed_requests} requests."
             )
 
             # Yield transformed request back
             yield request.model_dump_json()
-
-            if False:
-                # Get the response generator
-                response_generator = await self.pd_worker_client.round_robin(
-                    request.model_dump_json(), context=context
-                )
-                for readable in self.readables:
-                    await readable.wait_for_completion()
-
-                async for response in response_generator:
-                    output = MyRequestOutput.model_validate_json(response.data())
-                    yield MyRequestOutput(
-                        request_id=output.request_id,
-                        prompt=output.prompt,
-                        prompt_token_ids=output.prompt_token_ids,
-                        prompt_logprobs=output.prompt_logprobs,
-                        outputs=output.outputs,
-                        finished=output.finished,
-                    ).model_dump_json()
 
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")

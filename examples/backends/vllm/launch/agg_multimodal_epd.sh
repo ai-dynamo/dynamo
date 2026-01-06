@@ -17,7 +17,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
-SINGLE_GPU=true
+SINGLE_GPU=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -55,11 +55,10 @@ python -m dynamo.frontend &
 # Multi-GPU mode: Each worker gets its own GPU, so use higher memory settings
 EXTRA_ARGS=""
 if [[ "$SINGLE_GPU" == "true" ]]; then
-    # EXTRA_ARGS="--gpu-memory-utilization 0.6 --enforce-eager"
     EXTRA_ARGS="--gpu-memory-utilization 0.5 --enforce-eager --max-model-len 30426"
 else
     # Multi-GPU mode: standard memory settings
-    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 34096"
 fi
 
 # Start processor (Python-based preprocessing, handles prompt templating)

@@ -8,18 +8,14 @@ from collections import defaultdict
 from enum import Enum
 from typing import AsyncIterator, Final
 
-from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams as VllmSamplingParams
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
 from dynamo.runtime import Client
 
 from ..handlers import BaseWorkerHandler, build_sampling_params
 from ..multimodal_utils import (
-    ChatProcessor,
-    CompletionsProcessor,
     MultiModalGroup,
     MultiModalInput,
     MyRequestOutput,
@@ -42,7 +38,7 @@ class RequestType(Enum):
     COMPLETION = "completion"
 
 
-class ProcessorHandler(ProcessMixIn):
+class PreprocessedHandler(ProcessMixIn):
     """
     vLLM pre and post processing for multimodal requests
     """
@@ -58,28 +54,9 @@ class ProcessorHandler(ProcessMixIn):
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        self.tokenizer = self._create_tokenizer(self.engine_args)
-        self.chat_processor = ChatProcessor(self.tokenizer, self.model_config)
-        self.completions_processor = CompletionsProcessor(
-            self.tokenizer, self.model_config
-        )
 
     def cleanup(self):
         pass
-
-    def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
-        """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
-        model_path = engine_args.model
-
-        # Create the base tokenizer with VLLM's typical settings
-        base_tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            trust_remote_code=True,
-            padding_side="left",
-            truncation_side="left",
-            use_fast=True,  # VLLM might use the fast tokenizer for efficiency
-        )
-        return base_tokenizer
 
     # Main method to parse the request and send the request to the vllm worker.
     async def _generate(
