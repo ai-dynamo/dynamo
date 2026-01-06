@@ -19,45 +19,17 @@ jobs:
   changed-files:
     runs-on: ubuntu-latest
     outputs:
-      core: ${{ steps.filter.outputs.core_any_modified }}
+      core: ${{ steps.changes.outputs.core }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
       - name: Check for changes
-        uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
-        id: filter
+        id: changes
+        uses: ./.github/actions/changed-files
         with:
-          files_yaml_from_source_file: .github/filters.yaml
-      - name: Debug changed files
-        run: |
-          echo "=== All Modified Files (${{ steps.filter.outputs.all_all_modified_files_count }} total) ==="
-          echo "${{ steps.filter.outputs.all_all_modified_files }}"
-          echo ""
-          echo "=== Filter Results ==="
-          echo "core_any_modified: ${{ steps.filter.outputs.core_any_modified }}"
-          echo "core files: ${{ steps.filter.outputs.core_all_modified_files }}"
-      - name: Check for uncovered files
-        run: |
-          # Combine all filter-specific files into one list
-          COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
-
-          # Get all modified files
-          ALL_FILES=$(echo "${{ steps.filter.outputs.all_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
-
-          # Find files in ALL but not in COVERED
-          UNCOVERED=$(comm -23 <(echo "$ALL_FILES") <(echo "$COVERED_FILES"))
-
-          if [ -n "$UNCOVERED" ]; then
-            echo "::error::The following files are not covered by any CI filter:"
-            echo "$UNCOVERED"
-            echo ""
-            echo "Please add these paths to .github/filters.yaml"
-            echo "See .github/FILTERS.md for documentation"
-            exit 1
-          fi
-          echo "All modified files are covered by CI filters."
+          gh_token: ${{ github.token }}
 
   dynamo-status-check:
     runs-on: ubuntu-latest
