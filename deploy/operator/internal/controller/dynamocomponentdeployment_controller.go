@@ -1234,6 +1234,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		maps.Copy(podLabels, extraPodMetadata.Labels)
 	}
 
+	// Propagate restart annotation to pod template to trigger rolling restart
+	// This is the same mechanism used by kubectl rollout restart
+	if restartAt, exists := resourceAnnotations[commonconsts.RestartAnnotation]; exists {
+		podAnnotations[commonconsts.RestartAnnotation] = restartAt
+	}
+
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoComponentDeployment.Namespace), client.MatchingLabels{
