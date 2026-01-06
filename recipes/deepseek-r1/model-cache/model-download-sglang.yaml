@@ -36,3 +36,4 @@ spec:
       - name: model-cache
         persistentVolumeClaim:
           claimName: model-cache
+
