@@ -42,9 +42,27 @@ npm run coverage  # Check if all repo files are covered
 
 ## Pattern Syntax
 
-- `**` matches any path depth
+- `**` matches any path depth (but not dotfiles by default)
 - `*` matches within a directory
 - `!pattern` excludes files (used in `core` to skip docs)
+- For dotfiles, add explicit pattern like `dir/.*`
 
 Example: `lib/**/*.rs` matches all Rust files under `lib/`.
+
+## Adding a New Filter Group
+
+If you create a new filter in `filters.yaml`, you must also update the workflows:
+
+1. Add the filter to `filters.yaml`
+2. Update **both** workflow files to include the new filter in the uncovered files check:
+   - `.github/workflows/container-validation-backends.yml`
+   - `.github/workflows/container-validation-dynamo.yml`
+
+In each workflow, find the `COVERED_FILES` line and add your new filter:
+
+```bash
+COVERED_FILES=$(echo "... ${{ steps.filter.outputs.YOURFILTER_all_modified_files }} ..." | ...)
+```
+
+If you skip this step, CI will fail with "uncovered files" even though your filter exists.
 
