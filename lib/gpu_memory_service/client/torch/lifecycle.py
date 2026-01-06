@@ -49,7 +49,7 @@ _pluggable_alloc: Optional[Any] = None  # CUDAPluggableAllocator
 def get_or_create_allocator(
     socket_path: str,
     device: int,
-    mode: Literal["write", "read"],
+    mode: Literal["write", "read", "auto"],
     *,
     tag: str = "weights",
     timeout_ms: Optional[int] = None,
@@ -68,10 +68,16 @@ def get_or_create_allocator(
     - Creates memory manager in read mode (for import-only)
     - No MemPool needed (weights already on GPU)
 
+    For auto mode:
+    - Tries to acquire RW lock; if another writer is active, falls back to RO
+    - Useful for multiprocess architectures where only one process should write
+    - After connection, check manager.mode to see if "write" or "read" was granted
+
     Args:
         socket_path: Unix socket path for the allocation server.
         device: CUDA device index.
-        mode: Desired mode - "write" for cold start, "read" for import-only.
+        mode: Desired mode - "write" for cold start, "read" for import-only,
+              "auto" for RW if available else RO.
         tag: Allocation tag for write mode (default: "weights").
         timeout_ms: Timeout in milliseconds for lock acquisition.
                     None means wait indefinitely.
@@ -104,7 +110,7 @@ def get_or_create_allocator(
                     f"Cannot create write memory manager: one already exists in '{current_mode}' mode. "
                     "Only one memory manager per process is allowed."
                 )
-        else:  # mode == "read"
+        elif mode == "read":
             if current_mode == "read":
                 logger.debug(
                     "[GPU Memory Service] Returning existing read memory manager (device=%d)",
@@ -116,6 +122,14 @@ def get_or_create_allocator(
                     f"Cannot get read memory manager: current one is in '{current_mode}' mode. "
                     "Call manager.switch_to_read() first to transition to read mode."
                 )
+        else:  # mode == "auto"
+            # For auto mode, return existing manager regardless of its mode
+            logger.debug(
+                "[GPU Memory Service] Returning existing %s memory manager for auto mode (device=%d)",
+                current_mode,
+                device,
+            )
+            return _allocator, _mem_pool if current_mode == "write" else None
 
     # No memory manager exists - create a new one
     manager = GMSClientMemoryManager(
@@ -123,22 +137,29 @@ def get_or_create_allocator(
     )
     _allocator = manager
 
-    if mode == "write":
+    # For auto mode, check what was actually granted
+    actual_mode = manager.mode
+
+    if actual_mode == "write":
         # Set up PyTorch integration for write mode
         pool = _setup_pytorch_integration(manager, tag=tag)
         _mem_pool = pool
-        logger.debug(
-            "[GPU Memory Service] Created write memory manager with MemPool (device=%d, socket=%s)",
+        logger.info(
+            "[GPU Memory Service] Created write memory manager with MemPool "
+            "(device=%d, socket=%s, requested=%s)",
             device,
             socket_path,
+            mode,
         )
         return manager, pool
     else:
         # Read mode doesn't need MemPool
-        logger.debug(
-            "[GPU Memory Service] Created read memory manager (device=%d, socket=%s)",
+        logger.info(
+            "[GPU Memory Service] Created read memory manager "
+            "(device=%d, socket=%s, requested=%s)",
             device,
             socket_path,
+            mode,
         )
         return manager, None
 

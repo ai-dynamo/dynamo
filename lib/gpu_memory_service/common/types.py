@@ -36,6 +36,7 @@ class ConnectionMode(str, Enum):
 
     RW = "rw"  # Writer (exclusive)
     RO = "ro"  # Reader (shared)
+    RW_OR_RO = "rw_or_ro"  # Writer if available, else reader (auto mode)
 
 
 class StateEvent(Enum):

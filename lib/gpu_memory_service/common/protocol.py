@@ -84,11 +84,12 @@ class HandshakeRequest:
     The handshake IS lock acquisition:
     - lock_type="rw": Blocks until all RO connections close, resets commit state
     - lock_type="ro": Blocks until no RW connection exists
+    - lock_type="rw_or_ro": Try RW first; if another writer holds RW, fall back to RO
 
     After successful handshake, the connection IS the lock.
     """
 
-    lock_type: Literal["rw", "ro"]
+    lock_type: Literal["rw", "ro", "rw_or_ro"]
     timeout_ms: Optional[int] = None  # How long to wait for lock (None = forever)
 
 
@@ -98,10 +99,12 @@ class HandshakeResponse:
 
     success=False means timeout waiting for lock.
     committed tells readers if weights are valid.
+    granted_lock_type tells which lock was actually granted (for rw_or_ro mode).
     """
 
     success: bool
     committed: bool
+    granted_lock_type: Optional[Literal["rw", "ro"]] = None  # Which lock was granted
 
 
 # ==================== Commit Operation ====================

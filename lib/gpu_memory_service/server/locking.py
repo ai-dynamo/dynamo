@@ -371,7 +371,15 @@ class GlobalLockFSM:
     # ==================== Lock Acquisition Predicates ====================
 
     def can_acquire_rw(self) -> bool:
-        """Check if RW lock can be acquired now."""
+        """Check if RW lock can be acquired now.
+
+        RW can only be acquired if:
+        - No current RW holder
+        - No RO holders
+
+        Note: This allows RW from COMMITTED state (for explicit reload).
+        For rw_or_ro mode, callers should also check `committed` to prefer RO.
+        """
         return self._rw_conn is None and len(self._ro_conns) == 0
 
     def can_acquire_ro(self, waiting_writers: int) -> bool:
