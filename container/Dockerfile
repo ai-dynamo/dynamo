@@ -23,7 +23,7 @@
 
 ARG BASE_IMAGE
 ARG BASE_IMAGE_TAG
-ARG EPP_IMAGE=""
+ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1"
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
