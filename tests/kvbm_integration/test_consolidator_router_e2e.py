@@ -103,7 +103,7 @@ def compute_deduplication_test_params(
     g2_cpu_blocks: int,
     g3_disk_blocks: int,
     block_size: int = 16,
-    gpu_utilization: float = 0.6,
+    gpu_utilization_per_request: float = 0.6,
     offload_overflow_factor: float = 100.0,
 ) -> dict:
     """
@@ -126,7 +126,7 @@ def compute_deduplication_test_params(
         g2_cpu_blocks: Number of CPU cache blocks (DYN_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS)
         g3_disk_blocks: Number of disk cache blocks (DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS)
         block_size: Tokens per block (default 16 for vLLM)
-        gpu_utilization: Fraction of GPU capacity to use per request (default 0.6)
+        gpu_utilization_per_request: Fraction of GPU capacity to use per request (default 0.6)
             - Too high (>0.8): requests may cause immediate evictions
             - Too low (<0.3): too many requests needed, slow test
         offload_overflow_factor: How many times to overflow the smallest offload
@@ -165,7 +165,7 @@ def compute_deduplication_test_params(
     # 1. max_tokens: fits in GPU with margin
     # Use gpu_utilization to leave headroom for the model to process without
     # triggering evictions mid-generation
-    max_blocks_per_request = max(1, int(g1_gpu_blocks * gpu_utilization))
+    max_blocks_per_request = max(1, int(g1_gpu_blocks * gpu_utilization_per_request))
     max_tokens = max_blocks_per_request * block_size
 
     # 2. num_requests: overflow the smallest offload cache many times
