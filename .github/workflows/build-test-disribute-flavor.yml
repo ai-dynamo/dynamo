@@ -108,7 +108,7 @@ jobs:
   # BUILD
   # ============================================================================
   build:
-    if: inputs.build_image
+    # if: inputs.build_image
     strategy:
       fail-fast: false
       matrix:
@@ -171,7 +171,7 @@ jobs:
   # TEST
   # ============================================================================
   test:
-    if: inputs.run_tests
+    # if: inputs.run_tests
     needs: [build]
     name: test ${{ inputs.framework }}-amd64
     runs-on: gpu-l40-amd64
@@ -202,7 +202,7 @@ jobs:
   # COPY TO ACR
   # ============================================================================
   copy-to-acr:
-    if: inputs.copy_to_acr
+    # if: inputs.copy_to_acr
     needs: [build, test]
     # Handle case where tests are skipped
     # This uses always() to run even if test was skipped, but checks build succeeded
