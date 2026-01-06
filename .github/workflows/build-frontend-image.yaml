@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 name: Build Frontend Image
@@ -41,19 +41,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y \
-            curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg \
-            build-essential protobuf-compiler
+          # Install system dependencies from apt
+          sudo apt-get install -y git build-essential protobuf-compiler
           # Install Rust (cargo + rustc)
           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
           # Make cargo available to later steps
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          # Install cbindgen (needed in build-epp-dynamo.sh)
-          "$HOME/.cargo/bin/cargo" install cbindgen
+
+      - name: Install cbindgen
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install cbindgen
+
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -63,7 +66,6 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         env:
-          PLATFORMS: linux/${{ matrix.platform.arch }}
           TARGETARCH: ${{ matrix.platform.arch }}
         with:
           framework: none
@@ -78,8 +80,8 @@ jobs:
       - name: Docker Tag and Push Frontend Image
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: ${{ env.FRONTEND_IMAGE_TAG }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}

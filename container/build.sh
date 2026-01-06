@@ -948,7 +948,7 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     echo ""
     echo "Building EPP image for Frontend..."
     # Set up paths for GAIE
-    GAIE_CLONE_DIR="${BUILD_CONTEXT}/external/gateway-api-inference-extension"
+    GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
     
     # Clone GAIE repo
     echo ""

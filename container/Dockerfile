@@ -590,7 +590,7 @@ ENV PATH="/opt/dynamo/venv/bin:$PATH"
 # Copy virtual environment directly from dynamo_base (dev image)
 # This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
 # Copy uv to system /bin
-COPY --from=dev /bin/uv /bin/uvx /bin/
+COPY --chown=dynamo: --from=dev /bin/uv /bin/uvx /bin/
 RUN uv python install $PYTHON_VERSION
 COPY --chown=dynamo: --from=dev /opt/dynamo/venv/ /opt/dynamo/venv/
 
