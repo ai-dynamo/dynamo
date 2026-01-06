@@ -72,9 +72,8 @@ cd examples/backends/vllm/launch
 ./disagg.sh
 ```
 
-**Note:** `disagg.sh` sets additional per-worker port environment variables (e.g., `DYN_VLLM_KV_EVENT_PORT`,
-`VLLM_NIXL_SIDE_CHANNEL_PORT`) to avoid ZMQ "Address already in use" conflicts when multiple workers run on the
-same host. If you run the components manually, make sure you mirror those port settings.
+**Note:** the example vLLM `disagg.sh` sets additional per-worker port environment variables (e.g., `DYN_VLLM_KV_EVENT_PORT`,
+`VLLM_NIXL_SIDE_CHANNEL_PORT`) to avoid ZMQ "Address already in use" conflicts when multiple workers run on the same host. If you run the components manually, make sure you mirror those port settings.
 
 ```bash
 #!/bin/bash
@@ -90,7 +89,7 @@ export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4317
 export OTEL_SERVICE_NAME=dynamo-frontend
 python -m dynamo.frontend --router-mode kv &
 
-# Run decode/ingress worker (make sure to wait for start up)
+# Run decode worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-decode
 DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
