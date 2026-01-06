@@ -135,9 +135,9 @@ jobs:
           echo "sglang_all: ${{ steps.filter.outputs.sglang_all_all_changed_files }}"
           echo "trtllm_all: ${{ steps.filter.outputs.trtllm_all_all_changed_files }}"
 
-      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 #v6.1.0
-      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
-        timeout-minutes: 3
+      # - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 #v6.1.0
+      # - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
+      #   timeout-minutes: 3
 
   detect-buildkit-workers:
     name: Detect Buildkit Workers
@@ -256,7 +256,7 @@ jobs:
 
 
   copy-operator-to-acr:
-    needs: [operator, changed-files]
+    needs: [operator]
     # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: true
