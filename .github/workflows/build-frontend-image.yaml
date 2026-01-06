@@ -37,12 +37,16 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Install dependencies
+      - name: Install APT dependencies
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: git build-essential protobuf-compiler
+          version: 1.0
+        
+      - name: Install Rust
         shell: bash
         run: |
           set -euo pipefail
-          # Install system dependencies from apt
-          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
           # Install Rust (cargo + rustc)
           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
           # Make cargo available to later steps
