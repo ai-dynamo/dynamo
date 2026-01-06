@@ -977,6 +977,25 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 		}
 	}
 
+	pcsProcessed, err := r.isPodCliqueSetFullyProcessed(ctx, dgd)
+	if err != nil {
+		logger.Error(err, "failed to check PodCliqueSet processing status")
+		// On error, assume not processed and wait
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+			InProgress: []string{currentService},
+		}
+	}
+	if !pcsProcessed {
+		logger.V(1).Info("PodCliqueSet not fully processed by Grove yet, waiting", "service", currentService)
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+			InProgress: []string{currentService},
+		}
+	}
+
 	// Check if the current service is fully updated
 	isFullyUpdated, _ := r.checkServiceFullyUpdated(ctx, dgd, currentService)
 
@@ -1011,6 +1030,22 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 		Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 		InProgress: []string{nextService},
 	}
+}
+
+// isPodCliqueSetFullyProcessed checks if the PodCliqueSet has been fully processed by Grove.
+// Returns true if generation == status.observedGeneration, meaning Grove has processed the latest spec.
+func (r *DynamoGraphDeploymentReconciler) isPodCliqueSetFullyProcessed(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (bool, error) {
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
+	if err != nil {
+		return false, err
+	}
+
+	if pcs.Status.ObservedGeneration == nil {
+		return false, nil
+	}
+
+	return pcs.Generation == *pcs.Status.ObservedGeneration, nil
 }
 
 // checkServiceFullyUpdated checks if a single service is fully updated.
