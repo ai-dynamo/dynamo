@@ -6,6 +6,7 @@ mod utils;
 mod zmq;
 
 mod leader;
+pub mod registry;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
