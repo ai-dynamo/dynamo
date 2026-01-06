@@ -1,23 +1,75 @@
+# CI Filter Patterns - See FILTERS.md for documentation
+#
+# Filters that trigger CI jobs:
+#   core     -> dynamo build-test, all backend builds (vllm/sglang/trtllm), deploy tests
+#   operator -> operator build and test
+#   deploy   -> deploy-test-vllm-disagg-router
+#   vllm     -> vllm build and test
+#   sglang   -> sglang build and test
+#   trtllm   -> trtllm build and test
+#
+# Filters for coverage only (no CI triggered):
+#   docs, examples, ignore, planner
+
 all:
   - '**'
 
-docs: &docs
+docs:
   - 'docs/**'
   - '**/*.md'
   - '**/*.rst'
   - '**/*.txt'
+  - '**/.gitignore'
+  - '**/.helmignore'
+  - '**/.gitattributes'
+  - 'LICENSE'
+  - 'CODEOWNERS'
+
+examples:
+  - 'recipes/**'
+  - 'examples/**'
+  - 'benchmarks/**'
+  - '.devcontainer/**'
+  - 'deploy/discovery/**'
+  - 'deploy/inference-gateway/**'
+  - 'deploy/observability/**'
+  - 'deploy/pre-deployment/**'
+
+ignore:
+  - '.lycheeignore'
+  - '.pre-commit-config.yaml'
+  - '.coderabbit.yaml'
+  - '.clang-format'
+  - 'dynamo.code-workspace'
+  - 'deploy/*'
+  - 'launch/**'
+  - '.github/scripts/**'
+  - '.github/ISSUE_TEMPLATE/**'
+  - '.github/pull_request_template.md'
+  - '.github/release.yml'
+  - '.github/copy-pr-bot.yaml'
+  - '.github/dco.yml'
+  - 'container/Dockerfile.aws'
+  - 'container/Dockerfile.docs'
+  - 'container/Dockerfile.epp'
+  - 'container/Dockerfile.frontend'
+  - 'container/Dockerfile.local_dev'
+  - 'container/run.sh'
+  - 'container/use-sccache.sh'
 
 ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
   - '.github/actions/**'
+  - '.github/scripts/parse_buildkit_output.py'
 
-# Will run tests for all 3 containers (vLLM, SGLang, TRTLLM)
 core:
   - *ci
   - 'container/build.sh'
   - 'container/Dockerfile'
+  - '.dockerignore'
   - 'container/deps/*'
+  - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
@@ -28,36 +80,39 @@ core:
   - '*.lock'
   - '*.py'
   - '*.rs'
-  - '!**/*.md' # Avoid running on doc changes
-  - '!**/*.rst' # Avoid running on doc changes
-  - '!**/*.txt' # Avoid running on doc changes
+  - 'scripts/report_pytest_markers.py'
+  - '!**/*.md'
+  - '!**/*.rst'
+  - '!**/*.txt'
 
 operator:
   - *ci
-  - 'deploy/cloud/operator/**'
+  - 'deploy/operator/**'
+  - 'deploy/operator/.*'
 
 deploy:
-  - 'deploy/cloud/helm/**'
+  - 'deploy/helm/**'
   - 'deploy/utils/**'
 
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
 
-vllm: &vllm
+vllm:
   - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
   - 'examples/backends/vllm/**'
   - 'components/src/dynamo/vllm/**'
 
-sglang: &sglang
+sglang:
   - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
 
-trtllm: &trtllm
+trtllm:
   - 'container/Dockerfile.trtllm'
+  - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
