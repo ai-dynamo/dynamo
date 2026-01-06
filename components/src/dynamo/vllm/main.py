@@ -29,11 +29,6 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.vllm.ec_transfer_utils import (
-    create_ec_transfer_config,
-    get_encoder_engine_id,
-    get_pd_engine_id,
-)
 from dynamo.vllm.multimodal_handlers import (
     ECProcessorHandler,
     EncodeWorkerHandler,
@@ -42,6 +37,7 @@ from dynamo.vllm.multimodal_handlers import (
     ProcessorHandler,
     VLLMNativeEncoderWorkerHandler,
 )
+from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
 from .args import Config, overwrite_args, parse_args
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
@@ -739,21 +735,20 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
     """
     Initialize vLLM-native encoder worker component (ECConnector mode).
-
-    This encoder uses vLLM's built-in encoder disaggregation with ECConnector.
-    vLLM handles encoder execution, caching, and storage automatically.
+    In this mode, vLLM handles encoder execution, caching, and storage automatically.
     """
-    # 1. Create component and endpoint
+    # Create component and endpoint
     component = runtime.namespace(config.namespace).component(config.component)
     generate_endpoint = component.endpoint(config.endpoint)
 
-    # 2. Configure ECTransferConfig for producer role
-    # Use instance_id=0 as default (single instance per component)
-    engine_id = get_encoder_engine_id(config.namespace, config.component, instance_id=0)
+    # Configure ECTransferConfig for producer role
+    instance_id = 0
+    engine_id = f"{config.namespace}.{config.component}.encoder.{instance_id}"
 
+    # Configure encoder with producer role, it will be responsible for creating embeddings and storing them in the shared storage
     ec_transfer_config = create_ec_transfer_config(
         engine_id=engine_id,
-        ec_role="ec_producer",  # This instance produces encoder outputs
+        ec_role="ec_producer",
         ec_connector_backend=config.ec_connector_backend,
         ec_storage_path=config.ec_storage_path,
         ec_extra_config=config.ec_extra_config,
@@ -761,9 +756,8 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
 
     # Set ECTransferConfig on engine args
     config.engine_args.ec_transfer_config = ec_transfer_config
-    logger.info(f"Configured as ECConnector producer with engine_id={engine_id}")
 
-    # 3. Setup vLLM engine
+    # Setup vLLM engine
     (
         engine_client,
         vllm_config,
@@ -771,7 +765,7 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
         prometheus_temp_dir,
     ) = setup_vllm_engine(config)
 
-    # 4. Create handler (no PD client needed for ECConnector mode)
+    # Initialize vLLM Native Encoder Worker Handler
     handler = VLLMNativeEncoderWorkerHandler(
         runtime,
         component,
@@ -890,13 +884,13 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     # Configure ECConnector consumer mode if enabled
     if config.ec_consumer_mode:
         logger.info("Configuring as ECConnector consumer for encoder embeddings")
+        instance_id = 0
+        engine_id = f"{config.namespace}.{config.component}.backend.{instance_id}"
 
-        # Use instance_id=0 as default (single instance per component)
-        engine_id = get_pd_engine_id(config.namespace, config.component, instance_id=0)
-
+        # The PD Worker just load the embeddings from the shared storage, so it is a consumer
         ec_transfer_config = create_ec_transfer_config(
             engine_id=engine_id,
-            ec_role="ec_consumer",  # This instance consumes encoder outputs
+            ec_role="ec_consumer",
             ec_connector_backend=config.ec_connector_backend,
             ec_storage_path=config.ec_storage_path,
             ec_extra_config=config.ec_extra_config,

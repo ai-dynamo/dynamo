@@ -165,7 +165,6 @@ class VLLMNativeEncoderResponse(BaseModel):
     request_id: str
     mm_hash: str  # vLLM's multimodal hash identifier
     modality: str  # "image", "video", "audio"
-    embeddings_shape: Tuple[int, ...]  # Shape of encoded embeddings
     connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
 
 
