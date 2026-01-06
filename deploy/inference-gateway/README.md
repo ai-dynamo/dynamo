@@ -2,11 +2,11 @@
 
 When integrating Dynamo with the Inference Gateway it is recommended to use the custom Dynamo EPP image.
 
-1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach.
+1. **Dynamo EPP (Recommended):** The custom Dynamo EPP image integrates the Dynamo router directly into the gateway's endpoint picker. Using the `dyn-kv` plugin, it selects the optimal worker based on KV cache state and tokenized prompt before routing the request. The integration moves intelligent routing upstream to the gateway layer.
 
-2. You could still use the default EPP image provided by the extension. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
+2. **Standard EPP (Fallback):** You can use the default GAIE EPP image, which treats the Dynamo deployment as a black box and routes requests round-robin. Routing intelligence remains within the Dynamo graph itself. Use this approach if you have a single Dynamo graph and don't need the custom EPP image.
 
-EPP’s default kv-routing approach is token-aware only `by approximation` because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+EPP’s default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
@@ -16,7 +16,15 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 - [Prerequisites](#prerequisites)
 - [Installation Steps](#installation-steps)
-- [Usage](#6-usage)
+  - [1. Install Dynamo Platform](#1-install-dynamo-platform)
+  - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
+  - [3. Deploy Your Model](#3-deploy-your-model)
+  - [4. Install Dynamo GAIE Helm Chart](#4-install-dynamo-gaie-helm-chart)
+  - [5. Verify Installation](#5-verify-installation)
+  - [6. Usage](#6-usage)
+  - [7. Deleting the Installation](#7-deleting-the-installation)
+- [Gateway API Inference Extension v1.2.1 Integration](#gateway-api-inference-extension-v121-integration)
+- [Body Injector](#body-injector)
 
 ## Prerequisites
 
@@ -95,6 +103,50 @@ kubectl get gateway inference-gateway
 # NAME                CLASS      ADDRESS   PROGRAMMED   AGE
 # inference-gateway   kgateway             True         1m
 ```
+
+#### g. Deploy the Body-Transformer service
+
+**Why is this needed?**
+
+Dynamo backend workers require routing information in the request body as an `nvext` field (not just headers). The GAIE EPP sets routing headers (`x-worker-instance-id`, etc.), but these headers need to be converted into body fields before reaching the backend.
+
+The Body-Transformer is a lightweight ext_proc service that:
+1. Reads the routing headers set by the GAIE EPP
+2. Injects the `nvext` field into the JSON request body before forwarding to the Dynamo backend
+
+```
+Client: POST /v1/chat/completions {"model": "Qwen/Qwen3-0.6B", ...}
+    ↓
+kGateway
+    ↓
+EPP (Dynamo KV Scorer)
+  → Selects worker: 1732649523291627853
+  → Sets header: x-worker-instance-id=1732649523291627853
+    ↓
+Body Transformer
+  → Reads header
+  → Injects: {"nvext": {"backend_instance_id": 1732649523291627853}}
+  → Body: 106 → 158 bytes
+    ↓
+Dynamo Backend (vllm-agg-frontend)
+  → Receives request with nvext
+  → Routes to correct worker
+  → Returns response
+    ↓
+Client receives response
+```
+
+**Choosing an approach:**
+
+| Approach | Works With | Pros | Cons |
+|----------|------------|------|------|
+| **Body-Transformer (ext_proc)** | All Envoy-based gateways (kGateway, Istio, Envoy Gateway, etc.) | Portable, works everywhere | Requires deploying an extra service |
+| **Lua filters** | Istio, Envoy Gateway (NOT kGateway) | No extra service needed | Gateway-specific configuration |
+
+- **For kGateway**: Use the Body-Transformer (required - kGateway doesn't support Lua filters)
+- **For Istio/Envoy Gateway**: Choose either Body-Transformer OR Lua filters (see examples below)
+
+Follow the [Body-Transformer README](body-transformer/README.md) to build and deploy this service.
 
 ### 3. Deploy Your Model ###
 
@@ -421,7 +473,7 @@ You must deploy a **TrafficPolicy** that uses kGateway's transformation feature 
 │       x-worker-instance-id: 42                                       │
 │       x-dynamo-routing-mode: aggregated                              │
 │                                                                      │
-│  3. TrafficPolicy transformation reads headers and modifies body:    │
+│  3. Body Transformer (ext_proc) reads headers and modifies body:     │
 │     Body: {"model": "llama", "messages": [...],                      │
 │            "nvext": {"backend_instance_id": 42}}                     │
 │                                                                      │
@@ -459,31 +511,55 @@ The transformation injects an `nvext` field into the JSON request body:
 
 ### Installation for kGateway
 
-The TrafficPolicy configuration is in `config/lua-filter/kgateway-lua-filter.yaml`.
+kGateway v2.1.x does NOT support Lua filters or advanced body transformation via Inja templating.
+Instead, we use a separate **Body Transformer** ext_proc service.
 
-1. **Apply the TrafficPolicy:**
+1. **Build and deploy the Body Transformer:**
 
 ```bash
-kubectl apply -f config/lua-filter/kgateway-lua-filter.yaml
+cd body-transformer
+
+# Build the image
+make image-build
+
+# Load into minikube (if using minikube)
+make image-load
+
+# Deploy the service
+kubectl apply -f deploy/deployment.yaml -n my-model
 ```
 
-2. **Verify the policy is applied:**
+2. **Configure kGateway to use it:**
 
 ```bash
-kubectl get trafficpolicy dynamo-body-injector -o yaml
+# Apply GatewayExtension, TrafficPolicy, and ReferenceGrant
+kubectl apply -f deploy/kgateway-config.yaml
+```
+
+3. **Verify the configuration:**
+
+```bash
+# Check body-transformer is running
+kubectl get pods -l app=body-transformer -n my-model
+
+# Check TrafficPolicy status
+kubectl get trafficpolicy nvext-body-injector -o yaml
 ```
 
 The status should show `Accepted: True` and `Attached: True`.
 
+See [body-transformer/README.md](body-transformer/README.md) for more details.
+
 ### Other Gateway Implementations
 
-We provide reference implementations for other gateway types. These are provided as starting points and may require adjustments for your specific environment:
+We provide Lua filter reference implementations for gateways that support them. These are provided as starting points and may require adjustments for your specific environment:
 
 | Gateway | Configuration File | Resource Type |
 |---------|-------------------|---------------|
-| kGateway | `config/lua-filter/kgateway-lua-filter.yaml` | TrafficPolicy |
 | Istio | `config/lua-filter/istio-envoyfilter.yaml` | EnvoyFilter |
 | Envoy Gateway | `config/lua-filter/envoygateway-patch.yaml` | EnvoyPatchPolicy |
+
+**Note:** kGateway does not support Lua filters. Use the [Body-Transformer ext_proc service](body-transformer/README.md) instead.
 
 For Istio:
 ```bash

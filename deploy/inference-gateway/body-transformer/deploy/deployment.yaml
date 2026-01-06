@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Body Transformer Deployment
+#
+# This deploys the nvext body injection ext_proc service.
+# Deploy this in the same namespace as your inference workloads.
+#
+# Usage:
+#   kubectl apply -f deployment.yaml -n my-model
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: body-transformer
+  labels:
+    app: body-transformer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: body-transformer
+  template:
+    metadata:
+      labels:
+        app: body-transformer
+    spec:
+      containers:
+      - name: body-transformer
+        # Update this to your built image
+        image: body-transformer:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 9003
+          name: grpc
+          protocol: TCP
+        args:
+        - "-port"
+        - "9003"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 128Mi
+        livenessProbe:
+          tcpSocket:
+            port: 9003
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 9003
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: body-transformer
+  labels:
+    app: body-transformer
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9003
+    targetPort: 9003
+    protocol: TCP
+    name: grpc
+  selector:
+    app: body-transformer
+

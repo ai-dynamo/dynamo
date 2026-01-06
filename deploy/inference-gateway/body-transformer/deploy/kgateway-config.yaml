@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# kGateway Configuration for Body Transformer
+#
+# This configures kGateway to use the body-transformer ext_proc service
+# for nvext injection into request bodies.
+#
+# Prerequisites:
+#   1. Body transformer deployed: kubectl apply -f deployment.yaml -n my-model
+#   2. GAIE EPP deployed and setting routing headers
+#
+# Usage:
+#   # Update namespace references if needed, then:
+#   kubectl apply -f kgateway-config.yaml
+#
+
+---
+# GatewayExtension defines the body transformer as an ext_proc service
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: GatewayExtension
+metadata:
+  name: body-transformer
+  namespace: default  # Should match Gateway namespace
+spec:
+  type: ExtProc
+  extProc:
+    grpcService:
+      backendRef:
+        name: body-transformer
+        namespace: my-model  # Namespace where body-transformer is deployed
+        port: 9003
+
+---
+# TrafficPolicy attaches the body transformer to the Gateway
+# This ensures all requests go through nvext injection
+apiVersion: gateway.kgateway.dev/v1alpha1
+kind: TrafficPolicy
+metadata:
+  name: nvext-body-injector
+  namespace: default  # Should match Gateway namespace
+spec:
+  targetRefs:
+  - group: gateway.networking.k8s.io
+    kind: Gateway
+    name: inference-gateway  # Your gateway name
+  extProc:
+    extensionRef:
+      name: body-transformer
+      namespace: default
+    processingMode:
+      # BUFFERED mode ensures we receive the complete body
+      requestBodyMode: BUFFERED
+      requestHeaderMode: SEND
+      # Skip response processing - we only modify requests
+      responseHeaderMode: SKIP
+      responseBodyMode: NONE
+
+---
+# ReferenceGrant allows the Gateway (in default) to reference
+# the body-transformer service (in my-model)
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-body-transformer
+  namespace: my-model  # Namespace where body-transformer is deployed
+spec:
+  from:
+  - group: gateway.kgateway.dev
+    kind: GatewayExtension
+    namespace: default  # Gateway namespace
+  to:
+  - group: ""
+    kind: Service
+    name: body-transformer
+
