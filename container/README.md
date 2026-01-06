@@ -166,22 +166,19 @@ The `build.sh` script is responsible for building Docker images for different AI
 
 The frontend image is a specialized container that includes the Dynamo components (Dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
 
-**Step 1: Build the Custom Dynamo EPP Image**
-
-Follow the instructions in [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md) under "Build the custom EPP image" section. This process:
-- Clones the Gateway API Inference Extension repository
-- Applies Dynamo-specific patches for custom routing
-- Builds the Dynamo router as a static library
-- Creates a custom EPP image with integrated Dynamo routing capabilities
-
-**Step 2: Build the Frontend Image**
-
-The frontend image contains the core Dynamo runtime components and Python dependencies:
 ```bash
-# Build the base dev image (framework=none for frontend-only deployment)
-# Note: --framework none defaults ENABLE_MEDIA_NIXL=false
+# Build the frontend image (automatically builds EPP image as a dependency)
 ./build.sh --framework none --target frontend
 ```
+
+The build process automatically:
+1. Clones the Gateway API Inference Extension (GAIE) repository
+2. Builds the custom EPP image with Dynamo routing capabilities
+3. Builds the frontend image with the EPP binary and Dynamo runtime components
+
+For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
+
+**Note:** `--framework none` defaults `ENABLE_MEDIA_NIXL=false`.
 
 #### Frontend Image Contents
 
