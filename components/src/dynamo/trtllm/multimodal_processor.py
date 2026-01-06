@@ -43,12 +43,7 @@ class TokenizerProtocol(Protocol):
 
 
 class MultimodalRequestProcessor:
-    """Simple processor for OpenAI format multimodal requests.
-
-    This class initializes the tokenizer and processor ONCE at construction time
-    to avoid the ~900ms per-request overhead of reinitializing them in
-    default_multimodal_input_loader.
-    """
+    """Simple processor for OpenAI format multimodal requests."""
 
     def __init__(
         self,
