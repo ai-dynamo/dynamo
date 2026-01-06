@@ -4,12 +4,15 @@ This module registers a vLLM `load_format` that loads model weights into
 GPU Memory Service allocations (RW session), publishes via Commit(), and then
 holds an RO lock for inference lifetime.
 
+The model loader uses "auto" mode to connect to the GPU Memory Service:
+- First process to connect gets RW lock and loads weights from disk
+- Subsequent processes get RO lock and import weights from metadata store
+This enables weight sharing across processes without explicit configuration.
+
 Configuration via model_loader_extra_config:
 - gpu_memory_service_socket_path: Unix socket path for the Allocation Server (per GPU). You may
   include `{device}` which will be formatted with the GPU device index.
   Default: /tmp/gpu_memory_service_{device}.sock
-- gpu_memory_service_load_mode: Load mode - "write" (cold start) or "read" (import only).
-  Default: write
 
 IMPORTANT: Sleep/Wake Memory Behavior
 -------------------------------------
@@ -32,12 +35,11 @@ import json
 import logging
 import os
 from dataclasses import replace
-from enum import Enum
 from typing import Any, Optional
 
 import torch
 
-from dynamo.gpu_memory_service import GMSClientMemoryManager, get_or_create_allocator
+from dynamo.gpu_memory_service import get_or_create_allocator
 
 logger = logging.getLogger(__name__)
 
@@ -139,18 +141,10 @@ def _get_local_rank() -> int:
 DEFAULT_GPU_MEMORY_SERVICE_SOCKET_PATH = "/tmp/gpu_memory_service_{device}.sock"
 
 
-class GPUMemoryServiceLoadMode(Enum):
-    """GPU Memory Service load modes."""
-
-    WRITE = "write"  # Cold-start from disk and publish
-    READ = "read"  # Import-only (fast restart; requires weights already committed)
-
-
 # Keys that GPU Memory Service adds to model_loader_extra_config - must be stripped before
 # passing to DefaultModelLoader which may validate unknown keys
 GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS = {
     "gpu_memory_service_socket_path",
-    "gpu_memory_service_load_mode",
 }
 
 
@@ -207,38 +201,6 @@ def _resolve_socket_path(load_config: Any = None) -> str:
     if "{device}" in socket_path:
         socket_path = socket_path.format(device=local_rank)
     return socket_path
-
-
-def _get_gpu_memory_service_load_mode(
-    load_config: Any = None,
-) -> GPUMemoryServiceLoadMode:
-    """Return the GPU Memory Service load mode.
-
-    Args:
-        load_config: vLLM LoadConfig object with model_loader_extra_config dict.
-
-    Returns:
-        GPUMemoryServiceLoadMode enum value.
-    """
-    raw = None
-
-    # Try model_loader_extra_config
-    if load_config is not None:
-        extra_config = getattr(load_config, "model_loader_extra_config", None) or {}
-        raw = extra_config.get("gpu_memory_service_load_mode")
-
-    # Default to write mode (cold start from disk)
-    if not raw:
-        return GPUMemoryServiceLoadMode.WRITE
-
-    raw = raw.strip().lower()
-    try:
-        return GPUMemoryServiceLoadMode(raw)
-    except ValueError:
-        valid = [m.value for m in GPUMemoryServiceLoadMode]
-        raise ValueError(
-            f"Invalid gpu_memory_service_load_mode={raw!r}. Expected one of: {valid}"
-        )
 
 
 def compute_vllm_config_hash(vllm_config: Any) -> str:
@@ -316,12 +278,16 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
 
         def load_model(self, vllm_config, model_config) -> torch.nn.Module:
             global _gpu_memory_service_imported_weights_bytes
+            logger.info(
+                "[GPU Memory Service] load_model() called - starting model loading"
+            )
             device_config = vllm_config.device_config
             load_config = vllm_config.load_config
 
             # Resolve socket path from config or env vars
             socket_path = _resolve_socket_path(load_config)
             self._socket_path = socket_path
+            logger.info("[GPU Memory Service] Socket path resolved: %s", socket_path)
 
             load_device = (
                 device_config.device
@@ -338,29 +304,38 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     target_device.index if target_device.index is not None else 0
                 )
 
-            # Acquire RW lock and prepare metadata namespace.
+            # Acquire lock and prepare metadata namespace.
             config_hash = compute_vllm_config_hash(vllm_config)
 
-            # Get load mode from config
-            mode = _get_gpu_memory_service_load_mode(load_config)
-            if mode == GPUMemoryServiceLoadMode.READ:
-                ro_alloc: Optional[GMSClientMemoryManager] = None
+            # Use "auto" mode to handle multiprocess architectures:
+            # - First process to connect gets RW lock and loads from disk
+            # - Subsequent processes get RO lock and import from metadata
+            # The GMS client's rw_or_ro mode tries RW first, falls back to RO if unavailable.
+            logger.info(
+                "[GPU Memory Service] Connecting to GMS (socket=%s, device=%d, mode=auto)",
+                socket_path,
+                device_index,
+            )
+
+            # Get or create allocator with automatic mode selection.
+            # The client module ensures only one allocator exists per process.
+            allocator, pool = get_or_create_allocator(
+                socket_path, device_index, mode="auto", tag="weights"
+            )
+
+            # Check what mode was actually granted
+            granted_mode = allocator.mode
+            logger.info(
+                "[GPU Memory Service] GMS connection established, granted mode=%s",
+                granted_mode,
+            )
+
+            if granted_mode == "read":
+                # We got RO lock - import weights from metadata (another process loaded them)
                 try:
                     from dynamo.gpu_memory_service import materialize_module_from_gms
                     from dynamo.vllm.gpu_memory_service_adapters.import_only_loader import (
                         ImportOnlyModelLoader as VLLMImportOnlyLoader,
-                    )
-
-                    # Pick a device index best-effort. In vLLM, local_rank typically maps 1:1 to GPU index.
-                    device_index = _get_local_rank()
-                    if torch.cuda.is_available():
-                        torch.cuda.set_device(device_index)
-
-                    # Read mode: wait indefinitely for RO lock (no timeout)
-                    ro_alloc = GMSClientMemoryManager(
-                        socket_path,
-                        mode="read",
-                        device=device_index,
                     )
 
                     # Create the model structure on meta device with post-processing.
@@ -372,7 +347,7 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     )
 
                     imported_bytes = materialize_module_from_gms(
-                        ro_alloc,
+                        allocator,
                         model,
                         prefix=f"{config_hash}:",
                         device_index=device_index,
@@ -380,12 +355,6 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                     )
                     GPUServiceModelLoader._imported_weights_bytes = int(imported_bytes)
                     _gpu_memory_service_imported_weights_bytes = int(imported_bytes)
-
-                    # Success! Register the allocator in the client module.
-                    # We do this after success to avoid polluting the metadata on failure.
-                    from dynamo.gpu_memory_service import register_allocator
-
-                    register_allocator(ro_alloc)
 
                     # Apply vLLM worker patches
                     from dynamo.vllm.gpu_memory_service_adapters.worker_extension import (
@@ -398,17 +367,14 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                         "[GPU Memory Service] Import-only loaded %.2f GiB from GPU memory service",
                         imported_bytes / (1 << 30),
                     )
+
                     return model.eval()
                 except Exception:
-                    if ro_alloc is not None:
-                        ro_alloc.close()
+                    allocator.close()
                     raise
 
-            # Get or create allocator in write mode with PyTorch MemPool.
-            # The client module ensures only one allocator exists per process.
-            allocator, pool = get_or_create_allocator(
-                socket_path, device_index, mode="write", tag="weights"
-            )
+            # We got RW lock - load weights from disk
+            assert pool is not None, "Expected MemPool for write mode"
 
             # Start fresh (weights model load is authoritative).
             allocator.clear_all()
@@ -481,14 +447,6 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
                 total_bytes / (1 << 30),
                 len(allocator._mappings),
             )
-
-            # CRITICAL: Restore the correct CUDA device before returning.
-            # The use_mem_pool context or other operations may have changed it.
-            # If we don't restore it, subsequent vLLM operations (like profile_run)
-            # will fail with "illegal memory access" because they expect the
-            # correct device context.
-            if target_device.index is not None:
-                torch.cuda.set_device(target_device.index)
 
             return model.eval()
 

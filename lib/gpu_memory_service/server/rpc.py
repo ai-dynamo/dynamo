@@ -148,7 +148,7 @@ class GMSRPCServer:
             return None
 
         try:
-            mode = ConnectionMode(msg.lock_type)
+            requested_mode = ConnectionMode(msg.lock_type)
         except ValueError:
             await send_message(
                 writer, HandshakeResponse(success=False, committed=self._sm.committed)
@@ -157,32 +157,43 @@ class GMSRPCServer:
             return None
 
         # Acquire lock (blocks until available or timeout)
-        if not await self._acquire_lock(mode, msg.timeout_ms):
+        # Returns the actual granted mode (may differ from requested for rw_or_ro)
+        granted_mode = await self._acquire_lock(requested_mode, msg.timeout_ms)
+        if granted_mode is None:
             await send_message(
                 writer, HandshakeResponse(success=False, committed=self._sm.committed)
             )
             writer.close()
             return None
 
-        conn = Connection(reader, writer, mode, session_id, recv_buffer)
+        conn = Connection(reader, writer, granted_mode, session_id, recv_buffer)
 
         # State transition: connect
         event = (
             StateEvent.RW_CONNECT
-            if mode == ConnectionMode.RW
+            if granted_mode == ConnectionMode.RW
             else StateEvent.RO_CONNECT
         )
         self._sm.transition(event, conn)
 
         await send_message(
-            writer, HandshakeResponse(success=True, committed=self._sm.committed)
+            writer,
+            HandshakeResponse(
+                success=True,
+                committed=self._sm.committed,
+                granted_lock_type=granted_mode.value,
+            ),
         )
         return conn
 
     async def _acquire_lock(
         self, mode: ConnectionMode, timeout_ms: Optional[int]
-    ) -> bool:
-        """Wait until lock can be acquired (uses state machine predicates)."""
+    ) -> Optional[ConnectionMode]:
+        """Wait until lock can be acquired (uses state machine predicates).
+
+        Returns the granted ConnectionMode, or None if failed/timeout.
+        For rw_or_ro mode, returns RW if available immediately, else waits for RO.
+        """
         timeout = timeout_ms / 1000 if timeout_ms is not None else None
 
         if mode == ConnectionMode.RW:
@@ -196,12 +207,13 @@ class GMSRPCServer:
                             ),
                             timeout=timeout,
                         )
-                        return not self._shutdown
+                        return None if self._shutdown else ConnectionMode.RW
                     except asyncio.TimeoutError:
-                        return False
+                        return None
             finally:
                 self._waiting_writers -= 1
-        else:
+
+        elif mode == ConnectionMode.RO:
             async with self._condition:
                 try:
                     await asyncio.wait_for(
@@ -211,9 +223,42 @@ class GMSRPCServer:
                         ),
                         timeout=timeout,
                     )
-                    return not self._shutdown
+                    return None if self._shutdown else ConnectionMode.RO
                 except asyncio.TimeoutError:
-                    return False
+                    return None
+
+        elif mode == ConnectionMode.RW_OR_RO:
+            # Auto mode: try RW if available immediately AND no committed weights,
+            # otherwise wait for RO (to import existing weights)
+            async with self._condition:
+                # Check if RW is available AND no committed weights exist
+                # If weights are already committed, prefer RO to import them
+                if self._sm.can_acquire_rw() and not self._sm.committed:
+                    return ConnectionMode.RW
+
+                # Either RW not available OR weights already committed - wait for RO
+                if self._sm.committed:
+                    logger.info(
+                        "RW_OR_RO: Weights already committed, preferring RO to import"
+                    )
+                else:
+                    logger.info(
+                        "RW_OR_RO: RW not available (another writer active), "
+                        "falling back to RO"
+                    )
+                try:
+                    await asyncio.wait_for(
+                        self._condition.wait_for(
+                            lambda: self._shutdown
+                            or self._sm.can_acquire_ro(self._waiting_writers)
+                        ),
+                        timeout=timeout,
+                    )
+                    return None if self._shutdown else ConnectionMode.RO
+                except asyncio.TimeoutError:
+                    return None
+
+        return None  # Unknown mode
 
     async def _cleanup_connection(
         self, conn: Optional[Connection], session_id: str

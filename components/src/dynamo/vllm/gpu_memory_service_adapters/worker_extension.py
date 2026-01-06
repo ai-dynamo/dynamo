@@ -120,111 +120,166 @@ def gpu_memory_service_wake_weights() -> bool:
     return True
 
 
-def _get_gpu_memory_service_committed_bytes() -> int:
-    """Query the allocation server for total committed bytes on this device.
+def _establish_early_gms_connection() -> bool:
+    """Establish GMS connection early, before model loading.
 
-    Returns 0 if query fails or no allocations exist.
+    This is called during worker initialization to establish a persistent GMS
+    connection. The connection is used for:
+    1. Memory check adjustments (before model loading)
+    2. Model weight loading/importing
+    3. Sleep/wake operations
 
-    This function first checks for a registered allocator (which already holds
-    an RO connection) and uses it to avoid creating short-lived connections.
-    Only falls back to creating a new connection when no allocator is registered.
+    The connection persists for the process lifetime.
+
+    Returns True if connection was established successfully.
     """
-    # First, try to use the registered allocator's existing connection
-    allocator = get_gpu_memory_service_allocator()
-    if allocator is not None and allocator._client is not None:
-        try:
-            allocations = allocator._client.list_allocations()
-            total_bytes = sum(alloc.get("aligned_size", 0) for alloc in allocations)
-            if total_bytes > 0:
-                logger.debug(
-                    "[GPU Memory ServicePatch] Queried committed bytes via registered allocator: "
-                    "%.2f GiB (%d allocations)",
-                    total_bytes / (1 << 30),
-                    len(allocations),
-                )
-            return total_bytes
-        except Exception as e:
-            logger.warning(
-                "[GPU Memory ServicePatch] Failed to query via registered allocator: %s",
-                e,
-            )
-            # Fall through to create a new connection
-
-    # No registered allocator - use default socket path from model_loader
-    # This matches the default used by GPU Memory Service server and model loader
-    from dynamo.vllm.gpu_memory_service_adapters.model_loader import (
-        DEFAULT_GPU_MEMORY_SERVICE_SOCKET_PATH,
-    )
-
-    # Get local rank for socket path
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     try:
         import torch
+        from gpu_memory_service.client.torch.lifecycle import get_or_create_allocator
 
-        if torch.cuda.is_initialized():
-            local_rank = torch.cuda.current_device()
-    except Exception:
-        pass
+        # Get socket path from environment (set by main.py)
+        socket_path_template = os.environ.get(
+            "GPU_MEMORY_SERVICE_SOCKET_PATH", "/tmp/gpu_memory_service_{device}.sock"
+        )
+        device = torch.cuda.current_device() if torch.cuda.is_available() else 0
+        socket_path = socket_path_template.replace("{device}", str(device))
 
-    socket_path = DEFAULT_GPU_MEMORY_SERVICE_SOCKET_PATH.format(device=local_rank)
+        # Use auto mode - will get RW if available, RO if weights already committed
+        allocator, pool = get_or_create_allocator(
+            socket_path, device, mode="auto", tag="weights"
+        )
+        granted_mode = allocator.mode
+
+        logger.info(
+            "[GPU Memory Service] Early connection established (socket=%s, device=%d, mode=%s)",
+            socket_path,
+            device,
+            granted_mode,
+        )
+        return True
+    except TimeoutError:
+        logger.debug(
+            "[GPU Memory Service] Early connection timed out - will retry during model loading"
+        )
+        return False
+    except ConnectionError as e:
+        logger.debug(
+            "[GPU Memory Service] Early connection failed (server not ready): %s", e
+        )
+        return False
+    except Exception as e:
+        logger.warning("[GPU Memory Service] Early connection failed: %s", e)
+        return False
+
+
+def _get_gpu_memory_service_committed_bytes() -> int:
+    """Query committed bytes from GPU Memory Service.
+
+    This function is used by the MemorySnapshot patch to account for weights
+    that are already in GMS and will be imported (not newly allocated).
+
+    Returns 0 if:
+    - GMS server not running or not in COMMITTED state
+    - Allocator is in write mode (loading fresh weights)
+    - No allocator registered yet (shouldn't happen - init_device establishes it)
+    - Query fails
+    """
+    allocator = get_gpu_memory_service_allocator()
+    if allocator is None:
+        # No allocator registered - this shouldn't happen if init_device ran first
+        logger.debug(
+            "[GPU Memory ServicePatch] No allocator registered - no adjustment"
+        )
+        return 0
+
+    if allocator._client is None:
+        logger.debug(
+            "[GPU Memory ServicePatch] Allocator has no client - no adjustment"
+        )
+        return 0
+
+    if allocator.mode != "read":
+        # Write mode - no adjustment needed (loading fresh weights)
+        logger.debug(
+            "[GPU Memory ServicePatch] Allocator in write mode - no adjustment needed"
+        )
+        return 0
 
     try:
-        from dynamo.gpu_memory_service import GMSRPCClient
-
-        client = GMSRPCClient(socket_path, lock_type="ro")
-        allocations = client.list_allocations()
+        allocations = allocator._client.list_allocations()
         total_bytes = sum(alloc.get("aligned_size", 0) for alloc in allocations)
-        client.close()
         if total_bytes > 0:
             logger.info(
-                "[GPU Memory ServicePatch] Queried committed bytes from server (new connection): "
+                "[GPU Memory ServicePatch] Queried committed bytes via allocator: "
                 "%.2f GiB (%d allocations)",
                 total_bytes / (1 << 30),
                 len(allocations),
             )
         return total_bytes
     except Exception as e:
-        logger.debug("[GPU Memory ServicePatch] Could not query committed bytes: %s", e)
+        logger.debug("[GPU Memory ServicePatch] Failed to query via allocator: %s", e)
         return 0
 
 
+_original_worker_init_device = None
+_memory_snapshot_patched = False
+
+
 def _patch_init_device_for_gpu_memory_service(Worker) -> None:
-    """Patch MemorySnapshot to include committed GPU Memory Service bytes in free_memory.
+    """Patch Worker.init_device to establish GMS connection early, and MemorySnapshot for memory accounting.
 
-    In GPU Memory Service read mode, weights are already on GPU and will be imported (mapped),
-    not newly allocated. The startup memory check should account for this by
-    adding committed bytes to the reported free memory.
+    This patch does two things:
+    1. Patches Worker.init_device() to establish the GMS connection FIRST, before any memory checks
+    2. Patches MemorySnapshot.measure to account for committed GMS bytes in read mode
+
+    The GMS connection established in init_device persists for the entire worker lifetime and is
+    reused by load_model() and sleep/wake operations.
     """
-    global _original_init_device
+    global _original_init_device, _original_worker_init_device, _memory_snapshot_patched
 
-    if _original_init_device is not None:
-        return  # Already patched
+    # Patch Worker.init_device to establish GMS connection first
+    if _original_worker_init_device is None and hasattr(Worker, "init_device"):
+        _original_worker_init_device = Worker.init_device
 
-    # Patch MemorySnapshot.measure to add committed bytes to free_memory
-    from vllm.utils.mem_utils import MemorySnapshot
+        def patched_init_device(self):
+            # Establish GMS connection BEFORE calling original init_device
+            # This ensures the allocator is available for memory checks
+            _establish_early_gms_connection()
+            # Now call original init_device (which does memory checks)
+            return _original_worker_init_device(self)
 
-    _original_measure = MemorySnapshot.measure
+        Worker.init_device = patched_init_device
+        logger.info(
+            "[GPU Memory ServicePatch] Patched Worker.init_device to establish GMS connection early"
+        )
 
-    def patched_measure(self):
-        _original_measure(self)
-        # Add committed GPU Memory Service bytes to free_memory for the startup check
-        committed_bytes = _get_gpu_memory_service_committed_bytes()
-        if committed_bytes > 0:
-            original_free = self.free_memory
-            self.free_memory += committed_bytes
-            logger.info(
-                "[GPU Memory ServicePatch] Adjusted MemorySnapshot.free_memory for GPU Memory Service read mode: "
-                "%.2f GiB + %.2f GiB committed = %.2f GiB",
-                original_free / (1 << 30),
-                committed_bytes / (1 << 30),
-                self.free_memory / (1 << 30),
-            )
+    # Patch MemorySnapshot.measure to add committed bytes to free_memory (only once)
+    if not _memory_snapshot_patched:
+        from vllm.utils.mem_utils import MemorySnapshot
 
-    MemorySnapshot.measure = patched_measure
-    _original_init_device = _original_measure  # Store original for unpatch
-    logger.info(
-        "[GPU Memory ServicePatch] Patched MemorySnapshot.measure for GPU Memory Service read mode memory check"
-    )
+        _original_measure = MemorySnapshot.measure
+
+        def patched_measure(self):
+            _original_measure(self)
+            # Add committed GPU Memory Service bytes to free_memory for the startup check
+            committed_bytes = _get_gpu_memory_service_committed_bytes()
+            if committed_bytes > 0:
+                original_free = self.free_memory
+                self.free_memory += committed_bytes
+                logger.info(
+                    "[GPU Memory ServicePatch] Adjusted MemorySnapshot.free_memory for GPU Memory Service read mode: "
+                    "%.2f GiB + %.2f GiB committed = %.2f GiB",
+                    original_free / (1 << 30),
+                    committed_bytes / (1 << 30),
+                    self.free_memory / (1 << 30),
+                )
+
+        MemorySnapshot.measure = patched_measure
+        _original_init_device = _original_measure  # Store original for unpatch
+        _memory_snapshot_patched = True
+        logger.info(
+            "[GPU Memory ServicePatch] Patched MemorySnapshot.measure for GPU Memory Service read mode memory check"
+        )
 
 
 def patch_model_runner_for_gpu_memory_service() -> None:
@@ -260,7 +315,13 @@ def patch_model_runner_for_gpu_memory_service() -> None:
     _original_load_model = Worker.load_model
 
     def patched_load_model(self):
+        logger.info(
+            "[GPU Memory ServicePatch] patched_load_model called - starting model loading"
+        )
         _original_load_model(self)
+        logger.info(
+            "[GPU Memory ServicePatch] patched_load_model - original load_model returned"
+        )
         try:
             from dynamo.vllm.gpu_memory_service_adapters.model_loader import (
                 get_imported_weights_bytes,
@@ -537,9 +598,14 @@ def unpatch_worker_sleep_wake() -> None:
         _sleep_wake_patched = False
 
 
-# Apply early memory patches AFTER all functions are defined (avoids circular import)
-# This is needed because vLLM's memory check happens in init_device() BEFORE load_model()
-# The patch adjusts MemorySnapshot to account for committed GPU Memory Service bytes
+# Apply early patches AFTER all functions are defined (avoids circular import)
+# These patches:
+# 1. Worker.init_device() - establishes GMS connection BEFORE memory checks
+# 2. MemorySnapshot.measure - adjusts free_memory to account for committed GMS bytes
+# 3. Worker.load_model() - corrects model_memory_usage after loading
+#
+# The GMS connection established in init_device persists for the entire worker lifetime.
+# This avoids temporary connections and ensures consistent state throughout.
 if _should_apply_early_patches and not _early_patches_applied:
     try:
         patch_model_runner_for_gpu_memory_service()

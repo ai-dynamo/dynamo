@@ -106,10 +106,11 @@ class GMSRPCClient:
             TimeoutError: If timeout_ms expires waiting for lock
         """
         self.socket_path = socket_path
-        self.lock_type = lock_type
+        self._requested_lock_type = lock_type
         self._socket: Optional[socket.socket] = None
         self._recv_buffer = bytearray()
         self._committed = False
+        self._granted_lock_type: Optional[str] = None  # Actual lock granted by server
 
         # Connect and acquire lock
         self._connect(timeout_ms=timeout_ms)
@@ -125,7 +126,9 @@ class GMSRPCClient:
             raise ConnectionError(f"Failed to connect: {e}")
 
         # Send handshake (this IS lock acquisition)
-        request = HandshakeRequest(lock_type=self.lock_type, timeout_ms=timeout_ms)
+        request = HandshakeRequest(
+            lock_type=self._requested_lock_type, timeout_ms=timeout_ms
+        )
         send_message_sync(self._socket, request)
 
         # Receive response (may block waiting for lock)
@@ -149,14 +152,33 @@ class GMSRPCClient:
             raise TimeoutError("Timeout waiting for lock")
 
         self._committed = response.committed
+        # Store granted lock type (may differ from requested for rw_or_ro mode)
+        self._granted_lock_type = (
+            response.granted_lock_type or self._requested_lock_type
+        )
         logger.info(
-            f"Connected with {self.lock_type} lock, committed={self._committed}"
+            f"Connected with {self._requested_lock_type} lock (granted={self._granted_lock_type}), "
+            f"committed={self._committed}"
         )
 
     @property
     def committed(self) -> bool:
         """Check if weights are committed (valid)."""
         return self._committed
+
+    @property
+    def lock_type(self) -> Optional[str]:
+        """Get the lock type actually granted by the server.
+
+        For rw_or_ro mode, this tells you whether RW or RO was granted.
+        Returns "rw" or "ro".
+        """
+        return self._granted_lock_type
+
+    @property
+    def granted_lock_type(self) -> Optional[str]:
+        """Alias for lock_type (for backwards compatibility)."""
+        return self._granted_lock_type
 
     @property
     def is_connected(self) -> bool:

@@ -4,14 +4,18 @@ This module provides a custom SGLang `load_format` class that can be passed as
 `LoadConfig(load_format=...)`. It integrates with the GPUMemoryServiceMemorySaverImpl
 which owns the GPU Memory Service allocator.
 
+The model loader uses "auto" mode to connect to the GPU Memory Service:
+- First process to connect gets RW lock and loads weights from disk
+- Subsequent processes get RO lock and import weights from metadata
+This enables weight sharing across processes without explicit configuration.
+
 Flow:
-1. torch_memory_saver patch creates GPUMemoryServiceMemorySaverImpl (owns allocator)
+1. torch_memory_saver patch creates GPUMemoryServiceMemorySaverImpl (owns allocator with auto mode)
 2. SGLang's ModelRunner calls region("weights") which sets up use_mem_pool() in WRITE mode
 3. GPUServiceModelLoader.load_model() delegates to DefaultModelLoader (allocations routed via mempool)
 4. After loading, GPUServiceModelLoader calls impl.finalize_write_mode() to commit and switch to read
 
-For import-only mode (READ):
-- Impl detects weights are already committed via timeout=0 probe
+For import-only mode (READ - granted when another process already committed weights):
 - GPUServiceModelLoader creates a meta model and materializes from metadata
 
 IMPORTANT: Sleep/Wake Memory Behavior
@@ -24,7 +28,8 @@ allocated by the Allocation Server. This is by design for weight sharing:
 - On sleep, the client unmaps its local VA mappings but the server keeps the memory
 - On wake, the client remaps the same weights without reloading from disk
 
-This enables fast context switching between inference instances.
+This enables fast context switching between inference instances. If you need to
+actually free GPU memory during sleep, use native SGLang sleep/wake (without GPU Memory Service).
 """
 
 from __future__ import annotations
@@ -144,7 +149,6 @@ def _parse_extra_config(load_config: Any = None) -> dict:
 # passing to DefaultModelLoader which validates unknown keys
 GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS = {
     "gpu_memory_service_socket_path",
-    "gpu_memory_service_load_mode",
 }
 
 

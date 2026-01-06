@@ -76,6 +76,15 @@ def _setup_gpu_memory_service_if_needed(config: Config) -> None:
     # Set env var to trigger auto-registration in spawned workers
     os.environ["GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER"] = "1"
 
+    # Also pass socket path to workers via environment variable
+    # Workers need this to establish early GMS connection before model loading
+    extra_config = getattr(config.engine_args, "model_loader_extra_config", None) or {}
+    socket_path = extra_config.get(
+        "gpu_memory_service_socket_path", "/tmp/gpu_memory_service_{device}.sock"
+    )
+    os.environ["GPU_MEMORY_SERVICE_SOCKET_PATH"] = socket_path
+    logger.debug(f"[GPU Memory Service] Set socket path env var: {socket_path}")
+
     # Register loader and apply patches in main process
     try:
         from dynamo.vllm.gpu_memory_service_adapters import (

@@ -83,13 +83,14 @@ class GMSClientMemoryManager:
     Modes:
     - mode="write": acquire RW lock, allocate/map RW, mutate metadata, commit/publish.
     - mode="read": acquire RO lock (READY only), import/map RO, sleep/wake.
+    - mode="auto": try RW if available, else wait for RO (for multiprocess architectures).
     """
 
     def __init__(
         self,
         socket_path: str,
         *,
-        mode: Literal["write", "read"],
+        mode: Literal["write", "read", "auto"],
         device: int = 0,
         timeout_ms: Optional[int] = None,
     ) -> None:
@@ -123,18 +124,23 @@ class GMSClientMemoryManager:
             self._connect(lock_type="rw", timeout_ms=timeout_ms)
         elif mode == "read":
             self._connect(lock_type="ro", timeout_ms=timeout_ms)
+        elif mode == "auto":
+            self._connect(lock_type="rw_or_ro", timeout_ms=timeout_ms)
         else:
-            raise ValueError(f"Unknown mode: {mode}. Must be 'write' or 'read'.")
+            raise ValueError(
+                f"Unknown mode: {mode}. Must be 'write', 'read', or 'auto'."
+            )
 
     def _connect(
-        self, *, lock_type: Literal["rw", "ro"], timeout_ms: Optional[int]
+        self, *, lock_type: Literal["rw", "ro", "rw_or_ro"], timeout_ms: Optional[int]
     ) -> None:
         self._client = GMSRPCClient(
             self.socket_path, lock_type=lock_type, timeout_ms=timeout_ms
         )
         self._sleeping = False
-        # Update mode based on lock type
-        self._mode = "write" if lock_type == "rw" else "read"
+        # Update mode based on granted lock type (may differ from requested for rw_or_ro)
+        granted = self._client.granted_lock_type
+        self._mode = "write" if granted == "rw" else "read"
 
     @property
     def mode(self) -> Literal["write", "read"]:
@@ -145,7 +151,9 @@ class GMSClientMemoryManager:
     def lock_type(self) -> Optional[Literal["rw", "ro"]]:
         if self._client is None:
             return None
-        return "rw" if self._client.lock_type == "rw" else "ro"
+        # Use granted lock type (may differ from requested for rw_or_ro mode)
+        granted = self._client.granted_lock_type
+        return "rw" if granted == "rw" else "ro"
 
     @property
     def is_connected(self) -> bool:

@@ -81,9 +81,12 @@ class GPUMemoryServiceMemorySaverImpl:
     - "weights" or "model_weights": Handled by GPU Memory Service allocator (VA-stable)
     - Other tags (e.g., "kv_cache"): Delegated to torch mempool mode
 
-    The impl OWNS the GPU Memory Service allocator. Mode must be specified explicitly:
-    - "write": Cold start from disk, publish weights
-    - "read": Import-only from existing committed weights
+    The impl OWNS the GPU Memory Service allocator and uses "auto" mode:
+    - First process to connect gets RW lock and loads weights from disk
+    - Subsequent processes get RO lock and import weights from metadata
+
+    This enables automatic weight sharing without explicit configuration.
+    The connection is established once and lives throughout the worker lifetime.
 
     Torch mempool mode is REQUIRED for this hybrid implementation.
     """
@@ -93,7 +96,6 @@ class GPUMemoryServiceMemorySaverImpl:
         torch_impl: "_TorchMemorySaverImpl",
         socket_path: str,
         device_index: int,
-        mode: str = "write",
     ):
         """Initialize impl and create allocator.
 
@@ -101,26 +103,28 @@ class GPUMemoryServiceMemorySaverImpl:
         torch_memory_saver.region() is first called. At that point we're about
         to load model weights, so we need the allocator immediately.
 
+        Uses "auto" mode to connect to GMS:
+        - First process to connect gets RW lock and loads from disk
+        - Subsequent processes get RO lock and import from metadata
+
         Args:
             torch_impl: The underlying torch_memory_saver impl for non-weights tags.
             socket_path: Unix socket path for the GPU Memory Service allocation server.
             device_index: CUDA device index for this process.
-            mode: Explicit mode - "write" (cold start) or "read" (import only).
         """
         self._torch_impl = torch_impl
         self._socket_path = socket_path
         self._device_index = device_index
         self._disabled = False
-        self._requested_mode = mode
 
         # Track imported bytes for memory accounting
         self._imported_weights_bytes: int = 0
 
-        # Initialize allocator with explicit mode
+        # Initialize allocator with auto mode
         self._allocator: Optional["GMSClientMemoryManager"]
         self._mem_pool: Optional["MemPool"]
         self._mode: str
-        self._allocator, self._mem_pool, self._mode = self._init_allocator(mode)
+        self._allocator, self._mem_pool, self._mode = self._init_allocator()
 
         logger.info(
             "[GPU Memory Service Hybrid] Initialized with torch mempool mode for KV cache support"
@@ -136,51 +140,35 @@ class GPUMemoryServiceMemorySaverImpl:
 
     def _init_allocator(
         self,
-        mode: str,
     ) -> tuple[Optional["GMSClientMemoryManager"], Optional["MemPool"], str]:
-        """Create allocator with explicit mode.
+        """Create allocator with automatic mode selection.
 
-        Args:
-            mode: "write" for cold start from disk, "read" for import-only.
+        Uses "auto" mode which tries RW first, falls back to RO if weights
+        are already committed. This enables automatic weight sharing.
 
         Returns:
-            Tuple of (allocator, mem_pool, mode). mem_pool is None for READ mode.
+            Tuple of (allocator, mem_pool, actual_mode). mem_pool is None for READ mode.
         """
-        from gpu_memory_service import (
-            GMSClientMemoryManager,
-            get_or_create_allocator,
-            register_allocator,
-        )
+        from gpu_memory_service import get_or_create_allocator
 
-        if mode == "read":
-            # Import-only fast path - wait indefinitely for RO lock
-            allocator = GMSClientMemoryManager(
-                self._socket_path,
-                mode="read",
-                device=self._device_index,
-            )
-            # Register in lifecycle module for consumers (sleep/wake via get_allocator())
-            register_allocator(allocator)
-            logger.info(
-                "[GPU Memory Service] Initialized in READ mode (import-only, device=%d)",
-                self._device_index,
-            )
-            return allocator, None, "read"
-        else:
-            # WRITE mode - use lifecycle.py for full PyTorch integration
-            allocator, mem_pool = get_or_create_allocator(
-                self._socket_path,
-                self._device_index,
-                mode="write",
-                tag="weights",
-            )
-            # Clear any stale state from previous runs
+        # Auto mode - use get_or_create_allocator to automatically select RW or RO
+        # First process gets RW and loads from disk, others get RO and import
+        allocator, mem_pool = get_or_create_allocator(
+            self._socket_path,
+            self._device_index,
+            mode="auto",  # Maps to rw_or_ro in lifecycle.py
+            tag="weights",
+        )
+        actual_mode = allocator.mode  # "write" or "read" based on granted lock
+        if actual_mode == "write":
+            # Got RW lock - clear any stale state from previous runs
             allocator.clear_all()
-            logger.info(
-                "[GPU Memory Service] Initialized in WRITE mode (device=%d)",
-                self._device_index,
-            )
-            return allocator, mem_pool, "write"
+        logger.info(
+            "[GPU Memory Service] Initialized in AUTO mode, granted=%s (device=%d)",
+            actual_mode.upper(),
+            self._device_index,
+        )
+        return allocator, mem_pool if actual_mode == "write" else None, actual_mode
 
     def _is_weights_tag(self, tag: Optional[str]) -> bool:
         """Check if tag is for weights (handled by GPU Memory Service)."""
