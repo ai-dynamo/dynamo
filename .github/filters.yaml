@@ -1,3 +1,6 @@
+all:
+  - '**'
+
 docs: &docs
   - 'docs/**'
   - '**/*.md'
@@ -9,9 +12,11 @@ ci: &ci
   - '.github/filters.yaml'
   - '.github/actions/**'
 
+# Will run tests for all 3 containers (vLLM, SGLang, TRTLLM)
 core:
   - *ci
   - 'container/build.sh'
+  - 'container/Dockerfile'
   - 'container/deps/*'
   - 'lib/**'
   - 'tests/**'
