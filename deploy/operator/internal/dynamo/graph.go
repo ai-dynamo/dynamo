@@ -918,15 +918,24 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 }
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
+	// Always compute the dynamo namespace from authoritative sources
+	// (k8s namespace + DGD name), respecting GlobalDynamoNamespace flag.
+	// This ensures the correct namespace is used regardless of any deprecated
+	// dynamoNamespace field that may have been set in the DGD YAML.
+	var dynamoNamespace string
+	if component.GlobalDynamoNamespace {
+		dynamoNamespace = commonconsts.GlobalDynamoNamespace
+	} else {
+		dynamoNamespace = fmt.Sprintf("%s-%s", namespace, parentGraphDeploymentName)
+	}
+
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
 		DiscoveryBackend:               discoveryBackend,
-	}
-	if component.DynamoNamespace != nil {
-		componentContext.DynamoNamespace = *component.DynamoNamespace
+		DynamoNamespace:                dynamoNamespace,
 	}
 	return componentContext
 }
