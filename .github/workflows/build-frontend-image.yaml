@@ -66,12 +66,12 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         env:
-          PLATFORMS: 'linux/${{ matrix.platform.arch }}'
+          PLATFORMS: linux/${{ matrix.platform.arch }}
           TARGETARCH: ${{ matrix.platform.arch }}
         with:
           framework: none
           target: frontend
-          platform: 'linux/${{ matrix.platform.arch }}'
+          platform: ${{ env.PLATFORMS }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}

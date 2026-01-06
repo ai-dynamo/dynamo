@@ -943,13 +943,13 @@ show_image_options
 # Handle FRONTEND target: build EPP image first
 if [[ ${TARGET^^} == "FRONTEND" ]]; then
     echo "Building FRONTEND image - requires EPP image"
-    
+
     # Build base dynamo image first (framework=NONE, target=dev)
     echo ""
     echo "Building EPP image for Frontend..."
     # Set up paths for GAIE
     GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
-    
+
     # Clone GAIE repo
     echo ""
     echo "Cloning GAIE repository at ${GAIE_VERSION}..."
@@ -959,20 +959,20 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
     $RUN_PREFIX git checkout ${GAIE_VERSION}
     $RUN_PREFIX cd "${BUILD_CONTEXT}"
-    
+
     # Build EPP image
     echo ""
     echo "Building EPP image..."
     export GAIE_DIR="${GAIE_CLONE_DIR}"
     export DYNAMO_DIR="${BUILD_CONTEXT}"
-    
+
     $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
-    
+
     # Set EPP image tag (matches what build-epp-dynamo.sh produces)
     EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
-    
+
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
-    
+
     # Add build args for frontend image
     BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
 fi
