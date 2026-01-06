@@ -247,6 +247,7 @@ jobs:
           if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
             NO_CACHE_FLAG="--no-cache"
           fi
+          echo "BUILD FLAGS: --platform linux/${PLATFORM}  --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ -t ${IMAGE_BASE}:${{ github.sha }}-dynamo-operator-${PLATFORM} ${NO_CACHE_FLAG} ${EXTRA_TAGS} "
           docker buildx build --push \
               --platform linux/${PLATFORM} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
@@ -309,11 +310,12 @@ jobs:
       arm_torch_backend: 'cu129'
       buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.vllm_amd64 }}
       buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.vllm_arm64 }}
-      build_image: ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: false
     secrets: inherit
 
   sglang-pipeline:
@@ -324,11 +326,12 @@ jobs:
       framework: sglang
       buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_amd64 }}
       buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_arm64 }}
-      build_image: ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: true
     secrets: inherit
 
   trtllm-pipeline:
@@ -339,11 +342,12 @@ jobs:
       framework: trtllm
       buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_amd64 }}
       buildkit_arm64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_arm64 }}
-      build_image: ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: true
     secrets: inherit
 
 
