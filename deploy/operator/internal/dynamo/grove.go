@@ -248,6 +248,46 @@ func CheckPCSGFullyUpdated(ctx context.Context, client client.Client, resourceNa
 	return true, ""
 }
 
+// CheckDCDFullyUpdated checks if a DynamoComponentDeployment has completed its restart.
+// A DCD is considered fully updated when it has the Available condition set to True.
+// This is used for restart detection to ensure the underlying deployment has actually rolled.
+func CheckDCDFullyUpdated(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string) {
+	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, dcd)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.V(2).Info("DynamoComponentDeployment not found", "resourceName", resourceName)
+			return false, "resource not found"
+		}
+		logger.V(1).Info("Failed to get DynamoComponentDeployment", "error", err, "resourceName", resourceName)
+		return false, fmt.Sprintf("get error: %v", err)
+	}
+
+	// Log the DCD status for debugging
+	logger.Info("CheckDCDFullyUpdated",
+		"resourceName", resourceName,
+		"generation", dcd.Generation,
+		"conditionCount", len(dcd.Status.Conditions))
+
+	// Check if the Available condition is True
+	for _, condition := range dcd.Status.Conditions {
+		if condition.Type == nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable {
+			if condition.Status == metav1.ConditionTrue {
+				return true, ""
+			}
+			logger.V(1).Info("DynamoComponentDeployment not available",
+				"resourceName", resourceName,
+				"status", condition.Status,
+				"reason", condition.Reason,
+				"message", condition.Message)
+			return false, fmt.Sprintf("not available: %s", condition.Message)
+		}
+	}
+
+	logger.V(1).Info("DynamoComponentDeployment missing Available condition", "resourceName", resourceName)
+	return false, "Available condition not found"
+}
+
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default
 // This is the shared logic between DetermineKaiSchedulerQueue and ResolveKaiSchedulerQueue
 func resolveKaiSchedulerQueueName(annotations map[string]string) string {

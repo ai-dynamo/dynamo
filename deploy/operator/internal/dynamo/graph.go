@@ -254,7 +254,8 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+// If restartState is provided, restart annotations will be applied to the appropriate services.
+func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *GroveRestartState) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
@@ -285,6 +286,14 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
 			}
+		}
+
+		// Apply restart annotation if this service should be restarted
+		if restartState.ShouldAnnotateService(componentName) {
+			if deployment.Annotations == nil {
+				deployment.Annotations = make(map[string]string)
+			}
+			deployment.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
 		}
 
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
