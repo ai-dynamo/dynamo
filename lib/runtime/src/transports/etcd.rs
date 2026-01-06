@@ -354,16 +354,11 @@ impl Client {
 
         // Size channel to fit all existing KVs (avoids deadlock when sending before return)
         let existing_count = existing_kvs.as_ref().map_or(0, |kvs| kvs.len());
-        let channel_size = std::cmp::max(32, existing_count + 32);
-        let (tx, rx) = mpsc::channel(channel_size);
+        let (tx, rx) = mpsc::channel(existing_count + 32);
 
         // Send existing KVs before returning so they're immediately available to consumers
         if let Some(kvs) = existing_kvs {
-            tracing::trace!(
-                "sending {} existing kvs into channel (size={})",
-                kvs.len(),
-                channel_size
-            );
+            tracing::trace!("sending {} existing kvs", kvs.len());
             for kv in kvs {
                 tx.send(WatchEvent::Put(kv)).await?;
             }
