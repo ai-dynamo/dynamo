@@ -299,7 +299,9 @@ where
                     "can_offload query"
                 );
 
-                if let Err(e) = codec.encode_response(&ResponseType::CanOffload(statuses), &mut response) {
+                if let Err(e) =
+                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut response)
+                {
                     warn!("Failed to encode response: {}", e);
                 }
             }
@@ -315,7 +317,8 @@ where
                     "match query"
                 );
 
-                if let Err(e) = codec.encode_response(&ResponseType::Match(entries), &mut response) {
+                if let Err(e) = codec.encode_response(&ResponseType::Match(entries), &mut response)
+                {
                     warn!("Failed to encode response: {}", e);
                 }
             }
@@ -384,7 +387,9 @@ mod tests {
         // Test query
         let codec = BinaryCodec::<u64, u64, NoMetadata>::new();
         let mut buf = Vec::new();
-        codec.encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf).unwrap();
+        codec
+            .encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf)
+            .unwrap();
 
         let response = transport.request(&buf).await.expect("Request failed");
         let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();

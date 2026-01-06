@@ -231,7 +231,9 @@ mod tests {
                 Some(QueryType::CanOffload(keys)) => {
                     let statuses: Vec<_> = keys.iter().map(|_| OffloadStatus::Granted).collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).unwrap();
+                    codec
+                        .encode_response(&ResponseType::CanOffload(statuses), &mut buf)
+                        .unwrap();
                     buf
                 }
                 _ => Vec::new(),

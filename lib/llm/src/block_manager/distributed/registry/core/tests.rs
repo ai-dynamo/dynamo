@@ -40,7 +40,9 @@ mod integration {
 
         // Test can_offload
         let mut buf = Vec::new();
-        codec.encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf).unwrap();
+        codec
+            .encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf)
+            .unwrap();
         let response = client_handle.request(&buf).await.unwrap();
         let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
         match decoded {
@@ -53,7 +55,9 @@ mod integration {
 
         // Test match
         buf.clear();
-        codec.encode_query(&QueryType::Match(vec![1, 2]), &mut buf).unwrap();
+        codec
+            .encode_query(&QueryType::Match(vec![1, 2]), &mut buf)
+            .unwrap();
         let response = client_handle.request(&buf).await.unwrap();
         let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
         match decoded {
@@ -67,7 +71,9 @@ mod integration {
 
         // One more query to complete hub_task
         buf.clear();
-        codec.encode_query(&QueryType::CanOffload(vec![1]), &mut buf).unwrap();
+        codec
+            .encode_query(&QueryType::CanOffload(vec![1]), &mut buf)
+            .unwrap();
         let _ = client_handle.request(&buf).await;
 
         hub_task.await.unwrap();
@@ -98,14 +104,18 @@ mod integration {
                                 }
                             })
                             .collect();
-                        codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).unwrap();
+                        codec
+                            .encode_response(&ResponseType::CanOffload(statuses), &mut buf)
+                            .unwrap();
                     }
                     QueryType::Match(keys) => {
                         let entries: Vec<_> = keys
                             .iter()
                             .filter_map(|k| hub_storage.get(k).map(|v| (*k, v, NoMetadata)))
                             .collect();
-                        codec.encode_response(&ResponseType::Match(entries), &mut buf).unwrap();
+                        codec
+                            .encode_response(&ResponseType::Match(entries), &mut buf)
+                            .unwrap();
                     }
                 }
                 buf
@@ -206,7 +216,9 @@ mod integration {
 
         // Test can_offload
         let mut buf = Vec::new();
-        codec.encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf).unwrap();
+        codec
+            .encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf)
+            .unwrap();
         let response = transport.request(&buf).await.expect("Request failed");
         let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
 
@@ -220,7 +232,9 @@ mod integration {
 
         // Test match
         buf.clear();
-        codec.encode_query(&QueryType::Match(vec![1, 2]), &mut buf).unwrap();
+        codec
+            .encode_query(&QueryType::Match(vec![1, 2]), &mut buf)
+            .unwrap();
         let response = transport.request(&buf).await.expect("Match request failed");
         let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
 

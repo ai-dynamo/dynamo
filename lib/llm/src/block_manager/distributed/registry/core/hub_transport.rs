@@ -90,7 +90,6 @@ impl InProcessHubTransport {
     }
 }
 
-
 impl InProcessClientHandle {
     /// Send a query and wait for response.
     pub async fn request(&self, data: &[u8]) -> Result<Vec<u8>> {

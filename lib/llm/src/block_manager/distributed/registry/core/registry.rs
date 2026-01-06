@@ -313,7 +313,9 @@ mod tests {
                         })
                         .collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).unwrap();
+                    codec
+                        .encode_response(&ResponseType::CanOffload(statuses), &mut buf)
+                        .unwrap();
                     buf
                 }
                 _ => Vec::new(),
@@ -348,7 +350,9 @@ mod tests {
                         })
                         .collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::CanOffload(statuses), &mut buf).unwrap();
+                    codec
+                        .encode_response(&ResponseType::CanOffload(statuses), &mut buf)
+                        .unwrap();
                     buf
                 }
                 _ => Vec::new(),
@@ -378,7 +382,9 @@ mod tests {
                         .map(|k| (k, k * 100, NoMetadata))
                         .collect();
                     let mut buf = Vec::new();
-                    codec.encode_response(&ResponseType::Match(entries), &mut buf).unwrap();
+                    codec
+                        .encode_response(&ResponseType::Match(entries), &mut buf)
+                        .unwrap();
                     buf
                 }
                 _ => Vec::new(),

@@ -83,7 +83,11 @@ where
     fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>) -> RegistryResult<()>;
     fn decode_query(&self, data: &[u8]) -> Option<QueryType<K>>;
 
-    fn encode_response(&self, response: &ResponseType<K, V, M>, buf: &mut Vec<u8>) -> RegistryResult<()>;
+    fn encode_response(
+        &self,
+        response: &ResponseType<K, V, M>,
+        buf: &mut Vec<u8>,
+    ) -> RegistryResult<()>;
     fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V, M>>;
 
     /// Decode with detailed error information.
@@ -323,7 +327,11 @@ where
         }
     }
 
-    fn encode_response(&self, response: &ResponseType<K, V, M>, buf: &mut Vec<u8>) -> RegistryResult<()> {
+    fn encode_response(
+        &self,
+        response: &ResponseType<K, V, M>,
+        buf: &mut Vec<u8>,
+    ) -> RegistryResult<()> {
         buf.push(PROTOCOL_VERSION);
         match response {
             ResponseType::CanOffload(statuses) => {
