@@ -62,7 +62,7 @@ def _safe_empty_cache() -> None:
     global _original_empty_cache
     # Check if we have GPU Memory Service VMM allocations
     try:
-        from dynamo.gpu_memory_service import _rpc_cumem_ext as cumem
+        from dynamo.gpu_memory_service import _allocator_ext as cumem
 
         allocations = cumem.get_all_allocations()
         if allocations:
@@ -281,11 +281,11 @@ def register_gpu_memory_service_loader(load_format: str = "gpu_memory_service") 
 
     # Import the extension lazily so importing this module doesn't require it.
     try:
-        from dynamo.gpu_memory_service import _rpc_cumem_ext as cumem
+        from dynamo.gpu_memory_service import _allocator_ext as cumem
     except Exception as e:
         raise RuntimeError(
             "Missing CUDA VMM pluggable allocator extension. "
-            "Build gpu_memory_service/core/csrc/rpc_cumem.cpp first."
+            "Build gpu_memory_service/core/csrc/allocator.cpp first."
         ) from e
 
     from torch.cuda.memory import use_mem_pool
