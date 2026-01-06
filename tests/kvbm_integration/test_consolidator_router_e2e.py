@@ -97,6 +97,7 @@ def create_trtllm_config(test_directory: Path) -> Path:
         yaml.dump(config, f)
     return config_path
 
+
 def compute_deduplication_test_params(
     g1_gpu_blocks: int,
     g2_cpu_blocks: int,
@@ -890,18 +891,18 @@ class TestConsolidatorRouterE2E:
                             messages=[{"role": "user", "content": prompt}],
                             max_tokens=max_tokens,
                         )
-                    except requests.RequestException as e:
+                    except requests.RequestException:
                         logger.exception(f"Request {request_idx} failed")
                         return (request_idx, False)
                     else:
                         success = "content" in response["choices"][0]["message"]
                         return (request_idx, success)
+
                 completed_count = 0
                 failed_count = 0
                 with ThreadPoolExecutor(max_workers=concurrency) as executor:
                     futures = {
-                        executor.submit(send_request, i): i
-                        for i in range(num_requests)
+                        executor.submit(send_request, i): i for i in range(num_requests)
                     }
                     for future in as_completed(futures):
                         _request_idx, success = future.result()
