@@ -28,12 +28,10 @@ Dynamo components (frontends, workers, planner) need to be able to discover each
 
 ## Kubernetes Discovery (Default)
 
-Kubernetes discovery is the default and recommended backend when running on Kubernetes. It uses native Kubernetes primitives to faciliate discovery of components:
+Kubernetes discovery is the default and recommended backend when running on Kubernetes. It uses native Kubernetes primitives to facilitate discovery of components:
 
 - **DynamoWorkerMetadata CRD**: Each worker stores its registered endpoints and model cards in a Custom Resource
 - **EndpointSlices**: EndpointSlices signal each component's readiness status
-
-At runtime, the EndpointSlices are watched by the components to determine which components are ready to serve traffic. The DynamoWorkerMetadata CRs are watched by the components to get the metadata for each component (e.g endpoints and model cards).
 
 ### Implementation Details
 
@@ -74,17 +72,13 @@ The CR is named after the pod and includes an owner reference for automatic garb
 #### EndpointSlices
 
 The operator creates Services for each component with labels `nvidia.com/dynamo-discovery-backend: kubernetes` and `nvidia.com/dynamo-discovery-enabled: true`.
-The Kubernetes controller creates and maintains EndpointSlice resources that keep track of the readiness of the pods targeted by the service. Watching these slices, gives us an upto date snapshot of what Dynamo components are ready to serve traffic.
-The readiness status of the pod is determined by the readiness probe of the pod.
+The Kubernetes controller creates and maintains EndpointSlice resources that keep track of the readiness of the pods targeted by the Service. Watching these slices gives us an up-to-date snapshot of which Dynamo components are ready to serve traffic.
+
+A pod is marked ready if the readiness probe succeeds. On Dynamo workers, this is when the `generate` endpoint is available and healthy.
 
 #### RBAC
 
-The operator automatically creates RBAC resources for each DynamoGraphDeployment:
-- **ServiceAccount**: `{dgd-name}-k8s-service-discovery`
-- **Role**: Grants `get`, `list`, `watch` on `endpoints` and `endpointslices`, plus full CRUD on `dynamoworkermetadatas`
-- **RoleBinding**: Binds the ServiceAccount to the Role
-
-These resources are cleaned up when the DGD is deleted.
+Each Dynamo component pod is automatically given a ServiceAccount that allows it to watch `EndpointSlice` and `DynamoWorkerMetadata` resources within its namespace.
 
 #### Environment Variables
 
