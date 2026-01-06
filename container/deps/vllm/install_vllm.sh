@@ -150,13 +150,13 @@ elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
             --torch-backend=${TORCH_BACKEND}
         uv pip install flashinfer-cubin==$FLASHINF_REF
         uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
-        echo "✓ vLLM installation completed"
     else
         echo "⚠ Skipping LMCache on ARM64 (compatibility issues, missing aarch64 wheels)"
         echo "Building vLLM from source for ${ARCH} architecture..."
         echo "Try to install specific PyTorch and other dependencies first"
-        uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ -r requirements/cuda.txt
-        uv pip install setuptools_scm # required to build vLLM from source
+        uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ \
+            -r requirements/cuda.txt \
+            -r requirements/build.txt
         MAX_JOBS=${MAX_JOBS} uv pip install -v --no-build-isolation .
     fi
 else
