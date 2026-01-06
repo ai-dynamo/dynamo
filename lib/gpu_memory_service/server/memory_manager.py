@@ -10,25 +10,18 @@ synchronization (e.g., via LockManager ensuring single-writer access).
 
 import logging
 import time
-from ctypes import byref, c_int, c_size_t, c_ulonglong
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from uuid import uuid4
 
-from gpu_memory_service.common.cuda_vmm import (
-    CU_MEM_ALLOCATION_TYPE_PINNED,
-    CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-    CU_MEM_LOCATION_TYPE_DEVICE,
-    CUmemAllocationProp,
-    CUmemGenericAllocationHandle,
+from cuda.bindings import driver as cuda
+from gpu_memory_service.common.cuda_vmm_utils import (
     align_to_granularity,
     check_cuda_result,
     ensure_cuda_initialized,
     get_allocation_granularity,
-    get_cuda_driver,
 )
 
-# Re-export CUmemGenericAllocationHandle for use in cuMemRelease calls
 __all__ = ["GMSServerMemoryManager", "AllocationInfo", "AllocationNotFoundError"]
 
 logger = logging.getLogger(__name__)
@@ -146,30 +139,26 @@ class GMSServerMemoryManager:
             RuntimeError: If CUDA allocation fails
         """
         aligned_size = self._align(size)
-        cuda = get_cuda_driver()
 
         # Set up allocation properties for shareable handle
-        prop = CUmemAllocationProp()
-        prop.type = CU_MEM_ALLOCATION_TYPE_PINNED
-        prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE
+        prop = cuda.CUmemAllocationProp()
+        prop.type = cuda.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+        prop.location.type = cuda.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
         prop.location.id = self._device
-        prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        prop.requestedHandleTypes = (
+            cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
+        )
 
         # Create physical allocation (no VA mapping!)
-        handle = CUmemGenericAllocationHandle()
-        check_cuda_result(
-            cuda.cuMemCreate(
-                byref(handle), c_size_t(aligned_size), byref(prop), c_ulonglong(0)
-            ),
-            "cuMemCreate",
-        )
+        result, handle = cuda.cuMemCreate(aligned_size, prop, 0)
+        check_cuda_result(result, "cuMemCreate")
 
         allocation_id = str(uuid4())
         info = AllocationInfo(
             allocation_id=allocation_id,
             size=size,
             aligned_size=aligned_size,
-            handle=handle.value,
+            handle=int(handle),
             tag=tag,
             created_at=time.time(),
         )
@@ -204,18 +193,13 @@ class GMSServerMemoryManager:
         if info is None:
             raise AllocationNotFoundError(f"Unknown allocation: {allocation_id}")
 
-        cuda = get_cuda_driver()
-        fd = c_int()
-        check_cuda_result(
-            cuda.cuMemExportToShareableHandle(
-                byref(fd),
-                CUmemGenericAllocationHandle(info.handle),
-                c_int(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-                c_ulonglong(0),
-            ),
-            "cuMemExportToShareableHandle",
+        result, fd = cuda.cuMemExportToShareableHandle(
+            info.handle,
+            cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
+            0,
         )
-        return fd.value
+        check_cuda_result(result, "cuMemExportToShareableHandle")
+        return int(fd)
 
     def free(self, allocation_id: str) -> bool:
         """Release physical memory for a single allocation.
@@ -230,8 +214,9 @@ class GMSServerMemoryManager:
         if info is None:
             return False
 
-        cuda = get_cuda_driver()
-        cuda.cuMemRelease(CUmemGenericAllocationHandle(info.handle))
+        (result,) = cuda.cuMemRelease(info.handle)
+        if result != cuda.CUresult.CUDA_SUCCESS:
+            logger.warning(f"cuMemRelease failed for {allocation_id}: {result}")
         logger.debug(f"Freed allocation: {allocation_id}")
         return True
 
@@ -245,9 +230,12 @@ class GMSServerMemoryManager:
             Number of allocations cleared
         """
         count = len(self._allocations)
-        cuda = get_cuda_driver()
         for info in self._allocations.values():
-            cuda.cuMemRelease(CUmemGenericAllocationHandle(info.handle))
+            (result,) = cuda.cuMemRelease(info.handle)
+            if result != cuda.CUresult.CUDA_SUCCESS:
+                logger.warning(
+                    f"cuMemRelease failed for {info.allocation_id}: {result}"
+                )
         self._allocations.clear()
         logger.info(f"Cleared {count} allocations")
         return count

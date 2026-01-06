@@ -12,7 +12,7 @@ Key properties:
 - In read mode, the manager can import + map RO and hold the RO lock during inference.
 - sleep()/wake() releases and reacquires the RO lock (and remaps allocations).
 
-This module uses CUDA driver API calls via ctypes to:
+This module uses cuda-python bindings for CUDA driver API calls:
 - import FDs (cuMemImportFromShareableHandle)
 - reserve VA (cuMemAddressReserve)
 - map/unmap (cuMemMap/cuMemUnmap)
@@ -21,26 +21,17 @@ This module uses CUDA driver API calls via ctypes to:
 
 from __future__ import annotations
 
-import ctypes
 import logging
 import os
-from ctypes import byref, c_int, c_size_t, c_ulonglong, c_void_p
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional, Tuple
 
 import torch
+from cuda.bindings import driver as cuda
 from gpu_memory_service.client.rpc import GMSRPCClient
-from gpu_memory_service.common.cuda_vmm import (
-    CU_MEM_ACCESS_FLAGS_PROT_READ,
-    CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
-    CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
-    CU_MEM_LOCATION_TYPE_DEVICE,
-    CUdeviceptr,
-    CUmemAccessDesc,
-    CUmemGenericAllocationHandle,
+from gpu_memory_service.common.cuda_vmm_utils import (
     check_cuda_result,
     get_allocation_granularity,
-    get_cuda_driver,
 )
 
 logger = logging.getLogger(__name__)
@@ -310,8 +301,6 @@ class GMSClientMemoryManager:
         if allocation_id in self._allocation_id_to_va:
             return self._allocation_id_to_va[allocation_id]
 
-        cuda = get_cuda_driver()
-
         alloc_info = self._client.get_allocation(allocation_id)
         aligned_size = int(alloc_info["aligned_size"])
         size = int(alloc_info["size"])
@@ -319,53 +308,41 @@ class GMSClientMemoryManager:
 
         fd = self._client.export(allocation_id)
         try:
-            handle = CUmemGenericAllocationHandle()
-            check_cuda_result(
-                cuda.cuMemImportFromShareableHandle(
-                    byref(handle),
-                    c_void_p(fd),
-                    c_int(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-                    c_ulonglong(0),
-                ),
-                "cuMemImportFromShareableHandle",
+            # Import the handle from the FD
+            # C signature: cuMemImportFromShareableHandle(handle*, osHandle, handleType)
+            # cuda-python: (osHandle, handleType) -> (result, handle)
+            result, handle = cuda.cuMemImportFromShareableHandle(
+                fd,
+                cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
             )
+            check_cuda_result(result, "cuMemImportFromShareableHandle")
         finally:
             os.close(fd)
 
-        va = CUdeviceptr()
-        check_cuda_result(
-            cuda.cuMemAddressReserve(
-                byref(va),
-                c_size_t(aligned_size),
-                c_size_t(self.granularity),
-                CUdeviceptr(0),
-                c_ulonglong(0),
-            ),
-            "cuMemAddressReserve",
-        )
-        check_cuda_result(
-            cuda.cuMemMap(
-                va, c_size_t(aligned_size), c_size_t(0), handle, c_ulonglong(0)
-            ),
-            "cuMemMap",
-        )
+        # Reserve VA
+        result, va = cuda.cuMemAddressReserve(aligned_size, self.granularity, 0, 0)
+        check_cuda_result(result, "cuMemAddressReserve")
+
+        # Map the handle to the VA
+        (result,) = cuda.cuMemMap(va, aligned_size, 0, handle, 0)
+        check_cuda_result(result, "cuMemMap")
 
         access: Literal["ro", "rw"] = "rw" if self.lock_type == "rw" else "ro"
-        self._set_access(va.value, aligned_size, access=access)
+        self._set_access(int(va), aligned_size, access=access)
 
         self._track_mapping(
             LocalMapping(
                 allocation_id=allocation_id,
-                va=va.value,
+                va=int(va),
                 size=size,
                 aligned_size=aligned_size,
-                handle=int(handle.value),
+                handle=int(handle),
                 tag=tag,
                 access=access,
             )
         )
 
-        return va.value
+        return int(va)
 
     def clear_all(self) -> int:
         """Clear all allocations on the server (RW only).
@@ -682,21 +659,17 @@ class GMSClientMemoryManager:
         self._allocation_id_to_va[m.allocation_id] = m.va
 
     def _set_access(self, va: int, size: int, *, access: Literal["ro", "rw"]) -> None:
-        cuda = get_cuda_driver()
-        acc = CUmemAccessDesc()
-        acc.location.type = CU_MEM_LOCATION_TYPE_DEVICE
+        acc = cuda.CUmemAccessDesc()
+        acc.location.type = cuda.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
         acc.location.id = self.device
         acc.flags = (
-            CU_MEM_ACCESS_FLAGS_PROT_READ
+            cuda.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READ
             if access == "ro"
-            else CU_MEM_ACCESS_FLAGS_PROT_READWRITE
+            else cuda.CUmemAccess_flags.CU_MEM_ACCESS_FLAGS_PROT_READWRITE
         )
-        check_cuda_result(
-            cuda.cuMemSetAccess(
-                CUdeviceptr(va), c_size_t(size), byref(acc), c_size_t(1)
-            ),
-            "cuMemSetAccess",
-        )
+        # cuda-python expects a list of access descriptors, not a single object
+        (result,) = cuda.cuMemSetAccess(va, size, [acc], 1)
+        check_cuda_result(result, "cuMemSetAccess")
 
     def _unmap_preserving_va(self) -> None:
         """Unmap physical memory but PRESERVE VA reservations for sleep/wake.
@@ -704,7 +677,6 @@ class GMSClientMemoryManager:
         This keeps the VA reservation intact so tensors maintain stable pointers.
         On wake, we can remap to the same VAs.
         """
-        cuda = get_cuda_driver()
         unmapped_count = 0
         total_bytes = 0
         for va, mapping in list(self._mappings.items()):
@@ -712,14 +684,12 @@ class GMSClientMemoryManager:
                 continue  # Already unmapped
             try:
                 # Unmap physical memory from VA
-                result = cuda.cuMemUnmap(
-                    CUdeviceptr(va), c_size_t(mapping.aligned_size)
-                )
-                if result != 0:
+                (result,) = cuda.cuMemUnmap(va, mapping.aligned_size)
+                if result != cuda.CUresult.CUDA_SUCCESS:
                     logger.warning(f"cuMemUnmap failed for VA 0x{va:x}: error {result}")
                 # Release the imported handle reference (we need to re-import on wake)
-                result = cuda.cuMemRelease(CUmemGenericAllocationHandle(mapping.handle))
-                if result != 0:
+                (result,) = cuda.cuMemRelease(mapping.handle)
+                if result != cuda.CUresult.CUDA_SUCCESS:
                     logger.warning(
                         f"cuMemRelease failed for handle {mapping.handle}: error {result}"
                     )
@@ -771,7 +741,6 @@ class GMSClientMemoryManager:
             return va  # Already mapped
 
         assert self._client is not None
-        cuda = get_cuda_driver()
 
         # Validate allocation still exists and size matches
         try:
@@ -791,30 +760,19 @@ class GMSClientMemoryManager:
         # Re-import the handle
         fd = self._client.export(allocation_id)
         try:
-            handle = CUmemGenericAllocationHandle()
-            check_cuda_result(
-                cuda.cuMemImportFromShareableHandle(
-                    byref(handle),
-                    c_void_p(fd),
-                    c_int(CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR),
-                    c_ulonglong(0),
-                ),
-                "cuMemImportFromShareableHandle",
+            # C signature: cuMemImportFromShareableHandle(handle*, osHandle, handleType)
+            # cuda-python: (osHandle, handleType) -> (result, handle)
+            result, handle = cuda.cuMemImportFromShareableHandle(
+                fd,
+                cuda.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR,
             )
+            check_cuda_result(result, "cuMemImportFromShareableHandle")
         finally:
             os.close(fd)
 
         # Map to the SAME VA (which is still reserved)
-        check_cuda_result(
-            cuda.cuMemMap(
-                CUdeviceptr(va),
-                c_size_t(mapping.aligned_size),
-                c_size_t(0),
-                handle,
-                c_ulonglong(0),
-            ),
-            "cuMemMap",
-        )
+        (result,) = cuda.cuMemMap(va, mapping.aligned_size, 0, handle, 0)
+        check_cuda_result(result, "cuMemMap")
 
         # Set access permissions based on current lock type
         access: Literal["ro", "rw"] = "rw" if self.lock_type == "rw" else "ro"
@@ -824,17 +782,19 @@ class GMSClientMemoryManager:
         cuda.cuCtxSynchronize()
 
         # Validate the pointer is accessible (this is what Triton checks)
-        CU_POINTER_ATTRIBUTE_DEVICE_POINTER = 2
-        dev_ptr = CUdeviceptr()
-        result = cuda.cuPointerGetAttribute(
-            byref(dev_ptr), c_int(CU_POINTER_ATTRIBUTE_DEVICE_POINTER), CUdeviceptr(va)
+        result, dev_ptr = cuda.cuPointerGetAttribute(
+            cuda.CUpointer_attribute.CU_POINTER_ATTRIBUTE_DEVICE_POINTER, va
         )
-        if result != 0:
-            err_str = ctypes.c_char_p()
-            cuda.cuGetErrorString(result, byref(err_str))
+        if result != cuda.CUresult.CUDA_SUCCESS:
+            err_result, err_str = cuda.cuGetErrorString(result)
+            err_msg = ""
+            if err_result == cuda.CUresult.CUDA_SUCCESS and err_str:
+                err_msg = (
+                    err_str.decode() if isinstance(err_str, bytes) else str(err_str)
+                )
             logger.warning(
                 f"[GPU Memory Service] cuPointerGetAttribute failed for VA 0x{va:x} after remap: "
-                f"error {result} ({err_str.value.decode() if err_str.value else 'unknown'})"
+                f"error {result} ({err_msg})"
             )
         else:
             logger.debug(
@@ -847,7 +807,7 @@ class GMSClientMemoryManager:
             va=mapping.va,
             size=mapping.size,
             aligned_size=mapping.aligned_size,
-            handle=int(handle.value),
+            handle=int(handle),
             tag=mapping.tag,
             access=access,
         )
@@ -856,13 +816,12 @@ class GMSClientMemoryManager:
 
     def _unmap_all(self) -> None:
         """Unmap and release all local mappings including VA reservations."""
-        cuda = get_cuda_driver()
         for va, mapping in list(self._mappings.items()):
             try:
                 if mapping.handle != 0:
-                    cuda.cuMemUnmap(CUdeviceptr(va), c_size_t(mapping.aligned_size))
-                    cuda.cuMemRelease(CUmemGenericAllocationHandle(mapping.handle))
-                cuda.cuMemAddressFree(CUdeviceptr(va), c_size_t(mapping.aligned_size))
+                    cuda.cuMemUnmap(va, mapping.aligned_size)
+                    cuda.cuMemRelease(mapping.handle)
+                cuda.cuMemAddressFree(va, mapping.aligned_size)
             except Exception as e:
                 logger.warning(f"Error unmapping VA 0x{va:x}: {e}")
         self._mappings.clear()
