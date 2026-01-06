@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -102,8 +102,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "bootstrap_room": bootstrap_room,
         }
 
-        # Yield in LLMEngineOutput format for PrefillRouter compatibility
-        # The disaggregated_params field contains the bootstrap info
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
         yield {
             "token_ids": [],
             "text": None,

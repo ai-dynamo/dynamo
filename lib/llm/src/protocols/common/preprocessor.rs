@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -34,6 +34,19 @@ pub struct RoutingHints {
     /// Data parallel rank for the request
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dp_rank: Option<u32>,
+
+    /// Controls whether the router should manage local bookkeeping (add_request,
+    /// mark_prefill_completed, free) for this request.
+    ///
+    /// - `None` or `Some(true)`: Router handles bookkeeping locally (default behavior)
+    /// - `Some(false)`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enable_local_updates: Option<bool>,
+
+    /// Expected number of output tokens for this request.
+    /// Used as a hint for routing decisions to estimate resource requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_output_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
