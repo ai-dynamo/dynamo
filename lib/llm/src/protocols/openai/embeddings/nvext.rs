@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 pub trait NvExtProvider {
@@ -10,7 +11,7 @@ pub trait NvExtProvider {
 }
 
 /// NVIDIA LLM extensions to the OpenAI API
-#[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
 pub struct NvExt {
     /// Annotations

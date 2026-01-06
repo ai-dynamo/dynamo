@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The Preprocessor consists of the following modules
@@ -245,6 +245,8 @@ impl OpenAIPreprocessor {
                 prefill_worker_id: nvext.prefill_worker_id,
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
+                enable_local_updates: nvext.enable_local_updates,
+                expected_output_tokens: nvext.expected_output_tokens,
             };
             builder.routing(Some(routing));
         }
