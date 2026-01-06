@@ -149,6 +149,14 @@ func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resou
 	readyReplicas := podClique.Status.ReadyReplicas
 	updatedReplicas := podClique.Status.UpdatedReplicas
 
+	logger.Info("CheckPodCliqueFullyUpdated",
+		"resourceName", resourceName,
+		"generation", podClique.Generation,
+		"observedGeneration", podClique.Status.ObservedGeneration,
+		"desiredReplicas", desiredReplicas,
+		"readyReplicas", readyReplicas,
+		"updatedReplicas", updatedReplicas)
+
 	if desiredReplicas == 0 {
 		return true, ""
 	}
