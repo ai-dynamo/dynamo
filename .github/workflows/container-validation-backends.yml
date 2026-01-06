@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 name: Docker Build and Test
@@ -30,15 +30,73 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
+      core: ${{ steps.filter.outputs.core_any_changed }}
+      operator: ${{ steps.filter.outputs.operator_any_changed }}
+      deploy: ${{ steps.filter.outputs.deploy_any_changed }}
+      vllm: ${{ steps.filter.outputs.vllm_any_changed }}
+      sglang: ${{ steps.filter.outputs.sglang_any_changed }}
+      trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Get merge base
+        id: merge-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # For PR branches, compare against merge-base with PR's target branch
+          # For main/release branches, use default behavior (previous commit)
+          if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+            PR_NUMBER="${BASH_REMATCH[1]}"
+            BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+            echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
+            BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
+            echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+          else
+            echo "base_sha=" >> $GITHUB_OUTPUT
+            echo "Using default comparison (previous commit)"
+          fi
       - name: Check for changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
         id: filter
         with:
-          filters: .github/filters.yaml
+          files_yaml_from_source_file: .github/filters.yaml
+          base_sha: ${{ steps.merge-base.outputs.base_sha }}
+      - name: Debug changed files
+        run: |
+          echo "=== Base SHA Used ==="
+          echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
+          echo ""
+          echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
+          echo "${{ steps.filter.outputs.all_all_changed_files }}"
+          echo ""
+          echo "=== Filters That Matched ==="
+          echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
+          echo ""
+          echo "=== Filter Results (any_changed) ==="
+          echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"
+          echo "ci: ${{ steps.filter.outputs.ci_any_changed }}"
+          echo "core: ${{ steps.filter.outputs.core_any_changed }}"
+          echo "operator: ${{ steps.filter.outputs.operator_any_changed }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_any_changed }}"
+          echo "planner: ${{ steps.filter.outputs.planner_any_changed }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_any_changed }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_any_changed }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}"
+          echo ""
+          echo "=== Files Matching Each Filter ==="
+          echo "docs: ${{ steps.filter.outputs.docs_all_changed_files }}"
+          echo "ci: ${{ steps.filter.outputs.ci_all_changed_files }}"
+          echo "core: ${{ steps.filter.outputs.core_all_changed_files }}"
+          echo "operator: ${{ steps.filter.outputs.operator_all_changed_files }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_all_changed_files }}"
+          echo "planner: ${{ steps.filter.outputs.planner_all_changed_files }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_all_changed_files }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_all_changed_files }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_all_changed_files }}"
 
   backend-status-check:
     runs-on: ubuntu-latest
@@ -51,7 +109,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.operator == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -83,14 +141,14 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Tester
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
@@ -102,7 +160,7 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           sudo apt-get update && sudo apt-get install -y make
-          cd deploy/cloud/operator
+          cd deploy/operator
           make check
       - name: Build Container
         id: build-image
@@ -110,7 +168,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
@@ -127,7 +185,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +252,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -255,7 +313,7 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -314,186 +372,9 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
 
-  deploy-test-fault-tolerance:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, operator, vllm, trtllm, sglang]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      # Run matrix jobs sequentially to prevent a Helm race condition
-      # Parallel jobs conflict on ClusterRole ownership when installing the chart.
-      # Error: ClusterRole "...-operator" exists... cannot be imported... current value is "...-ft-vllm"
-      max-parallel: 1
-      matrix:
-        framework:
-          - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-          - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-          - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-    name: deploy-test-fault-tolerance (${{ matrix.framework.name }})
-    env:
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-    steps:
-      - name: Output Node Name
-        shell: bash
-        run: |
-          echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Set namespace
-        run: |
-          # Set namespace using test scenario
-          export FRAMEWORK=${{ matrix.framework.name }}
-          echo "NAMESPACE=gh-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
-          set -x
-
-          # Setup kubeconfig
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-          chmod 600 .kubeconfig
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-          kubectl config current-context
-      - name: Deploy Operator
-        run: |
-          set -x
-          export KUBECONFIG=$(pwd)/.kubeconfig
-
-          # Create a namespace for this job
-          echo "Creating an ephemeral namespace..."
-          kubectl delete namespace $NAMESPACE || true
-          kubectl create namespace $NAMESPACE || true
-          echo "Attaching the labels for secrets and cleanup"
-          kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
-
-          # Set the namespace as default
-          kubectl config set-context --current --namespace=$NAMESPACE
-
-          # Check if Istio is installed
-          kubectl get pods -n istio-system
-          # Check if default storage class exists
-          kubectl get storageclass
-
-          # Install Helm chart
-          export VIRTUAL_ENV=/opt/dynamo/venv
-          export KUBE_NS=$NAMESPACE
-          export ISTIO_ENABLED=true
-          export ISTIO_GATEWAY=istio-system/ingress-alb
-          export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-          export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
-
-          # Install dynamo env secrets
-          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-          # Create docker pull secret for operator image
-          kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-          # Install helm dependencies
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          cd deploy/cloud/helm/platform/
-          helm dep build .
-          # Install platform with namespace restriction for single profile testing
-          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-            --set dynamo-operator.namespaceRestriction.enabled=true \
-            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-            --timeout 10m --wait
-          # Wait for all deployments to be ready
-          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
-          cd -
-
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          kubectl config set-context --current --namespace=$NAMESPACE
-      - name: Run Fault Tolerance Tests
-        id: run-ft-tests
-        run: |
-          set -x
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          export NAMESPACE=$NAMESPACE
-          export FRAMEWORK=${{ matrix.framework.name }}
-          export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
-
-          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
-          echo "Using namespace: $NAMESPACE"
-          echo "Using image: $IMAGE"
-
-          # Install python3-venv package if not already installed
-          sudo apt-get update && sudo apt-get install -y python3-venv
-
-          # Set up Python virtual environment and install test dependencies
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-          pip install -r container/deps/requirements.test.txt
-          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
-
-          # Create test-results directory
-          mkdir -p test-results
-
-          # Run the pytest command with JUnit XML output
-          set +e  # Don't exit on test failures
-          pytest tests/fault_tolerance/deploy/test_deployment.py \
-            -m 'k8s and fault_tolerance' \
-            -k '${{ matrix.framework.test_scenario }}' \
-            -s -v \
-            --namespace ${NAMESPACE} \
-            --image ${IMAGE} \
-            --client-type legacy \
-            --junitxml=test-results/pytest_ft_report.xml \
-            --tb=short
-
-          TEST_EXIT_CODE=$?
-          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
-          echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
-
-          exit ${TEST_EXIT_CODE}
-      - name: Process Fault Tolerance Test Results
-        if: always()
-        run: |
-          set -x
-
-          # Rename JUnit XML with unique naming if it exists
-          if [ -f "test-results/pytest_ft_report.xml" ]; then
-            mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
-            echo "✅ JUnit XML report renamed with unique identifier"
-          else
-            echo "⚠️  JUnit XML report not found"
-          fi
-
-      - name: Upload Fault Tolerance Test Results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
-          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
-          retention-days: 7
-
-      - name: Cleanup
-        if: always()
-        timeout-minutes: 5
-        run: |
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-          chmod 600 .kubeconfig
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-
-          # For debugging purposes, list all the resources before we uninstall
-          kubectl get all
-
-          echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
-
-          # Uninstall the helm chart
-          helm ls
-          helm uninstall dynamo-platform || true
-
-          echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-          kubectl delete namespace $NAMESPACE || true
-          echo "Namespace $NAMESPACE completed."
-
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -547,7 +428,6 @@ jobs:
         export ISTIO_ENABLED=true
         export ISTIO_GATEWAY=istio-system/ingress-alb
         export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
 
         # Install dynamo env secrets
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
@@ -555,7 +435,7 @@ jobs:
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
         # Install helm dependencies
         helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/cloud/helm/platform/
+        cd deploy/helm/charts/platform/
         helm dep build .
         # Install platform with namespace restriction for single profile testing
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
@@ -759,7 +639,7 @@ jobs:
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read

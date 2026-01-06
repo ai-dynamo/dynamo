@@ -109,6 +109,28 @@ The migration system is designed with several important architectural considerat
 
 **Error Handling**: The migration system distinguishes between different types of failures and applies appropriate recovery strategies for each scenario.
 
+## Monitoring and Metrics
+
+The migration system exposes Prometheus metrics to monitor migration activity. These metrics are available on the frontend's `/metrics` endpoint (default port 8000):
+
+- `dynamo_frontend_model_migration_total`: Counter tracking the total number of request migrations
+  - Labels:
+    - `model`: The model name being served
+    - `migration_type`: Either `new_request` (initial connection failure) or `ongoing_request` (mid-stream disconnection)
+
+**Example metrics output:**
+```
+dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 3
+dynamo_frontend_model_migration_total{migration_type="new_request",model="Qwen/Qwen3-0.6B"} 1
+```
+
+These metrics can be used to:
+- Monitor worker reliability and failure patterns
+- Alert on excessive migration rates indicating infrastructure issues
+- Track the effectiveness of fault tolerance mechanisms
+
+For more information on Dynamo metrics, see the [Metrics documentation](../observability/metrics.md).
+
 ## Operational Impact
 
 Request migration fundamentally changes how the system handles failures, moving from a "fail-fast" approach to a "graceful degradation" model. This architectural shift enables higher availability and better resource utilization while maintaining the same external API contract for clients.

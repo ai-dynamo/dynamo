@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
@@ -103,7 +103,7 @@ dialoguer = { version = "0.11", default-features = false, features = [
 
 # block_manager
 aligned-vec = { version = "0.6.4", optional = true }
-nixl-sys = { version = "=0.7.1", optional = true }
+nixl-sys = { version = "=0.8.0", optional = true }
 cudarc = { workspace = true, optional = true }
 nix = { version = "0.26", optional = true }
 
@@ -194,6 +194,10 @@ insta = { version = "1.41", features = [
 
 lazy_static = "1.4"
 mockito = "1.7.0"
+
+[[bin]]
+name = "generate-frontend-openapi"
+path = "src/bin/generate_frontend_openapi.rs"
 
 [build-dependencies]
 tonic-build = { version = "0.13.1" }

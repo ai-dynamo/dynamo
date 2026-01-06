@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! KV RadixTree
@@ -32,7 +32,6 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use dynamo_runtime::{
     component::Component,
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
@@ -50,13 +49,10 @@ use std::{
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use xxhash_rust::xxh3;
-
-pub const XXH3_SEED: u64 = 1337;
 
 use crate::kv_router::approx::{BlockEntry, PruneConfig, PruneManager};
 use crate::kv_router::protocols::*;
-use crate::tokens::{SequenceHash, TokenBlockSequence};
+use crate::tokens::SequenceHash;
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -89,90 +85,6 @@ pub enum KvCacheEventError {
 
 /// A shared reference to a [`RadixBlock`].
 type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
-
-pub fn compute_hash(data: &[u8]) -> u64 {
-    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
-}
-
-/// Compute the hash of a local block.
-///
-/// ### Arguments
-///
-/// * `data` - A byte slice representing the data to hash.
-///
-/// ### Returns
-///
-/// A `LocalBlockHash` representing the computed hash.
-pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
-    LocalBlockHash(compute_hash(data))
-}
-
-// /// Updated version of the `compute_block_hash` function that included the lora_id
-// pub fn compute_block_hash_v2(token_id: &[u32], lora_id: u64) {
-//     let mut bytes = Vec::new();
-//     for token in token_id {
-//         bytes.extend_from_slice(&token.to_le_bytes());
-//     }
-//     bytes.extend_from_slice(&lora_id.to_le_bytes());
-//     let hash = xxh3::xxh3_64_with_seed(&bytes, XXH3_SEED);
-// }
-
-/// Compute the hash for a sequence of tokens.
-///
-/// ### Arguments
-///
-/// * `tokens` - A vector of `u32` tokens.
-///
-/// ### Returns
-///
-/// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
-pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
-    tokens
-        .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
-        .map(|chunk| {
-            let bytes: Vec<u8> = chunk
-                .iter()
-                .flat_map(|&num| num.to_le_bytes()) // Convert each i32 to its little-endian bytes
-                .collect();
-
-            compute_block_hash(&Bytes::from(bytes)) // Convert the byte Vec to Bytes
-        })
-        .collect()
-}
-
-/// Compute rolling sequence hashes for a vector of block hashes.
-///
-/// This mirrors the behavior in tokens.rs where:
-/// - The first block's sequence hash equals its block hash
-/// - Subsequent blocks' sequence hash = hash([parent_sequence_hash, current_block_hash], seed)
-///
-/// ### Arguments
-///
-/// * `block_hashes` - A vector of `LocalBlockHash` values representing the block hashes.
-///
-/// ### Returns
-///
-/// A vector of u64 values representing the sequence hashes for each block.
-pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<SequenceHash> {
-    if block_hashes.is_empty() {
-        return Vec::new();
-    }
-
-    let mut sequence_hashes = Vec::with_capacity(block_hashes.len());
-    sequence_hashes.push(block_hashes[0].0);
-
-    for i in 1..block_hashes.len() {
-        let parent_seq_hash = sequence_hashes[i - 1];
-        let current_block_hash = block_hashes[i].0;
-
-        let combined = [parent_seq_hash, current_block_hash];
-        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
-        let seq_hash = compute_hash(&bytes);
-        sequence_hashes.push(seq_hash);
-    }
-
-    sequence_hashes
-}
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -610,6 +522,7 @@ impl RadixTree {
                             parent_hash,
                             blocks: vec![KvCacheStoredBlockData {
                                 block_hash: *external_hash,
+                                mm_extra_info: None,
                                 tokens_hash,
                             }],
                         }),
@@ -868,29 +781,18 @@ pub trait KvIndexerInterface {
     /// A vector of RouterEvents representing the current state of the tree.
     async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError>;
 
-    /// Process a routing decision with pre-computed hashes.
-    ///
-    /// ### Arguments
-    ///
-    /// * `worker` - The worker (with dp_rank) that was selected.
-    /// * `local_hashes` - The local hashes of the tokens sent to the worker.
-    /// * `sequence_hashes` - The sequence hashes of the tokens sent to the worker.
-    async fn process_routing_decision(
-        &self,
-        worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
-    ) -> Result<(), KvRouterError>;
-
     /// Process a routing decision for a request with tokens.
     ///
+    /// Uses TokensWithHashes for lazy hash computation - if hashes were already
+    /// computed (e.g., by find_best_match), they will be reused.
+    ///
     /// ### Arguments
     ///
-    /// * `tokens` - A vector of `u32` tokens.
+    /// * `tokens_with_hashes` - Tokens with lazily computed hashes.
     /// * `worker` - The worker (with dp_rank) that was selected.
     async fn process_routing_decision_for_request(
         &self,
-        tokens: &[u32],
+        tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError>;
 }
@@ -1076,6 +978,7 @@ impl KvIndexer {
                                 blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
                                     tokens_hash: *local_hash,
                                     block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                mm_extra_info: None,
                                 }).collect(),
                             });
 
@@ -1243,7 +1146,7 @@ impl KvIndexerInterface for KvIndexer {
             tokens,
             tokens.len()
         );
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
         tracing::debug!("Computed sequence: {:?}", sequence);
         self.find_matches(sequence).await
     }
@@ -1274,7 +1177,22 @@ impl KvIndexerInterface for KvIndexer {
             .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
-    async fn process_routing_decision(
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens_with_hashes: &mut TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
+        let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
+            .await
+    }
+}
+
+impl KvIndexer {
+    /// Internal method to process a routing decision with pre-computed hashes.
+    async fn process_routing_decision_internal(
         &self,
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
@@ -1289,23 +1207,6 @@ impl KvIndexerInterface for KvIndexer {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
         Ok(())
-    }
-
-    async fn process_routing_decision_for_request(
-        &self,
-        tokens: &[u32],
-        worker: WorkerWithDpRank,
-    ) -> Result<(), KvRouterError> {
-        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
-        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
-        let sequence_hashes = sequence
-            .blocks()
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect::<Vec<_>>();
-
-        self.process_routing_decision(worker, local_hashes, sequence_hashes)
-            .await
     }
 }
 
@@ -1587,28 +1488,15 @@ impl KvIndexerInterface for LocalKvIndexer {
         self.indexer.dump_events().await
     }
 
-    async fn process_routing_decision(
-        &self,
-        worker: WorkerWithDpRank,
-        local_hashes: Vec<LocalBlockHash>,
-        sequence_hashes: Vec<SequenceHash>,
-    ) -> Result<(), KvRouterError> {
-        // TODO I guess the local kvindexers have little use for this method?
-        // Keeping it here now to implement the trait fully
-        self.indexer
-            .process_routing_decision(worker, local_hashes, sequence_hashes)
-            .await
-    }
-
     async fn process_routing_decision_for_request(
         &self,
-        tokens: &[u32],
+        tokens_with_hashes: &mut TokensWithHashes,
         worker: WorkerWithDpRank,
     ) -> Result<(), KvRouterError> {
         // TODO I guess the local kvindexers have little use for this method?
         // Keeping it here now to implement the trait fully
         self.indexer
-            .process_routing_decision_for_request(tokens, worker)
+            .process_routing_decision_for_request(tokens_with_hashes, worker)
             .await
     }
 }
@@ -1813,6 +1701,7 @@ impl KvIndexerSharded {
                                     blocks: hashes.map(|(local_hash, sequence_hash)| KvCacheStoredBlockData {
                                         tokens_hash: *local_hash,
                                         block_hash: ExternalSequenceBlockHash(*sequence_hash),
+                                mm_extra_info: None,
                                     }).collect(),
                                 });
 
@@ -1973,7 +1862,7 @@ impl KvIndexerInterface for KvIndexerSharded {
         &self,
         tokens: &[u32],
     ) -> Result<OverlapScores, KvRouterError> {
-        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size);
+        let sequence = compute_block_hash_for_seq(tokens, self.kv_block_size, None);
         self.find_matches(sequence).await
     }
 
@@ -2044,7 +1933,22 @@ impl KvIndexerInterface for KvIndexerSharded {
         Ok(all_events)
     }
 
-    async fn process_routing_decision(
+    async fn process_routing_decision_for_request(
+        &self,
+        tokens_with_hashes: &mut TokensWithHashes,
+        worker: WorkerWithDpRank,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = tokens_with_hashes.get_or_compute_block_hashes().to_vec();
+        let sequence_hashes = tokens_with_hashes.get_or_compute_seq_hashes().to_vec();
+
+        self.process_routing_decision_internal(worker, local_hashes, sequence_hashes)
+            .await
+    }
+}
+
+impl KvIndexerSharded {
+    /// Internal method to process a routing decision with pre-computed hashes.
+    async fn process_routing_decision_internal(
         &self,
         worker: WorkerWithDpRank,
         local_hashes: Vec<LocalBlockHash>,
@@ -2066,23 +1970,6 @@ impl KvIndexerInterface for KvIndexerSharded {
             .await
             .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
         Ok(())
-    }
-
-    async fn process_routing_decision_for_request(
-        &self,
-        tokens: &[u32],
-        worker: WorkerWithDpRank,
-    ) -> Result<(), KvRouterError> {
-        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
-        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
-        let sequence_hashes = sequence
-            .blocks()
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect::<Vec<_>>();
-
-        self.process_routing_decision(worker, local_hashes, sequence_hashes)
-            .await
     }
 }
 
@@ -2111,6 +1998,7 @@ mod tests {
             .map(|i| KvCacheStoredBlockData {
                 tokens_hash: LocalBlockHash(*i),
                 block_hash: ExternalSequenceBlockHash(*i * 100),
+                mm_extra_info: None,
             })
             .collect()
     }
@@ -2714,17 +2602,17 @@ mod tests {
         setup();
         // create a sequence of 64 elements
         let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 65 elements
         let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 129 elements
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
         assert_eq!(hashes.len(), 2);
     }
 
@@ -2929,6 +2817,7 @@ mod tests {
                 parent_hash: None,
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(0),
+                    mm_extra_info: None,
                     tokens_hash: LocalBlockHash(13226331709069118873),
                 }],
             }),
@@ -3392,6 +3281,7 @@ mod tests {
                         blocks: vec![KvCacheStoredBlockData {
                             block_hash: ExternalSequenceBlockHash(id * 100),
                             tokens_hash: LocalBlockHash(id * 200),
+                            mm_extra_info: None,
                         }],
                     }),
                     dp_rank: 0,
@@ -3567,6 +3457,7 @@ mod tests {
                     blocks: vec![KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     }],
                 }),
                 dp_rank: 0,

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import json
@@ -600,11 +600,6 @@ class DynamoFrontendProcess(ManagedProcess):
     ):
         # TODO: Refactor remaining duplicate "DynamoFrontendProcess" helpers in tests to
         # use this shared implementation (and delete the copies):
-        # - tests/frontend/test_vllm.py
-        # - tests/router/common.py
-        # - tests/router/test_router_e2e_with_vllm.py
-        # - tests/router/test_router_e2e_with_sglang.py
-        # - tests/router/test_router_e2e_with_trtllm.py
         # - tests/fault_tolerance/cancellation/utils.py
         # - tests/fault_tolerance/migration/utils.py
         # - tests/fault_tolerance/etcd_ha/utils.py

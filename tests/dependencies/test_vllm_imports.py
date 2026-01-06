@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests to sanity check that required dependencies can be imported."""
@@ -9,6 +9,7 @@ import pytest
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_1
+@pytest.mark.pre_merge
 def test_import_deep_ep():
     """Test that deep_ep module can be imported."""
     try:
@@ -22,6 +23,7 @@ def test_import_deep_ep():
 @pytest.mark.vllm
 @pytest.mark.unit
 @pytest.mark.gpu_1
+@pytest.mark.pre_merge
 def test_import_pplx_kernels():
     """Test that pplx_kernels module can be imported."""
     try:

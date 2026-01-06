@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
@@ -28,10 +28,7 @@ use futures::StreamExt;
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
     WORKER_KV_INDEXER_QUERY_SUBJECT,
-    indexer::{
-        KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest,
-        compute_block_hash_for_seq,
-    },
+    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest},
     protocols::*,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
@@ -543,6 +540,7 @@ fn convert_event(
             token_ids,
             block_size,
             lora_id,
+            block_mm_infos,
             ..
         } => {
             let num_block_tokens = vec![block_size as u64; block_hashes.len()];
@@ -563,6 +561,7 @@ fn convert_event(
                         &block_hashes_u64,
                         lora_id.unwrap_or(0),
                         warning_count,
+                        block_mm_infos.as_deref(),
                     ),
                 }),
                 dp_rank,
@@ -595,18 +594,25 @@ pub fn create_stored_block_from_parts(
     block_hash: u64,
     token_ids: &[u32],
     _lora_id: u64,
+    mm_extra_info: Option<BlockExtraInfo>,
 ) -> KvCacheStoredBlockData {
-    let tokens_hash = compute_block_hash_for_seq(token_ids, kv_block_size)[0];
+    // Compute tokens_hash including MM info if present
+    let block_mm_infos = mm_extra_info.as_ref().map(|info| vec![Some(info.clone())]);
+    let tokens_hash =
+        compute_block_hash_for_seq(token_ids, kv_block_size, block_mm_infos.as_deref())[0];
+
     tracing::trace!(
-        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}",
+        "Creating stored block: external_block_hash={}, tokens_hash={}, token_ids={:?}, kv_block_size={}, mm_extra_info={:?}",
         block_hash,
         tokens_hash.0,
         token_ids,
-        kv_block_size
+        kv_block_size,
+        mm_extra_info
     );
     KvCacheStoredBlockData {
         block_hash: ExternalSequenceBlockHash::from(block_hash),
         tokens_hash,
+        mm_extra_info,
     }
 }
 
@@ -617,11 +623,14 @@ pub fn create_stored_blocks(
     block_hashes: &[u64],
     lora_id: u64,
     warning_count: &Arc<AtomicU32>,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
 ) -> Vec<KvCacheStoredBlockData> {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
     let mut token_offset: usize = 0;
-    for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
+    for (block_idx, (num_tokens_it, block_hash_it)) in
+        num_block_tokens.iter().zip(block_hashes.iter()).enumerate()
+    {
         if *num_tokens_it != kv_block_size as u64 {
             if warning_count.fetch_add(1, Ordering::Relaxed) < 3 {
                 tracing::warn!(
@@ -634,11 +643,16 @@ pub fn create_stored_blocks(
         }
 
         let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
+        let mm_extra_info = block_mm_infos
+            .and_then(|infos| infos.get(block_idx))
+            .and_then(|opt| opt.clone());
+
         blocks.push(create_stored_block_from_parts(
             kv_block_size,
             *block_hash_it,
             tokens,
             lora_id,
+            mm_extra_info,
         ));
         token_offset += *num_tokens_it as usize;
     }
@@ -702,6 +716,9 @@ enum RawKvEvent {
         lora_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        /// Multimodal extra info for each block (length should match block_hashes)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
     },
     BlockRemoved {
         block_hashes: Vec<BlockHashValue>,
@@ -747,6 +764,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut lora_id: Option<Option<u64>> = None;
         let mut medium: Option<Option<String>> = None;
+        let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
             match key.as_str() {
@@ -771,6 +789,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "medium" => {
                     medium = Some(map.next_value()?);
                 }
+                "block_mm_infos" => {
+                    block_mm_infos = Some(map.next_value()?);
+                }
                 _ => {
                     map.next_value::<IgnoredAny>()?;
                 }
@@ -791,6 +812,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id: lora_id.unwrap_or(None),
                     medium: medium.unwrap_or(None),
+                    block_mm_infos: block_mm_infos.unwrap_or(None),
                 })
             }
             Some("BlockRemoved") => {
@@ -836,6 +858,8 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
+                    seq.next_element()?.unwrap_or(None);
 
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
@@ -846,6 +870,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id,
                     medium,
+                    block_mm_infos,
                 })
             }
             "BlockRemoved" => {
@@ -1077,7 +1102,7 @@ impl WorkerMetricsPublisher {
 #[cfg(test)]
 mod test_event_processing {
     use super::*;
-    use crate::kv_router::indexer::compute_block_hash_for_seq;
+    use crate::kv_router::protocols::compute_block_hash_for_seq;
 
     // ---------------------------------------------------------------------
     // create_stored_block_from_parts --------------------------------------
@@ -1088,11 +1113,12 @@ mod test_event_processing {
         let token_ids = vec![10, 20, 30, 40];
         let blk_hash = 0xdead_beef;
 
-        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0);
+        let stored = create_stored_block_from_parts(kv_block_size, blk_hash, &token_ids, 0, None);
 
         assert_eq!(stored.block_hash.0, blk_hash);
-        let expected_hash = compute_block_hash_for_seq(&token_ids, 4)[0];
+        let expected_hash = compute_block_hash_for_seq(&token_ids, 4, None)[0];
         assert_eq!(stored.tokens_hash, expected_hash);
+        assert!(stored.mm_extra_info.is_none());
     }
 
     // ---------------------------------------------------------------------
@@ -1113,6 +1139,7 @@ mod test_event_processing {
             &block_hashes,
             /*lora_id=*/ 0,
             &Arc::new(AtomicU32::new(0)),
+            None,
         );
 
         assert_eq!(blocks.len(), 2);
@@ -1136,6 +1163,7 @@ mod test_event_processing {
             &block_hashes,
             /*lora_id=*/ 0,
             &warning_count,
+            None,
         );
 
         // should early-exit as second has mismatch
@@ -1156,6 +1184,7 @@ mod test_event_processing {
             block_size: 4,
             lora_id: Some(0),
             medium: None,
+            block_mm_infos: None,
         };
 
         let out = convert_event(raw_evt, 42, kv_block_size, 0, &Arc::new(AtomicU32::new(0)));
@@ -1303,10 +1332,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(101),
                         tokens_hash: LocalBlockHash(201),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -1391,6 +1422,7 @@ mod tests_startup_helpers {
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
                 }],
             }),
             dp_rank: 0,
@@ -1471,6 +1503,7 @@ mod tests_startup_helpers {
                 blocks: vec![KvCacheStoredBlockData {
                     block_hash: ExternalSequenceBlockHash(100),
                     tokens_hash: LocalBlockHash(200),
+                    mm_extra_info: None,
                 }],
             }),
             dp_rank: 0,
@@ -1615,6 +1648,7 @@ mod tests_startup_helpers {
             block_size: 4,
             lora_id: None,
             medium: None,
+            block_mm_infos: None,
         }];
 
         let batch = KvEventBatch {
@@ -1705,10 +1739,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100),
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(101),
                         tokens_hash: LocalBlockHash(201),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -1769,10 +1805,12 @@ mod tests_startup_helpers {
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(100), // Shared prefix
                         tokens_hash: LocalBlockHash(200),
+                        mm_extra_info: None,
                     },
                     KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(102), // New block
                         tokens_hash: LocalBlockHash(202),
+                        mm_extra_info: None,
                     },
                 ],
             }),
@@ -2100,451 +2138,5 @@ mod test_integration_publisher {
         println!(
             "✅ KvStatsPrometheusGauges constructor and publish() work correctly with real Component"
         );
-    }
-}
-
-#[cfg(all(test, feature = "integration"))]
-mod test_integration_publisher_with_kvindexer {
-    use super::*;
-
-    use crate::kv_router::scheduler::DefaultWorkerSelector;
-    use crate::kv_router::{KvPushRouter, KvRouter, KvRouterConfig};
-    use crate::local_model::LocalModelBuilder;
-    use crate::local_model::runtime_config::ModelRuntimeConfig;
-    use crate::mocker::engine::{MOCKER_COMPONENT, MockVllmEngine};
-    use crate::mocker::protocols::MockEngineArgs;
-    use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
-    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
-    use dynamo_runtime::distributed_test_utils::create_test_shared_drt_async;
-    use dynamo_runtime::engine::AsyncEngine;
-    use dynamo_runtime::pipeline::{Context, PushRouter, RouterMode, network::Ingress};
-    use dynamo_runtime::protocols::annotated::Annotated;
-
-    /// Integration test: KvPushRouter end-to-end routing with mock engines.
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore] // Requires NATS/etcd. Run with: cargo test --package dynamo-llm --lib --features integration test_distributed_kvindexer_e2e -- --ignored --nocapture
-    async fn test_distributed_kvindexer_e2e() -> anyhow::Result<()> {
-        const BLOCK_SIZE: u32 = 4;
-        const NUM_REQUESTS: usize = 4;
-
-        dynamo_runtime::logging::init();
-
-        // === SETUP: Distributed runtimes and namespaces ===
-        let shared_store_dir = tempfile::tempdir()?;
-        let shared_store_path = shared_store_dir.path().to_path_buf();
-
-        // Make both runtimes point at the same file-backed storage backend so worker
-        // registrations and heartbeats remain visible to every DRT instance.
-        let distributed1 = create_test_shared_drt_async(&shared_store_path).await;
-        let distributed2 = create_test_shared_drt_async(&shared_store_path).await;
-        let component1 = distributed1
-            .namespace("test_e2e_router")?
-            .component(MOCKER_COMPONENT)?;
-        let component2 = distributed2
-            .namespace("test_e2e_router")?
-            .component(MOCKER_COMPONENT)?;
-
-        // === SETUP: Start mocker workers  ===
-        let mocker_args = MockEngineArgs::builder()
-            .block_size(BLOCK_SIZE as usize)
-            .dp_size(1) // single worker per runtime
-            .enable_prefix_caching(true)
-            .enable_local_indexer(true) // affects scheduler/publisher args
-            .build()?;
-
-        let worker_components = vec![component1.clone(), component2.clone()];
-        let mut server_handles = Vec::new();
-        let mut worker_ids = Vec::new();
-
-        for comp in worker_components {
-            let engine = Arc::new(MockVllmEngine::new(mocker_args.clone()));
-            engine.start(comp.clone()).await?;
-            tracing::info!("MockVllmEngine started for {:?}", comp);
-
-            // Register MDC with runtime_config so router can discover enable_local_indexer.
-            // (Without this step, the MDC-based assert in query_worker() in worker_query.rs will fail.)
-            // This inlines code which in the Python path would be performed by:
-            // - local_model.rs: LocalModelBuilder::build() sets runtime_config from MockEngineArgs
-            // - entrypoint/input/endpoint.rs: LocalModel::attach() registers MDC via discovery
-            let endpoint = comp.endpoint("generate");
-            let runtime_config = ModelRuntimeConfig {
-                enable_local_indexer: true,
-                ..Default::default()
-            };
-            let mut builder = LocalModelBuilder::default();
-            builder
-                .model_name(Some("mock".to_string()))
-                .kv_cache_block_size(Some(BLOCK_SIZE))
-                .runtime_config(runtime_config);
-            let mut local_model = builder.build().await?;
-            local_model
-                .attach(
-                    &endpoint,
-                    crate::model_type::ModelType::Chat,
-                    crate::model_type::ModelInput::Tokens,
-                    None,
-                )
-                .await?;
-
-            let ingress = Ingress::for_engine(engine.clone())?;
-            let endpoint_component = comp.clone();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = endpoint_component
-                    .endpoint("generate")
-                    .endpoint_builder()
-                    .handler(ingress)
-                    .start()
-                    .await
-                {
-                    tracing::error!("Generate endpoint failed: {e}");
-                }
-            });
-            server_handles.push(handle);
-            worker_ids.push(comp.drt().connection_id());
-        }
-        tracing::info!("Generate endpoint servers launched");
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // === SETUP: Build KvPushRouter ===
-        let router_distributed = create_test_shared_drt_async(&shared_store_path).await;
-        let router_namespace = router_distributed.namespace("test_e2e_router")?;
-        let backend_component = router_namespace.component(MOCKER_COMPONENT)?;
-        let backend_endpoint = backend_component.endpoint("generate");
-        let client = backend_endpoint.client().await?;
-        let kv_router_config = KvRouterConfig::default();
-        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
-        let consumer_id = format!("test-router-{}", router_distributed.connection_id());
-
-        let kv_router: Arc<KvRouter> = Arc::new(
-            KvRouter::new(
-                backend_endpoint.clone(),
-                client.clone(),
-                BLOCK_SIZE,
-                Some(selector),
-                Some(kv_router_config),
-                consumer_id,
-            )
-            .await?,
-        );
-
-        let push_router =
-               PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-                   client,
-                   RouterMode::KV,
-                   None,
-                   None,
-               )
-               .await?;
-
-        let kv_push_router = KvPushRouter::new(push_router, kv_router.clone());
-
-        // ===== TEST PART 1: ROUTE & SEND REQUESTS TO WORKERS (ROUTER -> WORKER) =====
-        let create_request = |tokens: Vec<u32>| {
-            PreprocessedRequest::builder()
-                .model("mock".to_string())
-                .token_ids(tokens)
-                .stop_conditions(StopConditions {
-                    max_tokens: Some(10),
-                    ..Default::default()
-                })
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .build()
-                .unwrap()
-        }; // from mocker/engine.rs
-
-        for i in 0..NUM_REQUESTS {
-            tracing::info!("Sending routed request {}", i + 1);
-            let tokens = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, i as u32];
-            let request = create_request(tokens.clone());
-
-            let response_stream = kv_push_router.generate(Context::new(request)).await?;
-            let responses: Vec<Annotated<LLMEngineOutput>> = response_stream.collect().await;
-            assert!(
-                !responses.is_empty(),
-                "Request {} should produce at least one response",
-                i + 1
-            );
-        }
-
-        tracing::info!("KvPushRouter generate() succeeded for {NUM_REQUESTS} requests");
-
-        // ===== TEST PART 2: QUERY WORKER-LOCAL KVINDEXERS DIRECTLY =====
-        // TODO: This could be refactored as router function (e.g. router.refresh_from_worker(worker_id))
-        // (which should also update the global kvIndexer with the buffer from the local kvIndexer)
-        let mut best_worker_info: Option<(u64, usize)> = None;
-
-        // Exactly one worker should have been routed requests. Find that worker
-        for &worker_id in &worker_ids {
-            let response = kv_router
-                .query_worker_local_kv(worker_id, None, None)
-                .await?;
-            let events = match response {
-                crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
-                crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
-                _ => vec![],
-            };
-            if events.is_empty() {
-                continue;
-            }
-
-            let event_count = events.len();
-            tracing::info!(
-                worker_id,
-                events = event_count,
-                "Worker query on worker {worker_id} returned buffered KV events"
-            );
-            best_worker_info = Some((worker_id, event_count));
-            break;
-        }
-
-        // Verify that only one worker has KV events in buffer
-        let (best_worker_id, best_worker_event_count) =
-            best_worker_info.expect("At least one worker should have buffered KV events");
-
-        tracing::info!(
-            "Best worker is {best_worker_id} with {best_worker_event_count} buffered KV events"
-        );
-
-        for &worker_id in &worker_ids {
-            if worker_id == best_worker_id {
-                continue;
-            }
-
-            let response = kv_router
-                .query_worker_local_kv(worker_id, None, None)
-                .await?;
-            let events = match response {
-                crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
-                crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
-                _ => vec![],
-            };
-            assert!(
-                events.is_empty(),
-                "Worker {worker_id} should not report buffered KV events; best worker {best_worker_id} reported {best_worker_event_count}"
-            );
-        }
-
-        // === Cleanup ===
-        for handle in server_handles {
-            handle.abort();
-        }
-        distributed1.shutdown();
-        distributed2.shutdown();
-        router_distributed.shutdown();
-
-        Ok(())
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
-    async fn test_distributed_kvindexer_e2e_startup() -> anyhow::Result<()> {
-        const BLOCK_SIZE: u32 = 4;
-
-        dynamo_runtime::logging::init();
-
-        // === SETUP: Distributed runtimes and namespaces ===
-        let shared_store_dir = tempfile::tempdir()?;
-        let shared_store_path = shared_store_dir.path().to_path_buf();
-
-        // Use a unique namespace per test run for full isolation
-        let test_namespace = format!("test_e2e_{}", uuid::Uuid::new_v4().simple());
-
-        // Make both runtimes point at the same file-backed storage backend so worker
-        // registrations and heartbeats remain visible to every DRT instance.
-        let distributed1 = create_test_shared_drt_async(&shared_store_path).await;
-        let distributed2 = create_test_shared_drt_async(&shared_store_path).await;
-        let component1 = distributed1
-            .namespace(&test_namespace)?
-            .component(MOCKER_COMPONENT)?;
-        let component2 = distributed2
-            .namespace(&test_namespace)?
-            .component(MOCKER_COMPONENT)?;
-
-        // === SETUP: Start mocker workers  ===
-        let mocker_args = MockEngineArgs::builder()
-            .block_size(BLOCK_SIZE as usize)
-            .dp_size(1) // single worker per runtime
-            .enable_prefix_caching(true)
-            .enable_local_indexer(true) // affects scheduler/publisher args
-            .build()?;
-
-        let worker_components = vec![component1.clone(), component2.clone()];
-        let mut server_handles = Vec::new();
-        let mut worker_ids = Vec::new();
-
-        for comp in worker_components {
-            let engine: Arc<MockVllmEngine> = Arc::new(MockVllmEngine::new(mocker_args.clone()));
-            engine.start(comp.clone()).await?;
-            tracing::info!("MockVllmEngine started for {:?}", comp);
-
-            // Register MDC with runtime_config so router can discover enable_local_indexer.
-            // (Without this step, the MDC-based assert in query_worker() in worker_query.rs will fail.)
-            // This inlines code which in the Python path would be performed by:
-            // - local_model.rs: LocalModelBuilder::build() sets runtime_config from MockEngineArgs
-            // - entrypoint/input/endpoint.rs: LocalModel::attach() registers MDC via discovery
-            let endpoint = comp.endpoint("generate");
-            let runtime_config = ModelRuntimeConfig {
-                enable_local_indexer: true,
-                ..Default::default()
-            };
-            let mut builder = LocalModelBuilder::default();
-            builder
-                .model_name(Some("mock".to_string()))
-                .kv_cache_block_size(Some(BLOCK_SIZE))
-                .runtime_config(runtime_config);
-            let mut local_model = builder.build().await?;
-            local_model
-                .attach(
-                    &endpoint,
-                    crate::model_type::ModelType::Chat,
-                    crate::model_type::ModelInput::Tokens,
-                    None,
-                )
-                .await?;
-
-            let ingress = Ingress::for_engine(engine.clone())?;
-            let endpoint_component = comp.clone();
-            let handle = tokio::spawn(async move {
-                if let Err(e) = endpoint_component
-                    .endpoint("generate")
-                    .endpoint_builder()
-                    .handler(ingress)
-                    .start()
-                    .await
-                {
-                    tracing::error!("Generate endpoint failed: {e}");
-                }
-            });
-            server_handles.push(handle);
-            worker_ids.push(comp.drt().connection_id());
-        }
-        tracing::info!("Generate endpoint servers launched");
-
-        tokio::time::sleep(Duration::from_millis(500)).await;
-
-        // === STEP 1: Send request to worker_ids[0] to populate its local indexer ===
-        // This simulates a situation where KvPushRouter is initialized
-        // to route to workers which already have KV events
-        let pre_router_distributed = create_test_shared_drt_async(&shared_store_path).await;
-        let pre_backend_endpoint = pre_router_distributed
-            .namespace(&test_namespace)?
-            .component(MOCKER_COMPONENT)?
-            .endpoint("generate");
-        let pre_client = pre_backend_endpoint.client().await?;
-
-        // Wait for the client to discover both workers
-        let discovery_timeout = Duration::from_secs(5);
-        let discovery_start = std::time::Instant::now();
-        loop {
-            let instances = pre_client.instance_source.as_ref().borrow().clone();
-            if instances.len() >= 2 {
-                tracing::info!("Discovered {} workers", instances.len());
-                break;
-            }
-            if discovery_start.elapsed() > discovery_timeout {
-                anyhow::bail!(
-                    "Timed out waiting for worker discovery: expected 2, found {}",
-                    instances.len()
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        // Create a PushRouter to send requests directly to a specific worker
-        let pre_push_router =
-            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client_with_threshold(
-                pre_client,
-                RouterMode::Random, // We'll use direct() so mode doesn't matter
-                None,
-                None,
-            )
-            .await?;
-
-        // Force sending one requests each to the two workers
-        for &worker_id in &worker_ids {
-            let tokens: Vec<u32> = vec![0, 1, 2, 3];
-            let request = PreprocessedRequest::builder()
-                .model("mock".to_string())
-                .token_ids(tokens.clone())
-                .sampling_options(SamplingOptions::default())
-                .output_options(OutputOptions::default())
-                .stop_conditions(StopConditions {
-                    max_tokens: Some(5),
-                    ..Default::default()
-                })
-                .build()?;
-            let response_stream = pre_push_router
-                .direct(Context::new(request), worker_id)
-                .await?;
-            // Consume the stream to complete the request
-            let _responses: Vec<_> = response_stream.collect().await;
-            tracing::debug!(
-                "Sent request {:?} directly to worker {} to populate its local indexer",
-                tokens,
-                worker_id
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-
-        // === SETUP: Build KvPushRouter ===
-        let router_distributed = create_test_shared_drt_async(&shared_store_path).await;
-        let router_namespace = router_distributed.namespace(&test_namespace)?;
-        let backend_component = router_namespace.component(MOCKER_COMPONENT)?;
-        let backend_endpoint = backend_component.endpoint("generate");
-        let client = backend_endpoint.client().await?;
-        let kv_router_config = KvRouterConfig::default();
-        let selector = Box::new(DefaultWorkerSelector::new(Some(kv_router_config)));
-        let consumer_id = format!("test-router-{}", router_distributed.connection_id());
-
-        let kv_router: Arc<KvRouter> = Arc::new(
-            KvRouter::new(
-                backend_endpoint.clone(),
-                client.clone(),
-                BLOCK_SIZE,
-                Some(selector),
-                Some(kv_router_config),
-                consumer_id,
-            )
-            .await?,
-        );
-
-        // The KvRouter now starts its subscriber asynchronously in a background task
-        // that waits for runtime_configs. Poll until events appear or timeout.
-        // Each request generates 2 events: input block (parent_hash: None) + output block (parent_hash: Some)
-        // With 2 workers, that's 4 events total.
-        let expected_events = 4;
-        let max_wait = Duration::from_secs(10);
-        let poll_interval = Duration::from_millis(100);
-        let start = std::time::Instant::now();
-
-        let global_kv_events = loop {
-            let events = kv_router.indexer.dump_events().await?;
-            tracing::debug!("Global KV events ({}): {:?}", events.len(), events);
-            if events.len() >= expected_events {
-                break events;
-            }
-            if start.elapsed() > max_wait {
-                anyhow::bail!(
-                    "Timed out waiting for KV events: expected {}, got {}",
-                    expected_events,
-                    events.len()
-                );
-            }
-            tokio::time::sleep(poll_interval).await;
-        };
-
-        assert_eq!(global_kv_events.len(), expected_events); // 2 workers × 2 events per request (input + output)
-
-        // === Cleanup ===
-        for handle in server_handles {
-            handle.abort();
-        }
-        distributed1.shutdown();
-        distributed2.shutdown();
-        router_distributed.shutdown();
-
-        Ok(())
     }
 }

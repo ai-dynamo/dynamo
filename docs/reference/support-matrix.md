@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
@@ -52,9 +52,9 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version** | glibc version                         | CUDA Version |
 | :----------------- | :---------- | :------------------------------------ | :----------- |
-| ai-dynamo          | 0.7.1       | >=2.28                                |              |
-| ai-dynamo-runtime  | 0.7.1       | >=2.28 (Python 3.12 has known issues) |              |
-| NIXL               | 0.7.1       | >=2.27                                | >=11.8       |
+| ai-dynamo          | 0.8.0       | >=2.28                                |              |
+| ai-dynamo-runtime  | 0.8.0       | >=2.28 (Python 3.12 has known issues) |              |
+| NIXL               | 0.8.0       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
 
@@ -62,10 +62,10 @@ The following table shows the dependency versions included with each Dynamo rele
 
 | **Dependency** | **main (ToT)** | **v0.8.0 (unreleased)** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
 | :------------- | :------------- | :---------------------- | :--------- | :--------------- | :--------- |
-| SGLang         | 0.5.6          | 0.5.6.post1             | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
-| TensorRT-LLM   | 1.2.0rc5       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
+| SGLang         | 0.5.6.post2    | 0.5.6.post2             | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
+| TensorRT-LLM   | 1.2.0rc6       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
 | vLLM           | 0.12.0         | 0.12.0                  | 0.11.0     | 0.11.0           | 0.11.0     |
-| NIXL           | 0.8.0          | 0.8.0                   | 0.7.1      | 0.7.1            | 0.7.1      |
+| NIXL           | 0.8.0          | 0.8.0                   | 0.8.0      | 0.8.0            | 0.8.0      |
 
 > [!Note]
 > **main (ToT)** reflects the current development branch. **v0.8.0** is the upcoming release (planned for January 14, 2025) and not yet available.

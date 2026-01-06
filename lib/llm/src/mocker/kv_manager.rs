@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # KV Manager
@@ -139,6 +139,7 @@ impl KvManager {
                     .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(global_hash),
                         tokens_hash: LocalBlockHash(*local_hash),
+                        mm_extra_info: None,
                     })
                     .collect(),
             })

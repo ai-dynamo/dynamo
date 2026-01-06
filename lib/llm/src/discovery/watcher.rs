@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     entrypoint::{self, EngineFactoryCallback, RouterConfig},
+    http::service::metrics::Metrics,
     kv_router::PrefillRouter,
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
@@ -54,6 +55,7 @@ pub struct ModelWatcher {
     notify_on_model: Notify,
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
+    metrics: Arc<Metrics>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -70,6 +72,7 @@ impl ModelWatcher {
         model_manager: Arc<ModelManager>,
         router_config: RouterConfig,
         engine_factory: Option<EngineFactoryCallback>,
+        metrics: Arc<Metrics>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
@@ -78,6 +81,7 @@ impl ModelWatcher {
             notify_on_model: Notify::new(),
             model_update_tx: None,
             engine_factory,
+            metrics,
         }
     }
 
@@ -445,12 +449,14 @@ impl ModelWatcher {
                     >(
                         card,
                         &client,
+                        self.manager.clone(),
                         self.router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
                         tokenizer_hf.clone(),
                         prefill_chooser.clone(),
                         self.router_config.enforce_disagg,
+                        self.metrics.clone(),
                     )
                     .await
                     .context("build_routed_pipeline")?
@@ -477,6 +483,7 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
+                    self.manager.clone(),
                     self.router_config.router_mode,
                     worker_monitor,
                     kv_chooser,
@@ -484,6 +491,7 @@ impl ModelWatcher {
                     tokenizer_hf,
                     prefill_chooser,
                     self.router_config.enforce_disagg,
+                    self.metrics.clone(),
                 )
                 .await
                 .context("build_routed_pipeline_with_preprocessor")?;

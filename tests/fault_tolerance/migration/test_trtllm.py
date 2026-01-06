@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -27,6 +27,7 @@ from .utils import (
     determine_request_receiving_worker,
     start_completion_request,
     validate_completion_response,
+    verify_migration_metrics,
     verify_migration_occurred,
 )
 
@@ -189,6 +190,11 @@ def test_request_migration_trtllm_worker_failure(
                 # Step 7: Verify migration occurred
                 verify_migration_occurred(frontend)
 
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
+
 
 @pytest.mark.timeout(290)  # 3x average
 @pytest.mark.skip(reason="TRT-LLM graceful shutdown not yet implemented")
@@ -246,6 +252,11 @@ def test_request_migration_trtllm_graceful_shutdown(
 
                 # Step 7: Verify migration occurred during graceful shutdown
                 verify_migration_occurred(frontend)
+
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
 
 
 @pytest.mark.timeout(185)  # 3x average
