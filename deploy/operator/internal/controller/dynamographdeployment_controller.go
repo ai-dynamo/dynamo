@@ -912,13 +912,17 @@ func (r *DynamoGraphDeploymentReconciler) computeGroveRestartStatus(
 			order := dynamo.GetRestartOrder(dgd)
 			// If we haven't processed all services yet, start the next batch
 			if restartState != nil && len(restartState.ServicesToAnnotate) < len(order) {
-				// More services to go - this will be handled on next reconcile
-				// when DetermineGroveRestartState includes the next service
-				logger.Info("Sequential restart: current batch complete, more services pending")
-				return &nvidiacomv1alpha1.RestartStatus{
-					ObservedAt: specAt,
-					Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
-					InProgress: []string{}, // Will trigger next batch on next reconcile
+				// Find the next service to restart
+				// The next service is at the index equal to the number of services already annotated
+				nextServiceIndex := len(restartState.ServicesToAnnotate)
+				if nextServiceIndex < len(order) {
+					nextService := order[nextServiceIndex]
+					logger.Info("Sequential restart: current batch complete, starting next service", "nextService", nextService)
+					return &nvidiacomv1alpha1.RestartStatus{
+						ObservedAt: specAt,
+						Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+						InProgress: []string{nextService},
+					}
 				}
 			}
 		}
