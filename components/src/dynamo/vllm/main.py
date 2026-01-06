@@ -35,7 +35,7 @@ from dynamo.vllm.multimodal_handlers import (
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
     ProcessorHandler,
-    VLLMNativeEncoderWorkerHandler,
+    VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
 
@@ -766,7 +766,7 @@ async def init_vllm_native_encoder(runtime: DistributedRuntime, config: Config):
     ) = setup_vllm_engine(config)
 
     # Initialize vLLM Native Encoder Worker Handler
-    handler = VLLMNativeEncoderWorkerHandler(
+    handler = VLLMEncodeWorkerHandler(
         runtime,
         component,
         engine_client,
