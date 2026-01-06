@@ -290,10 +290,10 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 
 		// Apply restart annotation if this service should be restarted
 		if restartState.ShouldAnnotateService(componentName) {
-			if deployment.Annotations == nil {
-				deployment.Annotations = make(map[string]string)
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
 			}
-			deployment.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+			deployment.Spec.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
 		}
 
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
