@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -449,6 +449,7 @@ impl ModelWatcher {
                     >(
                         card,
                         &client,
+                        self.manager.clone(),
                         self.router_config.router_mode,
                         worker_monitor.clone(),
                         kv_chooser.clone(),
@@ -482,6 +483,7 @@ impl ModelWatcher {
                 >(
                     card,
                     &client,
+                    self.manager.clone(),
                     self.router_config.router_mode,
                     worker_monitor,
                     kv_chooser,
