@@ -75,7 +75,7 @@ LORA_NAME="my-lora" \
 Start the Dynamo frontend and worker with LoRA support enabled:
 
 ```bash
-./agg_lora_s3.sh
+./agg_lora.sh
 ```
 
 This will:
@@ -259,7 +259,7 @@ curl -X POST http://localhost:8081/v1/loras \
 
 ### Using Different Base Models
 
-To use a different base model, modify the `--model` parameter in `agg_lora_s3.sh`:
+To use a different base model, modify the `--model` parameter in `agg_lora.sh`:
 
 ```bash
 python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf --enable-lora --max-lora-rank 64
@@ -271,7 +271,7 @@ Ensure your LoRAs are compatible with the chosen base model.
 
 ### Stop Services
 
-Press `Ctrl+C` in the terminal running `agg_lora_s3.sh` to stop Dynamo services.
+Press `Ctrl+C` in the terminal running `agg_lora.sh` to stop Dynamo services.
 
 ### Stop MinIO
 

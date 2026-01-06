@@ -52,9 +52,6 @@
    backends/trtllm/gpt-oss.md
    backends/trtllm/prometheus.md
 
-   backends/sglang/multinode-examples.md
-   backends/sglang/dsr1-wideep-gb200.md
-   backends/sglang/dsr1-wideep-h100.md
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
    backends/sglang/profiling.md
