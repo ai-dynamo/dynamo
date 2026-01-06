@@ -12,6 +12,20 @@ export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
 export MODALITY=${MODALITY:-"multimodal"}
 
+# Parse optional flags
+ROUTER_MODE=""
+EXTRA_WORKER_ARGS=""
+for arg in "$@"; do
+    case $arg in
+        --router-mode=*)
+            ROUTER_MODE="--router-mode ${arg#*=}"
+            ;;
+        --publish-events-and-metrics)
+            EXTRA_WORKER_ARGS="$EXTRA_WORKER_ARGS --publish-events-and-metrics"
+            ;;
+    esac
+done
+
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
@@ -24,7 +38,7 @@ trap cleanup EXIT INT TERM
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
-python3 -m dynamo.frontend &
+python3 -m dynamo.frontend $ROUTER_MODE &
 DYNAMO_PID=$!
 
 # run prefill worker
@@ -33,7 +47,8 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
-  --disaggregation-mode prefill &
+  --disaggregation-mode prefill \
+  $EXTRA_WORKER_ARGS &
 PREFILL_PID=$!
 
 # run decode worker

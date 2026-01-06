@@ -183,6 +183,23 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
+    "disaggregated_multimodal_router": TRTLLMConfig(
+        name="disaggregated_multimodal_router",
+        directory=trtllm_dir,
+        script_name="disagg_multimodal.sh",
+        script_args=["--router-mode=kv", "--publish-events-and-metrics"],
+        marks=[
+            pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        request_payloads=[multimodal_payload_default()],
+    ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
         directory=trtllm_dir,
