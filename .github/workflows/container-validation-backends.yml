@@ -167,7 +167,7 @@ jobs:
   # ============================================================================
   operator:
     needs: [detect-buildkit-workers, changed-files]
-    if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -257,7 +257,7 @@ jobs:
 
   copy-operator-to-acr:
     needs: [operator, changed-files]
-    if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -300,7 +300,7 @@ jobs:
   vllm-pipeline:
     needs: [detect-buildkit-workers, changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: vllm
       arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
@@ -319,7 +319,7 @@ jobs:
   sglang-pipeline:
     needs: [detect-buildkit-workers, changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: sglang
       buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.sglang_amd64 }}
@@ -334,7 +334,7 @@ jobs:
   trtllm-pipeline:
     needs: [detect-buildkit-workers, changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: trtllm
       buildkit_amd64_addresses: ${{ needs.detect-buildkit-workers.outputs.trtllm_amd64 }}
