@@ -18,6 +18,8 @@ from kr8s.objects import Pod, Service
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+# LogStreamManager removed - using PVC-based log collection only
+
 
 def _get_workspace_dir() -> str:
     """Get workspace directory without depending on dynamo.common package.
@@ -200,6 +202,48 @@ class ServiceSpec:
 
         # Auto-adjust GPU count to match tensor parallel size
         self.gpus = value
+
+    # ----- Readiness Probe -----
+    def set_readiness_probe(
+        self,
+        period_seconds: int = 10,
+        initial_delay_seconds: int = 0,
+        timeout_seconds: int = 4,
+        failure_threshold: int = 3,
+        path: str = "/health",
+        port: int = 9090,
+    ):
+        """Set readiness probe configuration for this service.
+
+        Args:
+            period_seconds: How often to perform the probe (default: 10)
+            initial_delay_seconds: Delay before first probe (default: 0)
+            timeout_seconds: Probe timeout (default: 4)
+            failure_threshold: Failures before marking unready (default: 3)
+            path: HTTP path to probe (default: "/health")
+            port: Port to probe (default: 9090 for workers, use 8000 for frontend)
+        """
+        self._spec["readinessProbe"] = {
+            "httpGet": {
+                "path": path,
+                "port": port,
+            },
+            "periodSeconds": period_seconds,
+            "initialDelaySeconds": initial_delay_seconds,
+            "timeoutSeconds": timeout_seconds,
+            "failureThreshold": failure_threshold,
+        }
+
+    # ----- Termination Grace Period -----
+    def set_termination_grace_period(self, seconds: int = 60):
+        """Set termination grace period for this service's pods.
+
+        Args:
+            seconds: Grace period in seconds (default: 60)
+        """
+        if "extraPodSpec" not in self._spec:
+            self._spec["extraPodSpec"] = {}
+        self._spec["extraPodSpec"]["terminationGracePeriodSeconds"] = seconds
 
 
 class DeploymentSpec:
@@ -456,10 +500,304 @@ class DeploymentSpec:
         service = self.get_service(service_name)
         service.replicas = replicas
 
+    def set_service_readiness_probe(
+        self, service_name: str, period_seconds: int, **kwargs
+    ):
+        """Set readiness probe for a specific service.
+
+        Args:
+            service_name: Name of the service (e.g., "TRTLLMDecodeWorker")
+            period_seconds: How often to perform the probe
+            **kwargs: Additional probe options (initial_delay_seconds, timeout_seconds, etc.)
+        """
+        service = self.get_service(service_name)
+        service.set_readiness_probe(period_seconds=period_seconds, **kwargs)
+
+    def set_service_termination_grace_period(self, service_name: str, seconds: int):
+        """Set termination grace period for a specific service.
+
+        Args:
+            service_name: Name of the service (e.g., "TRTLLMDecodeWorker")
+            seconds: Grace period in seconds
+        """
+        service = self.get_service(service_name)
+        service.set_termination_grace_period(seconds)
+
     def save(self, out_file: str):
         """Save updated deployment to file"""
         with open(out_file, "w") as f:
             yaml.safe_dump(self._deployment_spec, f, default_flow_style=False)
+
+    def enable_log_collection(
+        self,
+        pvc_name=None,
+        pvc_size="1Gi",
+        storage_class="nebius-shared-fs",
+        container_log_dir="/tmp/service_logs",
+        enable_all_services=True,
+        service_names=None,
+    ):
+        """
+        Enable log collection using a PersistentVolumeClaim with RWX (ReadWriteMany) access.
+
+        This approach creates a PVC that can be shared across all pods in the deployment,
+        allowing reliable log collection that persists through pod restarts and deletions.
+
+        IMPORTANT: Requires a storage class that supports ReadWriteMany (RWX) access mode.
+        If the cluster does not support RWX, an error will be raised at deployment time.
+
+        Args:
+            pvc_name: Name of the PVC to create (auto-generated if not provided)
+            pvc_size: Size of the PVC (e.g., "1Gi", "500Mi")
+            storage_class: Storage class name (must support RWX). Default: "nebius-shared-fs"
+            container_log_dir: Directory inside container where logs are written
+            enable_all_services: If True, wrap commands for all services
+            service_names: List of specific service names to wrap (used if enable_all_services is False)
+
+        Raises:
+            RuntimeError: If the storage class does not support RWX access mode
+        """
+        if enable_all_services:
+            target_services = self.services
+        else:
+            target_services = [self[name] for name in (service_names or [])]
+
+        # Generate unique PVC name if not provided - do this once and store it
+        if pvc_name is None:
+            import random
+            import time
+
+            # Use timestamp + random to ensure uniqueness even if multiple deployments start simultaneously
+            timestamp = int(time.time())
+            rand_suffix = random.randint(1000, 9999)
+            pvc_name = f"{self.name}-logs-{timestamp}-{rand_suffix}"
+
+        # Store PVC info for later use by ManagedDeployment
+        self._log_collection_pvc_name = pvc_name
+        self._log_collection_pvc_size = pvc_size
+        self._log_collection_storage_class = storage_class
+        self._log_collection_container_dir = container_log_dir
+
+        # Debug: Log the generated PVC name for consistency verification
+        print(f"[DEBUG] Generated PVC name: {pvc_name}")
+
+        # Add PVC at deployment level (following recipe pattern)
+        if "pvcs" not in self._deployment_spec["spec"]:
+            self._deployment_spec["spec"]["pvcs"] = []
+
+        # Remove any existing log PVCs to avoid conflicts
+        self._deployment_spec["spec"]["pvcs"] = [
+            pvc
+            for pvc in self._deployment_spec["spec"]["pvcs"]
+            if not pvc.get("name", "").endswith("-logs-pvc")
+            and pvc.get("name") != pvc_name
+        ]
+
+        # Add the log collection PVC (will be created by ManagedDeployment)
+        self._deployment_spec["spec"]["pvcs"].append(
+            {
+                "name": pvc_name,
+                "create": False,  # PVC will be created manually by ManagedDeployment
+            }
+        )
+
+        # Wrap all target services to use PVC-based logging
+        for service in target_services:
+            self._wrap_service_command_with_pvc(service, container_log_dir, pvc_name)
+
+    def _wrap_service_command_with_pvc(
+        self, service: ServiceSpec, container_log_dir: str, pvc_name: str
+    ):
+        """Wrap service command with PVC volume mounting for log collection."""
+        # Check if command is already wrapped to avoid double wrapping
+        main_container = service._spec.get("extraPodSpec", {}).get("mainContainer", {})
+        existing_command = main_container.get("command", [])
+
+        if (
+            len(existing_command) >= 3
+            and existing_command[:2] == ["/bin/bash", "-c"]
+            and "tee -a" in existing_command[2]
+        ):
+            return  # Already wrapped, skip
+
+        # Do the standard command wrapping
+        self._wrap_service_command(service, container_log_dir)
+
+        # Clean up any existing service-level volume mounts that might conflict
+        if "volumeMounts" in service._spec:
+            service._spec["volumeMounts"] = [
+                mount
+                for mount in service._spec["volumeMounts"]
+                if not (
+                    mount.get("name", "").startswith("service-logs")
+                    or mount.get("mountPoint") == container_log_dir
+                )
+            ]
+
+        # Add volume mount at service level (following Dynamo operator and recipe pattern)
+        if "volumeMounts" not in service._spec:
+            service._spec["volumeMounts"] = []
+
+        service._spec["volumeMounts"].append(
+            {
+                "name": pvc_name,  # Use the PVC name directly (not service-logs-pvc)
+                "mountPoint": container_log_dir,
+            }
+        )
+
+    def _get_service_default_command(
+        self, service: ServiceSpec, main_container: dict
+    ) -> tuple[list[str], list[str]]:
+        """
+        Get the default command and args for a service.
+
+        Priority:
+        1. Explicit command/args in main_container (from YAML)
+        2. Component type defaults (for services like frontend that have Go operator defaults)
+
+        Args:
+            service: The service specification
+            main_container: The mainContainer dict from extraPodSpec
+
+        Returns:
+            tuple: (command, args) where both are lists of strings
+        """
+        # First, check if command/args are explicitly set in the main container
+        existing_command = main_container.get("command", [])
+        existing_args = main_container.get("args", [])
+
+        if existing_command or existing_args:
+            return existing_command, existing_args
+
+        # If no explicit command, use component type defaults
+        component_type = service.component_type
+
+        # Frontend default command (from Go operator: component_frontend.go)
+        if component_type == "frontend":
+            return ["python3"], ["-m", "dynamo.frontend"]
+
+        # Default fallback - this should be rare since most services define their commands
+        return ["python3"], []
+
+    def _wrap_service_command(self, service: ServiceSpec, container_log_dir: str):
+        """
+        Wrap a service's command to tee output to a log file in the volume.
+
+        The wrapping strategy:
+        1. Get the original command and args (either explicit or default)
+        2. Create a shell script that:
+           - Sets up the log directory
+           - Creates a unique log file name (with timestamp and random suffix)
+           - Runs the original command while teeing output to the log file
+           - Handles signals properly for graceful shutdown
+        """
+        # Ensure extraPodSpec exists
+        if "extraPodSpec" not in service._spec:
+            service._spec["extraPodSpec"] = {"mainContainer": {}}
+        if "mainContainer" not in service._spec["extraPodSpec"]:
+            service._spec["extraPodSpec"]["mainContainer"] = {}
+
+        main_container = service._spec["extraPodSpec"]["mainContainer"]
+
+        # Get original command and args
+        original_command, original_args = self._get_service_default_command(
+            service, main_container
+        )
+
+        # Create the log file name with timestamp and random component for uniqueness
+
+        #        timestamp = int(time.time())
+        #        log_filename = f"{service.name.lower()}_{timestamp}_$RANDOM.log"
+        #        log_path = f"{container_log_dir}/{log_filename}"
+
+        # Build the original command string
+        if original_args:
+            full_original_command = " ".join(original_command + original_args)
+        else:
+            full_original_command = " ".join(original_command)
+
+        # Create the wrapper script
+        # Uses $POD_NAME (from downward API) for log filename to match kubectl logs naming
+        #
+        # Key design: Use exec with process substitution so signals go directly to the
+        # main process without any trapping. The main process becomes the shell's replacement
+        # and receives signals exactly as if it were PID 1.
+        wrapper_script = f"""#!/bin/bash
+set -e
+
+# Setup log directory
+mkdir -p {container_log_dir}
+
+# Use actual pod name (from downward API) + timestamp for unique log file per restart
+# This matches the naming used by kubectl logs (e.g., trtllm-disagg-0-frontend-sqfcx.log)
+LOG_FILE="{container_log_dir}/${{POD_NAME}}_$(date +%s).log"
+
+# Log startup information
+echo "=== SERVICE START at $(date --iso-8601=seconds) ===" | tee -a "$LOG_FILE"
+echo "Service: {service.name}" | tee -a "$LOG_FILE"
+echo "Component Type: {service.component_type}" | tee -a "$LOG_FILE"
+echo "Command: {full_original_command}" | tee -a "$LOG_FILE"
+echo "Log File: $LOG_FILE" | tee -a "$LOG_FILE"
+echo "Pod: $POD_NAME" | tee -a "$LOG_FILE"
+echo "Namespace: $POD_NAMESPACE" | tee -a "$LOG_FILE"
+echo "=================================" | tee -a "$LOG_FILE"
+
+# Use exec with process substitution so the main process receives signals directly.
+# No signal trapping needed - the main process replaces this shell and handles
+# signals exactly as it would if it were PID 1.
+exec {full_original_command} > >(tee -a "$LOG_FILE") 2>&1"""
+
+        # Set the wrapped command
+        main_container["command"] = ["/bin/bash", "-c", wrapper_script]
+
+        # Remove any existing args since we're now using a shell script
+        if "args" in main_container:
+            del main_container["args"]
+
+        # Add volume mount at service level (Dynamo operator pattern)
+        if "volumeMounts" not in service._spec:
+            service._spec["volumeMounts"] = []
+
+        # Check if mount already exists
+        log_mount_exists = any(
+            mount.get("name") == "service-logs"
+            for mount in service._spec["volumeMounts"]
+        )
+        if not log_mount_exists:
+            service._spec["volumeMounts"].append(
+                {"name": "service-logs", "mountPoint": container_log_dir}
+            )
+
+        # Volume is shared across all services via deployment-level pvcs,
+        # so no need to add it to individual service extraPodSpec
+
+        # Add environment variables for pod identification (using Kubernetes downward API)
+        if "envs" not in service._spec:
+            service._spec["envs"] = []
+
+        # Add POD_NAME env var (actual Kubernetes pod name for log file naming)
+        pod_name_env_exists = any(
+            env.get("name") == "POD_NAME" for env in service._spec["envs"]
+        )
+        if not pod_name_env_exists:
+            service._spec["envs"].append(
+                {
+                    "name": "POD_NAME",
+                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}},
+                }
+            )
+
+        # Add POD_NAMESPACE env var
+        namespace_env_exists = any(
+            env.get("name") == "POD_NAMESPACE" for env in service._spec["envs"]
+        )
+        if not namespace_env_exists:
+            service._spec["envs"].append(
+                {
+                    "name": "POD_NAMESPACE",
+                    "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}},
+                }
+            )
 
 
 class PodProcess:
@@ -512,6 +850,10 @@ class ManagedDeployment:
     deployment_spec: DeploymentSpec
     namespace: str
     skip_service_restart: bool = False
+    enable_volume_log_collection: bool = (
+        False  # PVC-based log collection (requires RWX storage class)
+    )
+    container_log_dir: str = "/tmp/service_logs"  # Directory for volume logs
 
     _custom_api: Optional[client.CustomObjectsApi] = None
     _core_api: Optional[client.CoreV1Api] = None
@@ -521,6 +863,11 @@ class ManagedDeployment:
     _deployment_name: Optional[str] = None
     _apps_v1: Optional[Any] = None
     _active_port_forwards: List[Any] = field(default_factory=list)
+
+    # PVC-based log collection
+    _log_collection_pvc_created: bool = field(
+        default=False, init=False
+    )  # Track if we created a PVC
 
     @property
     def frontend_service_name(self):
@@ -691,6 +1038,26 @@ class ManagedDeployment:
             await asyncio.sleep(sleep)
         raise TimeoutError("Deployment failed to become ready within timeout")
 
+    async def get_deployment_status(self) -> dict:
+        """Get current deployment status (state and conditions).
+
+        Returns:
+            dict with 'state' and 'conditions' keys
+        """
+        assert self._custom_api is not None, "Kubernetes API not initialized"
+        status = await self._custom_api.get_namespaced_custom_object(
+            group="nvidia.com",
+            version="v1alpha1",
+            namespace=self.namespace,
+            plural="dynamographdeployments",
+            name=self._deployment_name,
+        )
+        status_obj = status.get("status", {})
+        return {
+            "state": status_obj.get("state"),
+            "conditions": status_obj.get("conditions", []),
+        }
+
     async def _restart_nats(self):
         NATS_STS_NAME = "dynamo-platform-nats"
         NATS_LABEL = "app.kubernetes.io/component=nats"
@@ -732,7 +1099,28 @@ class ManagedDeployment:
             self._logger.info(f"Deployment Started {self._deployment_name}")
         except exceptions.ApiException as e:
             if e.status == 409:  # Already exists
-                self._logger.info(f"Deployment {self._deployment_name} already exists")
+                # Fallback: Replace the existing deployment with the new spec
+                # This ensures the new spec (e.g., different replica counts) is applied
+                self._logger.info(
+                    f"Deployment {self._deployment_name} already exists, replacing with new spec..."
+                )
+                try:
+                    await self._custom_api.replace_namespaced_custom_object(
+                        group="nvidia.com",
+                        version="v1alpha1",
+                        namespace=self.namespace,
+                        plural="dynamographdeployments",
+                        name=self._deployment_name,
+                        body=self.deployment_spec.spec(),
+                    )
+                    self._logger.info(
+                        f"Deployment {self._deployment_name} replaced successfully"
+                    )
+                except exceptions.ApiException as replace_e:
+                    self._logger.error(
+                        f"Failed to replace deployment {self._deployment_name}: {replace_e}"
+                    )
+                    raise
             else:
                 self._logger.info(
                     f"Failed to create deployment {self._deployment_name}: {e}"
@@ -924,6 +1312,49 @@ class ManagedDeployment:
             if e.status != 404:  # Ignore if already deleted
                 raise
 
+    async def _wait_for_deletion(self, timeout: int = 120):
+        """
+        Wait for the deployment CR to be fully deleted from Kubernetes.
+
+        This prevents a race condition where _create_deployment() is called
+        before the previous deployment is fully removed, resulting in a 409
+        error and the new deployment spec never being applied.
+
+        Args:
+            timeout: Maximum time to wait in seconds (default 120s)
+        """
+        if not self._deployment_name or self._custom_api is None:
+            return
+
+        start_time = time.time()
+        self._logger.info(
+            f"Waiting for deployment {self._deployment_name} to be fully deleted..."
+        )
+
+        while (time.time() - start_time) < timeout:
+            try:
+                await self._custom_api.get_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=self.namespace,
+                    plural="dynamographdeployments",
+                    name=self._deployment_name,
+                )
+                # CR still exists, wait
+                await asyncio.sleep(2)
+            except exceptions.ApiException as e:
+                if e.status == 404:
+                    self._logger.info(
+                        f"Deployment {self._deployment_name} fully deleted"
+                    )
+                    return
+                raise
+
+        self._logger.warning(
+            f"Deployment {self._deployment_name} deletion timed out after {timeout}s, "
+            "proceeding anyway (will attempt to patch if exists)"
+        )
+
     def port_forward(
         self, pod: Pod, remote_port: int, max_connection_attempts: int = 3
     ):
@@ -1001,8 +1432,10 @@ class ManagedDeployment:
 
     async def _cleanup(self):
         try:
-            # Collect logs/metrics first; any PFs opened here will be tracked and stopped below.
+            # Collect traditional logs/metrics while pods are still running
             self._get_service_logs()
+
+            # Stop port forwards
             self._logger.info(
                 f"Cleaning up {len(self._active_port_forwards)} active port forwards"
             )
@@ -1010,8 +1443,6 @@ class ManagedDeployment:
                 try:
                     port_forward.stop()
                 except RuntimeError as e:
-                    # Expected error when pod is terminated:
-                    # "anext(): asynchronous generator is already running"
                     if "anext()" in str(e) or "already running" in str(e):
                         self._logger.debug(f"Port forward cleanup: {e}")
                     else:
@@ -1022,7 +1453,8 @@ class ManagedDeployment:
                     self._logger.debug(f"Error stopping port forward: {e}")
             self._active_port_forwards.clear()
         finally:
-            await self._delete_deployment()
+            # Clean up all resources (deployment, then extract logs from PVC, then delete PVC)
+            await self._cleanup_all_resources()
 
     async def __aenter__(self):
         try:
@@ -1038,8 +1470,36 @@ class ManagedDeployment:
                 tasks.extend([self._restart_etcd(), self._restart_nats()])
             await asyncio.gather(*tasks)
 
+            # Wait for CR to be fully deleted to avoid race condition
+            # where _create_deployment() gets 409 (Already exists) and
+            # the new deployment spec is never applied
+            await self._wait_for_deletion()
+
+            # Enable PVC-based log collection before deployment creation
+            if self.enable_volume_log_collection:
+                # Check if PVC-based logging is already configured (by enable_log_collection)
+                pvc_configured = hasattr(
+                    self.deployment_spec, "_log_collection_pvc_name"
+                )
+
+                if pvc_configured:
+                    self._logger.info(
+                        f"PVC-based log collection configured: {self.deployment_spec._log_collection_pvc_name}"
+                    )
+                    # Validate RWX support and create PVC
+                    await self._create_log_collection_pvc()
+                else:
+                    # Auto-configure PVC-based logging with defaults
+                    self._logger.info("Auto-configuring PVC-based log collection")
+                    self.deployment_spec.enable_log_collection(
+                        container_log_dir=self.container_log_dir,
+                        enable_all_services=True,
+                    )
+                    await self._create_log_collection_pvc()
+
             await self._create_deployment()
             await self._wait_for_ready()
+            # Note: Download job will be created during cleanup after pods exit
 
         except:
             await self._cleanup()
@@ -1048,6 +1508,729 @@ class ManagedDeployment:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._cleanup()
+
+    async def create_log_download_job(
+        self,
+        local_output_dir: str,
+        container_log_dir="/tmp/service_logs",
+        job_name=None,
+        download_timeout=300,
+    ):
+        """
+        Create a Kubernetes job to download log files from the PVC-based service-logs volume.
+
+        This job will:
+        1. Mount the same PVC as the deployment services
+        2. Create a tar archive of all log files
+        3. Keep the job pod alive for extraction (similar to ManagedAIPerfDeployment pattern)
+
+        Args:
+            local_output_dir: Local directory to save the downloaded logs
+            container_log_dir: Container directory where logs are stored (should match enable_log_collection)
+            job_name: Optional custom job name (defaults to deployment-name-log-download)
+            download_timeout: Timeout in seconds for the download job
+
+        Returns:
+            dict: Information about the created job
+        """
+        if not self._custom_api:
+            raise RuntimeError(
+                "Kubernetes API not initialized. Call _init_kubernetes() first."
+            )
+
+        # Generate job name
+        if not job_name:
+            job_name = (
+                f"{self.deployment_spec.name}-log-download-{secrets.token_hex(4)}"
+            )
+
+        os.makedirs(local_output_dir, exist_ok=True)
+
+        # Create the log download script - keeps container alive for on-demand extraction
+        download_script = f"""#!/bin/bash
+set -e
+
+echo "=== LOG DOWNLOAD JOB STARTED at $(date --iso-8601=seconds) ==="
+echo "Deployment: {self.deployment_spec.name}"
+echo "Namespace: {self.namespace}"
+echo "Container log dir: {container_log_dir}"
+echo "Job name: {job_name}"
+
+# Create archive directory
+mkdir -p /tmp/log_archive
+
+if [ ! -d "{container_log_dir}" ]; then
+    echo "Log directory {container_log_dir} does not exist, creating it..."
+    mkdir -p {container_log_dir}
+fi
+
+# Mark job as ready (tar will be created on-demand at extraction time)
+echo "ready" > /tmp/log_archive/job_ready.txt
+
+echo "=== LOG DOWNLOAD JOB READY at $(date --iso-8601=seconds) ==="
+echo "Waiting for extraction signal. Logs will be archived on-demand."
+
+# Keep container alive for extraction
+while true; do
+    LOG_COUNT=$(find {container_log_dir} -name "*.log" -type f 2>/dev/null | wc -l)
+    echo "[$(date '+%H:%M:%S')] Log download job alive - $LOG_COUNT log files available"
+    sleep 60
+done"""
+
+        # Define the job spec
+        job_spec = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": job_name,
+                "namespace": self.namespace,
+                "labels": {
+                    "app": "log-download",
+                    "managed-by": "managed-deployment",
+                    "deployment": self.deployment_spec.name,
+                },
+            },
+            "spec": {
+                "backoffLimit": 1,
+                "completions": 1,
+                "parallelism": 1,
+                "template": {
+                    "metadata": {
+                        "labels": {
+                            "app": "log-download",
+                            "job-name": job_name,
+                        }
+                    },
+                    "spec": {
+                        "restartPolicy": "Never",
+                        "containers": [
+                            {
+                                "name": "log-downloader",
+                                "image": "busybox:1.35",  # Lightweight image with tar support
+                                "command": ["/bin/sh", "-c", download_script],
+                                "volumeMounts": [
+                                    {
+                                        "name": "service-logs",
+                                        "mountPath": container_log_dir,
+                                        "readOnly": True,  # Read-only since we're just downloading
+                                    }
+                                ],
+                                "resources": {
+                                    "requests": {"cpu": "100m", "memory": "128Mi"},
+                                    "limits": {"cpu": "500m", "memory": "512Mi"},
+                                },
+                            }
+                        ],
+                        "volumes": [
+                            {
+                                "name": "service-logs",
+                                **self._get_download_job_volume_config(),
+                            }
+                        ],
+                    },
+                },
+            },
+        }
+
+        # Create the job using BatchV1Api
+        try:
+            batch_api = client.BatchV1Api()
+            await batch_api.create_namespaced_job(
+                namespace=self.namespace, body=job_spec
+            )
+            self._logger.info(f"Log download job created: {job_name}")
+
+            return {
+                "success": True,
+                "job_name": job_name,
+                "namespace": self.namespace,
+                "local_output_dir": local_output_dir,
+            }
+
+        except exceptions.ApiException as e:
+            if e.status == 409:  # Already exists
+                self._logger.warning(f"Job {job_name} already exists")
+                return {
+                    "success": True,
+                    "job_name": job_name,
+                    "namespace": self.namespace,
+                    "local_output_dir": local_output_dir,
+                    "note": "job_already_existed",
+                }
+            else:
+                self._logger.error(f"Failed to create job {job_name}: {e}")
+                raise
+
+    async def extract_logs_from_download_job(
+        self, job_name: str, local_output_dir: str
+    ):
+        """
+        Extract logs from a log download job pod by creating tar on-demand.
+
+        This method creates the tar archive at extraction time (not at job start),
+        ensuring all logs up to this point are captured.
+
+        Args:
+            job_name: Name of the log download job
+            local_output_dir: Local directory to save the extracted logs
+
+        Returns:
+            dict: Extraction results including file count and paths
+        """
+        container_log_dir = self.container_log_dir
+
+        try:
+            # Find the job pod
+            pods = []
+            job_label = f"job-name={job_name}"
+            pod_generator = kr8s.get(
+                "pods",
+                namespace=self.namespace,
+                label_selector=job_label,
+            )
+            for pod in pod_generator:
+                pods.append(pod)
+
+            if not pods:
+                raise Exception(f"No pods found for job {job_name}")
+
+            pod = pods[0]
+
+            # Wait for job to be ready
+            self._logger.info("Waiting for log download job to be ready...")
+            for attempt in range(60):  # Wait up to 60 seconds
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.create_task(
+                            asyncio.to_thread(
+                                pod.exec,
+                                ["test", "-f", "/tmp/log_archive/job_ready.txt"],
+                            )
+                        ),
+                        timeout=5.0,
+                    )
+                    if result.returncode == 0:
+                        break
+                except Exception:
+                    pass
+
+                self._logger.info(
+                    f"Waiting for download job to be ready... (attempt {attempt + 1}/60)"
+                )
+                await asyncio.sleep(1)
+            else:
+                self._logger.warning(
+                    "Download job did not become ready in expected time, proceeding anyway..."
+                )
+
+            # Create tar archive ON-DEMAND (captures all logs up to this point)
+            self._logger.info("Creating tar archive of logs on-demand...")
+            create_tar_script = f"""
+cd {container_log_dir} 2>/dev/null || exit 1
+LOG_COUNT=$(find . -name "*.log" -type f | wc -l)
+echo "LOG_COUNT:$LOG_COUNT"
+if [ "$LOG_COUNT" -gt 0 ]; then
+    tar -czf /tmp/log_archive/service_logs.tar.gz *.log 2>/dev/null
+    echo "TAR_CREATED:true"
+else
+    echo "TAR_CREATED:false"
+fi
+"""
+            tar_result = await asyncio.wait_for(
+                asyncio.create_task(
+                    asyncio.to_thread(pod.exec, ["sh", "-c", create_tar_script])
+                ),
+                timeout=30.0,
+            )
+
+            # Parse the output to get log count
+            output = tar_result.stdout.decode() if tar_result.stdout else ""
+            log_count = 0
+            tar_created = False
+            for line in output.split("\n"):
+                if line.startswith("LOG_COUNT:"):
+                    log_count = int(line.split(":")[1])
+                elif line.startswith("TAR_CREATED:"):
+                    tar_created = line.split(":")[1] == "true"
+
+            self._logger.info(f"Found {log_count} log files, tar_created={tar_created}")
+
+            extracted_files = []
+
+            if log_count > 0 and tar_created:
+                # Extract the tar archive
+                self._logger.info("Extracting service logs archive...")
+                cat_result = await asyncio.wait_for(
+                    asyncio.create_task(
+                        asyncio.to_thread(
+                            pod.exec, ["cat", "/tmp/log_archive/service_logs.tar.gz"]
+                        )
+                    ),
+                    timeout=60.0,
+                )
+
+                if cat_result.returncode != 0:
+                    raise Exception(
+                        f"Archive extraction failed with return code {cat_result.returncode}"
+                    )
+
+                # Save the archive locally
+                local_archive = os.path.join(local_output_dir, "service_logs.tar.gz")
+                with open(local_archive, "wb") as f:
+                    f.write(cat_result.stdout)
+
+                # Extract the archive locally
+                import tarfile
+
+                with tarfile.open(local_archive, "r:gz") as tar:
+                    tar.extractall(path=local_output_dir)
+                    extracted_files = tar.getnames()
+
+                # Remove the temporary archive file
+                os.remove(local_archive)
+
+                self._logger.info(
+                    f"Extracted {len(extracted_files)} log files to {local_output_dir}"
+                )
+
+            else:
+                self._logger.info("No log files were available for download")
+
+            # Create metadata file locally
+            import json
+
+            metadata = {
+                "deployment_name": self.deployment_spec.name,
+                "namespace": self.namespace,
+                "extraction_timestamp": asyncio.get_event_loop().time(),
+                "job_name": job_name,
+                "log_count": log_count,
+                "container_log_dir": container_log_dir,
+            }
+            metadata_path = os.path.join(local_output_dir, "download_metadata.json")
+            with open(metadata_path, "w") as f:
+                json.dump(metadata, f, indent=2)
+            extracted_files.append("download_metadata.json")
+
+            return {
+                "success": True,
+                "extracted_files": extracted_files,
+                "log_count": log_count,
+                "local_output_dir": local_output_dir,
+            }
+
+        except Exception as e:
+            self._logger.error(
+                f"Failed to extract logs from download job {job_name}: {e}"
+            )
+            return {
+                "success": False,
+                "error": str(e),
+                "local_output_dir": local_output_dir,
+            }
+
+    async def cleanup_log_download_job(self, job_name: str):
+        """
+        Clean up a log download job and its associated pods.
+
+        Args:
+            job_name: Name of the job to clean up
+        """
+        try:
+            # Delete the job with foreground propagation to cascade to pods
+            from kubernetes_asyncio.client.models import V1DeleteOptions
+
+            delete_options = V1DeleteOptions(propagation_policy="Foreground")
+
+            batch_api = client.BatchV1Api()
+            await batch_api.delete_namespaced_job(
+                name=job_name,
+                namespace=self.namespace,
+                body=delete_options,
+            )
+            self._logger.info(f"Log download job {job_name} deleted")
+
+        except exceptions.ApiException as e:
+            if e.status != 404:  # Ignore if already deleted
+                self._logger.warning(
+                    f"Failed to delete log download job {job_name}: {e}"
+                )
+
+    async def download_volume_logs_now(self, local_output_dir=None):
+        """
+        Download logs from volume-based collection immediately.
+
+        This creates a temporary download job, extracts logs, and cleans up the job.
+        Useful for downloading logs during test execution (not just at cleanup time).
+
+        Args:
+            local_output_dir: Optional local directory to save logs (defaults to log_dir/volume_logs_manual)
+
+        Returns:
+            dict: Download results
+        """
+        if not self.enable_volume_log_collection:
+            return {"success": False, "error": "Volume log collection is not enabled"}
+
+        if local_output_dir is None:
+            local_output_dir = os.path.join(self.log_dir, "volume_logs_manual")
+
+        self._logger.info("Downloading volume logs on demand...")
+
+        try:
+            # Create a temporary download job
+            download_job_result = await self.create_log_download_job(
+                local_output_dir=local_output_dir,
+                container_log_dir=self.container_log_dir,
+            )
+
+            if not download_job_result.get("success"):
+                return {"success": False, "error": "Failed to create download job"}
+
+            job_name = download_job_result["job_name"]
+
+            # Extract logs
+            result = await self.extract_logs_from_download_job(
+                job_name, local_output_dir
+            )
+
+            if result["success"]:
+                self._logger.info(
+                    f"Successfully downloaded {result['log_count']} log files to {local_output_dir}"
+                )
+
+            # Cleanup the temporary job
+            await self.cleanup_log_download_job(job_name)
+
+            return result
+
+        except Exception as e:
+            self._logger.error(f"Failed to download volume logs: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def _create_log_collection_pvc(self) -> str:
+        """
+        Create a PVC for log collection based on the deployment spec configuration.
+
+        Requires a storage class that supports ReadWriteMany (RWX) access mode.
+
+        Returns:
+            The name of the created PVC
+
+        Raises:
+            RuntimeError: If the storage class does not support RWX access mode
+        """
+        pvc_name = getattr(
+            self.deployment_spec, "_log_collection_pvc_name", "dynamo-logs-pvc"
+        )
+        pvc_size = getattr(self.deployment_spec, "_log_collection_pvc_size", "1Gi")
+        storage_class = getattr(
+            self.deployment_spec, "_log_collection_storage_class", "nebius-shared-fs"
+        )
+
+        # Validate RWX support
+        await self._validate_rwx_support(storage_class)
+
+        self._logger.info(
+            f"Creating PVC {pvc_name} with storage class {storage_class} (RWX)"
+        )
+
+        # Check if PVC already exists and delete it to start fresh
+        try:
+            await self._core_api.read_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            self._logger.info(
+                f"PVC {pvc_name} already exists, deleting it to start fresh"
+            )
+            await self._core_api.delete_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            # Wait a moment for deletion to complete
+            await asyncio.sleep(2)
+            self._logger.info(f"Deleted existing PVC {pvc_name}")
+        except client.ApiException as e:
+            if e.status != 404:  # Not found is expected, other errors are issues
+                self._logger.warning(
+                    f"Error checking/deleting existing PVC {pvc_name}: {e}"
+                )
+            else:
+                self._logger.info(f"PVC {pvc_name} does not exist, will create new one")
+
+        # Create PVC with RWX access mode
+        pvc_spec = {
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": {
+                "name": pvc_name,
+                "namespace": self.namespace,
+                "labels": {
+                    "managed-by": "managed-deployment",
+                    "deployment": self.deployment_spec.name,
+                    "purpose": "log-collection",
+                    "app": f"{self.deployment_spec.name}-logs",
+                },
+            },
+            "spec": {
+                "accessModes": [
+                    "ReadWriteMany"
+                ],  # RWX required for multi-pod log collection
+                "storageClassName": storage_class,
+                "resources": {"requests": {"storage": pvc_size}},
+            },
+        }
+
+        try:
+            await self._core_api.create_namespaced_persistent_volume_claim(
+                namespace=self.namespace, body=pvc_spec
+            )
+            self._log_collection_pvc_created = True
+            self._logger.info(f"Created PVC {pvc_name} for log collection ({pvc_size})")
+
+            # Simple verification - just wait a moment for PVC to be available
+            self._logger.info(
+                f"Waiting 5 seconds for PVC {pvc_name} to be available in cluster..."
+            )
+            await asyncio.sleep(5)
+
+            self._logger.info(
+                f"Proceeding with deployment assuming PVC {pvc_name} was created successfully"
+            )
+            return pvc_name
+
+        except client.ApiException as e:
+            self._logger.error(f"Failed to create PVC {pvc_name}: {e}")
+            raise
+
+    async def _validate_rwx_support(self, storage_class_name: str):
+        """
+        Validate that the storage class supports ReadWriteMany (RWX) access mode.
+
+        Args:
+            storage_class_name: Name of the storage class to validate
+
+        Raises:
+            RuntimeError: If the storage class does not exist or doesn't support RWX
+        """
+        try:
+            storage_api = client.StorageV1Api()
+            sc = await storage_api.read_storage_class(name=storage_class_name)
+
+            # Note: StorageClass doesn't explicitly list supported access modes
+            # The validation happens when the PVC is bound to a PV
+            # We just verify the storage class exists
+            self._logger.info(
+                f"Storage class '{storage_class_name}' exists (provisioner: {sc.provisioner})"
+            )
+
+            # Known RWX-capable provisioners
+            rwx_provisioners = [
+                "nfs",
+                "cephfs",
+                "glusterfs",
+                "azurefile",
+                "efs.csi.aws.com",
+                "file.csi.azure.com",
+                "csi.cloudscale.ch",
+                "mounted-fs-path.csi.nebius",  # Nebius mounted filesystem (RWX capable)
+            ]
+
+            # Check if provisioner is known to support RWX
+            provisioner_lower = sc.provisioner.lower() if sc.provisioner else ""
+            supports_rwx = any(p in provisioner_lower for p in rwx_provisioners)
+
+            if not supports_rwx:
+                self._logger.warning(
+                    f"Storage class '{storage_class_name}' uses provisioner '{sc.provisioner}' "
+                    f"which may not support ReadWriteMany (RWX). "
+                    f"Log collection requires RWX for multi-pod access. "
+                    f"Known RWX provisioners: {rwx_provisioners}"
+                )
+                raise RuntimeError(
+                    f"Storage class '{storage_class_name}' (provisioner: {sc.provisioner}) "
+                    f"may not support ReadWriteMany (RWX) access mode. "
+                    f"Log collection requires RWX for reliable multi-pod log capture. "
+                    f"Please use a storage class with an RWX-capable provisioner."
+                )
+
+            self._logger.info(
+                f"Storage class '{storage_class_name}' appears to support RWX"
+            )
+
+        except client.ApiException as e:
+            if e.status == 404:
+                raise RuntimeError(
+                    f"Storage class '{storage_class_name}' does not exist. "
+                    f"Please specify a valid storage class that supports ReadWriteMany (RWX)."
+                )
+            raise
+
+    async def _cleanup_log_collection_pvc(self):
+        """
+        Clean up the log collection PVC if we created it.
+        """
+        if not self._log_collection_pvc_created:
+            return
+
+        pvc_name = getattr(
+            self.deployment_spec, "_log_collection_pvc_name", "dynamo-logs-pvc"
+        )
+
+        try:
+            await self._core_api.delete_namespaced_persistent_volume_claim(
+                name=pvc_name, namespace=self.namespace
+            )
+            self._logger.info(f"Cleaned up log collection PVC {pvc_name}")
+
+        except client.ApiException as e:
+            if e.status != 404:  # Not found is acceptable during cleanup
+                self._logger.warning(f"Failed to cleanup PVC {pvc_name}: {e}")
+
+    def _get_download_job_volume_config(self) -> dict:
+        """
+        Get the PVC volume configuration for the log download job.
+
+        Returns:
+            dict: Volume configuration for the download job using PVC
+
+        Raises:
+            RuntimeError: If PVC-based logging is not configured
+        """
+        if hasattr(self.deployment_spec, "_log_collection_pvc_name"):
+            pvc_name = self.deployment_spec._log_collection_pvc_name
+            return {"persistentVolumeClaim": {"claimName": pvc_name}}
+        else:
+            raise RuntimeError(
+                "PVC-based log collection is not configured. "
+                "Call deployment_spec.enable_log_collection() before using ManagedDeployment."
+            )
+
+    async def _cleanup_all_resources(self):
+        """
+        Comprehensive cleanup of all resources created by this deployment.
+
+        Order for volume log collection:
+        1. Delete deployment (pods exit gracefully, write final logs to PVC)
+        2. Wait for pods to terminate
+        3. Create download job to extract logs from PVC
+        4. Extract logs
+        5. Delete download job
+        6. Delete PVC
+        """
+        try:
+            # Delete the main deployment first (pods write final logs to PVC on exit)
+            self._logger.info("Deleting deployment...")
+            await self._delete_deployment()
+
+            # Wait for pods to fully terminate before extracting logs
+            if self.enable_volume_log_collection:
+                self._logger.info("Waiting for pods to terminate...")
+                await self._wait_for_pods_terminated()
+
+                # Now create download job to extract logs from PVC (after pods are gone)
+                await self._extract_logs_from_pvc()
+
+                # Clean up PVC
+                await self._cleanup_log_collection_pvc()
+
+            # Clean up any orphaned jobs related to this deployment
+            await self._cleanup_orphaned_jobs()
+
+        except Exception as e:
+            self._logger.warning(f"Error during comprehensive cleanup: {e}")
+
+    async def _wait_for_pods_terminated(self, timeout: int = 120):
+        """Wait for all deployment pods to terminate."""
+        label_selector = f"dynamo-deployment={self.deployment_spec.name}"
+        for attempt in range(timeout):
+            try:
+                pods = await self._core_api.list_namespaced_pod(
+                    namespace=self.namespace, label_selector=label_selector
+                )
+                if not pods.items:
+                    self._logger.info("All pods terminated")
+                    return
+                running = [
+                    p.metadata.name
+                    for p in pods.items
+                    if p.status.phase not in ("Succeeded", "Failed")
+                ]
+                if not running:
+                    self._logger.info("All pods completed")
+                    return
+                self._logger.info(
+                    f"Waiting for {len(running)} pods to terminate... ({attempt + 1}/{timeout})"
+                )
+            except Exception as e:
+                self._logger.debug(f"Error checking pods: {e}")
+            await asyncio.sleep(1)
+        self._logger.warning(f"Timeout waiting for pods to terminate after {timeout}s")
+
+    async def _extract_logs_from_pvc(self):
+        """Create download job, extract logs, and cleanup job."""
+        try:
+            volume_logs_dir = os.path.join(self.log_dir, "volume_logs")
+            os.makedirs(volume_logs_dir, exist_ok=True)
+
+            # Create download job
+            self._logger.info("Creating log download job...")
+            download_job_result = await self.create_log_download_job(
+                local_output_dir=volume_logs_dir,
+                container_log_dir=self.container_log_dir,
+            )
+
+            if not download_job_result.get("success"):
+                self._logger.warning("Failed to create log download job")
+                return
+
+            job_name = download_job_result["job_name"]
+            self._logger.info(f"Log download job created: {job_name}")
+
+            # Extract logs
+            extraction_result = await self.extract_logs_from_download_job(
+                job_name, volume_logs_dir
+            )
+            if extraction_result.get("success"):
+                self._logger.info(
+                    f"Successfully extracted {extraction_result.get('log_count', 0)} log files"
+                )
+            else:
+                self._logger.warning(
+                    f"Log extraction failed: {extraction_result.get('error', 'Unknown error')}"
+                )
+
+            # Cleanup download job
+            await self.cleanup_log_download_job(job_name)
+
+        except Exception as e:
+            self._logger.warning(f"Error extracting logs from PVC: {e}")
+
+    async def _cleanup_orphaned_jobs(self):
+        """Clean up any jobs that might be left behind."""
+        try:
+            # Get all jobs in the namespace that are related to this deployment
+            batch_api = client.BatchV1Api()
+            jobs = await batch_api.list_namespaced_job(
+                namespace=self.namespace,
+                label_selector=f"deployment={self.deployment_spec.name}",
+            )
+
+            for job in jobs.items:
+                job_name = job.metadata.name
+                try:
+                    # Delete the job with cascade to clean up pods
+                    await batch_api.delete_namespaced_job(
+                        name=job_name,
+                        namespace=self.namespace,
+                        body=client.V1DeleteOptions(propagation_policy="Background"),
+                    )
+                    self._logger.info(f"Cleaned up orphaned job: {job_name}")
+                except client.ApiException as e:
+                    if e.status != 404:
+                        self._logger.warning(f"Failed to cleanup job {job_name}: {e}")
+
+        except Exception as e:
+            self._logger.warning(f"Error cleaning up orphaned jobs: {e}")
 
 
 async def main():

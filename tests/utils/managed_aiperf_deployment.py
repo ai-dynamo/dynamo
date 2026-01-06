@@ -14,6 +14,8 @@ import kr8s
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+# LogStreamManager removed - using PVC-based log collection only
+
 
 @dataclass
 class LoadConfig:
@@ -154,6 +156,7 @@ class ManagedAIPerfDeployment:
             "32",
             "--ui",
             "simple",
+            "--verbose",
         ]
 
         # Add duration or request count based on configuration (following client.py pattern)
@@ -193,7 +196,7 @@ set -e
 
 # Setup environment
 apt-get update && apt-get install -y curl jq procps git && apt-get clean
-pip install git+https://github.com/ai-dynamo/aiperf.git@4d3fa29403c8f75da22a14f1f7b3aeb27db9288f
+pip install aiperf
 echo "aiperf installation completed"
 
 # Configure networking
