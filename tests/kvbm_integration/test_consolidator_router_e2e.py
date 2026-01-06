@@ -14,17 +14,14 @@ This test validates that:
 
 import concurrent.futures
 import importlib.util
-import json
 import logging
 import os
 import re
 import time
 from pathlib import Path
-from typing import Optional
 
 import pytest
 import requests
-import torch
 import yaml
 
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
@@ -893,12 +890,12 @@ class TestConsolidatorRouterE2E:
                             messages=[{"role": "user", "content": prompt}],
                             max_tokens=max_tokens,
                         )
+                    except requests.RequestException as e:
+                        logger.exception(f"Request {request_idx} failed")
+                        return (request_idx, False)
+                    else:
                         success = "content" in response["choices"][0]["message"]
                         return (request_idx, success)
-                    except Exception as e:
-                        logger.error(f"Request {request_idx} failed: {e}")
-                        return (request_idx, False)
-
                 completed_count = 0
                 failed_count = 0
                 with ThreadPoolExecutor(max_workers=concurrency) as executor:
@@ -907,7 +904,7 @@ class TestConsolidatorRouterE2E:
                         for i in range(num_requests)
                     }
                     for future in as_completed(futures):
-                        request_idx, success = future.result()
+                        _request_idx, success = future.result()
                         if success:
                             completed_count += 1
                         else:
