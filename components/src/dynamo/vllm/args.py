@@ -484,7 +484,8 @@ def overwrite_args(config):
         ensure_side_channel_host()
 
     defaults = {
-        "task": "generate",
+        # vLLM 0.13+ renamed 'task' to 'runner'
+        "runner": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
