@@ -232,39 +232,6 @@ def _setup_pytorch_integration(
     return pool
 
 
-def register_allocator(manager: "GMSClientMemoryManager") -> None:
-    """Register an externally-created memory manager.
-
-    This is used for the import-only (read mode) path where the memory manager
-    is created directly to handle timeout gracefully. On success, it should
-    be registered here.
-
-    If a memory manager is already registered, this is a no-op if it's the same
-    manager, otherwise raises an error.
-
-    Args:
-        manager: The memory manager to register.
-
-    Raises:
-        RuntimeError: If a different memory manager is already registered.
-    """
-    global _allocator
-
-    if _allocator is manager:
-        return  # Already registered
-
-    if _allocator is not None:
-        raise RuntimeError(
-            "Cannot register memory manager: another one is already registered. "
-            "Only one memory manager per process is allowed."
-        )
-
-    _allocator = manager
-    logger.debug(
-        "[GPU Memory Service] Registered memory manager (device=%s)", manager.device
-    )
-
-
 def get_allocator() -> Optional["GMSClientMemoryManager"]:
     """Get the active GPU Memory Service memory manager without creating one.
 
@@ -272,28 +239,3 @@ def get_allocator() -> Optional["GMSClientMemoryManager"]:
         The memory manager, or None if none exists.
     """
     return _allocator
-
-
-def get_mem_pool() -> Optional["MemPool"]:
-    """Get the MemPool for PyTorch integration.
-
-    Returns:
-        The MemPool, or None if not created (read mode or no memory manager).
-    """
-    return _mem_pool
-
-
-def clear_allocator() -> None:
-    """Clear the memory manager and all associated PyTorch components.
-
-    This should be called during cleanup.
-    """
-    global _allocator, _mem_pool, _pluggable_alloc
-
-    if _allocator is not None:
-        logger.debug(
-            "[GPU Memory Service] Cleared memory manager and PyTorch components"
-        )
-    _allocator = None
-    _mem_pool = None
-    _pluggable_alloc = None

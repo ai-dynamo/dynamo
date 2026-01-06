@@ -122,26 +122,3 @@ def patch_model_runner_for_gpu_memory_service() -> None:
     logger.info(
         "[GPU Memory ServicePatch] Patched SGLang ModelRunner.init_memory_pool for memory accounting safety"
     )
-
-
-def unpatch_model_runner_for_gpu_memory_service() -> None:
-    """Remove the ModelRunner.init_memory_pool patch."""
-    global _model_runner_patched, _original_init_memory_pool
-
-    if not _model_runner_patched:
-        return
-
-    try:
-        from sglang.srt.model_executor.model_runner import ModelRunner  # type: ignore
-
-        if _original_init_memory_pool is not None:
-            ModelRunner.init_memory_pool = _original_init_memory_pool
-    except Exception:
-        pass
-    finally:
-        _original_init_memory_pool = None
-        _model_runner_patched = False
-
-
-def is_model_runner_patched() -> bool:
-    return _model_runner_patched

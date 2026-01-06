@@ -28,32 +28,18 @@ from gpu_memory_service.client.memory_manager import (
     GMSClientMemoryManager,
     StaleWeightsError,
 )
-from gpu_memory_service.client.rpc import GMSRPCClient
 
 # PyTorch integration (lifecycle management)
 from gpu_memory_service.client.torch.lifecycle import (
-    clear_allocator,
     get_allocator,
-    get_mem_pool,
     get_or_create_allocator,
-    register_allocator,
 )
-
-# Common types
-from gpu_memory_service.common.types import ConnectionMode, ServerState
 
 __all__ = [
     # Client
     "GMSClientMemoryManager",
     "StaleWeightsError",
-    "GMSRPCClient",
     # Lifecycle
     "get_or_create_allocator",
     "get_allocator",
-    "get_mem_pool",
-    "register_allocator",
-    "clear_allocator",
-    # Types
-    "ConnectionMode",
-    "ServerState",
 ]

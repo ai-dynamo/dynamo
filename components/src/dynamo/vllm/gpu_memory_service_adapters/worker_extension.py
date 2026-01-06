@@ -375,32 +375,6 @@ def patch_model_runner_for_gpu_memory_service() -> None:
     )
 
 
-def unpatch_model_runner_for_gpu_memory_service() -> None:
-    """Remove the Worker.load_model patch."""
-    global _worker_patched, _original_load_model
-    if not _worker_patched:
-        return
-
-    try:
-        # vLLM 0.12+ renamed GPUWorker to Worker
-        try:
-            from vllm.v1.worker.gpu_worker import Worker  # type: ignore
-        except ImportError:
-            from vllm.v1.worker.gpu_worker import GPUWorker as Worker  # type: ignore
-
-        if _original_load_model is not None:
-            Worker.load_model = _original_load_model
-    except Exception:
-        pass
-    finally:
-        _original_load_model = None
-        _worker_patched = False
-
-
-def is_worker_patched() -> bool:
-    return _worker_patched
-
-
 _sleep_wake_patched = False
 _original_sleep = None
 _original_wake_up = None
@@ -571,31 +545,6 @@ def patch_worker_sleep_wake() -> None:
         "(2) KV cache: discarded on sleep, reallocated on wake via CuMemAllocator; "
         "(3) Original Worker.sleep()/wake_up() are NEVER called"
     )
-
-
-def unpatch_worker_sleep_wake() -> None:
-    """Remove Worker.sleep() and Worker.wake_up() patches."""
-    global _sleep_wake_patched, _original_sleep, _original_wake_up
-
-    if not _sleep_wake_patched:
-        return
-
-    try:
-        try:
-            from vllm.v1.worker.gpu_worker import Worker  # type: ignore
-        except ImportError:
-            from vllm.v1.worker.gpu_worker import GPUWorker as Worker  # type: ignore
-
-        if _original_sleep is not None:
-            Worker.sleep = _original_sleep
-        if _original_wake_up is not None:
-            Worker.wake_up = _original_wake_up
-    except Exception:
-        pass
-    finally:
-        _original_sleep = None
-        _original_wake_up = None
-        _sleep_wake_patched = False
 
 
 # Apply early patches AFTER all functions are defined (avoids circular import)
