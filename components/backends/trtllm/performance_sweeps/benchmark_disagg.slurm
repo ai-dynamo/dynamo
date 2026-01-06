@@ -144,7 +144,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
   set -x
   srun -l --container-name=${CONTAINER_NAME} \
       --container-mounts=${container_mounts} \
-      --mpi=pmix \
+      --mpi=pmix --cpu-bind verbose,none \
       -w ${decode_nodes_csv} \
       --nodes ${num_decode_nodes} $gpus_per_node \
       --ntasks $decode_tp_size \
@@ -181,7 +181,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
   set -x
   srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
-        --mpi=pmix --overlap -w ${nodes[node_idx]} \
+        --mpi=pmix --cpu-bind verbose,none --overlap -w ${nodes[node_idx]} \
         --oversubscribe \
         --overlap \
         --ntasks $(( prefill_tp_size < NTASKS_PER_NODE ? prefill_tp_size : NTASKS_PER_NODE )) \

@@ -55,6 +55,9 @@ decode:
       - 8
       - 16
       - 32
+      - 58
+      - 60
+      - 62
       - 64
     print_iter_log: true
     kv_cache_config:
