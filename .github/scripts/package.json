@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "description": "Tests for .github/filters.yaml pattern matching",
   "scripts": {
-    "test": "node test-filters.js"
+    "test": "node test-filters.js",
+    "coverage": "node test-filters.js --coverage"
   },
   "dependencies": {
     "micromatch": "^4.0.8",
