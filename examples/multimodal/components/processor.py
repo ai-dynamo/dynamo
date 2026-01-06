@@ -217,7 +217,7 @@ class Processor(ProcessMixIn):
                 # Collect all text content items from this user message
                 text_parts = []
                 for item in message.content:
-                    if item.type == "text":
+                    if item.type == "text" and item.text:
                         text_parts.append(item.text)
                 # If this user message has text content, join it and add to user_texts
                 if text_parts:
