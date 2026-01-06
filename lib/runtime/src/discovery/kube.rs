@@ -22,16 +22,30 @@ use async_trait::async_trait;
 use kube::Client as KubeClient;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{OnceCell, RwLock};
+use tokio::task::JoinHandle;
 
 /// Kubernetes-based discovery client
 #[derive(Clone)]
 pub struct KubeDiscoveryClient {
     instance_id: u64,
     metadata: Arc<RwLock<DiscoveryMetadata>>,
-    metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
     kube_client: KubeClient,
     pod_info: PodInfo,
+    cancel_token: CancellationToken,
+    daemon_state: Arc<OnceCell<Arc<DaemonHandles>>>,
+}
+
+struct DaemonHandles {
+    metadata_watch: tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>,
+    #[allow(dead_code)]
+    daemon_handle: JoinHandle<()>,
+}
+
+impl DaemonHandles {
+    fn receiver(&self) -> tokio::sync::watch::Receiver<Arc<MetadataSnapshot>> {
+        self.metadata_watch.clone()
+    }
 }
 
 impl KubeDiscoveryClient {
@@ -59,27 +73,65 @@ impl KubeDiscoveryClient {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create Kubernetes client: {}", e))?;
 
-        // Create watch channel with initial empty snapshot
-        let (watch_tx, watch_rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
-
-        // Create and spawn daemon
-        let daemon = DiscoveryDaemon::new(kube_client.clone(), pod_info.clone(), cancel_token)?;
-
-        tokio::spawn(async move {
-            if let Err(e) = daemon.run(watch_tx).await {
-                tracing::error!("Discovery daemon failed: {}", e);
-            }
-        });
-
-        tracing::info!("Discovery daemon started");
-
-        Ok(Self {
+        let client = Self {
             instance_id,
             metadata,
-            metadata_watch: watch_rx,
             kube_client,
             pod_info,
-        })
+            cancel_token,
+            daemon_state: Arc::new(OnceCell::new()),
+        };
+
+        // Check if eager daemon start is requested (for frontends that need discovery clients)
+        let eager_start = std::env::var(
+            crate::config::environment_names::runtime::discovery::DYN_DISCOVERY_EAGER_START,
+        )
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+        if eager_start {
+            tracing::info!("Eager discovery daemon start requested via DYN_DISCOVERY_EAGER_START");
+            // Start the daemon now by calling metadata_watch()
+            let _ = client.metadata_watch().await;
+        }
+
+        Ok(client)
+    }
+
+    async fn metadata_watch(&self) -> Result<tokio::sync::watch::Receiver<Arc<MetadataSnapshot>>> {
+        let handles = self
+            .daemon_state
+            .get_or_try_init(|| {
+                let instance_id = self.instance_id;
+                let kube_client = self.kube_client.clone();
+                let pod_info = self.pod_info.clone();
+                let cancel_token = self.cancel_token.clone();
+
+                async move {
+                    let (watch_tx, watch_rx) =
+                        tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+                    let daemon = DiscoveryDaemon::new(kube_client, pod_info, cancel_token)?;
+
+                    let daemon_handle = tokio::spawn(async move {
+                        if let Err(e) = daemon.run(watch_tx).await {
+                            tracing::error!("Discovery daemon failed: {}", e);
+                        }
+                    });
+
+                    tracing::info!(
+                        "Discovery daemon started lazily for instance_id={:x}",
+                        instance_id
+                    );
+
+                    Ok::<Arc<DaemonHandles>, anyhow::Error>(Arc::new(DaemonHandles {
+                        metadata_watch: watch_rx,
+                        daemon_handle,
+                    }))
+                }
+            })
+            .await?;
+
+        Ok(handles.receiver())
     }
 }
 
@@ -213,8 +265,31 @@ impl Discovery for KubeDiscoveryClient {
     async fn list(&self, query: DiscoveryQuery) -> Result<Vec<DiscoveryInstance>> {
         tracing::debug!("KubeDiscoveryClient::list called with query={:?}", query);
 
-        // Get current snapshot (may be empty if daemon hasn't fetched yet)
-        let snapshot = self.metadata_watch.borrow().clone();
+        // Ensure the daemon is running before accessing the snapshot
+        let mut metadata_watch = self.metadata_watch().await?;
+
+        // Check if we need to wait for initial snapshot.
+        // With lazy daemon start, the first call to list() triggers the daemon which needs time
+        // to poll other pods and aggregate their metadata before we have meaningful results.
+        let needs_wait = {
+            let snapshot = metadata_watch.borrow();
+            snapshot.sequence == 0 && snapshot.instances.is_empty()
+        };
+
+        // Wait for daemon to fetch at least one snapshot if this is the initial empty state
+        if needs_wait {
+            tracing::debug!("Waiting for initial discovery snapshot...");
+            // Wait for first update with a timeout
+            tokio::time::timeout(std::time::Duration::from_secs(10), metadata_watch.changed())
+                .await
+                .map_err(|_| anyhow::anyhow!("Timeout waiting for initial discovery snapshot"))?
+                .map_err(|_| {
+                    anyhow::anyhow!("Discovery daemon stopped before providing snapshot")
+                })?;
+        }
+
+        // Get current snapshot
+        let snapshot = metadata_watch.borrow().clone();
 
         tracing::debug!(
             "List using snapshot seq={} with {} instances",
@@ -246,8 +321,8 @@ impl Discovery for KubeDiscoveryClient {
             query
         );
 
-        // Clone the watch receiver
-        let mut watch_rx = self.metadata_watch.clone();
+        // Clone the watch receiver (starts daemon lazily on demand)
+        let mut watch_rx = self.metadata_watch().await?;
 
         // Create output stream
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -445,5 +520,93 @@ impl Discovery for KubeDiscoveryClient {
         // Convert receiver to stream
         let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(event_rx);
         Ok(Box::pin(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::environment_names::runtime::discovery::DYN_DISCOVERY_EAGER_START;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Helper to parse eager start env var the same way as production code
+    fn parse_eager_start_env(value: &str) -> bool {
+        value.eq_ignore_ascii_case("true") || value == "1"
+    }
+
+    #[test]
+    fn test_eager_start_env_var_name() {
+        // Verify the env var name is correct
+        assert_eq!(DYN_DISCOVERY_EAGER_START, "DYN_DISCOVERY_EAGER_START");
+    }
+
+    #[tokio::test]
+    async fn test_once_cell_lazy_initialization() {
+        // This test verifies that OnceCell only initializes once
+        // even when called concurrently
+        let init_count = Arc::new(AtomicUsize::new(0));
+        let cell: Arc<OnceCell<u64>> = Arc::new(OnceCell::new());
+
+        let mut handles = vec![];
+
+        // Spawn multiple tasks that all try to initialize the cell
+        for i in 0..10 {
+            let cell_clone = cell.clone();
+            let count_clone = init_count.clone();
+            handles.push(tokio::spawn(async move {
+                // Use get_or_try_init which is what we use in production code
+                let _ = cell_clone
+                    .get_or_try_init(|| {
+                        let count_for_init = count_clone.clone();
+                        let value = i as u64;
+                        async move {
+                            count_for_init.fetch_add(1, Ordering::SeqCst);
+                            // Small delay to increase chance of race
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                            Ok::<u64, std::convert::Infallible>(value)
+                        }
+                    })
+                    .await;
+            }));
+        }
+
+        // Wait for all tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify initialization happened exactly once
+        assert_eq!(
+            init_count.load(Ordering::SeqCst),
+            1,
+            "OnceCell should only initialize once"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_daemon_handles_receiver_clone() {
+        // Test that DaemonHandles::receiver() returns working clones
+        let (tx, rx) = tokio::sync::watch::channel(Arc::new(MetadataSnapshot::empty()));
+
+        // Create a dummy JoinHandle (the task immediately completes)
+        let dummy_handle = tokio::spawn(async {});
+
+        let handles = DaemonHandles {
+            metadata_watch: rx,
+            daemon_handle: dummy_handle,
+        };
+
+        // Get two receivers
+        let rx1 = handles.receiver();
+        let rx2 = handles.receiver();
+
+        // Send an update
+        let mut updated_snapshot = MetadataSnapshot::empty();
+        updated_snapshot.sequence = 42;
+        tx.send(Arc::new(updated_snapshot)).unwrap();
+
+        // Both receivers should see the update
+        assert_eq!(rx1.borrow().sequence, 42);
+        assert_eq!(rx2.borrow().sequence, 42);
     }
 }
