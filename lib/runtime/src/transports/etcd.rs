@@ -348,27 +348,31 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let (tx, rx) = mpsc::channel(4096);
-
-        // Get start revision and existing KVs (if requested)
         let (mut start_revision, existing_kvs) = self
             .get_start_revision(prefix.as_ref(), include_existing)
             .await?;
 
-        // Resilience watch stream in background
+        // Size channel to fit all existing KVs (avoids deadlock when sending before return)
+        let existing_count = existing_kvs.as_ref().map_or(0, |kvs| kvs.len());
+        let channel_size = std::cmp::max(32, existing_count + 32);
+        let (tx, rx) = mpsc::channel(channel_size);
+
+        // Send existing KVs before returning so they're immediately available to consumers
+        if let Some(kvs) = existing_kvs {
+            tracing::trace!(
+                "sending {} existing kvs into channel (size={})",
+                kvs.len(),
+                channel_size
+            );
+            for kv in kvs {
+                tx.send(WatchEvent::Put(kv)).await?;
+            }
+        }
+
+        // Watch for new events in background
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
         self.rt.spawn(async move {
-            // Flush existing KVs first (before starting watch)
-            if let Some(kvs) = existing_kvs {
-                for kv in kvs {
-                    if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                        tracing::debug!("receiver dropped during initial kv flush");
-                        return;
-                    }
-                }
-            }
-
             let mut reconnect = true;
             while reconnect {
                 // Start a new watch stream
@@ -391,11 +395,7 @@ impl Client {
         })
     }
 
-    /// Fetch the initial revision for watching and optionally return existing key-values.
-    ///
-    /// Returns the next revision to watch from and, if `include_existing` is true,
-    /// the existing keys with the prefix. Existing KVs should be sent to the consumer
-    /// before starting the watch to maintain ordering.
+    /// Fetch the start revision and optionally return existing key-values.
     async fn get_start_revision(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
