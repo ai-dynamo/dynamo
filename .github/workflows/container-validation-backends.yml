@@ -120,7 +120,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator]
+    needs: [changed-files, vllm, sglang, trtllm, operator]
     if: always()
     steps:
       - name: "Check all dependent jobs"

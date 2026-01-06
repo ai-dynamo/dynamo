@@ -61,10 +61,10 @@ jobs:
 
   dynamo-status-check:
     runs-on: ubuntu-latest
-    needs: [build-test]
+    needs: [changed-files, build-test]
     if: always()
     steps:
-      - name: "Check build-test result"
+      - name: "Check all dependent jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
