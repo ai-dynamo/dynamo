@@ -173,11 +173,7 @@ class ChatProcessor:
         else:
             chat_template = request.chat_template or self.tokenizer.chat_template
 
-        (
-            conversation,
-            request_prompts,
-            engine_prompts,
-        ) = await self.openai_serving._preprocess_chat(
+        preprocess_result = await self.openai_serving._preprocess_chat(
             request,
             self.tokenizer,
             request.messages,
@@ -191,6 +187,13 @@ class ChatProcessor:
             tool_parser=self.openai_serving.tool_parser,
             add_special_tokens=request.add_special_tokens,
         )
+
+        # Handle vLLM version compatibility: _preprocess_chat may return 2 or 3 values
+        if len(preprocess_result) == 2:
+            conversation, request_prompts = preprocess_result
+            engine_prompts = request_prompts  # In newer vLLM, these are the same
+        else:
+            conversation, request_prompts, engine_prompts = preprocess_result
 
         return PreprocessResult(conversation[0], request_prompts[0], engine_prompts[0])
 

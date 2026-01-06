@@ -210,11 +210,6 @@ class ProcessorHandler(ProcessMixIn):
 class ECProcessorHandler(ProcessorHandler):
     """
     Processor handler for ECConnector-based encoder
-
-    This processor extends ProcessorHandler to support a disaggregated architecture:
-    - Separate encoder worker(s) for multimodal encoding
-    - Separate PD worker(s) for prefill/decode
-    - ECConnector manages shared storage for embeddings between workers
     """
 
     def __init__(
@@ -274,21 +269,6 @@ class ECProcessorHandler(ProcessorHandler):
         model: str,
         request_id: str,
     ) -> Dict[str, Any]:
-        """
-        Create an encoder request for vLLMNativeEncoderWorkerHandler.
-
-        The encoder expects VLLMNativeEncoderRequest format with:
-        - multimodal_input: MultiModalInput object
-        - modality: "image", "video", or "audio"
-
-        Args:
-            mm_item: Multimodal content item (image_url or video_url)
-            model: Model name
-            request_id: Request ID for tracking
-
-        Returns:
-            Encoder request dictionary
-        """
         # Create MultiModalInput from the item
         multimodal_input = {}
         modality = None
@@ -319,14 +299,6 @@ class ECProcessorHandler(ProcessorHandler):
 
         Each item is sent as a separate request to an encoder worker.
         The encoder processes the item and stores embeddings to shared storage.
-
-        Args:
-            mm_items: List of multimodal items to encode
-            model: Model name
-            request_id: Base request ID for tracking
-
-        Raises:
-            Exception: If any encoder request fails
         """
         if not mm_items:
             logger.debug(f"[{request_id}] No multimodal items to encode")
@@ -365,13 +337,6 @@ class ECProcessorHandler(ProcessorHandler):
     ) -> None:
         """
         Send a single request to an encoder worker and wait for completion.
-
-        Args:
-            encoder_request: The encoder request
-            request_id: Request ID for logging
-
-        Raises:
-            Exception: If encoder request fails
         """
         try:
             # Convert to JSON
@@ -393,19 +358,6 @@ class ECProcessorHandler(ProcessorHandler):
     async def generate(self, raw_request: MultiModalRequest, context):
         """
         Main endpoint handler for chat completion requests with ECConnector.
-
-        Flow (ECConnector-specific):
-        1. Preprocess request (parse, template, tokenize) - inherited from base
-        2. Extract multimodal items and send to encoder (stores via ECConnector)
-        3. Forward preprocessed request to PD worker (loads from ECConnector)
-        4. Stream response back
-
-        Args:
-            raw_request: Incoming multimodal request
-            context: Request context from runtime
-
-        Yields:
-            Response chunks from PD worker
         """
         logger.debug(f"ECProcessor received request: {raw_request}")
 

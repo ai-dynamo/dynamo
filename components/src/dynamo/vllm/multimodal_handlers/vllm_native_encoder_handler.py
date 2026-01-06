@@ -4,7 +4,7 @@ import logging
 import shutil
 from typing import AsyncGenerator
 
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import TextPrompt
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.sampling_params import SamplingParams
 
@@ -54,18 +54,12 @@ class VLLMNativeEncoderWorkerHandler:
         """
         Process encoder request and trigger vLLM encoder execution.
 
-        vLLM (configured as producer) will:
-        1. Execute encoder via _execute_mm_encoder()
-        2. Cache by mm_hash in encoder_cache
-        3. Save to ECConnector storage
-        4. Return empty output (no text generation)
-
         Args:
-            request: VLLMNativeEncoderRequest or JSON string
+            request: VLLMNativeEncoderRequest with multimodal_input
             context: Request context from Dynamo runtime
 
         Yields:
-            JSON-encoded VLLMNativeEncoderResponse with metadata
+            JSON-encoded VLLMNativeEncoderResponse with mm_hash and connector metadata
         """
         # Parse request
         if not isinstance(request, VLLMNativeEncoderRequest):
@@ -73,11 +67,6 @@ class VLLMNativeEncoderWorkerHandler:
                 request = VLLMNativeEncoderRequest.model_validate_json(request)
             else:
                 request = VLLMNativeEncoderRequest.model_validate(request)
-
-        logger.info(
-            f"Processing encoder request: request_id={request.request_id}, "
-            f"modality={request.modality}"
-        )
 
         # Load media (image/video/audio)
         # TODO: Add support for video_url and audio
@@ -101,14 +90,15 @@ class VLLMNativeEncoderWorkerHandler:
             logger.error(f"Failed to compute mm_hash: {e}")
             raise
 
-        # Call vLLM generate with multimodal data
-        # vLLM will automatically run encoder and save to ECConnector
         try:
+            # Prompt can be a random string as the encoder is only interested in the multimodal data
+            prompt_dict = TextPrompt(
+                prompt="<image>", multi_modal_data={media_key: media}
+            )
+
             gen = self.engine_client.generate(
-                prompt=TokensPrompt(
-                    prompt_token_ids=[], multi_modal_data={media_key: media}
-                ),
-                sampling_params=SamplingParams(max_tokens=0, min_tokens=0),
+                prompt=prompt_dict,
+                sampling_params=SamplingParams(max_tokens=1, min_tokens=0),
                 request_id=request.request_id,
             )
 
@@ -124,15 +114,11 @@ class VLLMNativeEncoderWorkerHandler:
             logger.error(f"Encoder execution failed: {e}")
             raise
 
-        # TODO: Get actual embeddings shape from vLLM instead of hardcoded value
-        embeddings_shape = (1, 576, 4096)
-
         # Return metadata for PD workers
         response = VLLMNativeEncoderResponse(
             request_id=request.request_id,
             mm_hash=mm_hash,
             modality=request.modality,
-            embeddings_shape=embeddings_shape,
             connector_metadata={
                 "ec_connector": self.config.ec_connector_backend,
                 "storage_path": self.config.ec_storage_path,

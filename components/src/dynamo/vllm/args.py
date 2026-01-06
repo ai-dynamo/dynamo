@@ -61,6 +61,8 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
+    # Emebdding Cache Processor is different from the regular processor
+    # TODO: Have a single processor for all cases and adopting rust based processor
     ec_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
@@ -74,7 +76,7 @@ class Config:
     ec_connector_backend: Optional[str] = "ECExampleConnector"
     ec_storage_path: Optional[str] = None
     ec_extra_config: Optional[str] = None
-    ec_consumer_mode: bool = False  # For PD workers
+    ec_consumer_mode: bool = False
 
     # dump config to file
     dump_config_to: Optional[str] = None
@@ -341,19 +343,14 @@ def parse_args() -> Config:
             )
 
     # Set component and endpoint based on worker type
-    if args.multimodal_processor:
+    if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
         config.endpoint = "generate"
-    elif args.ec_processor:
-        config.component = "processor"
-        config.endpoint = "generate"
-    elif args.vllm_native_encoder_worker:
-        config.component = "encoder"
-        config.endpoint = "generate"
-    elif args.multimodal_encode_worker:
-        config.component = "encoder"
-        config.endpoint = "generate"
-    elif args.multimodal_encode_prefill_worker:
+    elif (
+        args.vllm_native_encoder_worker
+        or args.multimodal_encode_worker
+        or args.multimodal_encode_prefill_worker
+    ):
         config.component = "encoder"
         config.endpoint = "generate"
     elif args.multimodal_decode_worker:
