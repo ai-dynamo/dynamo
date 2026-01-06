@@ -69,70 +69,72 @@ jobs:
       sglang_container: ${{ steps.filter.outputs.sglang_container }}
       trtllm_all: ${{ steps.filter.outputs.trtllm_all }}
       trtllm_container: ${{ steps.filter.outputs.trtllm_container }}
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
-      # - name: Get merge base
-      #   id: merge-base
-      #   env:
-      #     GH_TOKEN: ${{ github.token }}
-      #   run: |
-      #     # For PR branches, compare against merge-base with PR's target branch
-      #     # For main/release branches, use default behavior (previous commit)
-      #     if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
-      #       PR_NUMBER="${BASH_REMATCH[1]}"
-      #       BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
-      #       echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
-      #       BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
-      #       echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
-      #       echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
-      #     else
-      #       echo "base_sha=" >> $GITHUB_OUTPUT
-      #       echo "Using default comparison (previous commit)"
-      #     fi
-      # - name: Check for changes
-      #   uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
-      #   id: filter
-      #   with:
-      #     files_yaml_from_source_file: .github/filters.yaml
-      #     base_sha: ${{ steps.merge-base.outputs.base_sha }}
-      # - name: Debug changed files
-      #   run: |
-      #     echo "=== Base SHA Used ==="
-      #     echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
-      #     echo ""
-      #     echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
-      #     echo "${{ steps.filter.outputs.all_all_changed_files }}"
-      #     echo ""
-      #     echo "=== Filters That Matched ==="
-      #     echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
-      #     echo ""
-      #     echo "=== Filter Results (any_changed) ==="
-      #     echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"
-      #     echo "ci: ${{ steps.filter.outputs.ci_any_changed }}"
-      #     echo "core: ${{ steps.filter.outputs.core_any_changed }}"
-      #     echo "operator: ${{ steps.filter.outputs.operator_any_changed }}"
-      #     echo "deploy: ${{ steps.filter.outputs.deploy_any_changed }}"
-      #     echo "planner: ${{ steps.filter.outputs.planner_any_changed }}"
-      #     echo "vllm: ${{ steps.filter.outputs.vllm_any_changed }}"
-      #     echo "sglang: ${{ steps.filter.outputs.sglang_any_changed }}"
-      #     echo "trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}"
-      #     echo ""
-      #     echo "=== Files Matching Each Filter ==="
-      #     echo "docs: ${{ steps.filter.outputs.docs_all_changed_files }}"
-      #     echo "ci: ${{ steps.filter.outputs.ci_all_changed_files }}"
-      #     echo "core: ${{ steps.filter.outputs.core_all_changed_files }}"
-      #     echo "operator: ${{ steps.filter.outputs.operator_all_changed_files }}"
-      #     echo "deploy: ${{ steps.filter.outputs.deploy_all_changed_files }}"
-      #     echo "planner: ${{ steps.filter.outputs.planner_all_changed_files }}"
-      #     echo "vllm: ${{ steps.filter.outputs.vllm_all_changed_files }}"
-      #     echo "sglang: ${{ steps.filter.outputs.sglang_all_changed_files }}"
-      #     echo "trtllm: ${{ steps.filter.outputs.trtllm_all_changed_files }}"
+      - name: Get merge base
+        id: merge-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # For PR branches, compare against merge-base with PR's target branch
+          # For main/release branches, use default behavior (previous commit)
+          if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+            PR_NUMBER="${BASH_REMATCH[1]}"
+            BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+            echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
+            BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
+            echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+          else
+            echo "base_sha=" >> $GITHUB_OUTPUT
+            echo "Using default comparison (previous commit)"
+          fi
+      - name: Check for changes
+        uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
+        id: filter
+        with:
+          files_yaml_from_source_file: .github/filters.yaml
+          base_sha: ${{ steps.merge-base.outputs.base_sha }}
+      - name: Debug changed files
+        run: |
+          echo "=== Base SHA Used ==="
+          echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
+          echo ""
+          echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
+          echo "${{ steps.filter.outputs.all_all_changed_files }}"
+          echo ""
+          echo "=== Filters That Matched ==="
+          echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
+          echo ""
+          echo "=== Filter Results (any_changed) ==="
+          echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"
+          echo "ci: ${{ steps.filter.outputs.ci_any_changed }}"
+          echo "core: ${{ steps.filter.outputs.core_any_changed }}"
+          echo "operator: ${{ steps.filter.outputs.operator_any_changed }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_any_changed }}"
+          echo "planner: ${{ steps.filter.outputs.planner_any_changed }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_any_changed }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_any_changed }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}"
+          echo ""
+          echo "=== Files Matching Each Filter ==="
+          echo "docs: ${{ steps.filter.outputs.docs_all_changed_files }}"
+          echo "ci: ${{ steps.filter.outputs.ci_all_changed_files }}"
+          echo "core: ${{ steps.filter.outputs.core_all_changed_files }}"
+          echo "operator: ${{ steps.filter.outputs.operator_all_changed_files }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_all_changed_files }}"
+          echo "planner: ${{ steps.filter.outputs.planner_all_changed_files }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_all_changed_files }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_all_changed_files }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_all_changed_files }}"
 
-      - uses: actions/setup-python@v5
-      - uses: pre-commit/action@v3.0.0
+      - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 #v6.1.0
+      - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
         timeout-minutes: 3
 
   detect-buildkit-workers:
