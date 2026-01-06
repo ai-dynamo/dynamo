@@ -40,8 +40,10 @@ from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for
 from dynamo._core import fetch_llm as fetch_llm
 from dynamo._core import lora_name_to_id as lora_name_to_id
 from dynamo._core import make_engine
+from dynamo._core import register_endpoint_instance as register_endpoint_instance
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input
+from dynamo._core import unregister_endpoint_instance as unregister_endpoint_instance
 from dynamo._core import unregister_llm as unregister_llm
 
 from .exceptions import HttpError
