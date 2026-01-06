@@ -1,7 +1,7 @@
 :orphan:
 
 ..
-    SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
     SPDX-License-Identifier: Apache-2.0
 
 .. This hidden toctree includes readmes etc that aren't meant to be in the main table of contents but should be accounted for in the sphinx project structure
@@ -52,9 +52,6 @@
    backends/trtllm/gpt-oss.md
    backends/trtllm/prometheus.md
 
-   backends/sglang/multinode-examples.md
-   backends/sglang/dsr1-wideep-gb200.md
-   backends/sglang/dsr1-wideep-h100.md
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
    backends/sglang/profiling.md

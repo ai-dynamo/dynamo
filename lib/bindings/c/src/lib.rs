@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use async_once_cell::OnceCell as AsyncOnceCell;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use dynamo_llm::{
     discovery::{KvWorkerMonitor, ModelWatcher},
-    kv_router::{indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher},
+    kv_router::{protocols::*, publisher::KvEventPublisher},
 };
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
@@ -1080,6 +1080,9 @@ pub fn add_query_instance_id(
 ///
 /// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
 /// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
+///
+/// Also sets `enable_local_updates: false` since the external caller (EPP/GAIE)
+/// will handle bookkeeping via C FFI functions.
 pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
     decode_worker_id: Option<i64>,
@@ -1090,6 +1093,9 @@ pub fn set_worker_ids_for_stage2(
             .build()
             .expect("NvExt builder should not fail")
     });
+
+    // Disable local updates - external caller handles bookkeeping via C FFI
+    nvext.enable_local_updates = Some(false);
 
     // Check if this is aggregated mode (same worker for both)
     let is_aggregated = prefill_worker_id == decode_worker_id;
@@ -1475,6 +1481,7 @@ pub async fn create_worker_selection_pipeline_chat(
     >(
         &card_with_local_files,
         &client,
+        model_manager.clone(),
         router_mode,
         worker_monitor,
         chooser,
