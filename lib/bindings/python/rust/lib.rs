@@ -140,6 +140,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
     m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_endpoint_instance, m)?)?;
+    m.add_function(wrap_pyfunction!(register_endpoint_instance, m)?)?;
     m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
@@ -418,6 +420,42 @@ fn unregister_llm<'p>(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         // Unified detach method handles both base models and LoRA adapters
         LocalModel::detach_from_endpoint(&endpoint.inner, lora_name_owned.as_deref())
+            .await
+            .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+/// Unregister the endpoint instance from discovery.
+///
+/// This removes the endpoint from the instances bucket, preventing the router
+/// from sending requests to this worker. Use this when a worker is sleeping
+/// and should not receive any requests.
+#[pyfunction]
+fn unregister_endpoint_instance<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::unregister_endpoint_instance(&endpoint.inner)
+            .await
+            .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+/// Re-register the endpoint instance to discovery.
+///
+/// This adds the endpoint back to the instances bucket, allowing the router
+/// to send requests to this worker again. Use this when a worker wakes up
+/// and should start receiving requests.
+#[pyfunction]
+fn register_endpoint_instance<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+) -> PyResult<Bound<'p, PyAny>> {
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::register_endpoint_instance(&endpoint.inner)
             .await
             .map_err(to_pyerr)?;
         Ok(())

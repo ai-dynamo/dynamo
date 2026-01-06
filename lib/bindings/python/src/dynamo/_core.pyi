@@ -1152,6 +1152,26 @@ async def unregister_llm(
     """
     ...
 
+async def unregister_endpoint_instance(endpoint: Endpoint) -> None:
+    """
+    Unregister the endpoint instance from discovery.
+
+    This removes the endpoint from the instances bucket, preventing the router
+    from sending requests to this worker. Use this when a worker is sleeping
+    and should not receive any requests.
+    """
+    ...
+
+async def register_endpoint_instance(endpoint: Endpoint) -> None:
+    """
+    Re-register the endpoint instance to discovery.
+
+    This adds the endpoint back to the instances bucket, allowing the router
+    to send requests to this worker again. Use this when a worker wakes up
+    and should start receiving requests.
+    """
+    ...
+
 def lora_name_to_id(lora_name: str) -> int:
     """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
