@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use dashmap::DashMap;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -39,6 +38,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
+    discovery::RuntimeConfigsWithNotify,
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent},
@@ -281,7 +281,7 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        workers_with_configs: Arc<DashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>>,
+        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -290,8 +290,6 @@ impl KvRouter {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-
-        let instance_ids_rx = client.instance_avail_watcher();
 
         // Watch for runtime config updates via discovery interface
         // (still needed for WorkerQueryClient and background tasks)
@@ -339,8 +337,7 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
-            instance_ids_rx,
-            workers_with_configs,
+            workers_with_configs.clone(),
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
@@ -354,39 +351,25 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // We block here until at least one worker runtime config is registered,
-        // then spawn the subscriber. This ensures the router is ready before accepting requests.
+        // model_manager.get_or_create_runtime_config_watcher() guarantees at least one worker exists.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
+            // model_manager guarantees workers_with_configs is populated
+            // Wait for at least one worker before starting the subscriber
+            while workers_with_configs.configs.is_empty() {
+                tracing::info!("KV router waiting for at least one worker...");
+                workers_with_configs.notify.notified().await;
+            }
 
-            // Wait for at least one worker runtime config to be registered
-            tracing::info!("Waiting for at least one worker runtime config to be registered...");
-            let (all_local_indexer, count) = loop {
-                {
-                    let configs = runtime_configs_rx_clone.borrow();
-                    if !configs.is_empty() {
-                        let all_local_indexer = configs.values().all(|c| c.enable_local_indexer);
-                        break (all_local_indexer, configs.len());
-                    }
-                }
+            let count = workers_with_configs.configs.len();
+            let all_local_indexer = workers_with_configs
+                .configs
+                .iter()
+                .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
+                .all(|b| b);
 
-                // Wait for changes to runtime_configs
-                tokio::select! {
-                    _ = cancellation_token.cancelled() => {
-                        tracing::debug!("KvRouter startup cancelled while waiting for workers");
-                        anyhow::bail!("KvRouter startup cancelled");
-                    }
-                    result = runtime_configs_rx_clone.changed() => {
-                        if result.is_err() {
-                            tracing::debug!("Runtime configs channel closed");
-                            anyhow::bail!("Runtime configs channel closed before any workers registered");
-                        }
-                    }
-                }
-            };
-            tracing::info!("Found {count} worker runtime config(s), starting KV event subscriber");
+            tracing::info!("Found {count} worker(s), starting KV event subscriber");
 
             // Start subscriber - setup runs synchronously, then spawns background loop internally
             if all_local_indexer {
