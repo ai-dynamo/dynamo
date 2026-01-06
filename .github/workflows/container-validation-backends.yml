@@ -124,6 +124,7 @@ jobs:
           aws_push: 'false'
           azure_push: 'true'
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+
   vllm-cuda-13:
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
@@ -133,7 +134,7 @@ jobs:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm (${{ matrix.platform.arch }})
+    name: vllm-cuda-13 (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Output Node Name
@@ -174,8 +175,8 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda13-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-cuda13-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -186,7 +187,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
+          pytest_marks: "pre_merge and vllm and gpu_0"  # GH arm runners have no GPUs
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -200,7 +201,7 @@ jobs:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm (${{ matrix.platform.arch }})
+    name: vllm-cuda-12 (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Output Node Name
