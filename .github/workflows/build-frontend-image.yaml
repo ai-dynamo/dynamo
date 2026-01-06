@@ -4,10 +4,10 @@
 name: Build Frontend Image
 
 on:
-  # workflow_dispatch:
   push:
     branches:
-      - tusharma/add-frontend-image-ci
+    - main
+    - release/*.*.*
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name || github.run_id }}
