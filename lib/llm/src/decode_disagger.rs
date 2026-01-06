@@ -450,10 +450,6 @@ impl MigrationContext {
         running_request: &PreprocessedRequest,
         parent_ctx: &Arc<dyn AsyncEngineContext>,
     ) -> Result<MigrationContext> {
-        // If we just migrated and then got the next token, drop the previous stream
-        if let Some(previous_stream) = self.previous_stream.take() {
-            drop(previous_stream);
-        }
 
         // If we've reached the end of the current tier, migrate to the next tier
         if running_request.token_ids.len() >= self.current_tier.seqlen as usize {
@@ -634,6 +630,13 @@ impl MigrationContext {
                 self.current_tier.seqlen,
                 duration.as_secs_f64(),
             );
+
+            // Now that we've received the first token from the new tier, it's safe to
+            // drop the previous stream. This ensures the old context isn't cancelled
+            // before the KV transfer completes.
+            if let Some(previous_stream) = self.previous_stream.take() {
+                drop(previous_stream);
+            }
         }
 
         if let Some(ref data) = chunk.data {
