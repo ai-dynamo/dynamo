@@ -127,6 +127,45 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 	return true, "", serviceStatus
 }
 
+// CheckPodCliqueFullyUpdated checks if a PodClique has completed its update.
+// This requires both:
+// - spec.replicas == status.readyReplicas (pods are ready)
+// - spec.replicas == status.updatedReplicas (pods have been updated to current spec)
+// This is used for restart detection to ensure pods have actually been rolled,
+// not just that old pods are still running.
+func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string) {
+	podClique := &grovev1alpha1.PodClique{}
+	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, podClique)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.V(2).Info("PodClique not found", "resourceName", resourceName)
+			return false, "resource not found"
+		}
+		logger.V(1).Info("Failed to get PodClique", "error", err, "resourceName", resourceName)
+		return false, fmt.Sprintf("get error: %v", err)
+	}
+
+	desiredReplicas := podClique.Spec.Replicas
+	readyReplicas := podClique.Status.ReadyReplicas
+	updatedReplicas := podClique.Status.UpdatedReplicas
+
+	if desiredReplicas == 0 {
+		return true, ""
+	}
+
+	if desiredReplicas != readyReplicas {
+		logger.V(1).Info("PodClique not ready", "resourceName", resourceName, "desired", desiredReplicas, "ready", readyReplicas)
+		return false, fmt.Sprintf("desired=%d, ready=%d", desiredReplicas, readyReplicas)
+	}
+
+	if desiredReplicas != updatedReplicas {
+		logger.V(1).Info("PodClique not fully updated", "resourceName", resourceName, "desired", desiredReplicas, "updated", updatedReplicas)
+		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas)
+	}
+
+	return true, ""
+}
+
 // CheckPCSGReady checks if a PodCliqueScalingGroup has spec.replicas == status.availableReplicas
 func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string, v1alpha1.ServiceReplicaStatus) {
 	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
@@ -162,6 +201,43 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 	}
 
 	return true, "", serviceStatus
+}
+
+// CheckPCSGFullyUpdated checks if a PodCliqueScalingGroup has completed its update.
+// This requires both:
+// - spec.replicas == status.availableReplicas (pods are available)
+// - spec.replicas == status.updatedReplicas (pods have been updated to current spec)
+func CheckPCSGFullyUpdated(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string) {
+	pcsg := &grovev1alpha1.PodCliqueScalingGroup{}
+	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, pcsg)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.V(2).Info("PodCliqueScalingGroup not found", "resourceName", resourceName)
+			return false, "resource not found"
+		}
+		logger.V(1).Info("Failed to get PodCliqueScalingGroup", "error", err, "resourceName", resourceName)
+		return false, fmt.Sprintf("get error: %v", err)
+	}
+
+	desiredReplicas := pcsg.Spec.Replicas
+	availableReplicas := pcsg.Status.AvailableReplicas
+	updatedReplicas := pcsg.Status.UpdatedReplicas
+
+	if desiredReplicas == 0 {
+		return true, ""
+	}
+
+	if desiredReplicas != availableReplicas {
+		logger.V(1).Info("PodCliqueScalingGroup not available", "resourceName", resourceName, "desired", desiredReplicas, "available", availableReplicas)
+		return false, fmt.Sprintf("desired=%d, available=%d", desiredReplicas, availableReplicas)
+	}
+
+	if desiredReplicas != updatedReplicas {
+		logger.V(1).Info("PodCliqueScalingGroup not fully updated", "resourceName", resourceName, "desired", desiredReplicas, "updated", updatedReplicas)
+		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas)
+	}
+
+	return true, ""
 }
 
 // resolveKaiSchedulerQueueName extracts the queue name from annotations or returns default

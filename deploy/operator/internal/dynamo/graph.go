@@ -126,6 +126,8 @@ func IsParallelRestart(dgd *v1alpha1.DynamoGraphDeployment) bool {
 
 // getServicesToAnnotateForSequentialRestart determines which services should be annotated
 // for a sequential restart in progress.
+// It returns all services up to and including those in InProgress.
+// Services before the in-progress ones have already completed and need to keep their annotation.
 func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment) map[string]bool {
 	services := make(map[string]bool)
 
@@ -142,6 +144,7 @@ func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployme
 		return services
 	}
 
+	// Find the max index among in-progress services
 	inProgress := make(map[string]bool)
 	for _, svc := range dgd.Status.Restart.InProgress {
 		inProgress[svc] = true
@@ -150,10 +153,14 @@ func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployme
 	maxIndex := -1
 	for i, svc := range order {
 		if inProgress[svc] {
-			maxIndex = i
+			if i > maxIndex {
+				maxIndex = i
+			}
 		}
 	}
 
+	// Add all services up to and including maxIndex
+	// Services before the in-progress one have completed and need their annotation preserved
 	if maxIndex >= 0 {
 		for i := 0; i <= maxIndex; i++ {
 			services[order[i]] = true
