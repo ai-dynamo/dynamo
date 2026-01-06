@@ -13,6 +13,7 @@ ci: &ci
   - '.github/actions/**'
 
 core_code: &core_code
+  - *ci
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
