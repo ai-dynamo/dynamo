@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -102,6 +102,7 @@ Options:
     --runtime-check   Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
                       and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
     --no-gpu-check    Skip GPU detection and information collection (useful for environments without GPU access)
+    --no-framework-check Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
 """
 
 import datetime
@@ -353,11 +354,13 @@ class SystemInfo(NodeInfo):
         terse: bool = False,
         runtime_check: bool = False,
         no_gpu_check: bool = False,
+        no_framework_check: bool = False,
     ):
         self.thorough_check = thorough_check
         self.terse = terse
         self.runtime_check = runtime_check
         self.no_gpu_check = no_gpu_check
+        self.no_framework_check = no_framework_check
         if hostname is None:
             hostname = platform.node()
 
@@ -421,7 +424,7 @@ class SystemInfo(NodeInfo):
             self.add_child(gpu_info)
 
         # Add Framework info (vllm, sglang, tensorrt_llm)
-        self.add_child(FrameworkInfo())
+        self.add_child(FrameworkInfo(no_framework_check=self.no_framework_check))
 
         # In terse mode, only add other components if they have errors
         if not self.terse:
@@ -444,7 +447,7 @@ class SystemInfo(NodeInfo):
                 self.add_child(MaturinInfo())
 
             # Add Python info
-            self.add_child(PythonInfo())
+            self.add_child(PythonInfo(runtime_check=self.runtime_check))
         else:
             # In terse mode, only add components that have errors
             self._add_error_only_components()
@@ -630,7 +633,7 @@ class SystemInfo(NodeInfo):
                     thorough_check=self.thorough_check, runtime_check=self.runtime_check
                 ),
             ),
-            ("Python", PythonInfo()),
+            ("Python", PythonInfo(runtime_check=self.runtime_check)),
         ]
 
         # Skip compile-time dependencies in runtime-check mode
@@ -1325,8 +1328,8 @@ class FilePermissionsInfo(NodeInfo):
                 self.add_child(
                     NodeInfo(
                         label="Dynamo workspace",
-                        desc="not needed for runtime container",
-                        status=NodeStatus.INFO,
+                        desc="workspace not found (runtime check does not require a checkout)",
+                        status=NodeStatus.WARNING,
                     )
                 )
             else:
@@ -1340,6 +1343,15 @@ class FilePermissionsInfo(NodeInfo):
             return
 
         if not DynamoInfo.is_dynamo_workspace(dynamo_root):
+            if self.runtime_check:
+                self.add_child(
+                    NodeInfo(
+                        label="Dynamo workspace",
+                        desc="not a valid dynamo workspace (runtime check does not require a checkout)",
+                        status=NodeStatus.WARNING,
+                    )
+                )
+                return
             self.add_child(
                 NodeInfo(
                     label="Dynamo workspace",
@@ -1358,6 +1370,8 @@ class FilePermissionsInfo(NodeInfo):
             exclude_files=[".git"],
         )
         for result in results:
+            if self.runtime_check and result.status == NodeStatus.ERROR:
+                result.status = NodeStatus.WARNING
             self.add_child(result)
 
         # Check .git directory separately
@@ -1367,6 +1381,8 @@ class FilePermissionsInfo(NodeInfo):
                 [git_dir], "Dynamo .git directory", recursive=recursive
             )
             for result in git_results:
+                if self.runtime_check and result.status == NodeStatus.ERROR:
+                    result.status = NodeStatus.WARNING
                 self.add_child(result)
         else:
             self.add_child(
@@ -1419,16 +1435,19 @@ class FilePermissionsInfo(NodeInfo):
                 for result in results:
                     # If we have at least one writable site-packages,
                     # downgrade ERROR to WARNING for non-writable ones
-                    if has_writable_site_packages and result.status == NodeStatus.ERROR:
+                    if (
+                        has_writable_site_packages or self.runtime_check
+                    ) and result.status == NodeStatus.ERROR:
                         result.status = NodeStatus.WARNING
                     self.add_child(result)
 
         except Exception as e:
+            status = NodeStatus.WARNING if self.runtime_check else NodeStatus.ERROR
             self.add_child(
                 NodeInfo(
                     label="Python site-packages",
                     desc=f"Permission check failed: {str(e)}",
-                    status=NodeStatus.ERROR,
+                    status=status,
                 )
             )
 
@@ -1999,17 +2018,27 @@ class MaturinInfo(NodeInfo):
 
 
 class PythonInfo(NodeInfo):
-    """Python installation information"""
+    """Python installation information.
 
-    def __init__(self):
+    In `--runtime-check` mode, Python is still useful to report, but failures should not
+    block the container sanity check, so missing/broken Python is downgraded to WARNING.
+    """
+
+    def __init__(self, runtime_check: bool = False):
+        self.runtime_check = runtime_check
         py_version = platform.python_version()
         py_exec = sys.executable or "python"
         display_py_exec = self._replace_home_with_var(py_exec)
 
+        if os.path.exists(py_exec):
+            status = NodeStatus.OK
+        else:
+            status = NodeStatus.WARNING if self.runtime_check else NodeStatus.ERROR
+
         super().__init__(
             label="Python",
             desc=f"{py_version}, {display_py_exec}",
-            status=NodeStatus.OK if os.path.exists(py_exec) else NodeStatus.ERROR,
+            status=status,
         )
 
         # Check for PyTorch (optional)
@@ -2065,8 +2094,15 @@ class PythonInfo(NodeInfo):
 class FrameworkInfo(NodeInfo):
     """LLM Framework information"""
 
-    def __init__(self):
+    def __init__(self, no_framework_check: bool = False):
         super().__init__(label="🤖Framework", status=NodeStatus.INFO)
+
+        if no_framework_check:
+            # Why: In some environments (CI, minimal runtime containers) we may want to
+            # validate the Dynamo install without requiring a framework/engine package
+            # (vllm/sglang/tensorrt_llm) to be present.
+            self.desc = "skipped (--no-framework-check)"
+            return
 
         # Check for framework packages (mandatory to show)
         frameworks_to_check = [
@@ -2682,8 +2718,8 @@ class DynamoInfo(NodeInfo):
         if self.runtime_check and not workspace_dir:
             super().__init__(
                 label="Dynamo",
-                desc="Runtime container - checking installed packages",
-                status=NodeStatus.INFO,
+                desc="workspace not found (runtime container) - checking installed packages",
+                status=NodeStatus.WARNING,
             )
             # Check runtime components even without workspace
             runtime_info = DynamoRuntimeInfo(
@@ -2964,6 +3000,12 @@ def main():
         action="store_true",
         help="Skip GPU detection and information collection (useful for CI environments without GPU access)",
     )
+    parser.add_argument(
+        "--no-framework-check",
+        dest="no_framework_check",
+        action="store_true",
+        help="Skip LLM framework package checks (vllm, sglang, tensorrt_llm)",
+    )
     args = parser.parse_args()
 
     # Validate mutual exclusion
@@ -2987,6 +3029,7 @@ def main():
         terse=args.terse or args.json_output,
         runtime_check=args.runtime_check,
         no_gpu_check=args.no_gpu_check,
+        no_framework_check=args.no_framework_check,
     )
 
     framework_errors = has_framework_errors(tree)

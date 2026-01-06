@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 name: Docker Build and Test
@@ -30,15 +30,73 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
+      core: ${{ steps.filter.outputs.core_any_changed }}
+      operator: ${{ steps.filter.outputs.operator_any_changed }}
+      deploy: ${{ steps.filter.outputs.deploy_any_changed }}
+      vllm: ${{ steps.filter.outputs.vllm_any_changed }}
+      sglang: ${{ steps.filter.outputs.sglang_any_changed }}
+      trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Get merge base
+        id: merge-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # For PR branches, compare against merge-base with PR's target branch
+          # For main/release branches, use default behavior (previous commit)
+          if [[ "${{ github.ref_name }}" =~ ^pull-request/([0-9]+)$ ]]; then
+            PR_NUMBER="${BASH_REMATCH[1]}"
+            BASE_BRANCH=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+            echo "PR #$PR_NUMBER targets branch: $BASE_BRANCH"
+            BASE_SHA=$(git merge-base "origin/$BASE_BRANCH" HEAD)
+            echo "base_sha=$BASE_SHA" >> $GITHUB_OUTPUT
+            echo "Using merge-base with $BASE_BRANCH: $BASE_SHA"
+          else
+            echo "base_sha=" >> $GITHUB_OUTPUT
+            echo "Using default comparison (previous commit)"
+          fi
       - name: Check for changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
+        uses: tj-actions/changed-files@aa08304bd477b800d468db44fe10f6c61f7f7b11  # v42.1.0
         id: filter
         with:
-          filters: .github/filters.yaml
+          files_yaml_from_source_file: .github/filters.yaml
+          base_sha: ${{ steps.merge-base.outputs.base_sha }}
+      - name: Debug changed files
+        run: |
+          echo "=== Base SHA Used ==="
+          echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
+          echo ""
+          echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
+          echo "${{ steps.filter.outputs.all_all_changed_files }}"
+          echo ""
+          echo "=== Filters That Matched ==="
+          echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
+          echo ""
+          echo "=== Filter Results (any_changed) ==="
+          echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"
+          echo "ci: ${{ steps.filter.outputs.ci_any_changed }}"
+          echo "core: ${{ steps.filter.outputs.core_any_changed }}"
+          echo "operator: ${{ steps.filter.outputs.operator_any_changed }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_any_changed }}"
+          echo "planner: ${{ steps.filter.outputs.planner_any_changed }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_any_changed }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_any_changed }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_any_changed }}"
+          echo ""
+          echo "=== Files Matching Each Filter ==="
+          echo "docs: ${{ steps.filter.outputs.docs_all_changed_files }}"
+          echo "ci: ${{ steps.filter.outputs.ci_all_changed_files }}"
+          echo "core: ${{ steps.filter.outputs.core_all_changed_files }}"
+          echo "operator: ${{ steps.filter.outputs.operator_all_changed_files }}"
+          echo "deploy: ${{ steps.filter.outputs.deploy_all_changed_files }}"
+          echo "planner: ${{ steps.filter.outputs.planner_all_changed_files }}"
+          echo "vllm: ${{ steps.filter.outputs.vllm_all_changed_files }}"
+          echo "sglang: ${{ steps.filter.outputs.sglang_all_changed_files }}"
+          echo "trtllm: ${{ steps.filter.outputs.trtllm_all_changed_files }}"
 
   backend-status-check:
     runs-on: ubuntu-latest
@@ -51,7 +109,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.operator == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -83,14 +141,14 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Tester
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
@@ -102,7 +160,7 @@ jobs:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           sudo apt-get update && sudo apt-get install -y make
-          cd deploy/cloud/operator
+          cd deploy/operator
           make check
       - name: Build Container
         id: build-image
@@ -110,7 +168,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
@@ -127,7 +185,7 @@ jobs:
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -195,7 +253,7 @@ jobs:
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -257,7 +315,7 @@ jobs:
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -319,7 +377,7 @@ jobs:
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -373,7 +431,6 @@ jobs:
         export ISTIO_ENABLED=true
         export ISTIO_GATEWAY=istio-system/ingress-alb
         export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
 
         # Install dynamo env secrets
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
@@ -381,7 +438,7 @@ jobs:
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
         # Install helm dependencies
         helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/cloud/helm/platform/
+        cd deploy/helm/charts/platform/
         helm dep build .
         # Install platform with namespace restriction for single profile testing
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
@@ -585,7 +642,7 @@ jobs:
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
