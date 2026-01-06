@@ -9,8 +9,10 @@ ARG BRANCH_TYPE
 ARG DYNAMO_VERSION=""
 ARG CARGO_BUILD_JOBS
 
-FROM alpine:latest AS protoc-downloader
+FROM alpine:latest AS dependency-downloader
 RUN apk add --no-cache wget unzip
+
+# Download protoc
 ARG PROTOC_VERSION=25.3
 RUN case "$(uname -m)" in \
       x86_64) PROTOC_ARCH=x86_64 ;; \
@@ -21,10 +23,34 @@ RUN case "$(uname -m)" in \
     unzip /tmp/protoc.zip -d /opt/protoc && \
     chmod +x /opt/protoc/bin/protoc
 
+# Download NATS .deb (will be installed with dpkg in final stage)
+ARG NATS_VERSION=2.10.28
+RUN case "$(uname -m)" in \
+      x86_64) ARCH=amd64 ;; \
+      aarch64) ARCH=arm64 ;; \
+      *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
+    esac && \
+    wget --tries=3 --waitretry=5 \
+      "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-${ARCH}.deb" \
+      -O /tmp/nats-server.deb
+
+# Download and extract ETCD
+ARG ETCD_VERSION=v3.5.21
+RUN case "$(uname -m)" in \
+      x86_64) ARCH=amd64 ;; \
+      aarch64) ARCH=arm64 ;; \
+      *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
+    esac && \
+    wget --tries=3 --waitretry=5 \
+      "https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/etcd-${ETCD_VERSION}-linux-${ARCH}.tar.gz" \
+      -O /tmp/etcd.tar.gz && \
+    mkdir -p /opt/etcd && \
+    tar -xzf /tmp/etcd.tar.gz -C /opt/etcd --strip-components=1
+
 FROM rust:1.90-bookworm AS chef
 RUN cargo install cargo-chef sccache --locked
-COPY --from=protoc-downloader /opt/protoc/bin/protoc /usr/local/bin/
-COPY --from=protoc-downloader /opt/protoc/include/google /usr/local/include/google
+COPY --from=dependency-downloader /opt/protoc/bin/protoc /usr/local/bin/
+COPY --from=dependency-downloader /opt/protoc/include/google /usr/local/include/google
 ARG SCCACHE_BUCKET="sccache"
 ARG SCCACHE_REGION="us-east-1"
 ARG AWS_ENDPOINT_URL=""
@@ -74,30 +100,15 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
 ARG TARGETARCH
 FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v3-${TARGETARCH}
 WORKDIR /sgl-workspace
-# Install NATS and ETCD
-RUN case "$(uname -m)" in \
-      x86_64) ARCH=amd64 ;; \
-      aarch64) ARCH=arm64 ;; \
-      *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
-    esac && \
-    wget --tries=3 --waitretry=5 \
-      https://github.com/nats-io/nats-server/releases/download/v2.10.28/\
-nats-server-v2.10.28-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
-ENV ETCD_VERSION="v3.5.21"
-RUN case "$(uname -m)" in \
-      x86_64) ARCH=amd64 ;; \
-      aarch64) ARCH=arm64 ;; \
-      *) echo "Unsupported architecture: $(uname -m)" && exit 1 ;; \
-    esac && \
-    wget --tries=3 --waitretry=5 \
-      https://github.com/etcd-io/etcd/releases/download/${ETCD_VERSION}/\
-etcd-${ETCD_VERSION}-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xzf /tmp/etcd.tar.gz \
-        -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
+
+# Install NATS from cached .deb
+COPY --from=dependency-downloader /tmp/nats-server.deb /tmp/nats-server.deb
+RUN dpkg -i /tmp/nats-server.deb && rm /tmp/nats-server.deb
+
+# Copy pre-extracted ETCD binaries
+COPY --from=dependency-downloader /opt/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd:$PATH
+
 ARG BRANCH_TYPE
 ARG CARGO_BUILD_JOBS
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
