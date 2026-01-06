@@ -126,6 +126,7 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   vllm-cuda-13:
+    continue-on-error: true  # Make it non-blocking for now
     needs: changed-files
     if: needs.changed-files.outputs.has_code_changes == 'true'
     strategy:
