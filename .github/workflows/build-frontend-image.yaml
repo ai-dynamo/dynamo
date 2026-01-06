@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           # Install system dependencies from apt
-          sudo apt-get install -y git build-essential protobuf-compiler
+          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
           # Install Rust (cargo + rustc)
           curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
           # Make cargo available to later steps
