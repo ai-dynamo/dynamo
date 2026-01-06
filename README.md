@@ -235,7 +235,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 
 > [!Note]
 > Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
-> For example, if you are using `tensorrt-llm==1.2.0rc5`, use the appropriate PyTorch container image version.
+> For example, if you are using `tensorrt-llm==1.2.0`, use the PyTorch container image version `25.10`.
 > To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
 
 > [!Important]
@@ -244,7 +244,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 ### Install prerequisites
 
 ```
-# By default, PyTorch CUDA 12.8 package is installed. Install PyTorch CUDA 13.0 package to align with the CUDA version used for building TensorRT LLM wheels.
+# Optional step: Only required for non-container installations. The PyTorch 25.10 container already includes PyTorch 2.9.0 with CUDA 13.0.
 uv pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
 
 sudo apt-get -y install libopenmpi-dev
