@@ -56,7 +56,7 @@ inputs:
   tolerations:
     description: 'Tolerations for buildkit pods'
     required: false
-    default: 'key=buildkit-worker,value=true,operator=Equal,effect=NoSchedule'
+    default: "key=buildkit-worker,value=true,operator=Equal,effect=NoSchedule"
 
 runs:
   using: "composite"
@@ -87,9 +87,9 @@ runs:
         
         if [[ -z "$NODESELECTOR" ]]; then
           if [[ "${{ inputs.platform }}" == "linux/arm64" ]]; then
-            NODESELECTOR="'kubernetes.io/arch=arm64,role=buildkit-arm-worker'"
+            NODESELECTOR="kubernetes.io/arch=arm64,role=buildkit-arm-worker"
           elif [[ "${{ inputs.platform }}" == "linux/amd64" ]]; then
-            NODESELECTOR="'kubernetes.io/arch=amd64,role=buildkit-amd-worker'"
+            NODESELECTOR="kubernetes.io/arch=amd64,role=buildkit-amd-worker"
           else
             echo "ERROR: Unsupported platform '${{ inputs.platform }}'. Must be linux/amd64 or linux/arm64."
             exit 1
@@ -113,7 +113,7 @@ runs:
          --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
          --driver-opt=requests.memory=${{ inputs.requests_memory }} \
          --driver-opt=limits.memory=${{ inputs.limits_memory }} \
-         "--driver-opt=nodeselector=$NODESELECTOR" \
-         "--driver-opt=tolerations=${{ inputs.tolerations }}"
+         '--driver-opt=nodeselector=$NODESELECTOR' \
+         '--driver-opt=tolerations=${{ inputs.tolerations }}'
 
         docker buildx inspect --bootstrap
