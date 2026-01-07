@@ -136,8 +136,8 @@ impl
 
         let prompt_token_ids = request.token_ids.clone();
 
-        // Default to skipping special tokens to match OpenAI-compatible behavior
-        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(true);
+        // TODO: Consider updating default to true to match behavior of other frameworks
+        let skip_special_tokens = request.output_options.skip_special_tokens.unwrap_or(false);
 
         // Extract include_stop_str_in_output from sampling_options (defaults to false)
         let include_stop_str_in_output = request
@@ -456,7 +456,7 @@ impl Decoder {
         // check for hidden stop tokens - eos takes precedence
         if self.hidden_stop_ids.contains(&token_id) {
             return Ok(StepResult::with_stop_trigger(
-                token,
+                None,
                 StopTrigger::HiddenStopTokenDetected(token_id),
             ));
         }
