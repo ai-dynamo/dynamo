@@ -15,13 +15,10 @@ spec:
   profilingConfig:
     profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
     config:
-      # Model cache PVC configuration (optional)
-      # If specified, the profiler pod will mount this PVC to access model weights
-      # instead of downloading from HuggingFace. The PVC must exist in the same namespace.
+      # Model cache PVC configuration; profiler will mount this PVC to access model weights
       deployment:
         model_cache_pvc_name: "model-cache"           # Name of PVC containing model weights
         model_cache_pvc_path: "deepseek-r1"           # Subpath within PVC where model is stored
-        model_cache_pvc_mount_path: "/opt/model-cache"  # Mount path in container (optional, this is the default)
 
       # Sweep/profiling configuration
       sweep:
