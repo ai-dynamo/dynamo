@@ -44,9 +44,9 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
-// GroveRestartState holds the restart state for Grove PCS generation.
+// RestartState holds the restart state for Grove PCS generation.
 // It determines which services should have restart annotations applied.
-type GroveRestartState struct {
+type RestartState struct {
 	// Timestamp is the restart timestamp to apply as the annotation value.
 	// Format: RFC3339
 	Timestamp string
@@ -58,19 +58,19 @@ type GroveRestartState struct {
 }
 
 // ShouldAnnotateService returns true if the given service should have a restart annotation.
-func (s *GroveRestartState) ShouldAnnotateService(serviceName string) bool {
+func (s *RestartState) ShouldAnnotateService(serviceName string) bool {
 	if s == nil || s.ServicesToAnnotate == nil {
 		return false
 	}
 	return s.ServicesToAnnotate[serviceName]
 }
 
-// DetermineGroveRestartState computes the restart state for Grove PCS generation.
+// DetermineRestartState computes the restart state for Grove PCS generation.
 // This determines which services should have restart annotations and with what timestamp.
 // If restartStatus is provided, it is used instead of dgd.Status.Restart. This allows
 // the caller to pass a pre-computed status (e.g., when detecting that a service has
 // completed and the next service should be included in the restart).
-func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v1alpha1.RestartStatus) *GroveRestartState {
+func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v1alpha1.RestartStatus) *RestartState {
 	// Use provided restartStatus if available, otherwise fall back to dgd.Status.Restart
 	status := restartStatus
 	if status == nil {
@@ -80,7 +80,7 @@ func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStat
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
 		// Check if there's a completed restart we need to preserve
 		if status != nil && status.ObservedAt != nil {
-			return &GroveRestartState{
+			return &RestartState{
 				Timestamp:          status.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
 				ServicesToAnnotate: getAllServiceNames(dgd),
 			}
@@ -96,21 +96,21 @@ func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStat
 		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != status.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
 
 	if !isNewRestart && status.Phase == v1alpha1.RestartPhaseCompleted {
-		return &GroveRestartState{
+		return &RestartState{
 			Timestamp:          specAt,
 			ServicesToAnnotate: getAllServiceNames(dgd),
 		}
 	}
 
 	if IsParallelRestart(dgd) {
-		return &GroveRestartState{
+		return &RestartState{
 			Timestamp:          specAt,
 			ServicesToAnnotate: getAllServiceNames(dgd),
 		}
 	}
 
 	// Sequential restart (default or specified)
-	return &GroveRestartState{
+	return &RestartState{
 		Timestamp:          specAt,
 		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, status),
 	}
@@ -267,7 +267,7 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 // existingRestartAnnotations is a map of serviceName -> restartAt timestamp from existing DCDs.
 // For services not in the current restart order, their existing annotation will be preserved
 // to avoid triggering unwanted rollouts.
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *GroveRestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
@@ -1135,7 +1135,7 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
-	restartState *GroveRestartState,
+	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}

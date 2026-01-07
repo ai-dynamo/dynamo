@@ -307,11 +307,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
-	// Log deployment state for debugging restart sequencing issues
-	// WARNING: After SyncResource updates the Deployment, the returned object has the NEW spec
-	// but the OLD status (status is updated asynchronously by the Deployment controller).
-	// If deploymentModified=true but status shows ready, this is STALE status!
-	logger.Info("Deployment sync completed",
+	logger.V(1).Info("Deployment sync completed",
 		"deploymentModified", deploymentModified,
 		"deploymentName", deployment.Name,
 		"deploymentGeneration", deployment.Generation,
@@ -330,17 +326,7 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		AvailableReplicas: &deployment.Status.AvailableReplicas,
 	}
 
-	// POTENTIAL BUG: If deploymentModified is true, we just updated the Deployment spec.
-	// The status we're checking here is STALE - it's from BEFORE the update was processed.
-	// IsDeploymentReady may return true based on the old pod's readiness, not the new one.
-	isReady := IsDeploymentReady(deployment)
-	if deploymentModified && isReady {
-		logger.Info("WARNING: Deployment was just modified but IsDeploymentReady returned true - likely stale status",
-			"deploymentName", deployment.Name)
-	}
-
-	if isReady {
-		logger.Info("Deployment is ready. Setting available status condition to true.")
+	if IsDeploymentReady(deployment) {
 		return ComponentReconcileResult{
 			modified:             deploymentModified,
 			status:               metav1.ConditionTrue,
@@ -788,13 +774,6 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	// 2. UpdatedReplicas: All replicas have been updated to the latest version
 	// 3. AvailableReplicas: All desired replicas are available (schedulable and healthy)
 	// 4. Replicas: Total replicas equals desired (no surge pods remaining from rolling update)
-	//
-	// NOTE: During a rolling update with maxSurge > 0:
-	//   - replicas = 2 (old + new pod)
-	//   - updatedReplicas = 1 (new pod)
-	//   - availableReplicas = 1 (OLD pod still available!)
-	// Without the Replicas == desired check, we'd incorrectly report ready
-	// because updatedReplicas >= 1 and availableReplicas >= 1, but they're DIFFERENT pods!
 	if status.ObservedGeneration < deployment.Generation ||
 		status.UpdatedReplicas < desiredReplicas ||
 		status.AvailableReplicas < desiredReplicas ||

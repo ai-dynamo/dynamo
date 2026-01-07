@@ -94,6 +94,26 @@ func TestIsDeploymentReady(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "not ready (surging)",
+			args: args{
+				deployment: &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Generation: 1,
+					},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: &[]int32{2}[0],
+					},
+					Status: appsv1.DeploymentStatus{
+						ObservedGeneration: 1,
+						UpdatedReplicas:    1,
+						AvailableReplicas:  1,
+						Replicas:           2,
+					},
+				},
+			},
+			want: false,
+		},
+		{
 			name: "ready",
 			args: args{
 				deployment: &appsv1.Deployment{

@@ -5993,7 +5993,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 	tests := []struct {
 		name          string
 		dgd           *v1alpha1.DynamoGraphDeployment
-		want          *GroveRestartState
+		want          *RestartState
 		wantNil       bool
 		wantSvcs      []string // expected services to annotate (sorted)
 		wantTimestamp *string
@@ -6173,7 +6173,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DetermineGroveRestartState(tt.dgd, nil)
+			got := DetermineRestartState(tt.dgd, nil)
 
 			if tt.wantNil {
 				if got != nil {
@@ -6208,7 +6208,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 	tests := []struct {
 		name        string
-		state       *GroveRestartState
+		state       *RestartState
 		serviceName string
 		want        bool
 	}{
@@ -6220,7 +6220,7 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 		},
 		{
 			name: "nil services map returns false",
-			state: &GroveRestartState{
+			state: &RestartState{
 				Timestamp:          "2024-01-01T00:00:00Z",
 				ServicesToAnnotate: nil,
 			},
@@ -6229,7 +6229,7 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 		},
 		{
 			name: "service in map returns true",
-			state: &GroveRestartState{
+			state: &RestartState{
 				Timestamp:          "2024-01-01T00:00:00Z",
 				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
 			},
@@ -6238,7 +6238,7 @@ func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
 		},
 		{
 			name: "service not in map returns false",
-			state: &GroveRestartState{
+			state: &RestartState{
 				Timestamp:          "2024-01-01T00:00:00Z",
 				ServicesToAnnotate: map[string]bool{"Frontend": true},
 			},
@@ -6261,7 +6261,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 
 	tests := []struct {
 		name                     string
-		restartState             *GroveRestartState
+		restartState             *RestartState
 		services                 map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec
 		wantAnnotationsPerClique map[string]bool              // clique name -> should have restart annotation
 		wantPreservedAnnotations map[string]map[string]string // clique name -> preserved annotations to verify
@@ -6286,7 +6286,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "nil ServicesToAnnotate - no annotations",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: nil,
 			},
@@ -6302,7 +6302,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "all services annotated - parallel restart",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
 			},
@@ -6323,7 +6323,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "only first service annotated - sequential restart start",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: map[string]bool{"Frontend": true},
 			},
@@ -6344,7 +6344,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "completed services keep annotation - sequential restart in progress",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
 			},
@@ -6370,7 +6370,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "service not in DGD spec - annotation still applied if in ServicesToAnnotate",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: map[string]bool{"Frontend": true, "NonExistent": true},
 			},
@@ -6386,7 +6386,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "multinode service - all cliques get restart annotation",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: map[string]bool{"Worker": true},
 			},
@@ -6406,7 +6406,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 		},
 		{
 			name: "preserves existing annotations when adding restart annotation",
-			restartState: &GroveRestartState{
+			restartState: &RestartState{
 				Timestamp:          restartTimestamp,
 				ServicesToAnnotate: map[string]bool{"Frontend": true},
 			},

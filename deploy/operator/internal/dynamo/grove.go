@@ -149,6 +149,8 @@ func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resou
 	readyReplicas := podClique.Status.ReadyReplicas
 	updatedReplicas := podClique.Status.UpdatedReplicas
 	replicas := podClique.Status.Replicas
+	observedGeneration := podClique.Status.ObservedGeneration
+	generation := podClique.Generation
 
 	logger.Info("CheckPodCliqueFullyUpdated",
 		"resourceName", resourceName,
@@ -162,6 +164,11 @@ func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resou
 
 	if desiredReplicas == 0 {
 		return true, ""
+	}
+
+	if observedGeneration != nil && *observedGeneration < generation {
+		logger.V(1).Info("PodClique spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, observedGeneration)
 	}
 
 	if desiredReplicas != readyReplicas {
@@ -238,9 +245,15 @@ func CheckPCSGFullyUpdated(ctx context.Context, client client.Client, resourceNa
 	desiredReplicas := pcsg.Spec.Replicas
 	availableReplicas := pcsg.Status.AvailableReplicas
 	updatedReplicas := pcsg.Status.UpdatedReplicas
+	observedGeneration := pcsg.Status.ObservedGeneration
+	generation := pcsg.Generation
 
 	if desiredReplicas == 0 {
 		return true, ""
+	}
+	if observedGeneration != nil && *observedGeneration < generation {
+		logger.V(1).Info("PodCliqueScalingGroup spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, observedGeneration)
 	}
 
 	if desiredReplicas != availableReplicas {
