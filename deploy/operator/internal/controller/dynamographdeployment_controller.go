@@ -906,6 +906,7 @@ func (r *DynamoGraphDeploymentReconciler) computeComponentSequentialRestartStatu
 	// If no current service, we're starting fresh - use the first service
 	if currentService == "" {
 		currentService = order[0]
+		logger.Info("Starting fresh restart", "service", currentService)
 		return &nvidiacomv1alpha1.RestartStatus{
 			ObservedAt: specAt,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
