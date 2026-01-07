@@ -30,24 +30,26 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      core: ${{ steps.filter.outputs.core }}
-      operator: ${{ steps.filter.outputs.operator }}
-      deploy: ${{ steps.filter.outputs.deploy }}
-      vllm: ${{ steps.filter.outputs.vllm }}
-      sglang: ${{ steps.filter.outputs.sglang }}
-      trtllm: ${{ steps.filter.outputs.trtllm }}
+      core: ${{ steps.changes.outputs.core }}
+      operator: ${{ steps.changes.outputs.operator }}
+      deploy: ${{ steps.changes.outputs.deploy }}
+      vllm: ${{ steps.changes.outputs.vllm }}
+      sglang: ${{ steps.changes.outputs.sglang }}
+      trtllm: ${{ steps.changes.outputs.trtllm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Check for changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
-        id: filter
         with:
-          filters: .github/filters.yaml
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator]
+    needs: [changed-files, vllm, sglang, trtllm, operator]
     if: always()
     steps:
       - name: "Check all dependent jobs"

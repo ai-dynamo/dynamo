@@ -20,6 +20,12 @@ spec:
         # Standard online profiling (not using AI Configurator)
         use_ai_configurator: false
 
+      hardware:
+        # for h200, sweep over 8-16 GPUs per engine
+        min_num_gpus_per_engine: 8
+        max_num_gpus_per_engine: 16
+        num_gpus_per_node: 8
+
       # SLA targets for profiling
       sla:
         isl: 3000   # Input sequence length

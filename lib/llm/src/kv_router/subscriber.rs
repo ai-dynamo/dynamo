@@ -37,6 +37,34 @@ const WORKER_QUERY_MAX_RETRIES: u32 = 8;
 const WORKER_QUERY_INITIAL_BACKOFF_MS: u64 = 200;
 
 // ============================================================================
+// Discovery Helpers
+// ============================================================================
+
+/// Wait for at least one worker instance to be discovered.
+/// Returns a peekable stream of discovery events for the generate endpoint.
+async fn wait_for_worker_instance(
+    component: &Component,
+    cancellation_token: &CancellationToken,
+) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<DiscoveryEvent>> + Send>>> {
+    let discovery_client = component.drt().discovery();
+    let generate_discovery_key = DiscoveryQuery::Endpoint {
+        namespace: component.namespace().name().to_string(),
+        component: component.name().to_string(),
+        endpoint: "generate".to_string(),
+    };
+
+    let mut stream = discovery_client
+        .list_and_watch(generate_discovery_key, Some(cancellation_token.clone()))
+        .await?
+        .peekable();
+
+    tracing::info!("KV subscriber waiting for at least one worker instance...");
+    std::pin::Pin::new(&mut stream).peek().await;
+
+    Ok(Box::pin(stream))
+}
+
+// ============================================================================
 // Local KvIndexer-based Recovery
 // ============================================================================
 
@@ -473,19 +501,13 @@ pub async fn start_kv_router_background(
     // Cleanup orphaned consumers on startup
     cleanup_orphaned_consumers(&mut nats_queue, &component, &consumer_id).await;
 
-    // Get the generate endpoint and watch for instance deletions
-    let generate_endpoint = component.endpoint("generate");
-    let discovery_client = component.drt().discovery();
-    let generate_discovery_key = DiscoveryQuery::Endpoint {
-        namespace: component.namespace().name().to_string(),
-        component: component.name().to_string(),
-        endpoint: "generate".to_string(),
-    };
-    let mut instance_event_stream = discovery_client
-        .list_and_watch(generate_discovery_key, Some(cancellation_token.clone()))
-        .await?;
+    // Wait for at least one worker instance before proceeding
+    let mut instance_event_stream =
+        wait_for_worker_instance(&component, &cancellation_token).await?;
 
     // Watch for router deletions to clean up orphaned consumers via discovery
+    let generate_endpoint = component.endpoint("generate");
+    let discovery_client = component.drt().discovery();
     let router_discovery_key = router_discovery_query(component.namespace().name());
     let mut router_event_stream = discovery_client
         .list_and_watch(router_discovery_key, Some(cancellation_token.clone()))
@@ -725,16 +747,9 @@ pub async fn start_kv_router_background_nats_core(
         "KV Router using NATS Core subscription (local_indexer mode)"
     );
 
-    // Get the generate endpoint and watch for instance events (add/remove)
-    let discovery_client = component.drt().discovery();
-    let generate_discovery_key = DiscoveryQuery::Endpoint {
-        namespace: component.namespace().name().to_string(),
-        component: component.name().to_string(),
-        endpoint: "generate".to_string(),
-    };
-    let mut instance_event_stream = discovery_client
-        .list_and_watch(generate_discovery_key, Some(cancellation_token.clone()))
-        .await?;
+    // Wait for at least one worker instance before proceeding
+    let mut instance_event_stream =
+        wait_for_worker_instance(&component, &cancellation_token).await?;
 
     // Drain and process all existing workers before spawning the background loop.
     // list_and_watch returns existing instances first, so we poll with a short timeout
