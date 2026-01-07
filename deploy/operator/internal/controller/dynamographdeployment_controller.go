@@ -271,7 +271,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		}
 	}
 
-	if r.isGrovePathway(ctx, dynamoDeployment) {
+	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
 	}
@@ -284,8 +284,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
 }
 
-func (r *DynamoGraphDeploymentReconciler) isGrovePathway(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
-	logger := log.FromContext(ctx)
+func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
 	// Orchestrator selection via single boolean annotation: nvidia.com/enable-grove
 	// Unset or not "false": Grove if available; else component mode
 	// "false": component mode (multinode -> LWS; single-node -> standard)
@@ -294,8 +293,6 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(ctx context.Context, dg
 		enableGrove = false
 	}
 
-	logger.Info("isGrovePathway", "enableGrove", enableGrove, "groveEnabled", r.Config.Grove.Enabled)
-
 	if enableGrove && r.Config.Grove.Enabled {
 		return true
 	}
@@ -303,11 +300,7 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(ctx context.Context, dg
 	return false
 }
 
-// TODO: need to handle resource not found the same for component mode and grove mode
 // getUpgdatedInProgressForGrove checks which services are still in progress.
-// A service is considered "in progress" if it's not fully updated (either not ready OR not updated).
-// This uses CheckPodCliqueFullyUpdated/CheckPCSGFullyUpdated to ensure pods have actually been rolled,
-// not just that old pods are still running.
 func (r *DynamoGraphDeploymentReconciler) getUpgdatedInProgressForGrove(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
 	logger := log.FromContext(ctx)
 
@@ -316,13 +309,13 @@ func (r *DynamoGraphDeploymentReconciler) getUpgdatedInProgressForGrove(ctx cont
 		component := dgd.Spec.Services[serviceName]
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
-		var isFullyUpdated bool
+		var isReady bool
 		if component.GetNumberOfNodes() > 1 {
-			isFullyUpdated, _ = dynamo.CheckPCSGFullyUpdated(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		} else {
-			isFullyUpdated, _ = dynamo.CheckPodCliqueFullyUpdated(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
-		if !isFullyUpdated {
+		if !isReady {
 			updatedInProgress = append(updatedInProgress, serviceName)
 		}
 	}
@@ -629,7 +622,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	var notFullyUpdated []string
 	var err error
 
-	if r.isGrovePathway(ctx, dgd) {
+	if r.isGrovePathway(dgd) {
 		notFullyUpdated, err = r.getUpgdatedInProgressForGrove(ctx, dgd, servicesToCheck)
 	} else {
 		notFullyUpdated, err = r.getUpdatedInProgressForComponent(ctx, dgd, servicesToCheck)
@@ -685,10 +678,11 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	}
 
 	// Check if the current service is fully updated
-	isFullyUpdated, _ := r.checkServiceFullyUpdated(ctx, dgd, currentService)
+	isFullyUpdated, reason := r.checkServiceFullyUpdated(ctx, dgd, currentService)
 
 	if !isFullyUpdated {
 		// Still restarting
+		logger.Info("Service restart not completed", "service", currentService, "reason", reason)
 		return &nvidiacomv1alpha1.RestartStatus{
 			ObservedAt: specAt,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
@@ -729,13 +723,15 @@ func (r *DynamoGraphDeploymentReconciler) checkServiceFullyUpdated(ctx context.C
 		return false, fmt.Sprintf("service %s not found in spec", serviceName)
 	}
 
-	if r.isGrovePathway(ctx, dgd) {
+	if r.isGrovePathway(dgd) {
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
 		if component.GetNumberOfNodes() > 1 {
-			return dynamo.CheckPCSGFullyUpdated(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _ := dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			return isReady, reason
 		}
-		return dynamo.CheckPodCliqueFullyUpdated(ctx, r.Client, resourceName, dgd.Namespace, logger)
+		isReady, reason, _ := dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+		return isReady, reason
 	}
 
 	return r.checkComponentServiceFullyUpdated(ctx, dgd, serviceName)
@@ -778,9 +774,59 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 
 // checkComponentServiceFullyUpdated checks if a DynamoComponentDeployment is fully updated.
 func (r *DynamoGraphDeploymentReconciler) checkComponentServiceFullyUpdated(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) (bool, string) {
-	logger := log.FromContext(ctx)
 	resourceName := dynamo.GetDynamoComponentName(dgd, serviceName)
-	return dynamo.CheckDCDFullyUpdated(ctx, r.Client, resourceName, dgd.Namespace, logger)
+	return checkDCDReady(ctx, r.Client, resourceName, dgd.Namespace)
+}
+
+// checkDCDReady checks if a DynamoComponentDeployment has completed its restart.
+// A DCD is considered fully updated when:
+// 1. The DCD controller has processed the latest spec (observedGeneration >= generation)
+// 2. The Available condition is set to True
+func checkDCDReady(ctx context.Context, client client.Client, resourceName, namespace string) (bool, string) {
+	logger := log.FromContext(ctx)
+	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, dcd)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			logger.V(2).Info("DynamoComponentDeployment not found", "resourceName", resourceName)
+			return false, "resource not found"
+		}
+		logger.V(1).Info("Failed to get DynamoComponentDeployment", "error", err, "resourceName", resourceName)
+		return false, fmt.Sprintf("get error: %v", err)
+	}
+
+	// Log the DCD status for debugging
+	logger.Info("CheckDCDFullyUpdated",
+		"resourceName", resourceName,
+		"generation", dcd.Generation,
+		"observedGeneration", dcd.Status.ObservedGeneration,
+		"conditionCount", len(dcd.Status.Conditions))
+
+	if dcd.Status.ObservedGeneration < dcd.Generation {
+		logger.V(1).Info("DynamoComponentDeployment spec not yet processed",
+			"resourceName", resourceName,
+			"generation", dcd.Generation,
+			"observedGeneration", dcd.Status.ObservedGeneration)
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", dcd.Generation, dcd.Status.ObservedGeneration)
+	}
+
+	// Check if the Available condition is True
+	for _, condition := range dcd.Status.Conditions {
+		if condition.Type == nvidiacomv1alpha1.DynamoGraphDeploymentConditionTypeAvailable {
+			if condition.Status == metav1.ConditionTrue {
+				return true, ""
+			}
+			logger.V(1).Info("DynamoComponentDeployment not available",
+				"resourceName", resourceName,
+				"status", condition.Status,
+				"reason", condition.Reason,
+				"message", condition.Message)
+			return false, fmt.Sprintf("not available: %s", condition.Message)
+		}
+	}
+
+	logger.V(1).Info("DynamoComponentDeployment missing Available condition", "resourceName", resourceName)
+	return false, "Available condition not found"
 }
 
 // getUpdatedInProgressForComponent checks which services are still in progress for DCD pathway.
