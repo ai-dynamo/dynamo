@@ -39,7 +39,7 @@ Creates K8s NetworkPolicy to block egress from target pods.
 {
   "partition_type": "worker_worker",
   "source": "dynamo",
-  "target": "dynamo", 
+  "target": "dynamo",
   "mode": "networkpolicy",
   "parameters": {
     "namespace": "dynamo",
@@ -191,15 +191,15 @@ async def inject_network_partition(
     delay_ms: int = 0
 ) -> str:
     """Inject network fault, return fault_id."""
-    
+
     api = "http://fault-injection-api.fault-injection-system:8080"
-    
+
     params = {
         "namespace": namespace,
         "target_pod_prefix": target_pod_prefix,
         "target_nats": False,  # Keep NATS working
     }
-    
+
     if packet_loss > 0:
         params["packet_loss_percent"] = packet_loss
         mode = "chaos_mesh"
@@ -208,7 +208,7 @@ async def inject_network_partition(
         mode = "chaos_mesh"
     else:
         mode = "networkpolicy"
-    
+
     resp = await httpx.post(f"{api}/api/v1/faults/network/inject", json={
         "partition_type": "worker_worker",
         "source": namespace,
@@ -216,7 +216,7 @@ async def inject_network_partition(
         "mode": mode,
         "parameters": params
     })
-    
+
     return resp.json()["fault_id"]
 
 async def recover_partition(fault_id: str):
@@ -236,7 +236,7 @@ async def test_inference_with_packet_loss():
         target_pod_prefix="vllm-decode",
         packet_loss=30
     )
-    
+
     try:
         # Inference should still work (with retries)
         result = await send_inference_request()
@@ -254,7 +254,7 @@ async def test_worker_isolation():
         namespace="dynamo",
         target_pod_prefix="vllm-decode"
     )
-    
+
     try:
         # Test routing still works via frontend
         assert await send_inference_request()

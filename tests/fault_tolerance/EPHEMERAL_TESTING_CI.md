@@ -85,22 +85,22 @@ async with ManagedDeployment(
     enable_hw_faults=True,
     hw_fault_config={"xid_type": 79}
 ) as deployment:
-    
+
     # Setup CUDA passthrough (pods restart once)
     await deployment.setup_cuda_passthrough(xid_type=79)
     await deployment.wait_for_all_pods_ready(timeout=300)
-    
+
     # Run baseline tests...
-    
+
     # Enable faults (no restart)
     await deployment.toggle_cuda_faults(enable=True)
-    
+
     # Inject XID for NVSentinel
     fault_id = await deployment.inject_hw_fault(fault_type="xid", xid_type=79)
-    
+
     # Wait for NVSentinel to cordon node
     assert deployment.is_node_cordoned(target_node)
-    
+
     # Cleanup and recover
     await deployment.cleanup_cuda_spec_without_restart()
     await deployment.wait_for_pods_on_healthy_nodes(exclude_node=target_node)
@@ -128,31 +128,31 @@ jobs:
   hw-fault-tests:
     runs-on: self-hosted-gpu  # Requires GPU cluster access
     timeout-minutes: 60
-    
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
-    
+
     - name: Install dependencies
       run: |
         pip install -e ".[test]"
         pip install kubernetes kubernetes-asyncio kr8s
-    
+
     - name: Setup kubeconfig
       run: |
         mkdir -p ~/.kube
         echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
-    
+
     - name: Deploy fault-injection-system
       run: |
         kubectl apply -f tests/fault_tolerance/hardware/fault_injection_service/deploy/
         kubectl wait --for=condition=available deployment/fault-injection-api \
           -n fault-injection-system --timeout=300s
-    
+
     - name: Run HW fault tests
       run: |
         pytest tests/fault_tolerance/deploy/test_hw_faults.py \
@@ -164,14 +164,14 @@ jobs:
           --tb=short \
           --junit-xml=results/hw-fault-tests.xml
       timeout-minutes: 45
-    
+
     - name: Upload test results
       uses: actions/upload-artifact@v4
       if: always()
       with:
         name: test-results
         path: results/
-    
+
     - name: Cleanup namespace
       if: always()
       run: |

@@ -153,7 +153,7 @@ import httpx
 async def inject_xid_79(node_name: str, gpu_id: int = 0):
     """Inject XID 79 via fault injection API."""
     api_url = "http://fault-injection-api.fault-injection-system:8080"
-    
+
     response = await httpx.post(
         f"{api_url}/api/v1/faults/gpu/inject/xid-79",
         json={
@@ -162,7 +162,7 @@ async def inject_xid_79(node_name: str, gpu_id: int = 0):
         },
         timeout=30
     )
-    
+
     if response.status_code == 200:
         fault_id = response.json()["fault_id"]
         print(f"XID 79 injected: {fault_id}")
