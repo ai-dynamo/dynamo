@@ -82,7 +82,7 @@ class EncodeWorkerHandler:
 
     async def generate(
         self, request: vLLMMultimodalRequest, context
-    ) -> AsyncIterator[vLLMMultimodalRequest]:
+    ) -> AsyncIterator[str]:
         logger.debug(f"Got raw request: {request}")
         if not isinstance(request, vLLMMultimodalRequest):
             if isinstance(request, str):
