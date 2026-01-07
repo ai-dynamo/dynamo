@@ -106,9 +106,9 @@ class ServiceAPI:
                     )
 
                 # Use vLLM's preprocessing to convert chat to prompt
+                # In newer vLLM, _preprocess_chat returns (conversation, engine_prompts) - 2 values
                 (
                     conversation,
-                    request_prompts,
                     engine_prompts,
                 ) = await self.openai_serving_chat._preprocess_chat(
                     request,

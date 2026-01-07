@@ -456,7 +456,7 @@ impl Decoder {
         // check for hidden stop tokens - eos takes precedence
         if self.hidden_stop_ids.contains(&token_id) {
             return Ok(StepResult::with_stop_trigger(
-                token,
+                None,
                 StopTrigger::HiddenStopTokenDetected(token_id),
             ));
         }
