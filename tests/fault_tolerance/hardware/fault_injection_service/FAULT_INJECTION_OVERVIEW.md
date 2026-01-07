@@ -180,6 +180,7 @@ python inject_into_pods.py \
 
 ## See Also
 
+- `NETWORK_PARTITIONS.md` - Network partition injection details
 - `cuda_fault_injection/CUDA_SHIM_LIBRARY.md` - CUDA shim library details
 - `agents/GPU_XID_FAULT_INJECTION.md` - XID injection agent details
 - `../../EPHEMERAL_TESTING_CI.md` - Ephemeral testing framework & CI guide
