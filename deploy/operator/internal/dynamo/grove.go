@@ -148,6 +148,7 @@ func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resou
 	desiredReplicas := podClique.Spec.Replicas
 	readyReplicas := podClique.Status.ReadyReplicas
 	updatedReplicas := podClique.Status.UpdatedReplicas
+	replicas := podClique.Status.Replicas
 
 	logger.Info("CheckPodCliqueFullyUpdated",
 		"resourceName", resourceName,
@@ -155,7 +156,9 @@ func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resou
 		"observedGeneration", podClique.Status.ObservedGeneration,
 		"desiredReplicas", desiredReplicas,
 		"readyReplicas", readyReplicas,
-		"updatedReplicas", updatedReplicas)
+		"updatedReplicas", updatedReplicas,
+		"replicas", replicas,
+	)
 
 	if desiredReplicas == 0 {
 		return true, ""
@@ -169,6 +172,11 @@ func CheckPodCliqueFullyUpdated(ctx context.Context, client client.Client, resou
 	if desiredReplicas != updatedReplicas {
 		logger.V(1).Info("PodClique not fully updated", "resourceName", resourceName, "desired", desiredReplicas, "updated", updatedReplicas)
 		return false, fmt.Sprintf("desired=%d, updated=%d", desiredReplicas, updatedReplicas)
+	}
+
+	if replicas != desiredReplicas {
+		logger.V(1).Info("PodClique performing rolling update", "resourceName", resourceName, "desired", desiredReplicas, "replicas", replicas)
+		return false, fmt.Sprintf("performing rolling update: desired=%d, replicas=%d", desiredReplicas, replicas)
 	}
 
 	return true, ""
