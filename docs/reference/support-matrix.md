@@ -64,7 +64,7 @@ The following table shows the dependency versions included with each Dynamo rele
 | :------------- | :------------- | :---------------------- | :--------- | :--------------- | :--------- |
 | SGLang         | 0.5.6.post2    | 0.5.6.post2             | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
 | TensorRT-LLM   | 1.2.0rc6       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
-| vLLM           | 0.12.0         | 0.12.0                  | 0.11.0     | 0.11.0           | 0.11.0     |
+| vLLM           | 0.13.0         | 0.12.0                  | 0.11.0     | 0.11.0           | 0.11.0     |
 | NIXL           | 0.8.0          | 0.8.0                   | 0.8.0      | 0.8.0            | 0.8.0      |
 
 > [!Note]
@@ -77,7 +77,7 @@ The following table shows the dependency versions included with each Dynamo rele
 ### CUDA Support by Framework
 | **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
 | :------------------- | :-----------------------| :-----------------------| :-----------------------|
-| **Dynamo 0.7.1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
+| **Dynamo 0.7.1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.9               |
 
 ## Cloud Service Provider Compatibility
 
