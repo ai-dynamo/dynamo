@@ -896,9 +896,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
-            request,
-            self.default_sampling_params,
-            self.model_max_len,
+            request, self.default_sampling_params, self.model_max_len
         )
 
         prefill_result = request.get("prefill_result")
