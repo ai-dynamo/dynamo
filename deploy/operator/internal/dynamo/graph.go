@@ -67,12 +67,21 @@ func (s *GroveRestartState) ShouldAnnotateService(serviceName string) bool {
 
 // DetermineGroveRestartState computes the restart state for Grove PCS generation.
 // This determines which services should have restart annotations and with what timestamp.
-func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment) *GroveRestartState {
+// If restartStatus is provided, it is used instead of dgd.Status.Restart. This allows
+// the caller to pass a pre-computed status (e.g., when detecting that a service has
+// completed and the next service should be included in the restart).
+func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v1alpha1.RestartStatus) *GroveRestartState {
+	// Use provided restartStatus if available, otherwise fall back to dgd.Status.Restart
+	status := restartStatus
+	if status == nil {
+		status = dgd.Status.Restart
+	}
+
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
 		// Check if there's a completed restart we need to preserve
-		if dgd.Status.Restart != nil && dgd.Status.Restart.ObservedAt != nil {
+		if status != nil && status.ObservedAt != nil {
 			return &GroveRestartState{
-				Timestamp:          dgd.Status.Restart.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Timestamp:          status.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
 				ServicesToAnnotate: getAllServiceNames(dgd),
 			}
 		}
@@ -82,11 +91,11 @@ func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment) *GroveResta
 
 	specAt := dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00")
 
-	isNewRestart := dgd.Status.Restart == nil ||
-		dgd.Status.Restart.ObservedAt == nil ||
-		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != dgd.Status.Restart.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
+	isNewRestart := status == nil ||
+		status.ObservedAt == nil ||
+		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != status.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
 
-	if !isNewRestart && dgd.Status.Restart.Phase == v1alpha1.RestartPhaseCompleted {
+	if !isNewRestart && status.Phase == v1alpha1.RestartPhaseCompleted {
 		return &GroveRestartState{
 			Timestamp:          specAt,
 			ServicesToAnnotate: getAllServiceNames(dgd),
@@ -103,7 +112,7 @@ func DetermineGroveRestartState(dgd *v1alpha1.DynamoGraphDeployment) *GroveResta
 	// Sequential restart (default or specified)
 	return &GroveRestartState{
 		Timestamp:          specAt,
-		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd),
+		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, status),
 	}
 }
 
@@ -128,7 +137,7 @@ func IsParallelRestart(dgd *v1alpha1.DynamoGraphDeployment) bool {
 // for a sequential restart in progress.
 // It returns all services up to and including those in InProgress.
 // Services before the in-progress ones have already completed and need to keep their annotation.
-func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment) map[string]bool {
+func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment, status *v1alpha1.RestartStatus) map[string]bool {
 	services := make(map[string]bool)
 
 	order := GetRestartOrder(dgd)
@@ -137,16 +146,16 @@ func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployme
 	}
 
 	// New restart or Pending phase - only first service
-	if dgd.Status.Restart == nil ||
-		dgd.Status.Restart.Phase == v1alpha1.RestartPhasePending ||
-		len(dgd.Status.Restart.InProgress) == 0 {
+	if status == nil ||
+		status.Phase == v1alpha1.RestartPhasePending ||
+		len(status.InProgress) == 0 {
 		services[order[0]] = true
 		return services
 	}
 
 	// Find the max index among in-progress services
 	inProgress := make(map[string]bool)
-	for _, svc := range dgd.Status.Restart.InProgress {
+	for _, svc := range status.InProgress {
 		inProgress[svc] = true
 	}
 

@@ -46,8 +46,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
-	"github.com/go-logr/logr"
-
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -202,15 +200,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Both Grove and DCD pathways compute restart status during resource reconciliation
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
-
-	// If restart is in progress, requeue to continue processing the next service.
-	// This is necessary because the controller uses GenerationChangedPredicate which
-	// doesn't trigger reconciles on status-only changes. Without explicit requeue,
-	// the restart would get stuck after completing one service.
-	if reconcileResult.RestartStatus != nil && reconcileResult.RestartStatus.Phase == nvidiacomv1alpha1.RestartPhaseRestarting {
-		logger.V(1).Info("Restart in progress, requeueing to continue processing")
-		return ctrl.Result{Requeue: true}, nil
-	}
 
 	return ctrl.Result{}, nil
 }
@@ -472,7 +461,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	restartState := dynamo.DetermineGroveRestartState(dynamoDeployment)
+	restartStatus := r.computeGroveRestartStatus(ctx, dynamoDeployment)
+	restartState := dynamo.DetermineGroveRestartState(dynamoDeployment, restartStatus)
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState)
 	if err != nil {
@@ -588,15 +578,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
 
-	// Compute restart status for Grove pathway
-	result.RestartStatus = r.computeGroveRestartStatus(ctx, dynamoDeployment, restartState)
+	result.RestartStatus = restartStatus
 
 	return result, nil
 }
 
 // computeGroveRestartStatus computes the restart status for Grove pathway.
-// This is called after PCS is reconciled with restart annotations.
-// It checks which services are still restarting and returns the appropriate status.
+// This is called before PCS is reconciled so that restart annotations can be
+// determined based on the computed status.
 //
 // For sequential restart, InProgress contains exactly ONE service - the current one being restarted.
 // A service is considered "done" only when:
@@ -608,10 +597,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 func (r *DynamoGraphDeploymentReconciler) computeGroveRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	restartState *dynamo.GroveRestartState,
 ) *nvidiacomv1alpha1.RestartStatus {
-	logger := log.FromContext(ctx)
-
 	// No restart requested
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
 		// Preserve existing completed status if any
@@ -628,32 +614,33 @@ func (r *DynamoGraphDeploymentReconciler) computeGroveRestartStatus(
 
 	specAt := dgd.Spec.Restart.At
 	order := dynamo.GetRestartOrder(dgd)
-	isParallel := dynamo.IsParallelRestart(dgd)
 
 	// For parallel restart, check all services at once
-	if isParallel {
-		return r.computeParallelRestartStatus(ctx, dgd, restartState, specAt, order)
+	if dynamo.IsParallelRestart(dgd) {
+		return r.computeParallelRestartStatus(ctx, dgd, specAt)
 	}
 
 	// Sequential restart: track one service at a time
-	return r.computeSequentialRestartStatus(ctx, dgd, restartState, specAt, order, logger)
+	return r.computeSequentialRestartStatus(ctx, dgd, specAt, order)
 }
 
 // computeParallelRestartStatus handles parallel restart where all services restart together.
 func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	restartState *dynamo.GroveRestartState,
 	specAt *metav1.Time,
-	order []string,
 ) *nvidiacomv1alpha1.RestartStatus {
 	logger := log.FromContext(ctx)
 
-	// Check all services
+	// If restart is in progress, use the in-progress services
 	var servicesToCheck []string
-	if restartState != nil {
-		for svc := range restartState.ServicesToAnnotate {
-			servicesToCheck = append(servicesToCheck, svc)
+	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
+		servicesToCheck = dgd.Status.Restart.InProgress
+	} else {
+		// If restart is not in progress, use all services
+		servicesToCheck = make([]string, 0, len(dgd.Spec.Services))
+		for serviceName := range dgd.Spec.Services {
+			servicesToCheck = append(servicesToCheck, serviceName)
 		}
 	}
 
@@ -693,11 +680,11 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	restartState *dynamo.GroveRestartState,
 	specAt *metav1.Time,
 	order []string,
-	logger logr.Logger,
 ) *nvidiacomv1alpha1.RestartStatus {
+	logger := log.FromContext(ctx)
+
 	// Get the current service being restarted from previous status
 	var currentService string
 	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
@@ -817,10 +804,7 @@ func getNextServiceInOrder(order []string, currentService string) string {
 func (r *DynamoGraphDeploymentReconciler) computeComponentRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	restartState *dynamo.GroveRestartState,
 ) *nvidiacomv1alpha1.RestartStatus {
-	logger := log.FromContext(ctx)
-
 	// No restart requested
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
 		// Preserve existing completed status if any
@@ -830,38 +814,37 @@ func (r *DynamoGraphDeploymentReconciler) computeComponentRestartStatus(
 		return nil
 	}
 
-	// If restart was already processed (completed or failed), return existing status
 	if isRestartAlreadyProcessed(dgd) {
 		return dgd.Status.Restart
 	}
 
 	specAt := dgd.Spec.Restart.At
 	order := dynamo.GetRestartOrder(dgd)
-	isParallel := dynamo.IsParallelRestart(dgd)
 
-	// For parallel restart, check all services at once
-	if isParallel {
-		return r.computeComponentParallelRestartStatus(ctx, dgd, restartState, specAt, order, logger)
+	if dynamo.IsParallelRestart(dgd) {
+		return r.computeComponentParallelRestartStatus(ctx, dgd, specAt)
 	}
 
-	// Sequential restart: track one service at a time
-	return r.computeComponentSequentialRestartStatus(ctx, dgd, restartState, specAt, order, logger)
+	return r.computeComponentSequentialRestartStatus(ctx, dgd, specAt, order)
 }
 
 // computeComponentParallelRestartStatus handles parallel restart for DCD pathway.
 func (r *DynamoGraphDeploymentReconciler) computeComponentParallelRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	restartState *dynamo.GroveRestartState,
 	specAt *metav1.Time,
-	order []string,
-	logger logr.Logger,
 ) *nvidiacomv1alpha1.RestartStatus {
-	// Check all services
+	logger := log.FromContext(ctx)
+
 	var servicesToCheck []string
-	if restartState != nil {
-		for svc := range restartState.ServicesToAnnotate {
-			servicesToCheck = append(servicesToCheck, svc)
+	// If restart is in progress, use the in-progress services
+	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
+		servicesToCheck = dgd.Status.Restart.InProgress
+	} else {
+		// If restart is not in progress, use all services
+		servicesToCheck := make([]string, 0, len(dgd.Spec.Services))
+		for serviceName := range dgd.Spec.Services {
+			servicesToCheck = append(servicesToCheck, serviceName)
 		}
 	}
 
@@ -901,12 +884,10 @@ func (r *DynamoGraphDeploymentReconciler) computeComponentParallelRestartStatus(
 func (r *DynamoGraphDeploymentReconciler) computeComponentSequentialRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	restartState *dynamo.GroveRestartState,
 	specAt *metav1.Time,
 	order []string,
-	logger logr.Logger,
 ) *nvidiacomv1alpha1.RestartStatus {
-	// Get the current service being restarted from previous status
+	logger := log.FromContext(ctx)
 	var currentService string
 	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
 		currentService = dgd.Status.Restart.InProgress[0] // For sequential, there's only one
@@ -1021,8 +1002,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	// Determine which services should have restart annotations (same logic as Grove)
-	restartState := dynamo.DetermineGroveRestartState(dynamoDeployment)
+	restartStatus := r.computeComponentRestartStatus(ctx, dynamoDeployment)
+
+	restartState := dynamo.DetermineGroveRestartState(dynamoDeployment, restartStatus)
 
 	// Fetch existing restart annotations from current DCDs.
 	// This allows GenerateDynamoComponentsDeployments to preserve annotations for services
@@ -1065,8 +1047,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
 
-	// Compute restart status for component pathway (same pattern as Grove)
-	result.RestartStatus = r.computeComponentRestartStatus(ctx, dynamoDeployment, restartState)
+	result.RestartStatus = restartStatus
 
 	return result, nil
 }

@@ -107,6 +107,7 @@ func TestIsDeploymentReady(t *testing.T) {
 						ObservedGeneration: 1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						Replicas:           1,
 						Conditions: []appsv1.DeploymentCondition{
 							{
 								Type:   appsv1.DeploymentAvailable,
