@@ -671,7 +671,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.reconcileGroveResources(ctx, dgd)
+			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
@@ -1238,7 +1238,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Config:   controller_common.Config{},
 			}
 
-			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd)
+			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))

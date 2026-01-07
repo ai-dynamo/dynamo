@@ -44,16 +44,12 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
-// RestartState holds the restart state for Grove PCS generation.
-// It determines which services should have restart annotations applied.
+// RestartState holds the restart state for DGD services.
 type RestartState struct {
 	// Timestamp is the restart timestamp to apply as the annotation value.
 	// Format: RFC3339
 	Timestamp string
 	// ServicesToAnnotate is the set of service names that should have the restart annotation.
-	// For parallel restart: all services
-	// For sequential restart: only services that are pending or in progress
-	// For completed restart: all services (to preserve annotations)
 	ServicesToAnnotate map[string]bool
 }
 
@@ -65,37 +61,29 @@ func (s *RestartState) ShouldAnnotateService(serviceName string) bool {
 	return s.ServicesToAnnotate[serviceName]
 }
 
-// DetermineRestartState computes the restart state for Grove PCS generation.
-// This determines which services should have restart annotations and with what timestamp.
-// If restartStatus is provided, it is used instead of dgd.Status.Restart. This allows
-// the caller to pass a pre-computed status (e.g., when detecting that a service has
-// completed and the next service should be included in the restart).
+// DetermineRestartState computes the restart state for DGD services.
 func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v1alpha1.RestartStatus) *RestartState {
-	// Use provided restartStatus if available, otherwise fall back to dgd.Status.Restart
-	status := restartStatus
-	if status == nil {
-		status = dgd.Status.Restart
+	if restartStatus == nil {
+		return nil
 	}
 
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
 		// Check if there's a completed restart we need to preserve
-		if status != nil && status.ObservedAt != nil {
+		if restartStatus.ObservedAt != nil {
 			return &RestartState{
-				Timestamp:          status.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Timestamp:          restartStatus.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
 				ServicesToAnnotate: getAllServiceNames(dgd),
 			}
 		}
-		// No restart ever requested
 		return nil
 	}
 
 	specAt := dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00")
 
-	isNewRestart := status == nil ||
-		status.ObservedAt == nil ||
-		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != status.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
+	isNewRestart := restartStatus.ObservedAt == nil ||
+		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != restartStatus.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
 
-	if !isNewRestart && status.Phase == v1alpha1.RestartPhaseCompleted {
+	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseCompleted {
 		return &RestartState{
 			Timestamp:          specAt,
 			ServicesToAnnotate: getAllServiceNames(dgd),
@@ -112,7 +100,7 @@ func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v
 	// Sequential restart (default or specified)
 	return &RestartState{
 		Timestamp:          specAt,
-		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, status),
+		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, restartStatus),
 	}
 }
 

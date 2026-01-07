@@ -271,9 +271,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		}
 	}
 
+	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
+	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
+
+	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
-		return r.reconcileGroveResources(ctx, dynamoDeployment)
+		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState)
 	}
 	if hasMultinode && !r.Config.LWS.Enabled {
 		err := fmt.Errorf("no multinode orchestrator available")
@@ -281,7 +285,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
 	}
 	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
-	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
+	result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile Dynamo components deployments")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+	result.RestartStatus = restartStatus
+	return result, nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
@@ -467,11 +477,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (ReconcileResult, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
-
-	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
-	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
 	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState)
 	if err != nil {
@@ -586,9 +593,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
-
-	result.RestartStatus = restartStatus
-
 	return result, nil
 }
 
@@ -880,13 +884,9 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 	}
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (ReconcileResult, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState) (ReconcileResult, error) {
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
-
-	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
-
-	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
 	// Fetch existing restart annotations from current DCDs.
 	// This allows GenerateDynamoComponentsDeployments to preserve annotations for services
@@ -928,9 +928,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
-
-	result.RestartStatus = restartStatus
-
 	return result, nil
 }
 
