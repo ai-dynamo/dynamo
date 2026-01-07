@@ -54,7 +54,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 		expectDeleted        []string         // adapter names that should be deleted
 	}{
 		{
-			name: "creates adapters for all services",
+			name: "creates adapters for services with scalingAdapter.enabled=true",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -64,9 +64,15 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"Frontend": {
 							Replicas: ptr.To(int32(2)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
 						},
 						"decode": {
 							Replicas: ptr.To(int32(3)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
 						},
 					},
 				},
@@ -86,7 +92,11 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 				},
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-						"worker": {},
+						"worker": {
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
+						},
 					},
 				},
 			},
@@ -96,7 +106,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			},
 		},
 		{
-			name: "skips adapter creation when disabled",
+			name: "skips adapter creation when not enabled",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -106,12 +116,13 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"Frontend": {
 							Replicas: ptr.To(int32(2)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
 						},
 						"decode": {
 							Replicas: ptr.To(int32(3)),
-							ScalingAdapter: &v1alpha1.ScalingAdapter{
-								Disable: true,
-							},
+							// No ScalingAdapter or Enabled=false means no adapter created
 						},
 					},
 				},
@@ -133,6 +144,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"Frontend": {
 							Replicas: ptr.To(int32(2)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
 						},
 					},
 				},
@@ -194,7 +208,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 			expectDeleted: []string{"test-dgd-removed"},
 		},
 		{
-			name: "deletes adapter when scalingAdapter.disable is set to true",
+			name: "deletes adapter when scalingAdapter.enabled is not set",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-dgd",
@@ -205,9 +219,7 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"Frontend": {
 							Replicas: ptr.To(int32(2)),
-							ScalingAdapter: &v1alpha1.ScalingAdapter{
-								Disable: true,
-							},
+							// No ScalingAdapter means adapter should be deleted
 						},
 					},
 				},
@@ -253,6 +265,9 @@ func TestDynamoGraphDeploymentReconciler_reconcileScalingAdapters(t *testing.T) 
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 						"MyService": {
 							Replicas: ptr.To(int32(1)),
+							ScalingAdapter: &v1alpha1.ScalingAdapter{
+								Enabled: true,
+							},
 						},
 					},
 				},

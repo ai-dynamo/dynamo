@@ -134,7 +134,6 @@ class Processor(ProcessMixIn):
         (
             request,
             conversation,
-            prompt,
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
