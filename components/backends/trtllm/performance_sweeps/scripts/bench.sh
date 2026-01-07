@@ -113,7 +113,7 @@ report_ts=$(date +%s)
 
 while :; do
     # Curl timeout - our primary use case here is to launch it at the first node (localhost), so no timeout is needed.
-    curl_result=$(curl ${health_addr} 2>/dev/null)
+    curl_result=$(curl ${health_addr} 2>/dev/null || echo "curl error")
     # Python path - Use of `check_server_health.py` is self-constrained outside of any packaging.
     check_result=$(python3 $SCRIPTS_DIR/scripts/check_server_health.py $num_ctx_servers $num_gen_servers <<< $curl_result)
     if [[ $check_result == *"Model is ready."* ]]; then
