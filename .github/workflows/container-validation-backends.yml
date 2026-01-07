@@ -140,7 +140,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          - { arch: arm64  }
+          # - { arch: arm64  }
     name: operator (${{ matrix.platform.arch }})
     runs-on: builder-cpu-amd-runner
     steps:

@@ -112,8 +112,7 @@ runs:
          --driver-opt=replicas=${{ inputs.replicas }} \
          --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
          --driver-opt=requests.memory=${{ inputs.requests_memory }} \
-         --driver-opt=limits.memory=${{ inputs.limits_memory }} \
-         --driver-opt="nodeselector=$NODESELECTOR" \
-         --driver-opt="tolerations=${{ inputs.tolerations }}"
-
+         --driver-opt=limits.memory=${{ inputs.limits_memory }} #\
+        #  --driver-opt="nodeselector=$NODESELECTOR" \
+        #  --driver-opt="tolerations=${{ inputs.tolerations }}"
         docker buildx inspect --bootstrap
