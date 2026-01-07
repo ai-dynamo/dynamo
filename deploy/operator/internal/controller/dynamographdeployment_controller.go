@@ -1015,9 +1015,26 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	// Determine which services should have restart annotations (same logic as Grove)
 	restartState := dynamo.DetermineGroveRestartState(dynamoDeployment)
 
+	// Fetch existing restart annotations from current DCDs.
+	// This allows GenerateDynamoComponentsDeployments to preserve annotations for services
+	// not yet in the current restart order, preventing unwanted rollouts.
+	existingRestartAnnotations := make(map[string]string)
+	for serviceName := range dynamoDeployment.Spec.Services {
+		dcdName := dynamo.GetDynamoComponentName(dynamoDeployment, serviceName)
+		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		if err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dynamoDeployment.Namespace}, existingDCD); err == nil {
+			if existingDCD.Spec.Annotations != nil {
+				if restartAt := existingDCD.Spec.Annotations[consts.RestartAnnotation]; restartAt != "" {
+					existingRestartAnnotations[serviceName] = restartAt
+				}
+			}
+		}
+		// Ignore NotFound errors - DCD may not exist yet
+	}
+
 	// generate the dynamoComponentsDeployments from the config
 	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
-	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, &defaultIngressSpec, restartState)
+	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations)
 	if err != nil {
 		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
 		return ReconcileResult{}, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)

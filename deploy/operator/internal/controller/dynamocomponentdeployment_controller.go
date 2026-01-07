@@ -787,9 +787,18 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	// 1. ObservedGeneration: Deployment controller has observed the latest configuration
 	// 2. UpdatedReplicas: All replicas have been updated to the latest version
 	// 3. AvailableReplicas: All desired replicas are available (schedulable and healthy)
+	// 4. Replicas: Total replicas equals desired (no surge pods remaining from rolling update)
+	//
+	// NOTE: During a rolling update with maxSurge > 0:
+	//   - replicas = 2 (old + new pod)
+	//   - updatedReplicas = 1 (new pod)
+	//   - availableReplicas = 1 (OLD pod still available!)
+	// Without the Replicas == desired check, we'd incorrectly report ready
+	// because updatedReplicas >= 1 and availableReplicas >= 1, but they're DIFFERENT pods!
 	if status.ObservedGeneration < deployment.Generation ||
 		status.UpdatedReplicas < desiredReplicas ||
-		status.AvailableReplicas < desiredReplicas {
+		status.AvailableReplicas < desiredReplicas ||
+		status.Replicas != desiredReplicas {
 		return false
 	}
 	// Finally, check for the DeploymentAvailable condition

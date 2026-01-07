@@ -255,7 +255,10 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 // If restartState is provided, restart annotations will be applied to the appropriate services.
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *GroveRestartState) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+// existingRestartAnnotations is a map of serviceName -> restartAt timestamp from existing DCDs.
+// For services not in the current restart order, their existing annotation will be preserved
+// to avoid triggering unwanted rollouts.
+func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *GroveRestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
@@ -288,12 +291,21 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 		}
 
-		// Apply restart annotation if this service should be restarted
+		// Apply restart annotation if this service should be restarted.
+		// For services not in the current restart order, preserve their existing annotation
+		// to avoid triggering unwanted rollouts when a new restart begins.
 		if restartState.ShouldAnnotateService(componentName) {
 			if deployment.Spec.Annotations == nil {
 				deployment.Spec.Annotations = make(map[string]string)
 			}
 			deployment.Spec.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+		} else if existingRestartAnnotations != nil {
+			if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
+				if deployment.Spec.Annotations == nil {
+					deployment.Spec.Annotations = make(map[string]string)
+				}
+				deployment.Spec.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+			}
 		}
 
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
