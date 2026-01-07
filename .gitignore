@@ -112,3 +112,4 @@ profiling_results*
 
 # Direnv
 .envrc
+*.code-workspace

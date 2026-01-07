@@ -18,9 +18,13 @@ from transformers import AutoTokenizer
 TIER_BOUNDARIES = [128, 256, 512]  # Token boundaries for decode tiers
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
+DEFAULT_DOCKER_IMAGE = "ai-dynamo-sglang-local:amd64"
 
 # Event to signal all processes should stop
 stop_event = threading.Event()
+
+# Global config for docker mode
+docker_config: dict = {}
 
 # Track processes with names for monitoring
 processes: dict[str, subprocess.Popen] = {}
@@ -49,6 +53,8 @@ def get_common_args(num_gpus: int, model_path: Path) -> list[str]:
     return [
         "--model-path",
         str(model_path),
+        "--served-model-name",
+        "model",
         "--context-length",
         "512",
         "--mem-fraction-static",
@@ -144,6 +150,13 @@ def start_worker(
     proc_env = os.environ.copy()
     if env:
         proc_env.update(env)
+
+    # Wrap in docker run if docker mode is enabled
+    if docker_config.get("enabled"):
+        args = build_docker_command(name, args, env)
+        # Don't pass env to Popen when using docker (it's passed via -e flags)
+        proc_env = os.environ.copy()
+
     proc = subprocess.Popen(
         args,
         stdout=subprocess.PIPE,
@@ -167,6 +180,89 @@ def start_worker(
     return proc
 
 
+def cleanup_docker_container(name: str):
+    """Remove existing docker container if it exists."""
+    container_name = f"dynamo-{name}"
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        capture_output=True,
+    )
+
+
+def build_docker_command(
+    name: str, args: list[str], env: dict[str, str] | None = None
+) -> list[str]:
+    """Wrap a command in docker run."""
+    # Remove any existing container with the same name
+    cleanup_docker_container(name)
+
+    image = docker_config["image"]
+    # Resolved path (symlinks don't exist inside container)
+    resolved_model_path = Path(docker_config["model_path"])
+    resolved_models_dir = resolved_model_path.parent
+
+    # Original path (with symlinks) for matching in args
+    original_model_path = docker_config["model_path_original"]
+    original_models_dir = str(Path(original_model_path).parent)
+
+    # Get GPU set from env if specified
+    gpu_devices = env.get("CUDA_VISIBLE_DEVICES") if env else None
+
+    docker_args = [
+        "docker",
+        "run",
+        "--rm",
+        "-i",
+        "--name",
+        f"dynamo-{name}",
+        "--gpus",
+        "all",
+        "--network",
+        "host",
+        "--ipc",
+        "host",
+        "--shm-size",
+        "16g",
+        "--ulimit",
+        "memlock=-1",
+        # Mount models directory (resolved path)
+        "-v",
+        f"{resolved_models_dir}:{resolved_models_dir}",
+    ]
+
+    # Set CUDA_VISIBLE_DEVICES inside container for GPU selection
+    if gpu_devices:
+        docker_args.extend(["-e", f"CUDA_VISIBLE_DEVICES={gpu_devices}"])
+
+    # Add other environment variables
+    if env:
+        for key, value in env.items():
+            if key == "CUDA_VISIBLE_DEVICES":
+                continue  # Already handled above
+            docker_args.extend(["-e", f"{key}={value}"])
+
+    # Add the image and command
+    docker_args.append(image)
+
+    # Convert the original args: replace sys.executable with python3
+    # and rewrite any paths containing the original (symlink) model dir to resolved path
+    converted_args = []
+    for arg in args:
+        if arg == sys.executable:
+            converted_args.append("python3")
+        elif original_models_dir in arg:
+            # Rewrite symlink path to resolved path
+            converted_args.append(
+                arg.replace(original_models_dir, str(resolved_models_dir))
+            )
+        else:
+            converted_args.append(arg)
+
+    docker_args.extend(converted_args)
+
+    return docker_args
+
+
 def monitor_processes():
     """Monitor all processes and signal stop if any exits."""
     while not stop_event.is_set():
@@ -181,7 +277,7 @@ def monitor_processes():
         time.sleep(0.5)
 
 
-def wait_for_health(num_workers: int, timeout: float = 120.0):
+def wait_for_health(num_workers: int, timeout: float = 600.0):
     """Poll /health until we have the expected number of instances."""
     print(f"\n⏳ Waiting for {num_workers} workers to be ready...")
     start = time.time()
@@ -326,6 +422,17 @@ def interactive_loop(model_path: Path):
 def cleanup():
     """Terminate all running processes."""
     print("\n🧹 Cleaning up processes...")
+
+    # If docker mode, stop containers by name
+    if docker_config.get("enabled"):
+        for name in processes.keys():
+            container_name = f"dynamo-{name}"
+            subprocess.run(
+                ["docker", "stop", container_name],
+                capture_output=True,
+                timeout=10,
+            )
+
     for name, proc in processes.items():
         if proc.poll() is None:  # Still running
             proc.terminate()
@@ -348,7 +455,30 @@ def main():
         default=str(Path.home() / "proj/models/smol2-135m"),
         help="Path to the model directory (default: ~/proj/models/smol2-135m)",
     )
+    parser.add_argument(
+        "--docker",
+        action="store_true",
+        help="Run workers inside Docker containers",
+    )
+    parser.add_argument(
+        "--docker-image",
+        type=str,
+        default=DEFAULT_DOCKER_IMAGE,
+        help=f"Docker image to use (default: {DEFAULT_DOCKER_IMAGE})",
+    )
     args = parser.parse_args()
+
+    # Configure docker mode
+    if args.docker:
+        docker_config["enabled"] = True
+        docker_config["image"] = args.docker_image
+        docker_config[
+            "model_path_original"
+        ] = args.model_path  # Keep original (with symlinks)
+        docker_config["model_path"] = str(
+            Path(args.model_path).resolve()
+        )  # Resolved path
+        print(f"🐳 Docker mode enabled with image: {args.docker_image}")
 
     # Set model path from arguments
     MODEL_PATH = Path(args.model_path)
@@ -367,22 +497,85 @@ def main():
     mem_fraction = "0.8" if num_gpus > 1 else "0.15"
     print(f"📊 Using mem-fraction-static: {mem_fraction}")
 
-    # Determine worker configuration based on GPU count
-    # GPU 0: prefill worker
-    # GPU 1+: decode workers with different seqlen tiers
+    # Determine worker configuration based on GPU count.
+    #
+    # Single-GPU mode:
+    # - Prefill + 3 decode workers all share GPU 0.
+    #
+    # Multi-GPU mode:
+    # - Run on exactly 8 GPUs, using 2 GPUs per worker.
+    #   - prefill: GPUs 0,1
+    #   - decode1: GPUs 2,3
+    #   - decode2: GPUs 4,5
+    #   - decode3: GPUs 6,7
+    # - Decode workers use DP attention.
     decode_tiers = [128, 256, 512]  # seqlen tiers for decode workers
-    num_decode_workers = (
-        min(num_gpus - 1, len(decode_tiers)) if num_gpus > 1 else len(decode_tiers)
-    )
+
+    multi_gpu_mode = num_gpus > 1
+    required_multi_gpu = 8
+
+    if multi_gpu_mode and num_gpus < required_multi_gpu:
+        print(
+            f"❌ Multi-GPU mode requires at least {required_multi_gpu} GPUs "
+            f"(detected {num_gpus})."
+        )
+        return 1
+
+    # SGLang uses server_args.port as the base for several internal ports.
+    # When DP attention is enabled, it derives a fixed TCP port block from it, so
+    # multiple workers on the same host must not share the same --port.
+    base_sglang_port = 10000
+    sglang_port_stride = 1000  # keep ranges apart to avoid collisions
+    worker_ports = {
+        "prefill": base_sglang_port,
+        "decode1": base_sglang_port + 1 * sglang_port_stride,
+        "decode2": base_sglang_port + 2 * sglang_port_stride,
+        "decode3": base_sglang_port + 3 * sglang_port_stride,
+    }
+    # Each worker needs a unique disaggregation bootstrap port
+    base_bootstrap_port = 12345
+    bootstrap_ports = {
+        "prefill": base_bootstrap_port,
+        "decode1": base_bootstrap_port + 1,
+        "decode2": base_bootstrap_port + 2,
+        "decode3": base_bootstrap_port + 3,
+    }
+
+    if multi_gpu_mode:
+        # Ignore extra GPUs; we intentionally pin to 8.
+        # Most workers get 2 GPUs, but decode2 gets 1 GPU to test DP mismatch.
+        gpu_sets = {
+            "prefill": "0,1",
+            "decode1": "2,3",
+            "decode2": "4",  # Single GPU to test migration with different DP sizes
+            "decode3": "5,6",
+        }
+        # Prefill: TP=2 for tensor parallelism (no DP attention)
+        # Decode: TP=2 DP=2 with --enable-dp-attention uses 2 GPUs (except decode2)
+        prefill_tp_args = ["--tp", "2"]
+        decode_dp_args = ["--tp", "2", "--dp", "2"]
+        # decode2 uses single GPU, no DP
+        decode2_args = []
+        num_decode_workers = len(decode_tiers)
+    else:
+        gpu_sets = {"prefill": "0"}
+        prefill_tp_args = []
+        decode_dp_args = []
+        decode2_args = []
+        num_decode_workers = len(decode_tiers)
+
     num_workers = 1 + num_decode_workers  # 1 prefill + N decode
 
-    print(f"🚀 Starting {num_workers} workers: 1 prefill + {num_decode_workers} decode")
+    print(
+        f"🚀 Starting {num_workers} workers: 1 prefill + {num_decode_workers} decode "
+        + ("(multi-gpu: 8 GPUs, 2 GPUs/worker)" if multi_gpu_mode else "(single-gpu)")
+    )
 
     try:
         # Start prefill worker on GPU 0 (or all GPUs if only 1)
         prefill_env = {"DYN_SYSTEM_PORT": "8081"}
-        if num_gpus > 1:
-            prefill_env["CUDA_VISIBLE_DEVICES"] = "0"
+        if multi_gpu_mode:
+            prefill_env["CUDA_VISIBLE_DEVICES"] = gpu_sets["prefill"]
 
         start_worker(
             "prefill",
@@ -391,14 +584,19 @@ def main():
                 "-m",
                 "dynamo.sglang",
                 *common_args,
+                *prefill_tp_args,
+                "--load-balance-method",
+                "round_robin",
                 "--disaggregation-mode",
                 "prefill",
                 "--disaggregation-bootstrap-port",
-                "12345",
+                str(bootstrap_ports["prefill"]),
                 "--disaggregation-transfer-backend",
                 "nixl",
                 "--host",
                 "0.0.0.0",
+                "--port",
+                str(worker_ports["prefill"]),
             ],
             env=prefill_env,
         )
@@ -406,14 +604,22 @@ def main():
         # Start decode workers
         for i in range(num_decode_workers):
             worker_name = f"decode{i + 1}"
-            gpu_id = i + 1 if num_gpus > 1 else 0  # Use separate GPU if available
             seqlen_tier = decode_tiers[i]
-            bootstrap_port = 12346 + i
             system_port = 8082 + i
 
             worker_env = {"DYN_SYSTEM_PORT": str(system_port)}
-            if num_gpus > 1:
-                worker_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            if multi_gpu_mode:
+                worker_env["CUDA_VISIBLE_DEVICES"] = gpu_sets[worker_name]
+
+            # decode2 uses single GPU (no DP attention), others use DP attention
+            if multi_gpu_mode and worker_name == "decode2":
+                worker_dp_args = decode2_args
+                enable_dp_attention = []
+            else:
+                worker_dp_args = decode_dp_args
+                enable_dp_attention = (
+                    ["--enable-dp-attention"] if multi_gpu_mode else []
+                )
 
             start_worker(
                 worker_name,
@@ -422,14 +628,19 @@ def main():
                     "-m",
                     "dynamo.sglang",
                     *common_args,
+                    *worker_dp_args,
+                    *enable_dp_attention,
+                    "--prefill-round-robin-balance",
                     "--disaggregation-mode",
                     "decode",
                     "--disaggregation-bootstrap-port",
-                    str(bootstrap_port),
+                    str(bootstrap_ports[worker_name]),
                     "--disaggregation-transfer-backend",
                     "nixl",
                     "--host",
                     "0.0.0.0",
+                    "--port",
+                    str(worker_ports[worker_name]),
                     "--this-seqlen",
                     str(seqlen_tier),
                 ],

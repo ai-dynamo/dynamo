@@ -98,7 +98,8 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
 # Use an arch-specific base image tag to avoid cross-arch tag clobbering.
 # BuildKit provides TARGETARCH automatically for buildx builds.
 ARG TARGETARCH
-FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v3-${TARGETARCH}
+#FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v5-${TARGETARCH}
+FROM sgl-dd-local
 WORKDIR /sgl-workspace
 
 # Install NATS from cached .deb

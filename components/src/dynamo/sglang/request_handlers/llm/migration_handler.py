@@ -111,7 +111,8 @@ class MigrationHandler(BaseWorkerHandler):
         # 1. Find and remove the request from running_batch
         # 2. Setup KV sender with the bootstrap info
         # 3. Return any output tokens the frontend hasn't seen yet
-        pending_outputs = await self.engine.migrate_request(
+        # 4. Return src_dp_rank so receiver can target correct source DP worker
+        result = await self.engine.migrate_request(
             rid=rid,
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
@@ -119,13 +120,20 @@ class MigrationHandler(BaseWorkerHandler):
             tokens_seen=tokens_seen,
         )
 
+        # Extract pending_outputs and src_dp_rank from result
+        # src_dp_rank is needed so the destination's KV receiver targets the correct
+        # DP rank on the source worker (required for DP attention setups)
+        pending_outputs = result.get("pending_outputs", [])
+        src_dp_rank = result.get("src_dp_rank")
+
         logging.info(
             f"Migration initiated for rid: {rid}, room: {bootstrap_room}, "
-            f"pending_outputs: {len(pending_outputs)}"
+            f"pending_outputs: {len(pending_outputs)}, src_dp_rank: {src_dp_rank}"
         )
 
         yield {
             "rid": rid,
             "bootstrap_info": bootstrap_info,
             "pending_outputs": pending_outputs,
+            "src_dp_rank": src_dp_rank,
         }

@@ -1,74 +1,17 @@
 {
-    "folders": [
-        {
-            "path": "."
-        }
-    ],
-    "settings": {
-        "rust-analyzer.linkedProjects": [
-            "Cargo.toml",
-            "launch/dynamo-run/Cargo.toml",
-            "lib/bindings/python/Cargo.toml"
-        ],
-        "rust-analyzer.procMacro.enable": true,
-    },
-    "extensions": {
-        "recommendations": [
-            "ms-python.python",
-            "rust-lang.rust-analyzer"
-        ]
-    },
-    "launch": {
-        // REQUIRES:
-        // export RUSTFLAGS="-g"
-        // cargo b --features cuda --profile dev
-        "configurations": [
-            {
-                "name": "Dynamo Frontend",
-                "type": "lldb",
-                "request": "launch",
-                "program": "${workspaceFolder}/.venv/bin/python",
-                "args": [
-                    "-m",
-                    "dynamo.frontend",
-                ],
-                "initCommands": [
-                    "settings set target.disable-aslr false"
-                ],
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "RUST_BACKTRACE": "1",
-                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/src"
-                },
-                "sourceLanguages": [
-                    "rust"
-                ]
-            },
-            {
-                "name": "Dynamo vLLM Backend",
-                "type": "lldb",
-                "request": "launch",
-                "program": "${workspaceFolder}/.venv/bin/python",
-                "args": [
-                    "-m",
-                    "dynamo.vllm",
-                    "--model",
-                    "${env:DYNAMO_MODEL_NAME}",
-                    "--enforce-eager",
-                    "--no-enable-prefix-caching",
-                ],
-                "initCommands": [
-                    "settings set target.disable-aslr false"
-                ],
-                "cwd": "${workspaceFolder}",
-                "env": {
-                    "RUST_BACKTRACE": "1",
-                    "PYTHONPATH": "${env:PYTHONPATH}:${workspaceFolder}/components/src"
-                },
-                "sourceLanguages": [
-                    "rust"
-                ]
-            }
-        ]
-    }
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../sglang"
+		}
+	],
+	"settings": {
+		"rust-analyzer.linkedProjects": [
+			"Cargo.toml",
+			"lib/bindings/python/Cargo.toml"
+		],
+		"rust-analyzer.cargo.targetDir": true
+	}
 }

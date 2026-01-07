@@ -226,6 +226,11 @@ pub struct MigrationResponse {
     /// After yielding these, frontend will have: tokens_seen + tokens from pending_outputs
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_outputs: Vec<super::llm_backend::LLMEngineOutput>,
+    /// Source DP rank that has the KV cache. The destination worker's KV receiver
+    /// must target this specific DP rank on the source to fetch the correct KV cache.
+    /// Required for DP attention setups where each DP rank has its own KV cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub src_dp_rank: Option<u32>,
     /// Error message if migration failed
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
