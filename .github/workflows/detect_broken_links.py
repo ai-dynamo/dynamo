@@ -472,12 +472,21 @@ def validate_links(
                     link_url, md_file, logger, git_root_dir
                 )
 
-                # Check if target is a markdown file or a directory
+                # Determine if this is a markdown file, directory, or should be skipped
                 is_markdown = is_markdown_file(resolved_path)
-                is_directory = resolved_path.exists() and resolved_path.is_dir()
+                is_directory_link = link_url.endswith("/") or (
+                    resolved_path.exists() and resolved_path.is_dir()
+                )
 
-                # Skip if it's neither a markdown file nor a directory (e.g., image, code file, etc.)
-                if not is_markdown and not is_directory and not link_url.endswith("/"):
+                # Check if link has a non-markdown file extension (image, code file, etc.)
+                has_other_extension = (
+                    resolved_path.suffix
+                    and resolved_path.suffix.lower() not in [".md", ""]
+                )
+
+                # Skip non-markdown files (images, videos, code files, etc.)
+                # but validate markdown files and directory links (with or without trailing slash)
+                if not is_markdown and not is_directory_link and has_other_extension:
                     logger.debug(
                         f"Skipping non-markdown file link in {md_file}:{line_num} - {link_url}"
                     )
@@ -496,9 +505,9 @@ def validate_links(
                         logger.debug(
                             f"Valid markdown link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
                         )
-                else:
-                    # It's a directory link (or link ending with /)
-                    # Just check if directory exists
+                elif is_directory_link:
+                    # It's a directory link (ends with / or resolves to existing directory)
+                    # Check if directory exists
                     if not resolved_path.exists():
                         is_broken = True
                         error_reason = f"Directory does not exist: {resolved_path}"
@@ -510,6 +519,19 @@ def validate_links(
                     else:
                         logger.debug(
                             f"Valid directory link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
+                        )
+                else:
+                    # Link without extension that's not markdown or directory
+                    # Could be LICENSE, Makefile, etc. - check if it exists
+                    if not resolved_path.exists():
+                        is_broken = True
+                        error_reason = (
+                            f"File does not exist: {resolved_path}. "
+                            f"If this is a directory link, add a trailing slash (/)"
+                        )
+                    else:
+                        logger.debug(
+                            f"Valid file link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
                         )
 
                 # Report broken link if found
