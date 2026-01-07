@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import argparse
 import logging
 import os
 import socket
@@ -84,8 +85,8 @@ class Config:
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
 
-    # Whether to enable NATS for KV events (controlled by --no-kv-events flag)
-    use_kv_events: bool = True
+    # Whether to enable NATS for KV events (controlled by --kv-events/--no-kv-events flags)
+    use_kv_events: bool = False
 
     def has_connector(self, connector_name: str) -> bool:
         """
@@ -260,11 +261,13 @@ def parse_args() -> Config:
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
     parser.add_argument(
-        "--no-kv-events",
-        action="store_false",
+        "--kv-events",
+        action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
-        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="Disable NATS initialization for KV events. By default, NATS is enabled for publishing KV cache events to the router. Use this flag to disable NATS when KV routing is not needed.",
+        default=(
+            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
+        ),  # default is false
+        help="Enable/disable NATS initialization for KV events. Use --kv-events to enable (router receives cache state events from workers) or --no-kv-events to disable (default, router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
         "--use-vllm-tokenizer",

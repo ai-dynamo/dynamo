@@ -146,29 +146,31 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--no-kv-events",
-        action="store_false",
+        "--kv-events",
+        action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
-        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+        default=(
+            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
+        ),  # default is false
+        help="KV Router: Enable/disable KV events. Use --kv-events to enable (router receives cache state events from workers) or --no-kv-events to disable (default, router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
         "--router-ttl",
         type=float,
         default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
-        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled (default mode). Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
     )
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
         default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**20))),
-        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
+        help="KV Router: Maximum tree size before pruning when KV events are disabled (default mode). Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
     )
     parser.add_argument(
         "--router-prune-target-ratio",
         type=float,
         default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
-        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
+        help="KV Router: Target size ratio after pruning when KV events are disabled (default mode). Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
         "--namespace",
@@ -327,7 +329,8 @@ async def async_main():
 
     # Enable NATS for KV router mode when kv_events are used.
     # NATS is needed for receiving KV cache events from workers.
-    # When --no-kv-events is set or router mode is not "kv", NATS is not needed.
+    # When --kv-events is set AND router mode is "kv", NATS is needed.
+    # By default (--no-kv-events), NATS is not needed.
     enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
 
     loop = asyncio.get_running_loop()
