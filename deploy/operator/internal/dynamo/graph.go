@@ -1125,12 +1125,18 @@ func GeneratePodSpecForComponent(
 }
 
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
+// GenerateGrovePodCliqueSet generates a PodCliqueSet from a DynamoGraphDeployment.
+// If restartState is provided, restart annotations will be applied to the appropriate services.
+// existingRestartAnnotations is a map of serviceName -> restartAt timestamp from the existing PCS.
+// For services not in the current restart order, their existing annotation will be preserved
+// to avoid triggering unwanted rollouts when a new restart begins.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
 	restartState *GroveRestartState,
+	existingRestartAnnotations map[string]string,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
@@ -1212,12 +1218,21 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
-			// Apply restart annotation if this service should be restarted
+			// Apply restart annotation if this service should be restarted.
+			// For services not in the current restart order, preserve their existing annotation
+			// to avoid triggering unwanted rollouts when a new restart begins.
 			if restartState.ShouldAnnotateService(serviceName) {
 				if annotations == nil {
 					annotations = make(map[string]string)
 				}
 				annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+			} else if existingRestartAnnotations != nil {
+				if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
+					if annotations == nil {
+						annotations = make(map[string]string)
+					}
+					annotations[commonconsts.RestartAnnotation] = existingTimestamp
+				}
 			}
 			clique.Annotations = annotations
 

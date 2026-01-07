@@ -379,8 +379,26 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.GroveRestartState) (*commoncontroller.Resource, error) {
 	logger := log.FromContext(ctx)
 
+	// Fetch existing PCS restart annotations to preserve them for services not being restarted
+	existingRestartAnnotations := make(map[string]string)
+	existingPCS := &grovev1alpha1.PodCliqueSet{}
+	err := r.Client.Get(ctx, types.NamespacedName{Name: dynamoDeployment.Name, Namespace: dynamoDeployment.Namespace}, existingPCS)
+	if err == nil {
+		// Extract restart annotations from existing cliques
+		for _, clique := range existingPCS.Spec.Template.Cliques {
+			if clique.Annotations != nil {
+				if timestamp, ok := clique.Annotations[consts.RestartAnnotation]; ok {
+					// Extract service name from clique labels
+					if serviceName, ok := clique.Labels[consts.KubeLabelDynamoComponent]; ok {
+						existingRestartAnnotations[serviceName] = timestamp
+					}
+				}
+			}
+		}
+	}
+
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever, restartState)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever, restartState, existingRestartAnnotations)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
