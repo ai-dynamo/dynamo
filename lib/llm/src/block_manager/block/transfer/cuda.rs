@@ -237,12 +237,142 @@ fn calculate_block_dimensions_from_layout<T: BlockDataProvider>(
     })
 }
 
+/// Validate and log transfer addresses for debugging CUDA errors
+fn validate_transfer_addresses(
+    src_addresses: &[u64],
+    dst_addresses: &[u64],
+    layer_size: usize,
+) -> Result<(), TransferError> {
+    tracing::info!("=== ADDRESS VALIDATION ===");
+    tracing::info!("Total address pairs: {}", src_addresses.len());
+    tracing::info!("Layer size: {} bytes", layer_size);
+
+    // Print first 10 addresses
+    tracing::info!("First 10 src addresses:");
+    for (i, &addr) in src_addresses.iter().take(10).enumerate() {
+        tracing::info!("  [{:3}] src=0x{:016x}", i, addr);
+    }
+
+    tracing::info!("First 10 dst addresses:");
+    for (i, &addr) in dst_addresses.iter().take(10).enumerate() {
+        tracing::info!("  [{:3}] dst=0x{:016x}", i, addr);
+    }
+
+    // Print last 5 addresses
+    let len = src_addresses.len();
+    if len > 10 {
+        tracing::info!("Last 5 src addresses:");
+        for (i, &addr) in src_addresses.iter().skip(len - 5).enumerate() {
+            tracing::info!("  [{:3}] src=0x{:016x}", len - 5 + i, addr);
+        }
+
+        tracing::info!("Last 5 dst addresses:");
+        for (i, &addr) in dst_addresses.iter().skip(len - 5).enumerate() {
+            tracing::info!("  [{:3}] dst=0x{:016x}", len - 5 + i, addr);
+        }
+    }
+
+    // Check for null pointers
+    let null_src = src_addresses.iter().filter(|&&a| a == 0).count();
+    let null_dst = dst_addresses.iter().filter(|&&a| a == 0).count();
+
+    if null_src > 0 {
+        tracing::error!("Found {} null source addresses!", null_src);
+        // Print indices of null addresses
+        tracing::error!("Null src address indices:");
+        for (i, &addr) in src_addresses.iter().enumerate() {
+            if addr == 0 {
+                tracing::error!("  [{}] NULL", i);
+            }
+        }
+    }
+    if null_dst > 0 {
+        tracing::error!("Found {} null destination addresses!", null_dst);
+        // Print indices of null addresses
+        tracing::error!("Null dst address indices:");
+        for (i, &addr) in dst_addresses.iter().enumerate() {
+            if addr == 0 {
+                tracing::error!("  [{}] NULL", i);
+            }
+        }
+    }
+
+    // Check alignment (should be 16-byte aligned for efficient transfers)
+    let unaligned_src = src_addresses.iter().filter(|&&a| a % 16 != 0).count();
+    let unaligned_dst = dst_addresses.iter().filter(|&&a| a % 16 != 0).count();
+
+    if unaligned_src > 0 {
+        tracing::warn!("{} source addresses not 16-byte aligned", unaligned_src);
+        // Print first few unaligned addresses
+        tracing::warn!("First 5 unaligned src addresses:");
+        let mut count = 0;
+        for (i, &addr) in src_addresses.iter().enumerate() {
+            if addr % 16 != 0 {
+                tracing::warn!("  [{}] 0x{:016x} (offset: {})", i, addr, addr % 16);
+                count += 1;
+                if count >= 5 {
+                    break;
+                }
+            }
+        }
+    }
+    if unaligned_dst > 0 {
+        tracing::warn!("{} destination addresses not 16-byte aligned", unaligned_dst);
+        // Print first few unaligned addresses
+        tracing::warn!("First 5 unaligned dst addresses:");
+        let mut count = 0;
+        for (i, &addr) in dst_addresses.iter().enumerate() {
+            if addr % 16 != 0 {
+                tracing::warn!("  [{}] 0x{:016x} (offset: {})", i, addr, addr % 16);
+                count += 1;
+                if count >= 5 {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Check for suspiciously small addresses (likely invalid pointers)
+    let suspicious_src = src_addresses.iter().filter(|&&a| a != 0 && a < 0x1000).count();
+    let suspicious_dst = dst_addresses.iter().filter(|&&a| a != 0 && a < 0x1000).count();
+
+    if suspicious_src > 0 {
+        tracing::error!("Found {} suspiciously small source addresses (< 0x1000)!", suspicious_src);
+        for (i, &addr) in src_addresses.iter().enumerate() {
+            if addr != 0 && addr < 0x1000 {
+                tracing::error!("  [{}] 0x{:016x}", i, addr);
+            }
+        }
+    }
+    if suspicious_dst > 0 {
+        tracing::error!("Found {} suspiciously small destination addresses (< 0x1000)!", suspicious_dst);
+        for (i, &addr) in dst_addresses.iter().enumerate() {
+            if addr != 0 && addr < 0x1000 {
+                tracing::error!("  [{}] 0x{:016x}", i, addr);
+            }
+        }
+    }
+
+    // Statistical summary
+    tracing::info!("Address statistics:");
+    tracing::info!("  Null src: {}/{}", null_src, src_addresses.len());
+    tracing::info!("  Null dst: {}/{}", null_dst, dst_addresses.len());
+    tracing::info!("  Unaligned src: {}/{}", unaligned_src, src_addresses.len());
+    tracing::info!("  Unaligned dst: {}/{}", unaligned_dst, dst_addresses.len());
+    tracing::info!("  Suspicious src: {}/{}", suspicious_src, src_addresses.len());
+    tracing::info!("  Suspicious dst: {}/{}", suspicious_dst, dst_addresses.len());
+
+    tracing::info!("=== END ADDRESS VALIDATION ===");
+
+    Ok(())
+}
+
 pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
     sources: &'a [Source],
     destinations: &'a mut [Destination],
     stream: &CudaStream,
     ctx: &crate::block_manager::block::transfer::TransferContext,
-) -> Result<Option<(Vec<u64>, usize)>, TransferError>
+) -> Result<Option<crate::block_manager::block::transfer::context::CudaPoolBufferGuard>, TransferError>
 where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
@@ -283,6 +413,13 @@ where
             size
         );
 
+        // CRITICAL: Synchronize stream before CPU accesses the memory!
+        // Stream-ordered allocations require the stream to complete before CPU can safely access.
+        stream.synchronize().map_err(|e|
+            TransferError::ExecutionError(format!("Stream sync after allocation failed: {}", e)))?;
+
+        tracing::debug!("Stream synchronized - buffers are now safe for CPU access");
+
         // Copy addresses directly to pinned host memory
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -299,6 +436,13 @@ where
 
         tracing::debug!("Copied {} address pairs to pinned buffers", src_addresses.len());
 
+        // Validate addresses before launching kernel
+        validate_transfer_addresses(
+            &src_addresses,
+            &dst_addresses,
+            dims.layer_size,
+        )?;
+
         // Launch kernel (reads from pinned host memory)
         unsafe {
             launch_copy_kernel_direct(
@@ -310,17 +454,20 @@ where
             )?;
         }
 
-        // Free buffers back to pool (stream-ordered - won't reuse until kernel completes!)
-        pool.free_async(src_buffer, stream.cu_stream())
-            .map_err(|e| TransferError::ExecutionError(format!("CUDA pool free failed: {}", e)))?;
-        pool.free_async(dst_buffer, stream.cu_stream())
-            .map_err(|e| TransferError::ExecutionError(format!("CUDA pool free failed: {}", e)))?;
-
-        tracing::debug!(
-            "Kernel launched and buffers freed (stream-ordered) - CUDA will ensure no reuse until kernel completes"
+        // Return buffer guard - it will be freed after event synchronization
+        use crate::block_manager::block::transfer::context::CudaPoolBufferGuard;
+        let guard = CudaPoolBufferGuard::new(
+            src_buffer,
+            dst_buffer,
+            stream.cu_stream(),
+            pool.clone(),
         );
 
-        Ok(None)
+        tracing::debug!(
+            "Kernel launched - buffers will be freed after event sync (deferred cleanup)"
+        );
+
+        Ok(Some(guard))
     } else {
         // Fallback: Use legacy TransferResources pool
         tracing::debug!("CUDA memory pool not available, falling back to legacy pool");
