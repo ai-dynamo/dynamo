@@ -261,6 +261,7 @@ jobs:
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   sglang-cuda-13:
     needs: changed-files
@@ -389,6 +390,7 @@ jobs:
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   trtllm:
     needs: changed-files
@@ -454,6 +456,7 @@ jobs:
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
