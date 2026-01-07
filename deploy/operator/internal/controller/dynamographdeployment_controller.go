@@ -271,6 +271,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		}
 	}
 
+	// return error early if Grove and LWS is not available for multinode
+	if !r.isGrovePathway(dynamoDeployment) && hasMultinode && !r.Config.LWS.Enabled {
+		err := fmt.Errorf("no multinode orchestrator available")
+		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
+	}
+
 	restartStatus := r.computeRestartStatus(ctx, dynamoDeployment)
 	restartState := dynamo.DetermineRestartState(dynamoDeployment, restartStatus)
 
@@ -278,14 +285,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState)
+	} else {
+		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
+		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
 	}
-	if hasMultinode && !r.Config.LWS.Enabled {
-		err := fmt.Errorf("no multinode orchestrator available")
-		logger.Error(err, err.Error(), "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
-		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
-	}
-	logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
-	result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile Dynamo components deployments")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile Dynamo components deployments: %w", err)
