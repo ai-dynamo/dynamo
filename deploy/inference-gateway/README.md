@@ -150,50 +150,26 @@ You can either use the special FrontEnd image for the EPP_IMAGE in the Helm depl
 
 ##### 1. Build the custom EPP image #####
 
-If you choose to build your own image use the steps below.
-
-##### 1.1 Clone the official GAIE repo in a separate folder #####
+If you choose to build your own image, use the `container/build.sh` script with the `--target frontend` option:
 
 ```bash
-git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git
-cd gateway-api-inference-extension
-git checkout v0.5.1
+./container/build.sh --framework none --target frontend
 ```
 
-##### 1.2 Build the Dynamo Custom EPP #####
+This command automatically:
+- Clones the Gateway API Inference Extension (GAIE) repository at the correct version
+- Builds the Dynamo Router static library
+- Applies the necessary patches to the EPP codebase
+- Builds the custom EPP image with Dynamo KV routing support
+- Builds the frontend image with the EPP binary and Dynamo runtime components
 
-###### 1.2.1 Clone the official EPP repo ######
-
-```bash
-# Clone the official GAIE repo in a separate folder
-cd path/to/gateway-api-inference-extension
-git clone git@github.com:kubernetes-sigs/gateway-api-inference-extension.git
-git checkout v0.5.1
-```
-
-###### 1.2.2 Run the script to build the EPP image ######
-
-The script will apply a custom patch to the code with your GAIE repo and build the image for you to use.
-
-```bash
-# Use your custom paths
-export DYNAMO_DIR=/path/to/dynamo
-export GAIE_DIR=/path/to/gateway-api-inference-extension
-
-# Run the script
-cd deploy/inference-gateway
-./build-epp-dynamo.sh
-```
-
-Under the hood the script applies the Dynamo Patch to the EPP code base; creates a Dynamo Router static library and builds a custom EPP image with it.
-Re-tag the freshly built image and push it to your registry.
+Re-tag the freshly built image and push it to your registry:
 
 ```bash
 docker images
 docker tag <your-new-id> <your-image-tag>
-docker push  <your-image-tag>
+docker push <your-image-tag>
 ```
-
 
 **Note**
 You can also use the standard EPP image`us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0`. For the basic black box integration run:
