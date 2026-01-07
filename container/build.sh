@@ -29,7 +29,7 @@ PLATFORM=linux/amd64
 commit_id=${commit_id:-$(git rev-parse --short HEAD)}
 
 # if COMMIT_ID matches a TAG use that
-current_tag=${current_tag:-$($(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true)}
+current_tag=${current_tag:-$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || true)}
 
 # Get latest TAG and add COMMIT_ID for dev
 latest_tag=${latest_tag:-$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//' || true)}
