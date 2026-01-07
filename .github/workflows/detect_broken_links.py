@@ -400,11 +400,15 @@ def resolve_link_path(
         logger.debug(f"Absolute filesystem path detected: {link_url}")
         return Path(link_url)
 
-    # For symlinks, resolve relative paths from the symlink's location, not the target's location
-    # This matches GitHub's behavior where links in symlinked files are resolved relative to the symlink
+    # For symlinks, resolve relative paths from the symlink's location, not the
+    # target's location. This matches GitHub's behavior where links in symlinked
+    # files are resolved relative to the symlink
     source_dir = source_file.parent
     if source_file.is_symlink():
-        logger.debug(f"Source file is a symlink, resolving links from symlink location: {source_dir}")
+        logger.debug(
+            f"Source file is a symlink, resolving links from symlink location: "
+            f"{source_dir}"
+        )
 
     resolved_path = source_dir / link_url
 
@@ -471,18 +475,18 @@ def validate_links(
                 # Check if target is a markdown file or a directory
                 is_markdown = is_markdown_file(resolved_path)
                 is_directory = resolved_path.exists() and resolved_path.is_dir()
-                
+
                 # Skip if it's neither a markdown file nor a directory (e.g., image, code file, etc.)
-                if not is_markdown and not is_directory and not link_url.endswith('/'):
+                if not is_markdown and not is_directory and not link_url.endswith("/"):
                     logger.debug(
                         f"Skipping non-markdown file link in {md_file}:{line_num} - {link_url}"
                     )
                     continue
-                
+
                 # Validate the link
                 is_broken = False
                 error_reason = None
-                
+
                 if is_markdown:
                     # Check markdown file exists
                     if not resolved_path.exists():
@@ -500,12 +504,14 @@ def validate_links(
                         error_reason = f"Directory does not exist: {resolved_path}"
                     elif not resolved_path.is_dir():
                         is_broken = True
-                        error_reason = f"Path exists but is not a directory: {resolved_path}"
+                        error_reason = (
+                            f"Path exists but is not a directory: {resolved_path}"
+                        )
                     else:
                         logger.debug(
                             f"Valid directory link in {md_file}:{line_num} - {link_url} -> {resolved_path}"
                         )
-                
+
                 # Report broken link if found
                 if is_broken:
                     # Generate GitHub URL for the broken link line
