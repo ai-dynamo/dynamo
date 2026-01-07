@@ -245,6 +245,7 @@ def setup_prometheus_registry(
         endpoint=generate_endpoint,
         registry=registry,
         metric_prefix_filters=["sglang:"],
+        add_prefix="sglang_",
     )
     return registry
 

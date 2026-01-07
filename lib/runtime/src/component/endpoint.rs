@@ -230,7 +230,7 @@ impl EndpointConfigBuilder {
 /// This function handles both health check and discovery transport building.
 /// All transport modes use consistent addressing:
 /// - HTTP: Uses full URL path including endpoint name (e.g., http://host:port/v1/rpc/endpoint_name)
-/// - TCP: Includes endpoint name for routing (e.g., host:port/endpoint_name)
+/// - TCP: Includes instance_id and endpoint name for routing (e.g., host:port/instance_id_hex/endpoint_name)
 /// - NATS: Uses subject-based addressing (unique per endpoint)
 ///
 /// # Errors
@@ -266,9 +266,14 @@ fn build_transport_type_inner(
                 .and_then(|p| p.parse::<u16>().ok())
                 .unwrap_or(crate::pipeline::network::manager::get_actual_tcp_rpc_port()?);
 
-            // Include endpoint name for proper TCP routing
-            // TCP client parses this format and adds x-endpoint-path header for server-side routing
-            let tcp_endpoint = format!("{}:{}/{}", tcp_host, tcp_port, endpoint_id.name);
+            // Include instance_id and endpoint name for proper TCP routing.
+            // Format: host:port/instance_id_hex/endpoint_name
+            // This ensures each worker has a unique routing key when multiple workers
+            // share the same TCP server (e.g., --num-workers > 1).
+            let tcp_endpoint = format!(
+                "{}:{}/{:x}/{}",
+                tcp_host, tcp_port, connection_id, endpoint_id.name
+            );
 
             Ok(TransportType::Tcp(tcp_endpoint))
         }

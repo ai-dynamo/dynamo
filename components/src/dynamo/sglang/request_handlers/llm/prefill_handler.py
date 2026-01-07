@@ -102,8 +102,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "bootstrap_room": bootstrap_room,
         }
 
-        # Yield in LLMEngineOutput format for PrefillRouter compatibility
-        # The disaggregated_params field contains the bootstrap info
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
         yield {
             "token_ids": [],
             "text": None,
