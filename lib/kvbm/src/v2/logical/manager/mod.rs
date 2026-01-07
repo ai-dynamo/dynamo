@@ -609,29 +609,14 @@ impl<T: BlockMetadata> BlockManagerConfigBuilder<T> {
 
         // Create pools
         let inactive_pool = InactivePool::new(backend, &reset_pool);
-        let active_pool = ActivePool::new(registry.clone(), inactive_pool.return_fn());
+        let active_pool = ActivePool::new(inactive_pool.clone());
 
-        // Create upgrade function that captures the necessary components
-        let registry_clone = registry.clone();
+        // Create upgrade function that captures InactivePool for unified lookup
         let inactive_pool_clone = inactive_pool.clone();
-        let return_fn_clone = inactive_pool.return_fn();
         let upgrade_fn = Arc::new(
             move |seq_hash: SequenceHash| -> Option<Arc<dyn RegisteredBlock<T>>> {
-                // Try active pool first with touch=false (using registry directly)
-                if let Some(handle) = registry_clone.match_sequence_hash(seq_hash, false)
-                    && let Some(block) = handle.try_get_block::<T>(return_fn_clone.clone())
-                {
-                    return Some(block);
-                }
-                // Then try inactive pool with touch=false
-                if let Some(block) = inactive_pool_clone
-                    .find_blocks(&[seq_hash], false)
-                    .into_iter()
-                    .next()
-                {
-                    return Some(block);
-                }
-                None
+                // Use InactivePool's unified lookup (handles both active and inactive)
+                inactive_pool_clone.find_or_promote_dyn(seq_hash)
             },
         );
 

@@ -38,10 +38,12 @@ impl<T: BlockMetadata> PrimaryBlock<T> {
         }
     }
 
-    /// Register this block and get an Arc to the RegisteredBlock trait object
+    /// Wrap this PrimaryBlock in an Arc and return as RegisteredBlock trait object.
+    ///
+    /// Note: This does NOT register in weak_blocks - caller must do that separately
+    /// via InactivePool::register_active() if needed.
     pub(crate) fn register(self) -> Arc<dyn RegisteredBlock<T>> {
-        let block = self.block.clone().unwrap();
-        block.registration_handle().attach_block(self)
+        Arc::new(self)
     }
 }
 
