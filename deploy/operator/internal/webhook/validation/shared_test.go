@@ -24,6 +24,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// ptr is a helper function to create a pointer to a string
+func ptr(s string) *string {
+	return &s
+}
+
 func TestSharedSpecValidator_Validate(t *testing.T) {
 	var (
 		negativeReplicas = int32(-1)
@@ -71,6 +76,31 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 			fieldPath: "spec",
 			wantErr:   true,
 			errMsg:    "spec.replicas must be non-negative",
+		},
+		{
+			name: "deprecated dynamoNamespace field is rejected",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				DynamoNamespace: ptr("my-custom-namespace"),
+			},
+			fieldPath: "spec.services[Frontend]",
+			wantErr:   true,
+			errMsg:    "spec.services[Frontend].dynamoNamespace is deprecated and must not be set. The dynamo namespace is automatically computed as {k8s_namespace}-{dgd_name}. Remove this field from your configuration",
+		},
+		{
+			name: "nil dynamoNamespace is allowed",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				DynamoNamespace: nil,
+			},
+			fieldPath: "spec",
+			wantErr:   false,
+		},
+		{
+			name: "empty string dynamoNamespace is allowed",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				DynamoNamespace: ptr(""),
+			},
+			fieldPath: "spec",
+			wantErr:   false,
 		},
 		{
 			name: "ingress enabled without host",

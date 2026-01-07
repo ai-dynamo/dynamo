@@ -44,6 +44,16 @@ func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 // Validate performs validation on the shared spec fields.
 // Returns warnings (e.g., deprecation notices) and error if validation fails.
 func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
+	// Reject deprecated dynamoNamespace field - it is ignored by the operator
+	// The operator always computes the dynamo namespace as {k8s_namespace}-{dgd_name}
+	if v.spec.DynamoNamespace != nil && *v.spec.DynamoNamespace != "" {
+		return nil, fmt.Errorf(
+			"%s.dynamoNamespace is deprecated and must not be set. "+
+				"The dynamo namespace is automatically computed as {k8s_namespace}-{dgd_name}. "+
+				"Remove this field from your configuration",
+			v.fieldPath)
+	}
+
 	// Validate replicas if specified
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
