@@ -15,6 +15,7 @@ from dynamo.vllm.multimodal_utils.image_loader import ImageLoader
 from dynamo.vllm.multimodal_utils.model import (
     SupportedModels,
     construct_mm_data,
+    is_qwen_vl_model,
     load_vision_model,
 )
 from dynamo.vllm.multimodal_utils.protocol import (
@@ -34,6 +35,7 @@ __all__ = [
     "ImageLoader",
     "SupportedModels",
     "construct_mm_data",
+    "is_qwen_vl_model",
     "load_vision_model",
     "MultiModalInput",
     "MultiModalRequest",

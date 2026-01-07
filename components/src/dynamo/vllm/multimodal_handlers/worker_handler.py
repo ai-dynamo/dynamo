@@ -3,6 +3,7 @@
 
 import copy
 import logging
+from typing import Any, Dict, Optional
 
 import torch
 from vllm.inputs.data import TokensPrompt
@@ -16,10 +17,60 @@ from ..multimodal_utils import (
     ImageLoader,
     MyRequestOutput,
     construct_mm_data,
+    is_qwen_vl_model,
     vLLMMultimodalRequest,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _construct_qwen_decode_mm_data(
+    image_grid_thw: list,
+    hidden_size: int = 3584,
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """
+    Construct multimodal data for Qwen VL models during decode phase.
+
+    For Qwen2.5-VL and similar models, the decode worker needs image_grid_thw
+    for MRoPE (multi-resolution rotary position embeddings) calculation,
+    even though it doesn't process image embeddings (those are in KV cache).
+
+    vLLM's Qwen parser requires BOTH 'image_embeds' and 'image_grid_thw' keys.
+    We provide placeholder zeros for image_embeds to satisfy the parser.
+    The actual visual features are already in the KV cache from prefill.
+
+    Args:
+        image_grid_thw: List of [temporal, height, width] grid dimensions per image
+        hidden_size: Model hidden dimension (3584 for Qwen2.5-VL-7B)
+
+    Returns:
+        Dictionary with image data for vLLM, or None if no grid provided
+    """
+    if image_grid_thw is None or len(image_grid_thw) == 0:
+        return None
+
+    grid_thw_tensor = torch.tensor(image_grid_thw)
+
+    # Calculate total visual tokens from grid dimensions
+    # Each [t, h, w] entry represents one image's grid
+    # Visual tokens = sum of (t * h * w) for each image
+    total_visual_tokens = sum(int(t) * int(h) * int(w) for t, h, w in image_grid_thw)
+
+    # Create placeholder embeddings with shape (num_visual_tokens, hidden_dim)
+    # This satisfies vLLM's parser requirement for 'image_embeds' key
+    # The zeros won't be used since KV cache already has the real visual features
+    image_embeds = torch.zeros(
+        (total_visual_tokens, hidden_size),
+        dtype=torch.float16,
+        device="cpu",
+    )
+
+    return {
+        "image": {
+            "image_embeds": image_embeds,
+            "image_grid_thw": grid_thw_tensor,
+        }
+    }
 
 
 class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
@@ -63,10 +114,29 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
-        # Decode worker doesn't process embeddings, so we pass None or empty tensor
+        # For Qwen VL models, we need to pass image_grid_thw for MRoPE position calculation
+        # even during decode (the embeddings are already in KV cache from prefill)
+        # vLLM's Qwen parser requires both image_embeds and image_grid_thw keys
+        multi_modal_data = None
+        if is_qwen_vl_model(self.config.model) and request.image_grid_thw:
+            # Get hidden size from model config, default to Qwen2.5-VL-7B value
+            hidden_size = getattr(
+                self.config.engine_args.create_model_config().hf_text_config,
+                "hidden_size",
+                3584,
+            )
+            multi_modal_data = _construct_qwen_decode_mm_data(
+                request.image_grid_thw, hidden_size=hidden_size
+            )
+            logger.debug(
+                f"Constructed Qwen decode mm_data with image_grid_thw: {request.image_grid_thw}, "
+                f"hidden_size: {hidden_size}"
+            )
+
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
+                multi_modal_data=multi_modal_data,
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
