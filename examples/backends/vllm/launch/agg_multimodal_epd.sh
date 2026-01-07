@@ -16,7 +16,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
-MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_NAME="Qwen/Qwen2-VL-2B-Instruct"
 SINGLE_GPU=false
 
 # Parse command line arguments
@@ -69,6 +69,7 @@ python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Single GPU mode: both workers share GPU 0 with reduced memory
     CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
+    sleep 20  # Ensure encode worker starts before PD worker [gluo WAR]
     CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
 else
     CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
