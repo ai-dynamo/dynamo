@@ -684,15 +684,15 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 }
 
 // reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each service in the DGD
-// that has scaling adapter enabled (default). Services with scalingAdapter.disable=true will not have a DGDSA.
+// that has scaling adapter explicitly enabled. Services without scalingAdapter.enabled=true will not have a DGDSA.
 // This enables pluggable autoscaling via HPA, KEDA, or Planner.
 func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
 	// Process each service - SyncResource handles create, update, and delete via toDelete flag
 	for serviceName, component := range dynamoDeployment.Spec.Services {
-		// Check if scaling adapter is disabled for this service
-		scalingAdapterDisabled := component.ScalingAdapter != nil && component.ScalingAdapter.Disable
+		// Check if scaling adapter is enabled for this service (disabled by default)
+		scalingAdapterEnabled := component.ScalingAdapter != nil && component.ScalingAdapter.Enabled
 
 		// Get current replicas (default to 1 if not set)
 		currentReplicas := int32(1)
@@ -721,8 +721,8 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 					},
 				},
 			}
-			// Return toDelete=true if scaling adapter is disabled
-			return adapter, scalingAdapterDisabled, nil
+			// Return toDelete=true if scaling adapter is not enabled
+			return adapter, !scalingAdapterEnabled, nil
 		})
 
 		if err != nil {
