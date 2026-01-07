@@ -38,7 +38,26 @@ class DistributedRuntime:
     The runtime object for dynamo applications
     """
 
-    ...
+    def __new__(
+        cls,
+        event_loop: Any,
+        store_kv: str,
+        request_plane: str,
+        enable_nats: Optional[bool] = None,
+    ) -> "DistributedRuntime":
+        """
+        Create a new DistributedRuntime.
+
+        Args:
+            event_loop: The asyncio event loop
+            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            request_plane: Request plane transport ("tcp", "http", or "nats")
+            enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                        If NATS_SERVER env var is set or request_plane is "nats",
+                        NATS is enabled regardless of this parameter.
+                        When enabled without NATS_SERVER env var, uses localhost:4222.
+        """
+        ...
 
     def namespace(self, name: str) -> Namespace:
         """

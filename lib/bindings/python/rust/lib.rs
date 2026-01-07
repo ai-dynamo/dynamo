@@ -534,7 +534,13 @@ enum ModelInput {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
+    #[pyo3(signature = (event_loop, store_kv, request_plane, enable_nats=None))]
+    fn new(
+        event_loop: PyObject,
+        store_kv: String,
+        request_plane: String,
+        enable_nats: Option<bool>,
+    ) -> PyResult<Self> {
         let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
@@ -566,17 +572,23 @@ impl DistributedRuntime {
             });
         }
 
+        // NATS is used for more than just the NATS request-plane:
+        // - KV router events (JetStream or NATS core + local indexer)
+        // - inter-router replica sync (NATS core)
+        //
+        // NATS initialization logic:
+        // 1. If NATS_SERVER env var is set, always enable NATS (env override)
+        // 2. If request_plane is NATS, always enable NATS
+        // 3. Otherwise, use enable_nats parameter (defaults to true for backward compat)
+        //
+        // When NATS is enabled but NATS_SERVER is not set, it will use default localhost:4222
+        let nats_server_env_set =
+            std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER).is_ok();
+        let enable_nats = enable_nats.unwrap_or(true); // Default to true
+
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            // NATS is used for more than just the NATS request-plane:
-            // - KV router events (JetStream or NATS core + local indexer)
-            // - inter-router replica sync (NATS core)
-            //
-            // If a NATS server is configured via env, enable the client regardless of request plane.
-            nats_config: if request_plane.is_nats()
-                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
-                    .is_ok()
-            {
+            nats_config: if nats_server_env_set || request_plane.is_nats() || enable_nats {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None

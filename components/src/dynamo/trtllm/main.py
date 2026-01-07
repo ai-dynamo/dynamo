@@ -113,7 +113,11 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+    # Enable NATS based on use_kv_events flag (controlled by --no-kv-events)
+    # When enabled, NATS will use NATS_SERVER env var or default to localhost:4222
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, config.use_kv_events
+    )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():

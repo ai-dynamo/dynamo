@@ -325,8 +325,13 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
+    # Enable NATS for KV router mode when kv_events are used.
+    # NATS is needed for receiving KV cache events from workers.
+    # When --no-kv-events is set or router mode is not "kv", NATS is not needed.
+    enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
+
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))

@@ -73,6 +73,9 @@ class Config:
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
 
+    # Whether to enable NATS for KV events (controlled by --no-kv-events flag)
+    use_kv_events: bool = True
+
     def has_connector(self, connector_name: str) -> bool:
         """
         Check if a specific connector is enabled.
@@ -213,6 +216,13 @@ def parse_args() -> Config:
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
     parser.add_argument(
+        "--no-kv-events",
+        action="store_false",
+        dest="use_kv_events",
+        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
+        help="Disable NATS initialization for KV events. By default, NATS is enabled for publishing KV cache events to the router. Use this flag to disable NATS when KV routing is not needed.",
+    )
+    parser.add_argument(
         "--use-vllm-tokenizer",
         action="store_true",
         default=False,
@@ -329,6 +339,7 @@ def parse_args() -> Config:
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    config.use_kv_events = args.use_kv_events
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -385,6 +396,14 @@ def parse_args() -> Config:
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
+    # Check if KV events are explicitly disabled via --no-kv-events flag
+    if not config.use_kv_events:
+        logger.info(
+            "KV events disabled by --no-kv-events flag: "
+            "kv_events_config will not be created"
+        )
+        return None
+
     if config.is_decode_worker:
         logger.info(
             f"Decode worker detected (is_decode_worker={config.is_decode_worker}): "

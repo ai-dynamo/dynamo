@@ -21,13 +21,24 @@ from dynamo._core import Namespace as Namespace
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker():
+def dynamo_worker(enable_nats: bool = True):
+    """
+    Decorator that creates a DistributedRuntime and passes it to the worker function.
+
+    Args:
+        enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                    If NATS_SERVER env var is set or request_plane is "nats",
+                    NATS is enabled regardless of this parameter.
+                    When enabled without NATS_SERVER env var, uses localhost:4222.
+                    Pass False (via --no-kv-events flag) to disable NATS initialization.
+    """
+
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
-            runtime = DistributedRuntime(loop, "etcd", request_plane)
+            runtime = DistributedRuntime(loop, "etcd", request_plane, enable_nats)
 
             await func(runtime, *args, **kwargs)
 

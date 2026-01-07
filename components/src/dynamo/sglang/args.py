@@ -123,6 +123,13 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
+    "no-kv-events": {
+        "flags": ["--no-kv-events"],
+        "action": "store_false",
+        "dest": "use_kv_events",
+        "default": os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
+        "help": "Disable NATS initialization for KV events. By default, NATS is enabled for publishing KV cache events to the router. Use this flag to disable NATS when KV routing is not needed.",
+    },
 }
 
 
@@ -157,6 +164,8 @@ class DynamoArgs:
     dump_config_to: Optional[str] = None
     # local indexer option
     enable_local_indexer: bool = False
+    # Whether to enable NATS for KV events (controlled by --no-kv-events flag)
+    use_kv_events: bool = True
 
 
 class DisaggregationMode(Enum):
@@ -487,6 +496,7 @@ async def parse_args(args: list[str]) -> Config:
         embedding_worker=parsed_args.embedding_worker,
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        use_kv_events=parsed_args.use_kv_events,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
