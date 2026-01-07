@@ -10,6 +10,36 @@ Hardware fault injection framework for testing Dynamo's fault tolerance capabili
 | **GPU Faults (XID)** | Trigger NVSentinel detection & node cordoning | NVSentinel auto-eviction (~2-5 min) |
 | **CUDA Shim Library** | Simulate GPU unavailability at API level | Pod reschedule to healthy node (~5-7 min) |
 
+## Why Both CUDA + XID for GPU Fault Simulation?
+
+To realistically simulate a GPU hardware failure, **both components are required**:
+
+| Component | What It Does | Why Needed |
+|-----------|--------------|------------|
+| **CUDA Shim** | `LD_PRELOAD` intercepts CUDA calls → returns error codes | App sees GPU failure, crashes, triggers pod restart |
+| **XID Injection** | Writes to `/dev/kmsg` → appears in syslog | NVSentinel detects XID, cordons node, evicts pods |
+
+**Why both?**
+- **XID alone:** NVSentinel cordons node, but app continues using "broken" GPU until pod evicted (delayed failure)
+- **CUDA alone:** App fails immediately, but NVSentinel never detects anything (no syslog entry) → no node remediation
+- **Together:** Realistic simulation where app fails AND infrastructure responds correctly
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         GPU Fault Simulation Flow                        │
+│                                                                         │
+│  1. CUDA Shim Toggle ON ──▶ CUDA calls return errors ──▶ App crashes    │
+│                                                                         │
+│  2. XID Injection ──▶ /dev/kmsg ──▶ NVSentinel detects ──▶ Cordon node │
+│                                                                         │
+│  3. Pod restarts on cordoned node ──▶ Crashes again (CUDA shim)        │
+│                                                                         │
+│  4. Cleanup DGD spec (remove CUDA artifacts)                            │
+│                                                                         │
+│  5. node-drainer evicts pods ──▶ New pods on healthy nodes (clean)     │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
 ## Architecture
 
 ```
@@ -150,7 +180,8 @@ python inject_into_pods.py \
 
 ## See Also
 
-- `cuda_fault_injection/README.md` - CUDA shim library details
-- `agents/README.md` - XID injection agent details
+- `cuda_fault_injection/CUDA_SHIM_LIBRARY.md` - CUDA shim library details
+- `agents/GPU_XID_FAULT_INJECTION.md` - XID injection agent details
+- `../../EPHEMERAL_TESTING_CI.md` - Ephemeral testing framework & CI guide
 - `../../deploy/test_hw_faults.py` - Integration test example
 
