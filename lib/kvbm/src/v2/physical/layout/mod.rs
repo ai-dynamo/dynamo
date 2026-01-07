@@ -13,6 +13,7 @@ pub(crate) mod builder;
 
 mod config;
 mod fully_contiguous;
+mod kv_block_layout;
 mod layer_separate;
 mod physical;
 mod serialize;
@@ -27,6 +28,7 @@ pub(super) mod tests;
 pub use builder::{LayoutKind, PhysicalLayoutBuilder};
 pub use config::{BlockDimension, LayoutConfig};
 pub use fully_contiguous::FullyContiguousLayout;
+pub use kv_block_layout::{BlockDim, KvBlockLayout, KvBlocks};
 pub use layer_separate::LayerSeparateLayout;
 pub use physical::{NixlMetadata, PhysicalLayout};
 pub use serialize::{
@@ -119,6 +121,13 @@ pub trait Layout: Send + Sync + std::fmt::Debug {
     /// This provides the layout-type-specific information needed to serialize
     /// and reconstruct the layout on a remote node.
     fn serialization_details(&self) -> serialize::LayoutTypeDetails;
+
+    /// Get the KV block layout describing how dimensions are permuted within blocks.
+    ///
+    /// Returns the internal tensor ordering for blocks in this layout.
+    /// For layer-separate layouts, this describes the inner tensor format.
+    /// For fully contiguous layouts, this describes the full block format.
+    fn block_layout(&self) -> KvBlockLayout;
 }
 
 /// Inner shape format for tensor layout
@@ -132,4 +141,38 @@ pub enum InnerShape {
     /// HND format: [num_heads, block_size, head_dim]
     /// Alternative layout with heads first
     HND,
+}
+
+/// Trait for layouts that provide contiguous per-block memory regions.
+///
+/// This trait enables direct access to entire blocks as contiguous memory,
+/// without requiring layer/outer indexing. It is implemented by
+/// [`FullyContiguousLayout`] but NOT by [`LayerSeparateLayout`] (which
+/// stores each layer separately).
+///
+/// Use this trait when you need to:
+/// - Access raw block memory for transformation kernels
+/// - Reinterpret block memory under different [`KvBlockLayout`] formats
+/// - Perform whole-block operations without layer decomposition
+pub trait ContiguousBlockLayout: Send + Sync + std::fmt::Debug {
+    /// Get the total number of blocks in this layout.
+    fn num_blocks(&self) -> usize;
+
+    /// Get the size of each block in bytes.
+    fn bytes_per_block(&self) -> usize;
+
+    /// Get the contiguous memory region for a specific block.
+    ///
+    /// # Arguments
+    /// * `block_id` - The ID of the block to query (0..num_blocks)
+    ///
+    /// # Returns
+    /// A [`MemoryRegion`] covering the entire block's memory.
+    ///
+    /// # Errors
+    /// Returns an error if `block_id` is out of range.
+    fn raw_block(&self, block_id: usize) -> Result<MemoryRegion>;
+
+    /// Get the KV block layout for this contiguous layout.
+    fn block_layout(&self) -> KvBlockLayout;
 }

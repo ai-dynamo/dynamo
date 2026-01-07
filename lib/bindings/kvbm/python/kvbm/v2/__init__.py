@@ -21,6 +21,11 @@ try:
     SchedulerOutput = _v2.SchedulerOutput
     Tensor = _v2.Tensor
 
+    # Scheduler classes (thin wrappers around real Rust scheduler)
+    RustScheduler = _v2.RustScheduler
+    SchedulerConfig = _v2.SchedulerConfig
+    RequestStatus = _v2.RequestStatus
+
     _V2_CORE_AVAILABLE = True
 except ImportError:
     # Provide stubs when v2 feature is not compiled
@@ -36,6 +41,9 @@ except ImportError:
     KvbmRequest = _make_feature_stub("KvbmRequest", "v2")
     SchedulerOutput = _make_feature_stub("SchedulerOutput", "v2")
     Tensor = _make_feature_stub("Tensor", "v2")
+    RustScheduler = _make_feature_stub("RustScheduler", "v2")
+    SchedulerConfig = _make_feature_stub("SchedulerConfig", "v2")
+    RequestStatus = _make_feature_stub("RequestStatus", "v2")
     _V2_CORE_AVAILABLE = False
 
 __all__ = [
@@ -47,5 +55,8 @@ __all__ = [
     "KvbmRequest",
     "SchedulerOutput",
     "Tensor",
+    "RustScheduler",
+    "SchedulerConfig",
+    "RequestStatus",
     "_V2_CORE_AVAILABLE",
 ]

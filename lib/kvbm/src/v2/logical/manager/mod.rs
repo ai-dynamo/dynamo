@@ -192,7 +192,6 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     pub fn register_blocks(&self, blocks: Vec<CompleteBlock<T>>) -> Vec<ImmutableBlock<T>> {
-        let pool_return_fn = self.inactive_pool.return_fn();
         blocks
             .into_iter()
             .map(|block| {
@@ -200,7 +199,7 @@ impl<T: BlockMetadata> BlockManager<T> {
                     .block_registry
                     .register_sequence_hash(block.sequence_hash());
                 let registered_block =
-                    handle.register_block(block, self.duplication_policy, pool_return_fn.clone());
+                    handle.register_block(block, self.duplication_policy, &self.inactive_pool);
                 ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
             })
             .collect()
@@ -221,7 +220,7 @@ impl<T: BlockMetadata> BlockManager<T> {
         let registered_block = handle.register_mutable_block(
             block,
             self.duplication_policy,
-            self.inactive_pool.return_fn(),
+            &self.inactive_pool,
         );
 
         ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
@@ -247,7 +246,7 @@ impl<T: BlockMetadata> BlockManager<T> {
         let registered_block = handle.register_mutable_block(
             block,
             self.duplication_policy,
-            self.inactive_pool.return_fn(),
+            &self.inactive_pool,
         );
 
         ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
@@ -255,6 +254,12 @@ impl<T: BlockMetadata> BlockManager<T> {
 
     /// Match blocks does a linear search through the [SequenceHash] array, stopping on the first miss.
     pub fn match_blocks(&self, seq_hash: &[SequenceHash]) -> Vec<ImmutableBlock<T>> {
+        tracing::debug!(
+            num_hashes = seq_hash.len(),
+            inactive_pool_len = self.inactive_pool.len(),
+            "match_blocks called"
+        );
+
         // First try to match against active blocks
         let mut matched: Vec<ImmutableBlock<T>> = Vec::with_capacity(seq_hash.len());
         matched.extend(
@@ -264,17 +269,28 @@ impl<T: BlockMetadata> BlockManager<T> {
                 .map(|block| ImmutableBlock::new(block, self.upgrade_fn.clone())),
         );
 
+        let active_matched = matched.len();
+        tracing::debug!(active_matched, "Matched from active pool");
+
         // If we didn't match all hashes, try inactive blocks for the remaining ones
         let remaining_hashes = &seq_hash[matched.len()..];
         if !remaining_hashes.is_empty() {
+            let inactive_found: Vec<_> = self.inactive_pool.find_blocks(remaining_hashes, true);
+            let inactive_matched = inactive_found.len();
+            tracing::debug!(
+                remaining_to_check = remaining_hashes.len(),
+                inactive_matched,
+                "Matched from inactive pool"
+            );
             matched.extend(
-                self.inactive_pool
-                    .find_blocks(remaining_hashes, true)
+                inactive_found
                     .into_iter()
                     .map(|block| ImmutableBlock::new(block, self.upgrade_fn.clone())),
             );
         }
 
+        tracing::debug!(total_matched = matched.len(), "match_blocks result");
+        tracing::trace!(matched = ?matched, "matched blocks");
         matched
     }
 
@@ -326,6 +342,15 @@ impl<T: BlockMetadata> BlockManager<T> {
 
     pub fn block_size(&self) -> usize {
         self.block_size
+    }
+
+    pub fn duplication_policy(&self) -> &BlockDuplicationPolicy {
+        &self.duplication_policy
+    }
+
+    /// Get a reference to the block registry
+    pub(crate) fn block_registry(&self) -> &BlockRegistry {
+        &self.block_registry
     }
 }
 

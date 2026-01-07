@@ -227,18 +227,18 @@ fn test_concurrent_try_get_block_and_drop() {
         (registered_pool_clone.return_fn())(block);
     }) as Arc<dyn Fn(Arc<Block<TestData, Registered>>) + Send + Sync>;
 
-    let complete_block = Block::new(0, 4)
+    // Manually create a registered block and PrimaryBlock with custom return function
+    // This is necessary because register_block() now takes &InactivePool instead of pool_return_fn
+    let complete_block = Block::<TestData, _>::new(0, 4)
         .complete(token_block)
         .expect("Block size should match");
+    let registered_block = complete_block.register(handle.clone());
 
-    let immutable_block = handle.register_block(
-        CompleteBlock {
-            block: Some(complete_block),
-            return_fn: reset_pool.return_fn(),
-        },
-        BlockDuplicationPolicy::Allow,
-        pool_return_fn.clone(),
-    );
+    // Create PrimaryBlock with custom return function
+    let primary = PrimaryBlock::new(Arc::new(registered_block), pool_return_fn);
+
+    // Manually attach the block to the registry for future lookups
+    let immutable_block = handle.attach_block(primary);
 
     let handle_clone = handle.clone();
     let real_return_fn = registered_pool.return_fn();

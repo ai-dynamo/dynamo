@@ -12,6 +12,7 @@ use super::validation::validate_block_transfer;
 use super::{PhysicalLayout, TransferContext, TransferPlan, TransferStrategy};
 use crate::BlockId;
 use crate::physical::transfer::BounceBufferInternal;
+use crate::v2::physical::layout::KvBlockLayout;
 use crate::v2::physical::transfer::{StorageKind, context::TransferCompleteNotification};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
@@ -23,6 +24,99 @@ use tokio::sync::Mutex;
 // Re-export the NIXL transfer builder for public use
 pub use nixl::NixlTransferBuilder;
 
+/// Transformation kernel types for converting between different block layouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransformKernel {
+    /// No transformation needed - layouts are compatible, use copy
+    None,
+    /// Transform from operational (NHD/HND) to universal format
+    BlockToUniversal { src_layout: KvBlockLayout },
+    /// Transform from universal to operational (NHD/HND) format
+    UniversalToBlock { dst_layout: KvBlockLayout },
+    /// Transpose between operational formats (NHD <-> HND)
+    OperationalTranspose,
+    /// Layouts are incompatible and no kernel is available
+    Unsupported,
+}
+
+/// Select the appropriate transformation kernel based on source and destination layouts.
+///
+/// Returns `TransformKernel::None` if the layouts are the same (copy is sufficient).
+/// Returns `TransformKernel::Unsupported` if the layout combination is not supported.
+#[allow(dead_code)]
+pub(crate) fn select_transform_kernel(
+    src_layout: KvBlockLayout,
+    dst_layout: KvBlockLayout,
+) -> TransformKernel {
+    // Same layout - no transformation needed
+    if !src_layout.requires_transform(&dst_layout) {
+        return TransformKernel::None;
+    }
+
+    // Unknown layouts cannot be transformed
+    if matches!(src_layout, KvBlockLayout::Unknown) || matches!(dst_layout, KvBlockLayout::Unknown)
+    {
+        return TransformKernel::Unsupported;
+    }
+
+    match (src_layout, dst_layout) {
+        // Operational to Universal
+        (KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalTP)
+        | (KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalPP)
+        | (KvBlockLayout::OperationalHND, KvBlockLayout::UniversalTP)
+        | (KvBlockLayout::OperationalHND, KvBlockLayout::UniversalPP) => {
+            TransformKernel::BlockToUniversal { src_layout }
+        }
+
+        // Universal to Operational
+        (KvBlockLayout::UniversalTP, KvBlockLayout::OperationalNHD)
+        | (KvBlockLayout::UniversalTP, KvBlockLayout::OperationalHND)
+        | (KvBlockLayout::UniversalPP, KvBlockLayout::OperationalNHD)
+        | (KvBlockLayout::UniversalPP, KvBlockLayout::OperationalHND) => {
+            TransformKernel::UniversalToBlock { dst_layout }
+        }
+
+        // Operational NHD <-> HND transpose
+        (KvBlockLayout::OperationalNHD, KvBlockLayout::OperationalHND)
+        | (KvBlockLayout::OperationalHND, KvBlockLayout::OperationalNHD) => {
+            TransformKernel::OperationalTranspose
+        }
+
+        // Custom layouts need explicit handling
+        (KvBlockLayout::Custom(_), _) | (_, KvBlockLayout::Custom(_)) => {
+            TransformKernel::Unsupported
+        }
+
+        // Universal to Universal (different variants)
+        (KvBlockLayout::UniversalTP, KvBlockLayout::UniversalPP)
+        | (KvBlockLayout::UniversalPP, KvBlockLayout::UniversalTP) => {
+            // TODO: Add direct universal-to-universal kernel
+            TransformKernel::Unsupported
+        }
+
+        // Fallback for any unhandled combinations
+        _ => TransformKernel::Unsupported,
+    }
+}
+
+/// Get the effective source layout, using override if provided.
+#[expect(dead_code)]
+pub(crate) fn effective_src_layout(
+    src: &PhysicalLayout,
+    override_layout: Option<KvBlockLayout>,
+) -> KvBlockLayout {
+    override_layout.unwrap_or_else(|| src.layout().block_layout())
+}
+
+/// Get the effective destination layout, using override if provided.
+#[expect(dead_code)]
+pub(crate) fn effective_dst_layout(
+    dst: &PhysicalLayout,
+    override_layout: Option<KvBlockLayout>,
+) -> KvBlockLayout {
+    override_layout.unwrap_or_else(|| dst.layout().block_layout())
+}
+
 #[derive(Default)]
 #[expect(dead_code)]
 pub(crate) struct TransferOptionsInternal {
@@ -32,6 +126,12 @@ pub(crate) struct TransferOptionsInternal {
     /// If provided, use this stream instead of acquiring from pool.
     /// Caller manages synchronization - no event is recorded by the executor.
     pub(crate) cuda_stream: Option<Arc<CudaStream>>,
+    /// Override source block layout interpretation.
+    /// If None, uses the layout's block_layout() method.
+    pub(crate) src_kv_layout: Option<KvBlockLayout>,
+    /// Override destination block layout interpretation.
+    /// If None, uses the layout's block_layout() method.
+    pub(crate) dst_kv_layout: Option<KvBlockLayout>,
 }
 
 impl TransferOptionsInternal {
@@ -46,6 +146,8 @@ pub(crate) struct TransferOptionsInternalBuilder {
     nixl_write_notification: Option<u64>,
     bounce_buffer: Option<BounceBufferInternal>,
     cuda_stream: Option<Arc<CudaStream>>,
+    src_kv_layout: Option<KvBlockLayout>,
+    dst_kv_layout: Option<KvBlockLayout>,
 }
 
 impl TransferOptionsInternalBuilder {
@@ -77,12 +179,36 @@ impl TransferOptionsInternalBuilder {
         self
     }
 
+    /// Override the source block layout interpretation.
+    ///
+    /// When set, the transfer executor will treat source blocks as having
+    /// this layout instead of the layout's default block_layout().
+    /// This enables transferring blocks that are stored in one format
+    /// but should be interpreted as another.
+    pub(crate) fn src_kv_layout(mut self, layout: KvBlockLayout) -> Self {
+        self.src_kv_layout = Some(layout);
+        self
+    }
+
+    /// Override the destination block layout interpretation.
+    ///
+    /// When set, the transfer executor will treat destination blocks as having
+    /// this layout instead of the layout's default block_layout().
+    /// This enables writing blocks in a different format than the destination
+    /// layout's native format.
+    pub(crate) fn dst_kv_layout(mut self, layout: KvBlockLayout) -> Self {
+        self.dst_kv_layout = Some(layout);
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TransferOptionsInternal> {
         Ok(TransferOptionsInternal {
             layer_range: self.layer_range,
             nixl_write_notification: self.nixl_write_notification,
             bounce_buffer: self.bounce_buffer,
             cuda_stream: self.cuda_stream,
+            src_kv_layout: self.src_kv_layout,
+            dst_kv_layout: self.dst_kv_layout,
         })
     }
 }
@@ -470,5 +596,98 @@ impl TransferNotification {
 
     pub fn is_complete(&self) -> bool {
         self.status.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_select_transform_kernel_same_layout() {
+        // Same layout - no transformation
+        assert_eq!(
+            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::OperationalNHD),
+            TransformKernel::None
+        );
+        assert_eq!(
+            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::UniversalTP),
+            TransformKernel::None
+        );
+    }
+
+    #[test]
+    fn test_select_transform_kernel_block_to_universal() {
+        // Operational to Universal
+        assert!(matches!(
+            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::UniversalTP),
+            TransformKernel::BlockToUniversal {
+                src_layout: KvBlockLayout::OperationalNHD
+            }
+        ));
+        assert!(matches!(
+            select_transform_kernel(KvBlockLayout::OperationalHND, KvBlockLayout::UniversalTP),
+            TransformKernel::BlockToUniversal {
+                src_layout: KvBlockLayout::OperationalHND
+            }
+        ));
+    }
+
+    #[test]
+    fn test_select_transform_kernel_universal_to_block() {
+        // Universal to Operational
+        assert!(matches!(
+            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::OperationalNHD),
+            TransformKernel::UniversalToBlock {
+                dst_layout: KvBlockLayout::OperationalNHD
+            }
+        ));
+        assert!(matches!(
+            select_transform_kernel(KvBlockLayout::UniversalTP, KvBlockLayout::OperationalHND),
+            TransformKernel::UniversalToBlock {
+                dst_layout: KvBlockLayout::OperationalHND
+            }
+        ));
+    }
+
+    #[test]
+    fn test_select_transform_kernel_operational_transpose() {
+        // NHD <-> HND
+        assert_eq!(
+            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::OperationalHND),
+            TransformKernel::OperationalTranspose
+        );
+        assert_eq!(
+            select_transform_kernel(KvBlockLayout::OperationalHND, KvBlockLayout::OperationalNHD),
+            TransformKernel::OperationalTranspose
+        );
+    }
+
+    #[test]
+    fn test_select_transform_kernel_unknown_unsupported() {
+        // Unknown is always unsupported
+        assert_eq!(
+            select_transform_kernel(KvBlockLayout::Unknown, KvBlockLayout::OperationalNHD),
+            TransformKernel::Unsupported
+        );
+        assert_eq!(
+            select_transform_kernel(KvBlockLayout::OperationalNHD, KvBlockLayout::Unknown),
+            TransformKernel::Unsupported
+        );
+    }
+
+    #[test]
+    fn test_select_transform_kernel_custom_unsupported() {
+        // Custom layouts are unsupported (for now)
+        let custom = KvBlockLayout::Custom([
+            crate::v2::physical::layout::BlockDim::Head,
+            crate::v2::physical::layout::BlockDim::Layer,
+            crate::v2::physical::layout::BlockDim::Outer,
+            crate::v2::physical::layout::BlockDim::Page,
+        ]);
+        assert_eq!(
+            select_transform_kernel(custom, KvBlockLayout::OperationalNHD),
+            TransformKernel::Unsupported
+        );
     }
 }

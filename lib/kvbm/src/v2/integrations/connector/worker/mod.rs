@@ -45,6 +45,7 @@ use anyhow::{Result, bail};
 use cudarc::driver::sys::{
     CUevent, CUresult, CUstream, cuEventQuery, cuEventRecord, cuStreamWaitEvent, cudaError_enum,
 };
+use derive_getters::Dissolve;
 use dynamo_memory::TensorDescriptor;
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -108,7 +109,7 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     fn shutdown(&self) -> Result<()>;
 
     /// Get and drain all finished request IDs.
-    fn get_finished(&self) -> (HashSet<String>, HashSet<String>);
+    fn get_finished(&self) -> FinishedRequests;
 
     /// Get and drain all failed onboarding block IDs.
     fn get_failed_onboarding(&self) -> HashSet<usize>;
@@ -532,8 +533,11 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         Ok(())
     }
 
+    /// Get and drain all finished request IDs.
+    ///
+    /// When [`FinishedRequests::dissolve`] is called, the returned tuple will be (offloading, onboarding).
     #[tracing::instrument(level = "debug", skip(self), ret)]
-    fn get_finished(&self) -> (HashSet<String>, HashSet<String>) {
+    fn get_finished(&self) -> FinishedRequests {
         self.state.finished_state.take_finished()
     }
 
@@ -541,4 +545,10 @@ impl ConnectorWorkerInterface for ConnectorWorker {
     fn get_failed_onboarding(&self) -> HashSet<usize> {
         self.state.finished_state.take_failed_onboarding()
     }
+}
+
+#[derive(Default, Debug, Clone, Dissolve)]
+pub struct FinishedRequests {
+    pub offloading: HashSet<String>,
+    pub onboarding: HashSet<String>,
 }

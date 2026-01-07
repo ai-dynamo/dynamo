@@ -9,9 +9,14 @@
 
 use crate::G1;
 use crate::v2::BlockId;
+use crate::v2::SequenceHash;
+use crate::v2::integrations::common::BlockAssignmentStorage;
 use crate::v2::logical::blocks::{CompleteBlock, ImmutableBlock, MutableBlock};
 use crate::v2::logical::manager::BlockManager;
+use crate::v2::logical::pools::BlockDuplicationPolicy;
 use dynamo_tokens::TokenBlock;
+
+use anyhow::Result;
 
 /// Manager for KV cache blocks on GPU (G1 tier).
 ///
@@ -29,6 +34,18 @@ use dynamo_tokens::TokenBlock;
 /// - Allocating "placeholder" blocks that reserve capacity
 /// - Tracking block IDs for the scheduler output
 /// - The actual token data is filled by the model forward pass
+///
+/// # Prefix Caching
+///
+/// When prefix caching is enabled, the manager can look up previously
+/// computed blocks by their sequence hash. This allows requests with
+/// common prefixes (e.g., system prompts) to reuse KV cache data.
+///
+/// The prefix cache lookup flow:
+/// 1. Scheduler calls `get_computed_blocks()` with sequence hashes
+/// 2. BlockManager searches active and inactive pools for matches
+/// 3. Matched ImmutableBlocks are returned for reuse
+/// 4. Only non-cached tokens need new block allocation
 pub struct KVCacheManager {
     /// The underlying block manager for G1 blocks.
     block_manager: BlockManager<G1>,
@@ -38,17 +55,55 @@ pub struct KVCacheManager {
 
     /// Total number of blocks in the cache.
     total_blocks: usize,
+
+    /// Whether prefix caching is enabled.
+    ///
+    /// When enabled, `get_computed_blocks()` will search for cached blocks
+    /// matching the request's sequence hashes. When disabled, it returns empty.
+    prefix_caching_enabled: bool,
 }
 
 impl KVCacheManager {
     /// Create a new KV cache manager wrapping the given block manager.
-    pub fn new(block_manager: BlockManager<G1>, block_size: usize) -> Self {
+    ///
+    /// # Arguments
+    /// * `block_manager` - The underlying BlockManager<G1>
+    /// * `block_size` - Block size in tokens
+    ///
+    /// Note: Prefix caching is disabled by default. Use `with_prefix_caching()`
+    /// to create a manager with prefix caching enabled.
+    pub fn new(block_manager: BlockManager<G1>, block_size: usize) -> Result<Self> {
+        Self::with_prefix_caching(block_manager, block_size, false)
+    }
+
+    /// Create a new KV cache manager with explicit prefix caching setting.
+    ///
+    /// # Arguments
+    /// * `block_manager` - The underlying BlockManager<G1>
+    /// * `block_size` - Block size in tokens
+    /// * `enable_prefix_caching` - Whether to enable prefix cache lookups
+    pub fn with_prefix_caching(
+        block_manager: BlockManager<G1>,
+        block_size: usize,
+        enable_prefix_caching: bool,
+    ) -> Result<Self> {
         let total_blocks = block_manager.total_blocks();
-        Self {
+        if *block_manager.duplication_policy() == BlockDuplicationPolicy::Reject {
+            return Err(anyhow::anyhow!(
+                "BlockDuplicationPolicy::Reject is not allowed"
+            ));
+        }
+        Ok(Self {
             block_manager,
             block_size,
             total_blocks,
-        }
+            prefix_caching_enabled: enable_prefix_caching,
+        })
+    }
+
+    /// Check if prefix caching is enabled.
+    pub fn prefix_caching_enabled(&self) -> bool {
+        self.prefix_caching_enabled
     }
 
     /// Get the block size in tokens.
@@ -155,7 +210,9 @@ impl KVCacheManager {
                 Err(err) => {
                     // Extract the block from the error
                     match err {
-                        crate::v2::logical::blocks::BlockError::BlockSizeMismatch { block, .. } => {
+                        crate::v2::logical::blocks::BlockError::BlockSizeMismatch {
+                            block, ..
+                        } => {
                             failed_blocks.push(block);
                         }
                     }
@@ -172,6 +229,84 @@ impl KVCacheManager {
 
         // Register all complete blocks
         Ok(self.block_manager.register_blocks(complete_blocks))
+    }
+
+    // =========================================================================
+    // Prefix caching methods
+    // =========================================================================
+
+    /// Get computed blocks for a request via prefix cache lookup.
+    ///
+    /// This searches the block manager's active and inactive pools for blocks
+    /// matching the request's sequence hashes. Blocks are matched in order,
+    /// stopping at the first miss to ensure a contiguous prefix.
+    ///
+    /// # Arguments
+    /// * `seq_hashes` - Sequence hashes to look up (from request's TokenBlockSequence)
+    ///
+    /// # Returns
+    /// A tuple of:
+    /// * `Vec<ImmutableBlock<G1>>` - Matched blocks that can be reused
+    /// * `usize` - Number of computed tokens (matched blocks * block_size)
+    ///
+    /// # Prefix Cache Behavior
+    ///
+    /// The lookup follows this pattern (matching vLLM's `get_computed_blocks`):
+    /// 1. If prefix caching is disabled, returns empty immediately
+    /// 2. Searches active pool first (blocks currently in use by other requests)
+    /// 3. Falls back to inactive pool (cached but not currently in use)
+    /// 4. Stops at first non-matching hash to ensure contiguous prefix
+    ///
+    /// # RAII Note
+    ///
+    /// The returned ImmutableBlocks are RAII guards. Holding them prevents the
+    /// blocks from being evicted. The scheduler should:
+    /// - Add matched blocks to the request's `block_state.registered`
+    /// - Only allocate new blocks for the non-cached portion
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Request has 4 complete blocks with hashes [H1, H2, H3, H4]
+    /// // G1 cache has blocks for [H1, H2] (from previous request)
+    /// let seq_hashes = request.get_sequence_hashes();
+    /// let (matched, num_cached) = kv_cache.get_computed_blocks(&seq_hashes);
+    /// // matched = [Block1, Block2], num_cached = 2 * block_size
+    /// // Only need to allocate 2 new blocks for H3, H4
+    /// ```
+    pub fn get_computed_blocks(
+        &self,
+        seq_hashes: &[SequenceHash],
+    ) -> (Vec<ImmutableBlock<G1>>, usize) {
+        if !self.prefix_caching_enabled {
+            return (vec![], 0);
+        }
+
+        if seq_hashes.is_empty() {
+            return (vec![], 0);
+        }
+
+        // Match blocks in order, stopping at first miss.
+        // This ensures we get a contiguous prefix.
+        let matched = self.block_manager.match_blocks(seq_hashes);
+        let num_computed_tokens = matched.len() * self.block_size;
+
+        tracing::debug!(
+            num_hashes = seq_hashes.len(),
+            num_matched = matched.len(),
+            num_computed_tokens,
+            "G1 prefix cache lookup"
+        );
+
+        (matched, num_computed_tokens)
+    }
+
+    /// Create an empty KVCacheBlocks result (no cached blocks).
+    ///
+    /// Used as the return value when prefix caching is disabled or no blocks
+    /// are found. Mirrors vLLM's `empty_kv_cache_blocks`.
+    pub fn empty_computed_blocks(&self) -> (Vec<ImmutableBlock<G1>>, usize) {
+        (vec![], 0)
     }
 }
 
@@ -309,6 +444,37 @@ impl RequestBlockState {
         ids
     }
 
+    /// Calculate the number of blocks that would actually be freed on eviction.
+    ///
+    /// This accounts for block reference counting:
+    /// - Pending (mutable) blocks: always freeable (single owner)
+    /// - Registered (immutable) blocks: only if `use_count() == 1`
+    ///
+    /// Blocks with `use_count() > 1` are shared via prefix caching and
+    /// won't return resources to the pool when this request releases them.
+    ///
+    /// # Usage
+    ///
+    /// Use this method when estimating how many blocks would be freed by
+    /// pausing or evicting a request. The `total_blocks()` method returns
+    /// all held blocks, but shared blocks don't actually free capacity.
+    pub fn freeable_blocks(&self) -> usize {
+        let freeable_pending = self.pending.len();
+        let freeable_registered = self
+            .registered
+            .iter()
+            .filter(|block| block.use_count() == 1)
+            .count();
+        freeable_pending + freeable_registered
+    }
+
+    /// Get an iterator over registered (immutable) blocks.
+    ///
+    /// Useful for inspecting block reference counts or other metadata.
+    pub fn registered_iter(&self) -> impl Iterator<Item = &ImmutableBlock<G1>> {
+        self.registered.iter()
+    }
+
     /// Clear all blocks, returning them to pools via RAII.
     ///
     /// This is called when a request is preempted or finished.
@@ -326,6 +492,44 @@ impl std::fmt::Debug for RequestBlockState {
             .field("pending_ids", &self.pending_block_ids())
             .field("registered_ids", &self.registered_block_ids())
             .finish()
+    }
+}
+
+// ============================================================================
+// BlockAssignmentStorage trait implementation
+// ============================================================================
+
+impl BlockAssignmentStorage for RequestBlockState {
+    type Unassigned = MutableBlock<G1>;
+    type Assigned = ImmutableBlock<G1>;
+
+    fn assigned(&self) -> &[Self::Assigned] {
+        &self.registered
+    }
+
+    fn unassigned(&self) -> &[Self::Unassigned] {
+        &self.pending
+    }
+
+    fn unassigned_mut(&mut self) -> &mut Vec<Self::Unassigned> {
+        &mut self.pending
+    }
+
+    fn extend_assigned(&mut self, blocks: impl IntoIterator<Item = Self::Assigned>) {
+        self.registered.extend(blocks);
+    }
+
+    fn take_unassigned(&mut self) -> Vec<Self::Unassigned> {
+        std::mem::take(&mut self.pending)
+    }
+
+    fn extend_unassigned(&mut self, blocks: impl IntoIterator<Item = Self::Unassigned>) {
+        self.pending.extend(blocks);
+    }
+
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.registered.clear();
     }
 }
 

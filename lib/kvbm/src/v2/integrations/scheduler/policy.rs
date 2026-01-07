@@ -100,5 +100,3 @@ impl SchedulingPolicy for FCFSPolicy {
             .map(|r| r.request_id())
     }
 }
-
-

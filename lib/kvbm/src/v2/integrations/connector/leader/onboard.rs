@@ -5,7 +5,6 @@ use anyhow::Context;
 use futures::future::{BoxFuture, Either, Ready};
 
 use crate::{logical::LogicalLayoutHandle, physical::TransferOptions};
-use std::time::Instant;
 
 use super::*;
 
@@ -202,7 +201,7 @@ async fn execute_onboarding(
     // The current implementation awaits all G2 blocks to be ready before executing the transfer.
     // The balance here is when do we acquire/allocate G1 blocks as they are a precious commodity vs.,
     // when should we start onboarding. More analysis is needed here to determine the optimal strategy.
-    let start_time = Instant::now();
+    // let start_time = Instant::now();
     instance_leader
         .execute_local_transfer(
             LogicalLayoutHandle::G2,
@@ -212,8 +211,8 @@ async fn execute_onboarding(
             TransferOptions::default(),
         )?
         .await?;
-    let end_time = Instant::now();
-    let duration = end_time.duration_since(start_time);
+    // let end_time = Instant::now();
+    // let duration = end_time.duration_since(start_time);
     // tracing::info!(
     //     "G2 to G1 transfer: blocks={}, duration={:?}"
     //     g2_block_ids.len(),

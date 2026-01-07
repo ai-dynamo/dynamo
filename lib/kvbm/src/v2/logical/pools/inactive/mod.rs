@@ -21,7 +21,7 @@ use super::{
 
 // pub(crate) use backends::*;
 
-/// Backend trait for InactivePool storage strategies.
+/// Backend trait for InactivePool storage strategies
 pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
     /// Find blocks matching the given hashes in order, stopping on first miss.
     fn find_matches(&mut self, hashes: &[SequenceHash], touch: bool) -> Vec<Block<T, Registered>>;
@@ -45,6 +45,7 @@ pub(crate) trait InactivePoolBackend<T: BlockMetadata>: Send + Sync {
         self.len() == 0
     }
 
+    #[allow(dead_code)]
     fn has_block(&self, seq_hash: SequenceHash) -> bool;
 
     /// Allocate all blocks from the pool, removing them from the backend.
@@ -96,7 +97,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                 Ok(block) => {
                     let block_id = block.block_id();
                     inner.backend.insert(block);
-                    tracing::trace!(?seq_hash, block_id, "Block returned to inactive pool");
+                    tracing::info!(?seq_hash, block_id, "Block stored in inactive pool");
                 }
                 Err(_block) => {
                     tracing::warn!(
@@ -184,10 +185,33 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     }
 
     /// Check if a block exists in the pool
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn has_block(&self, hash: SequenceHash) -> bool {
         let inner = self.inner.read();
         inner.backend.has_block(hash)
+    }
+
+    /// Find and promote a single block from inactive to active by sequence hash.
+    /// Returns the concrete `Arc<PrimaryBlock<T>>` for duplicate referencing.
+    ///
+    /// This differs from `find_blocks()` which returns trait objects. This method
+    /// returns the concrete type needed when creating `DuplicateBlock` references.
+    ///
+    /// **Note**: The caller is responsible for calling `attach_block_ref()` on the
+    /// returned PrimaryBlock's registration handle to update the weak reference.
+    /// This is not done here to avoid deadlocks when called while holding the
+    /// registry attachments lock.
+    pub fn find_block_as_primary(
+        &self,
+        hash: SequenceHash,
+        touch: bool,
+    ) -> Option<Arc<PrimaryBlock<T>>> {
+        let mut inner = self.inner.write();
+        let matched = inner.backend.find_matches(&[hash], touch);
+        matched.into_iter().next().map(|block| {
+            let primary = PrimaryBlock::new(Arc::new(block), self.return_fn.clone());
+            Arc::new(primary)
+        })
     }
 
     /// Get the number of blocks in the pool

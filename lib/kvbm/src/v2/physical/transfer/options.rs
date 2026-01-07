@@ -4,8 +4,10 @@
 //! Transfer options for configuring block and layer transfers.
 
 use super::BounceBuffer;
+use crate::v2::physical::layout::KvBlockLayout;
 use cudarc::driver::CudaStream;
 use derive_builder::Builder;
+use derive_getters::Dissolve;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ use std::sync::Arc;
 ///     .layer_range(0..10)
 ///     .build();
 /// ```
-#[derive(Clone, Default, Builder)]
+#[derive(Clone, Default, Builder, Dissolve)]
 #[builder(pattern = "owned", default)]
 pub struct TransferOptions {
     /// Range of layers to transfer (None = all layers).
@@ -58,6 +60,24 @@ pub struct TransferOptions {
     /// on the same stream to allow proper event sequencing.
     #[builder(default, setter(strip_option))]
     pub cuda_stream: Option<Arc<CudaStream>>,
+
+    /// Override source block layout interpretation.
+    ///
+    /// When set, the transfer executor will treat source blocks as having
+    /// this layout instead of the layout's default block_layout().
+    /// This enables transferring blocks that are stored in one format
+    /// but should be interpreted as another (e.g., operational → universal).
+    #[builder(default, setter(strip_option))]
+    pub src_kv_layout: Option<KvBlockLayout>,
+
+    /// Override destination block layout interpretation.
+    ///
+    /// When set, the transfer executor will treat destination blocks as having
+    /// this layout instead of the layout's default block_layout().
+    /// This enables writing blocks in a different format than the destination
+    /// layout's native format.
+    #[builder(default, setter(strip_option))]
+    pub dst_kv_layout: Option<KvBlockLayout>,
 }
 
 impl TransferOptions {

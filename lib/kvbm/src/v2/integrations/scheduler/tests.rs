@@ -29,13 +29,7 @@ mod tests {
         #[test]
         fn test_request_with_lora() {
             let tokens: Vec<u32> = vec![1, 2, 3];
-            let request = Request::new(
-                "test-2",
-                tokens,
-                Some("my-lora".to_string()),
-                None,
-                None,
-            );
+            let request = Request::new("test-2", tokens, Some("my-lora".to_string()), None, None);
 
             assert_eq!(request.lora_name, Some("my-lora".to_string()));
         }
@@ -43,8 +37,20 @@ mod tests {
         #[test]
         fn test_request_salt_hash_differs() {
             let tokens: Vec<u32> = vec![1, 2, 3];
-            let request1 = Request::new("test", tokens.clone(), None, Some("salt1".to_string()), None);
-            let request2 = Request::new("test", tokens.clone(), None, Some("salt2".to_string()), None);
+            let request1 = Request::new(
+                "test",
+                tokens.clone(),
+                None,
+                Some("salt1".to_string()),
+                None,
+            );
+            let request2 = Request::new(
+                "test",
+                tokens.clone(),
+                None,
+                Some("salt2".to_string()),
+                None,
+            );
 
             // Different salts should produce different hashes
             assert_ne!(request1.salt_hash, request2.salt_hash);
@@ -92,10 +98,10 @@ mod tests {
         #[test]
         fn test_scheduler_request_creation() {
             let request = create_test_request("req-1", 50);
-            let sched_req = SchedulerRequest::new(request);
+            let sched_req = SchedulerRequest::new(request, 16);
 
             assert_eq!(sched_req.request_id(), "req-1");
-            assert_eq!(sched_req.prompt_len(), 50);
+            assert_eq!(sched_req.original_prompt_len(), 50);
             assert_eq!(sched_req.status, RequestStatus::Waiting);
             assert_eq!(sched_req.num_computed_tokens, 0);
             assert_eq!(sched_req.num_output_tokens, 0);
@@ -103,20 +109,25 @@ mod tests {
         }
 
         #[test]
-        fn test_scheduler_request_total_tokens() {
+        fn test_scheduler_request_total_known_tokens() {
             let request = create_test_request("req-1", 50);
-            let mut sched_req = SchedulerRequest::new(request);
+            let mut sched_req = SchedulerRequest::new(request, 16);
 
-            assert_eq!(sched_req.total_tokens(), 50);
+            // Initial: only prompt tokens
+            assert_eq!(sched_req.total_known_tokens(), 50);
 
-            sched_req.add_output_tokens(10);
-            assert_eq!(sched_req.total_tokens(), 60);
+            // Extend token sequence with output tokens (simulating model output)
+            let output_tokens: Vec<u32> = vec![100, 101, 102, 103, 104, 105, 106, 107, 108, 109];
+            sched_req.extend_tokens(&output_tokens).unwrap();
+            sched_req.add_output_tokens(output_tokens.len());
+            assert_eq!(sched_req.total_known_tokens(), 60);
+            assert_eq!(sched_req.num_output_tokens, 10);
         }
 
         #[test]
         fn test_scheduler_request_blocks_needed() {
             let request = create_test_request("req-1", 50);
-            let sched_req = SchedulerRequest::new(request);
+            let sched_req = SchedulerRequest::new(request, 16);
 
             // With block size 16: ceil(50/16) = 4 blocks needed
             assert_eq!(sched_req.num_blocks_required(16), 4);
@@ -134,7 +145,7 @@ mod tests {
         #[test]
         fn test_scheduler_request_lifecycle() {
             let request = create_test_request("req-1", 50);
-            let mut sched_req = SchedulerRequest::new(request);
+            let mut sched_req = SchedulerRequest::new(request, 16);
 
             // Initial state
             assert_eq!(sched_req.status, RequestStatus::Waiting);
@@ -162,13 +173,114 @@ mod tests {
         #[test]
         fn test_scheduler_request_at_max_tokens() {
             let request = create_test_request("req-1", 50);
-            let mut sched_req = SchedulerRequest::new(request);
+            let mut sched_req = SchedulerRequest::new(request, 16);
 
             assert!(!sched_req.is_at_max_tokens());
 
             // Add tokens up to max
             sched_req.add_output_tokens(100);
             assert!(sched_req.is_at_max_tokens());
+        }
+
+        #[test]
+        fn test_unified_token_api_fresh_request() {
+            // Test the new unified token API on a fresh request
+            let request = create_test_request("req-1", 50);
+            let sched_req = SchedulerRequest::new(request, 16);
+
+            // Fresh request: total_known_tokens should equal original prompt
+            assert_eq!(sched_req.total_known_tokens(), 50);
+            assert_eq!(sched_req.original_prompt_len(), 50);
+
+            // Fresh request is prefilling (no tokens computed yet)
+            assert!(sched_req.is_prefilling());
+            assert_eq!(sched_req.remaining_prefill(), Some(50));
+            assert_eq!(sched_req.tokens_to_compute(), 50);
+
+            // max_total_tokens with max_seq_len=4096
+            assert_eq!(sched_req.max_total_tokens(4096), 50 + 100); // 50 prompt + 100 max_tokens
+        }
+
+        #[test]
+        fn test_unified_token_api_with_output() {
+            // Test that extending tokens properly updates total_known_tokens
+            let request = create_test_request("req-1", 50);
+            let mut sched_req = SchedulerRequest::new(request, 16);
+
+            // Simulate generating 10 output tokens
+            let output_tokens: Vec<u32> = (50..60).collect();
+            sched_req.extend_tokens(&output_tokens).unwrap();
+            sched_req.num_output_tokens = 10;
+
+            // total_known_tokens should now be 60
+            assert_eq!(sched_req.total_known_tokens(), 60);
+            // original_prompt_len remains 50
+            assert_eq!(sched_req.original_prompt_len(), 50);
+
+            // With 0 computed tokens, still prefilling all 60
+            assert!(sched_req.is_prefilling());
+            assert_eq!(sched_req.remaining_prefill(), Some(60));
+
+            // Simulate computing the first 50 tokens (original prompt)
+            sched_req.num_computed_tokens = 50;
+            assert!(sched_req.is_prefilling()); // Still prefilling (10 more tokens)
+            assert_eq!(sched_req.remaining_prefill(), Some(10));
+            assert_eq!(sched_req.tokens_to_compute(), 10);
+
+            // Simulate computing all tokens
+            sched_req.num_computed_tokens = 60;
+            assert!(!sched_req.is_prefilling()); // Done prefilling
+            assert_eq!(sched_req.remaining_prefill(), None);
+            assert_eq!(sched_req.tokens_to_compute(), 0);
+        }
+
+        #[test]
+        fn test_unified_token_api_resumed_request() {
+            // Test that the API works correctly for resumed requests.
+            // A resumed request needs to recompute its full sequence.
+            let request = create_test_request("req-1", 50);
+            let mut sched_req = SchedulerRequest::new(request, 16);
+
+            // Simulate the request generating 30 output tokens before eviction
+            let output_tokens: Vec<u32> = (50..80).collect();
+            sched_req.extend_tokens(&output_tokens).unwrap();
+            sched_req.num_output_tokens = 30;
+            sched_req.num_computed_tokens = 80; // All tokens computed
+
+            // Now simulate preemption
+            sched_req.preempt();
+            assert_eq!(sched_req.num_computed_tokens, 0); // Reset
+            assert_eq!(sched_req.status, RequestStatus::Preempted);
+
+            // Resume the request
+            sched_req.resume();
+
+            // Key test: total_known_tokens should still be 80 (token sequence preserved)
+            assert_eq!(sched_req.total_known_tokens(), 80);
+            // original_prompt_len is still 50 (for prefix cache)
+            assert_eq!(sched_req.original_prompt_len(), 50);
+
+            // The resumed request is now "prefilling" its full 80 tokens
+            assert!(sched_req.is_prefilling());
+            assert_eq!(sched_req.remaining_prefill(), Some(80));
+            assert_eq!(sched_req.tokens_to_compute(), 80);
+        }
+
+        #[test]
+        fn test_remaining_output_capacity() {
+            let request = create_test_request("req-1", 50);
+            let mut sched_req = SchedulerRequest::new(request, 16);
+
+            // max_tokens is 100, so capacity is 100
+            assert_eq!(sched_req.remaining_output_capacity(), 100);
+
+            // Generate 30 tokens
+            sched_req.num_output_tokens = 30;
+            assert_eq!(sched_req.remaining_output_capacity(), 70);
+
+            // Generate all tokens
+            sched_req.num_output_tokens = 100;
+            assert_eq!(sched_req.remaining_output_capacity(), 0);
         }
     }
 
@@ -182,7 +294,7 @@ mod tests {
         fn create_test_sched_request(id: &str) -> SchedulerRequest {
             let tokens: Vec<u32> = vec![1, 2, 3, 4];
             let request = Request::new(id, tokens, None, None, None);
-            SchedulerRequest::new(request)
+            SchedulerRequest::new(request, 16)
         }
 
         #[test]
@@ -273,7 +385,7 @@ mod tests {
         fn create_test_sched_request(id: &str, num_tokens: usize) -> SchedulerRequest {
             let tokens: Vec<u32> = (0..num_tokens as u32).collect();
             let request = Request::new(id, tokens, None, None, None);
-            SchedulerRequest::new(request)
+            SchedulerRequest::new(request, 16)
         }
 
         #[test]
@@ -320,9 +432,9 @@ mod tests {
             let mut req1 = create_test_sched_request("req-1", 32);
             let mut req2 = create_test_sched_request("req-2", 32);
 
-            // req1 has more computed tokens
-            req1.update_computed_tokens(20);
-            req2.update_computed_tokens(5);
+            // req1 has more computed tokens (simulating cache matches)
+            req1.apply_cache_matches(20, 0);
+            req2.apply_cache_matches(5, 0);
 
             let running: Vec<&SchedulerRequest> = vec![&req1, &req2];
 
@@ -449,12 +561,7 @@ mod tests {
         fn test_scheduler_output_add_new_request() {
             let mut output = SchedulerOutput::new(1);
 
-            output.add_new_request(
-                "req-1".to_string(),
-                vec![1, 2, 3, 4],
-                vec![0, 1],
-                0,
-            );
+            output.add_new_request("req-1".to_string(), vec![1, 2, 3, 4], vec![0, 1], 0);
 
             assert_eq!(output.scheduled_new_reqs.len(), 1);
             assert_eq!(output.scheduled_new_reqs[0].req_id, "req-1");
@@ -465,15 +572,7 @@ mod tests {
         fn test_scheduler_output_add_cached_request() {
             let mut output = SchedulerOutput::new(1);
 
-            output.add_cached_request(
-                "req-1".to_string(),
-                false,
-                vec![5],
-                None,
-                vec![2],
-                10,
-                1,
-            );
+            output.add_cached_request("req-1".to_string(), false, vec![5], None, vec![2], 10, 1);
 
             assert_eq!(output.scheduled_cached_reqs.len(), 1);
             assert!(!output.scheduled_cached_reqs[0].resumed);
@@ -496,4 +595,3 @@ mod tests {
         }
     }
 }
-

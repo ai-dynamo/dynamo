@@ -65,6 +65,9 @@ impl From<SerializableTransferOptions> for TransferOptions {
             // bounce_buffer requires TransportManager to resolve handle to layout
             bounce_buffer: None,
             cuda_stream: None,
+            // KV layout overrides are not serialized; they must be set locally
+            src_kv_layout: None,
+            dst_kv_layout: None,
         }
     }
 }

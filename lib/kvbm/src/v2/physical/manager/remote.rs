@@ -95,6 +95,7 @@ mod tests {
             }],
             layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
                 block_format: BlockFormat::Operational,
+                kv_block_layout: crate::v2::physical::layout::KvBlockLayout::OperationalNHD,
             }),
         }
     }
@@ -109,6 +110,10 @@ mod tests {
         assert_eq!(remote.handle(), handle);
         assert_eq!(remote.worker_id(), 999);
         assert_eq!(remote.layout_id(), 42);
+        assert_eq!(
+            remote.layout().layout().block_layout(),
+            crate::physical::layout::KvBlockLayout::OperationalNHD
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use crate::BlockId;
 
 use super::{
-    FullyContiguousLayout, LayerSeparateLayout, Layout, MemoryRegion,
+    FullyContiguousLayout, InnerShape, LayerSeparateLayout, Layout, MemoryRegion,
     builder::{PhysicalLayoutBuilder, PhysicalLayoutBuilderDefault},
     serialize::{LayoutDescriptor, LayoutTypeDetails},
 };
@@ -237,6 +237,7 @@ impl PhysicalLayout {
                     serialized.layout_config.clone(),
                     Buffer::from_arc(remote_regions[0].clone()),
                     details.block_format,
+                    details.kv_block_layout,
                 )?;
                 Arc::new(layout)
             }
@@ -248,11 +249,16 @@ impl PhysicalLayout {
                         remote_regions.len()
                     ));
                 }
-                let layout = LayerSeparateLayout::new(
-                    serialized.layout_config.clone(),
-                    remote_regions.into_iter().map(Buffer::from_arc).collect(),
-                    details.block_dim,
-                )?;
+                let inner_shape = details
+                    .kv_block_layout
+                    .to_inner_shape()
+                    .unwrap_or(InnerShape::Unknown);
+                let layout = LayerSeparateLayout::builder()
+                    .config(serialized.layout_config.clone())
+                    .memory(remote_regions.into_iter().map(Buffer::from_arc).collect())
+                    .block_dim(details.block_dim)
+                    .inner_shape(inner_shape)
+                    .build()?;
                 Arc::new(layout)
             }
         };

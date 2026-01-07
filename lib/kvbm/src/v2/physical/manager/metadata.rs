@@ -168,9 +168,12 @@ impl std::fmt::Debug for SerializedLayout {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::physical::layout::{
-        BlockFormat, FullyContiguousDetails, LayoutConfig, LayoutDescriptor, LayoutTypeDetails,
-        NixlMetadata,
+    use crate::{
+        physical::layout::KvBlockLayout,
+        v2::physical::layout::{
+            BlockFormat, FullyContiguousDetails, LayoutConfig, LayoutDescriptor, LayoutTypeDetails,
+            NixlMetadata,
+        },
     };
     use dynamo_memory::{MemoryRegion, StorageKind, nixl};
 
@@ -196,6 +199,7 @@ mod tests {
             }],
             layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
                 block_format: BlockFormat::Operational,
+                kv_block_layout: KvBlockLayout::OperationalNHD,
             }),
         }
     }

@@ -190,7 +190,7 @@ impl PyConnectorWorker {
     ///            Returns None for each set if there are no completed requests of that type.
     #[allow(clippy::type_complexity)]
     pub fn get_finished(&self) -> PyResult<(Option<HashSet<String>>, Option<HashSet<String>>)> {
-        let (offload_ids, onboard_ids) = self.inner.get_finished();
+        let (offload_ids, onboard_ids) = self.inner.get_finished().dissolve();
 
         let offload = if offload_ids.is_empty() {
             None

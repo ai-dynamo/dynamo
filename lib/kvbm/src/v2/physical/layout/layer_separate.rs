@@ -12,7 +12,10 @@ use anyhow::{Result, anyhow};
 use validator::Validate;
 
 use super::serialize::{LayerSeparateDetails, LayoutTypeDetails};
-use super::{BlockDimension, Buffer, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion};
+use super::{
+    BlockDimension, Buffer, InnerShape, KvBlockLayout, Layout, LayoutConfig, MemoryDescriptor,
+    MemoryRegion,
+};
 
 /// Layer-separate layout where each layer has its own allocation.
 #[derive(Debug)]
@@ -20,7 +23,7 @@ pub struct LayerSeparateLayout {
     config: LayoutConfig,
     /// Base addresses for each layer
     layer_base_addrs: Vec<usize>,
-    /// Whether the outer dimension is contiguous (vs block dimensionl
+    /// Whether the outer dimension is contiguous (vs block dimension)
     block_dim: BlockDimension,
     /// Stride between blocks in bytes
     block_stride: usize,
@@ -30,23 +33,130 @@ pub struct LayerSeparateLayout {
     region_size: usize,
     /// Owned memory regions backing this layout (one per layer)
     memory_regions: Vec<Buffer>,
+    /// KV block layout for inner tensor format (must be operational: NHD or HND)
+    kv_block_layout: KvBlockLayout,
+}
+
+/// Builder for creating [`LayerSeparateLayout`] instances.
+///
+/// # Example
+///
+/// ```ignore
+/// let layout = LayerSeparateLayout::builder()
+///     .config(config)
+///     .memory(memory_regions)
+///     .block_dim(BlockDimension::BlockIsFirstDim)
+///     .inner_shape(InnerShape::NHD)
+///     .build()?;
+/// ```
+#[derive(Debug, Default)]
+pub struct LayerSeparateLayoutBuilder {
+    config: Option<LayoutConfig>,
+    memory: Option<Vec<Buffer>>,
+    block_dim: Option<BlockDimension>,
+    kv_block_layout: KvBlockLayout,
+}
+
+impl LayerSeparateLayoutBuilder {
+    /// Create a new builder with default values.
+    pub fn new() -> Self {
+        Self {
+            config: None,
+            memory: None,
+            block_dim: None,
+            kv_block_layout: KvBlockLayout::Unknown,
+        }
+    }
+
+    /// Set the layout configuration.
+    pub fn config(&mut self, config: LayoutConfig) -> &mut Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Set the memory buffers backing this layout (one per layer).
+    pub fn memory(&mut self, memory: Vec<Buffer>) -> &mut Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Set the block dimension ordering.
+    pub fn block_dim(&mut self, block_dim: BlockDimension) -> &mut Self {
+        self.block_dim = Some(block_dim);
+        self
+    }
+
+    /// Set the inner shape, which translates to the KV block layout.
+    ///
+    /// Only operational layouts (NHD, HND) are valid for layer-separate layouts.
+    ///
+    /// - `InnerShape::NHD` -> `KvBlockLayout::OperationalNHD`
+    /// - `InnerShape::HND` -> `KvBlockLayout::OperationalHND`
+    /// - `InnerShape::Unknown` -> `KvBlockLayout::Unknown`
+    ///
+    /// Default: `KvBlockLayout::Unknown`
+    pub fn inner_shape(&mut self, shape: InnerShape) -> &mut Self {
+        self.kv_block_layout = KvBlockLayout::from_inner_shape(shape);
+        self
+    }
+
+    /// Build the [`LayerSeparateLayout`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `config` is not set
+    /// - `memory` is not set
+    /// - `block_dim` is not set
+    /// - The memory region count doesn't match `num_layers`
+    /// - Any memory region is too small for the layout
+    /// - The config validation fails
+    pub fn build(&self) -> Result<LayerSeparateLayout> {
+        let config = self
+            .config
+            .clone()
+            .ok_or_else(|| anyhow!("config is required"))?;
+        let memory = self
+            .memory
+            .clone()
+            .ok_or_else(|| anyhow!("memory is required"))?;
+        let block_dim = self
+            .block_dim
+            .ok_or_else(|| anyhow!("block_dim is required"))?;
+
+        LayerSeparateLayout::new_internal(config, memory, block_dim, self.kv_block_layout)
+    }
 }
 
 impl LayerSeparateLayout {
-    /// Create a new layer-separate layout.
+    /// Create a builder for `LayerSeparateLayout`.
+    pub fn builder() -> LayerSeparateLayoutBuilder {
+        LayerSeparateLayoutBuilder::new()
+    }
+
+    /// Create a new layer-separate layout with default KV block layout.
     ///
     /// # Arguments
     /// - `config` - Layout configuration
     /// - `memory` - Vector of owned memory regions (one per layer)
-    /// - `outer_contiguous` - If true, outer dimension is contiguous with the inner dimension, i.e. (num_blocks, outer_dim, ...);
-    ///   if false, block dimension is contiguous with the inner dimension, i.e. (outer_dim, num_blocks, ...).
+    /// - `block_dim` - Whether block or outer dimension is first
     ///
     /// # Returns
-    /// A new LayerSeparateLayout instance
-    pub fn new(
+    /// A new LayerSeparateLayout instance with `KvBlockLayout::Unknown`
+    pub(crate) fn new(
         config: LayoutConfig,
         memory: Vec<Buffer>,
         block_dim: BlockDimension,
+    ) -> Result<Self> {
+        Self::new_internal(config, memory, block_dim, KvBlockLayout::Unknown)
+    }
+
+    /// Internal constructor with all parameters.
+    fn new_internal(
+        config: LayoutConfig,
+        memory: Vec<Buffer>,
+        block_dim: BlockDimension,
+        kv_block_layout: KvBlockLayout,
     ) -> Result<Self> {
         config.validate()?;
 
@@ -97,6 +207,7 @@ impl LayerSeparateLayout {
             outer_stride,
             region_size,
             memory_regions: memory,
+            kv_block_layout,
         })
     }
 
@@ -142,6 +253,18 @@ impl LayerSeparateLayout {
     /// Get mutable reference to the memory regions for NIXL registration.
     pub fn memory_regions_mut(&mut self) -> &mut [Buffer] {
         &mut self.memory_regions
+    }
+
+    /// Get the KV block layout.
+    pub fn kv_block_layout(&self) -> KvBlockLayout {
+        self.kv_block_layout
+    }
+
+    /// Set the KV block layout from an inner shape.
+    ///
+    /// Note: Only operational layouts (NHD, HND) are valid for layer-separate layouts.
+    pub fn set_kv_block_layout(&mut self, inner_shape: InnerShape) {
+        self.kv_block_layout = KvBlockLayout::from_inner_shape(inner_shape);
     }
 }
 
@@ -201,7 +324,12 @@ impl Layout for LayerSeparateLayout {
     fn serialization_details(&self) -> LayoutTypeDetails {
         LayoutTypeDetails::LayerSeparate(LayerSeparateDetails {
             block_dim: self.block_dim,
+            kv_block_layout: self.kv_block_layout,
         })
+    }
+
+    fn block_layout(&self) -> KvBlockLayout {
+        self.kv_block_layout
     }
 }
 

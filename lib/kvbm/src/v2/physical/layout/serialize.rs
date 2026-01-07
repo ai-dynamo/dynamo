@@ -7,7 +7,7 @@
 //! so they can be transmitted to remote nodes and reconstructed there for RDMA operations.
 
 use super::physical::NixlMetadata;
-use super::{BlockDimension, LayoutConfig};
+use super::{BlockDimension, KvBlockLayout, LayoutConfig};
 use anyhow::Result;
 use dynamo_memory::{MemoryRegion, StorageKind};
 use serde::{Deserialize, Serialize};
@@ -34,6 +34,9 @@ impl Default for BlockFormat {
 pub struct FullyContiguousDetails {
     /// Format of the blocks in memory
     pub block_format: BlockFormat,
+    /// KV block layout describing dimension ordering within blocks
+    #[serde(default)]
+    pub kv_block_layout: KvBlockLayout,
 }
 
 /// Details specific to layer-separate layouts.
@@ -41,6 +44,9 @@ pub struct FullyContiguousDetails {
 pub struct LayerSeparateDetails {
     /// Block dimension ordering (block-first or block-second)
     pub block_dim: BlockDimension,
+    /// KV block layout for the inner tensor format (must be operational: NHD or HND)
+    #[serde(default)]
+    pub kv_block_layout: KvBlockLayout,
 }
 
 /// Layout-type-specific details.
@@ -192,6 +198,7 @@ mod tests {
             memory_descriptors: vec![MemoryRegion::new(0x1000, 4096)],
             layout_type_details: LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
                 block_format: BlockFormat::Operational,
+                kv_block_layout: KvBlockLayout::OperationalNHD,
             }),
         };
 
@@ -222,6 +229,7 @@ mod tests {
             ],
             layout_type_details: LayoutTypeDetails::LayerSeparate(LayerSeparateDetails {
                 block_dim: BlockDimension::BlockIsFirstDim,
+                kv_block_layout: KvBlockLayout::OperationalNHD,
             }),
         };
 
@@ -238,6 +246,7 @@ mod tests {
     fn test_fully_contiguous_details_serialization() {
         let details = LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
             block_format: BlockFormat::Operational,
+            kv_block_layout: KvBlockLayout::UniversalTP,
         });
 
         let json = serde_json::to_string(&details).unwrap();
@@ -246,6 +255,7 @@ mod tests {
         match deserialized {
             LayoutTypeDetails::FullyContiguous(d) => {
                 assert_eq!(d.block_format, BlockFormat::Operational);
+                assert_eq!(d.kv_block_layout, KvBlockLayout::UniversalTP);
             }
             _ => panic!("Expected FullyContiguous variant"),
         }
@@ -255,6 +265,7 @@ mod tests {
     fn test_layer_separate_details_serialization() {
         let details = LayoutTypeDetails::LayerSeparate(LayerSeparateDetails {
             block_dim: BlockDimension::BlockIsSecondDim,
+            kv_block_layout: KvBlockLayout::OperationalHND,
         });
 
         let json = serde_json::to_string(&details).unwrap();
@@ -263,6 +274,7 @@ mod tests {
         match deserialized {
             LayoutTypeDetails::LayerSeparate(d) => {
                 assert_eq!(d.block_dim, BlockDimension::BlockIsSecondDim);
+                assert_eq!(d.kv_block_layout, KvBlockLayout::OperationalHND);
             }
             _ => panic!("Expected LayerSeparate variant"),
         }

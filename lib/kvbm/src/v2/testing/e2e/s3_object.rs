@@ -32,7 +32,7 @@ use crate::v2::physical::transfer::{
     BlockChecksum, FillPattern, NixlAgent, compute_block_checksums, fill_blocks,
 };
 use crate::v2::testing::physical::{LayoutKind, standard_config};
-use crate::{BlockId, SequenceHash};
+use crate::{BlockId, KvbmSequenceHashProvider, SequenceHash};
 use dynamo_tokens::TokenBlockSequence;
 
 /// Generate unique test bucket name to avoid collisions.
@@ -86,7 +86,7 @@ fn generate_test_hashes(count: usize, seed: usize) -> Vec<SequenceHash> {
     seq.blocks()
         .iter()
         .take(count)
-        .map(|b| b.positional_lineage_hash())
+        .map(|b| b.kvbm_sequence_hash())
         .collect()
 }
 
@@ -757,8 +757,14 @@ async fn test_g4_search_finds_offloaded_blocks() -> Result<()> {
 
     fill_blocks(&layout, &block_ids, FillPattern::Sequential)?;
     let put_results = test_client.put_blocks(&hashes, &layout, &block_ids).await;
-    assert!(put_results.iter().all(|r| r.is_ok()), "Offload should succeed");
-    println!("✓ Pre-uploaded {} blocks to S3 (simulating G4)", block_ids.len());
+    assert!(
+        put_results.iter().all(|r| r.is_ok()),
+        "Offload should succeed"
+    );
+    println!(
+        "✓ Pre-uploaded {} blocks to S3 (simulating G4)",
+        block_ids.len()
+    );
 
     // Step 2: G4 search via has_blocks
     let search_results = test_client.has_blocks(&hashes).await;
@@ -773,7 +779,10 @@ async fn test_g4_search_finds_offloaded_blocks() -> Result<()> {
         assert_eq!(size_opt.unwrap(), expected_size, "Block size should match");
     }
 
-    println!("✓ G4 search found all {} blocks with correct size ({} bytes)", found_count, expected_size);
+    println!(
+        "✓ G4 search found all {} blocks with correct size ({} bytes)",
+        found_count, expected_size
+    );
     Ok(())
 }
 
@@ -793,8 +802,13 @@ async fn test_g4_search_partial_results() -> Result<()> {
     let uploaded_hashes = generate_test_hashes(3, 710);
 
     fill_blocks(&layout, &uploaded_block_ids, FillPattern::Sequential)?;
-    let _ = test_client.put_blocks(&uploaded_hashes, &layout, &uploaded_block_ids).await;
-    println!("✓ Uploaded {} blocks (simulating partial G4)", uploaded_block_ids.len());
+    let _ = test_client
+        .put_blocks(&uploaded_hashes, &layout, &uploaded_block_ids)
+        .await;
+    println!(
+        "✓ Uploaded {} blocks (simulating partial G4)",
+        uploaded_block_ids.len()
+    );
 
     // Search for blocks 0-5 (0-2 exist, 3-5 don't)
     let mut search_hashes = uploaded_hashes.clone();
@@ -806,9 +820,15 @@ async fn test_g4_search_partial_results() -> Result<()> {
     let missing_count = search_results.iter().filter(|(_, s)| s.is_none()).count();
 
     assert_eq!(found_count, 3, "Should find 3 blocks that exist");
-    assert_eq!(missing_count, 3, "Should not find 3 blocks that don't exist");
+    assert_eq!(
+        missing_count, 3,
+        "Should not find 3 blocks that don't exist"
+    );
 
-    println!("✓ G4 search correctly identified {} found, {} missing", found_count, missing_count);
+    println!(
+        "✓ G4 search correctly identified {} found, {} missing",
+        found_count, missing_count
+    );
     Ok(())
 }
 
@@ -832,7 +852,9 @@ async fn test_g4_load_downloads_blocks() -> Result<()> {
     let hashes = generate_test_hashes(4, 720);
 
     let src_checksums = fill_and_checksum(&src_layout, &src_block_ids, FillPattern::Sequential)?;
-    let _ = test_client.put_blocks(&hashes, &src_layout, &src_block_ids).await;
+    let _ = test_client
+        .put_blocks(&hashes, &src_layout, &src_block_ids)
+        .await;
     println!("✓ Uploaded {} blocks to G4", src_block_ids.len());
 
     // Step 2: Allocate destination blocks (simulating G2 allocation)
@@ -841,7 +863,9 @@ async fn test_g4_load_downloads_blocks() -> Result<()> {
     let dst_block_ids: Vec<BlockId> = (4..8).collect(); // Different block IDs
 
     // Step 3: Download via get_blocks
-    let get_results = test_client.get_blocks(&hashes, &dst_layout, &dst_block_ids).await;
+    let get_results = test_client
+        .get_blocks(&hashes, &dst_layout, &dst_block_ids)
+        .await;
 
     let success_count = get_results.iter().filter(|r| r.is_ok()).count();
     assert_eq!(success_count, 4, "All G4 loads should succeed");
@@ -850,13 +874,24 @@ async fn test_g4_load_downloads_blocks() -> Result<()> {
     // Step 4: Verify checksums
     let dst_checksums = compute_block_checksums(&dst_layout, &dst_block_ids)?;
 
-    for ((&src_id, &dst_id), _hash) in src_block_ids.iter().zip(dst_block_ids.iter()).zip(hashes.iter()) {
+    for ((&src_id, &dst_id), _hash) in src_block_ids
+        .iter()
+        .zip(dst_block_ids.iter())
+        .zip(hashes.iter())
+    {
         let src_checksum = src_checksums.get(&src_id).expect("src checksum");
         let dst_checksum = dst_checksums.get(&dst_id).expect("dst checksum");
-        assert_eq!(src_checksum, dst_checksum, "Checksum mismatch: src[{}] != dst[{}]", src_id, dst_id);
+        assert_eq!(
+            src_checksum, dst_checksum,
+            "Checksum mismatch: src[{}] != dst[{}]",
+            src_id, dst_id
+        );
     }
 
-    println!("✓ G4 load verified: all {} blocks have matching checksums", success_count);
+    println!(
+        "✓ G4 load verified: all {} blocks have matching checksums",
+        success_count
+    );
     Ok(())
 }
 
@@ -878,7 +913,9 @@ async fn test_g4_load_partial_failure() -> Result<()> {
     let uploaded_hashes: Vec<SequenceHash> = generate_test_hashes(2, 730);
 
     fill_blocks(&src_layout, &uploaded_ids, FillPattern::Sequential)?;
-    let _ = test_client.put_blocks(&uploaded_hashes, &src_layout, &uploaded_ids).await;
+    let _ = test_client
+        .put_blocks(&uploaded_hashes, &src_layout, &uploaded_ids)
+        .await;
     println!("✓ Uploaded 2 blocks (0, 2) - blocks 1, 3 don't exist");
 
     // Try to load all 4 blocks (0, 1, 2, 3 - but 1 and 3 don't exist)
@@ -891,7 +928,9 @@ async fn test_g4_load_partial_failure() -> Result<()> {
     let dst_layout = create_fc_system_layout(agent_dst, 8);
     let dst_block_ids: Vec<BlockId> = vec![4, 5, 6, 7];
 
-    let get_results = test_client.get_blocks(&all_hashes, &dst_layout, &dst_block_ids).await;
+    let get_results = test_client
+        .get_blocks(&all_hashes, &dst_layout, &dst_block_ids)
+        .await;
 
     let success_count = get_results.iter().filter(|r| r.is_ok()).count();
     let failure_count = get_results.iter().filter(|r| r.is_err()).count();
@@ -905,6 +944,9 @@ async fn test_g4_load_partial_failure() -> Result<()> {
     assert!(get_results[2].is_ok(), "Block 2 should succeed");
     assert!(get_results[3].is_err(), "Block 3 should fail");
 
-    println!("✓ G4 load partial failure: {} succeeded, {} failed as expected", success_count, failure_count);
+    println!(
+        "✓ G4 load partial failure: {} succeeded, {} failed as expected",
+        success_count, failure_count
+    );
     Ok(())
 }

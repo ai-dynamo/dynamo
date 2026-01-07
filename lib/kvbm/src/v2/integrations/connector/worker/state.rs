@@ -20,7 +20,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
-use super::init::PendingWorkerState;
+use super::{FinishedRequests, init::PendingWorkerState};
 
 use crate::{
     KvbmRuntime,
@@ -83,11 +83,14 @@ impl FinishedState {
     ///
     /// Returns (finished_offloading, finished_onboarding) to match vLLM's API
     /// which expects (sending/saving ids, recving/loading ids).
-    pub fn take_finished(&self) -> (HashSet<String>, HashSet<String>) {
+    pub fn take_finished(&self) -> FinishedRequests {
         let mut inner = self.inner.lock();
         let finished_onboarding = std::mem::take(&mut inner.finished_onboarding);
         let finished_offloading = std::mem::take(&mut inner.finished_offloading);
-        (finished_offloading, finished_onboarding)
+        FinishedRequests {
+            offloading: finished_offloading,
+            onboarding: finished_onboarding,
+        }
     }
 
     /// Take and drain all failed onboarding block IDs.
@@ -389,9 +392,9 @@ mod tests {
         assert_eq!(failed.len(), 3);
 
         // take_finished returns (onboarding, offloading)
-        let (onboarding, offloading) = state.take_finished();
-        assert!(offloading.is_empty());
+        let (offloading, onboarding) = state.take_finished().dissolve();
         assert!(onboarding.contains("req-123"));
+        assert!(offloading.is_empty());
     }
 
     #[test]

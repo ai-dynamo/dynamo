@@ -661,7 +661,7 @@ mod tests {
     #[test]
     fn test_batch_config_default() {
         let config = BatchConfig::default();
-        assert_eq!(config.max_batch_size, 64);
+        assert_eq!(config.max_batch_size, 1024);
         assert_eq!(config.min_batch_size, 8);
     }
 

@@ -5,8 +5,6 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use validator::{Validate, ValidationError};
 
-use super::InnerShape;
-
 /// Configuration for block layouts
 #[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayoutConfig {
@@ -40,9 +38,17 @@ pub struct LayoutConfig {
     #[builder(default = "2")]
     pub dtype_width_bytes: usize,
 
-    /// Inner shape format (NHD, HND, or Unknown)
-    #[builder(default = "InnerShape::Unknown")]
-    pub inner_shape: InnerShape,
+    /// Number of attention heads (optional).
+    ///
+    /// When provided, enables KvBlockLayout support for universal formats.
+    /// The head dimension can be computed as: `inner_dim / (page_size * num_heads)`.
+    ///
+    /// Required for:
+    /// - Universal layout transformations
+    /// - Per-head memory region access
+    #[builder(default = "None")]
+    #[serde(default)]
+    pub num_heads: Option<usize>,
 }
 
 impl LayoutConfig {
@@ -58,6 +64,64 @@ impl LayoutConfig {
             .saturating_mul(self.page_size)
             .saturating_mul(self.inner_dim)
             .saturating_mul(self.dtype_width_bytes)
+    }
+
+    /// Get the head dimension if `num_heads` is specified.
+    ///
+    /// Computes `inner_dim / (page_size * num_heads)`.
+    ///
+    /// # Returns
+    /// `Some(head_dim)` if `num_heads` is set, `None` otherwise.
+    pub fn head_dim(&self) -> Option<usize> {
+        self.num_heads.map(|nh| {
+            let divisor = self.page_size * nh;
+            if divisor > 0 {
+                self.inner_dim / divisor
+            } else {
+                0
+            }
+        })
+    }
+
+    /// Check if this config supports KvBlockLayout operations.
+    ///
+    /// Returns `true` if `num_heads` is set and the dimensions are valid
+    /// (inner_dim is evenly divisible by page_size * num_heads).
+    pub fn supports_kv_block_layout(&self) -> bool {
+        if let Some(nh) = self.num_heads {
+            let divisor = self.page_size * nh;
+            divisor > 0 && self.inner_dim % divisor == 0
+        } else {
+            false
+        }
+    }
+
+    /// Validate that this config supports KvBlockLayout operations.
+    ///
+    /// # Returns
+    /// `Ok(())` if valid, `Err` with details otherwise.
+    pub fn validate_for_kv_block_layout(&self) -> Result<(), ValidationError> {
+        let nh = match self.num_heads {
+            Some(nh) => nh,
+            None => {
+                return Err(ValidationError::new(
+                    "num_heads_required_for_kv_block_layout",
+                ));
+            }
+        };
+
+        if nh == 0 {
+            return Err(ValidationError::new("num_heads_must_be_positive"));
+        }
+
+        let divisor = self.page_size * nh;
+        if self.inner_dim % divisor != 0 {
+            return Err(ValidationError::new(
+                "inner_dim_must_be_divisible_by_page_size_times_num_heads",
+            ));
+        }
+
+        Ok(())
     }
 }
 

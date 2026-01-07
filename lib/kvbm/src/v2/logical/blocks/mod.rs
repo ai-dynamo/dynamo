@@ -14,7 +14,7 @@ mod complete;
 mod immutable;
 mod mutable;
 mod registered;
-pub(crate) mod registry;
+pub mod registry;
 
 pub use complete::CompleteBlock;
 pub use immutable::{ImmutableBlock, WeakBlock};
@@ -22,7 +22,8 @@ pub use mutable::MutableBlock;
 
 pub(crate) mod state;
 pub(crate) use registered::{DuplicateBlock, PrimaryBlock};
-pub(crate) use registry::{BlockRegistrationHandle, BlockRegistry};
+pub use registry::BlockRegistry;
+pub(crate) use registry::BlockRegistrationHandle;
 
 pub trait BlockMetadata: Clone + Send + Sync + 'static {}
 impl<T: Clone + Send + Sync + 'static> BlockMetadata for T {}

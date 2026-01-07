@@ -17,6 +17,8 @@ use super::{
     PrimaryBlock, RegisteredBlock, SequenceHash, state::Registered,
 };
 
+use super::super::pools::InactivePool;
+
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -535,11 +537,106 @@ impl BlockRegistrationHandle {
         reg_arc as Arc<dyn RegisteredBlock<T>>
     }
 
+    /// Attach a weak reference to an existing PrimaryBlock for future lookups.
+    /// This is used when promoting a block from the inactive pool.
+    pub(crate) fn attach_block_ref<T: BlockMetadata + Sync>(
+        &self,
+        primary_arc: &Arc<PrimaryBlock<T>>,
+    ) {
+        let type_id = TypeId::of::<Weak<Block<T, Registered>>>();
+        let mut attachments = self.inner.attachments.lock();
+
+        let raw_block = Arc::downgrade(primary_arc.block.as_ref().unwrap());
+        let primary_block = Arc::downgrade(primary_arc);
+
+        attachments.weak_blocks.insert(
+            type_id,
+            Box::new(WeakBlockEntry {
+                raw_block,
+                primary_block,
+            }),
+        );
+    }
+
+    /// Try to find an existing block with the same sequence hash.
+    /// Handles race conditions where block may be transitioning between pools.
+    ///
+    /// Returns:
+    /// - `Some(Arc<PrimaryBlock>)` if found (promoted from inactive if necessary)
+    /// - `None` if no existing block
+    ///
+    /// This function loops until either:
+    /// 1. Presence check fails (block was removed from tier)
+    /// 2. Block is found in active OR inactive pool
+    /// 3. Max retries exceeded (defensive against infinite loops)
+    fn try_find_existing_block<T: BlockMetadata + Sync>(
+        &self,
+        inactive_pool: &InactivePool<T>,
+        attachments: &AttachmentStore,
+    ) -> Option<Arc<PrimaryBlock<T>>> {
+        let type_id = TypeId::of::<Weak<Block<T, Registered>>>();
+        const MAX_RETRIES: usize = 100;
+        let mut retry_count = 0;
+
+        loop {
+            // Check presence first
+            if !attachments
+                .presence_markers
+                .contains_key(&TypeId::of::<T>())
+            {
+                tracing::debug!(
+                    seq_hash = %self.seq_hash(),
+                    "try_find_existing_block: no presence marker, returning None"
+                );
+                return None; // No block in tier
+            }
+
+            // Try active pool (weak reference)
+            if let Some(weak_any) = attachments.weak_blocks.get(&type_id)
+                && let Some(weak_block) = weak_any.downcast_ref::<WeakBlockEntry<T>>()
+            {
+                if let Some(existing_primary) = weak_block.primary_block.upgrade() {
+                    tracing::debug!(
+                        seq_hash = %self.seq_hash(),
+                        block_id = existing_primary.block_id(),
+                        "try_find_existing_block: found in active pool"
+                    );
+                    return Some(existing_primary);
+                }
+            }
+
+            // Try inactive pool - this acquires the inactive pool lock
+            if let Some(promoted) = inactive_pool.find_block_as_primary(self.seq_hash(), false) {
+                tracing::debug!(
+                    seq_hash = %self.seq_hash(),
+                    block_id = promoted.block_id(),
+                    "try_find_existing_block: found in inactive pool, promoted"
+                );
+                return Some(promoted);
+            }
+
+            // Block is present but not found in either pool - it's transitioning.
+            retry_count += 1;
+            if retry_count >= MAX_RETRIES {
+                tracing::warn!(
+                    seq_hash = %self.seq_hash(),
+                    retries = retry_count,
+                    "try_find_existing_block: max retries exceeded, presence marker set but block not found in either pool"
+                );
+                // Return None to avoid infinite loop - treat as no existing block
+                return None;
+            }
+
+            // Brief yield to allow other thread to complete transition
+            std::hint::spin_loop();
+        }
+    }
+
     pub(crate) fn register_block<T: BlockMetadata + Sync>(
         &self,
         mut block: CompleteBlock<T>,
         duplication_policy: BlockDuplicationPolicy,
-        pool_return_fn: RegisteredReturnFn<T>,
+        inactive_pool: &InactivePool<T>,
     ) -> Arc<dyn RegisteredBlock<T>> {
         assert_eq!(
             block.sequence_hash(),
@@ -553,53 +650,46 @@ impl BlockRegistrationHandle {
         // Take ownership of the inner block
         let inner_block = block.block.take().unwrap();
         let reset_return_fn = block.return_fn.clone();
+        let pool_return_fn = inactive_pool.return_fn();
 
-        // Register the block to get it in Registered state
-        let registered_block = inner_block.register(self.clone());
+        // CRITICAL: Check for existing blocks BEFORE registering.
+        // register() calls mark_present::<T>() which would make has_block::<T>() always return true.
+        let attachments = self.inner.attachments.lock();
 
-        let mut attachments = self.inner.attachments.lock();
-
-        // Check for existing blocks with same sequence hash
-        if let Some(weak_any) = attachments.weak_blocks.get(&type_id)
-            && let Some(weak_block) = weak_any.downcast_ref::<WeakBlockEntry<T>>()
-        {
-            // Try to get the existing primary block
-            if let Some(existing_primary) = weak_block.primary_block.upgrade() {
-                // Check if same block_id (shouldn't happen)
-                if existing_primary.block_id() == block_id {
-                    panic!("Attempted to register block with same block_id as existing");
-                }
-
-                // Handle duplicate based on policy
-                match duplication_policy {
-                    BlockDuplicationPolicy::Allow => {
-                        // Create DuplicateBlock referencing the primary
-                        let duplicate = DuplicateBlock::new(
-                            registered_block,
-                            existing_primary.clone(),
-                            reset_return_fn,
-                        );
-                        return Arc::new(duplicate);
-                    }
-                    BlockDuplicationPolicy::Reject => {
-                        // CRITICAL: Drop lock before calling reset_return_fn to avoid deadlock
-                        drop(attachments);
-
-                        // Return existing primary, discard new block
-                        let reset_block = registered_block.reset();
-                        let existing = existing_primary.clone();
-
-                        reset_return_fn(reset_block);
-                        return existing as Arc<dyn RegisteredBlock<T>>;
-                    }
-                }
+        // Check for existing block (handles race condition with retry loop)
+        if let Some(existing_primary) = self.try_find_existing_block(inactive_pool, &attachments) {
+            // Check if same block_id (shouldn't happen)
+            if existing_primary.block_id() == block_id {
+                panic!("Attempted to register block with same block_id as existing");
             }
 
-            // Primary couldn't be upgraded but raw block might exist
-            // This is an edge case - for now, treat as creating a new primary
+            // Handle duplicate based on policy
+            match duplication_policy {
+                BlockDuplicationPolicy::Allow => {
+                    // Register new block, create DuplicateBlock referencing existing
+                    drop(attachments);
+                    self.attach_block_ref(&existing_primary);
+                    let registered_block = inner_block.register(self.clone());
+                    let duplicate =
+                        DuplicateBlock::new(registered_block, existing_primary, reset_return_fn);
+                    return Arc::new(duplicate);
+                }
+                BlockDuplicationPolicy::Reject => {
+                    // Don't register new block, return existing
+                    drop(attachments);
+                    self.attach_block_ref(&existing_primary);
+
+                    // Discard the new block by returning it to the reset pool
+                    reset_return_fn(inner_block.reset());
+                    return existing_primary as Arc<dyn RegisteredBlock<T>>;
+                }
+            }
         }
 
-        // No existing block or couldn't upgrade - create new primary
+        // No existing block - register and create new primary
+        drop(attachments);
+        let registered_block = inner_block.register(self.clone());
+
         let primary = PrimaryBlock::new(Arc::new(registered_block), pool_return_fn);
 
         // Store weak references for future lookups
@@ -607,6 +697,7 @@ impl BlockRegistrationHandle {
         let raw_block = Arc::downgrade(primary_arc.block.as_ref().unwrap());
         let primary_block = Arc::downgrade(&primary_arc);
 
+        let mut attachments = self.inner.attachments.lock();
         attachments.weak_blocks.insert(
             type_id,
             Box::new(WeakBlockEntry {
@@ -666,52 +757,53 @@ impl BlockRegistrationHandle {
         &self,
         mutable_block: MutableBlock<T>,
         duplication_policy: BlockDuplicationPolicy,
-        pool_return_fn: RegisteredReturnFn<T>,
+        inactive_pool: &InactivePool<T>,
     ) -> Arc<dyn RegisteredBlock<T>> {
         let type_id = TypeId::of::<Weak<Block<T, Registered>>>();
         let block_id = mutable_block.block_id();
 
         let (inner_block, reset_return_fn) = mutable_block.into_parts();
-        let registered_block = inner_block.register_with_handle(self.clone());
+        let pool_return_fn = inactive_pool.return_fn();
 
-        let mut attachments = self.inner.attachments.lock();
+        // CRITICAL: Check for existing blocks BEFORE registering.
+        // register_with_handle() calls mark_present::<T>() which would make has_block::<T>() always return true.
+        let attachments = self.inner.attachments.lock();
 
-        // Check for existing blocks with same sequence hash
-        if let Some(weak_any) = attachments.weak_blocks.get(&type_id)
-            && let Some(weak_block) = weak_any.downcast_ref::<WeakBlockEntry<T>>()
-        {
-            // Try to get the existing primary block
-            if let Some(existing_primary) = weak_block.primary_block.upgrade() {
-                // Check if same block_id (shouldn't happen)
-                if existing_primary.block_id() == block_id {
-                    panic!("Attempted to register block with same block_id as existing");
+        // Check for existing block (handles race condition with retry loop)
+        if let Some(existing_primary) = self.try_find_existing_block(inactive_pool, &attachments) {
+            // Check if same block_id (shouldn't happen)
+            if existing_primary.block_id() == block_id {
+                panic!("Attempted to register block with same block_id as existing");
+            }
+
+            // Handle duplicate based on policy
+            match duplication_policy {
+                BlockDuplicationPolicy::Allow => {
+                    // Register new block, create DuplicateBlock referencing existing
+                    drop(attachments);
+                    self.attach_block_ref(&existing_primary);
+                    let registered_block = inner_block.register_with_handle(self.clone());
+                    let duplicate =
+                        DuplicateBlock::new(registered_block, existing_primary, reset_return_fn);
+                    return Arc::new(duplicate);
                 }
+                BlockDuplicationPolicy::Reject => {
+                    // Don't register new block, return existing
+                    drop(attachments);
+                    self.attach_block_ref(&existing_primary);
 
-                // Handle duplicate based on policy
-                match duplication_policy {
-                    BlockDuplicationPolicy::Allow => {
-                        let duplicate = DuplicateBlock::new(
-                            registered_block,
-                            existing_primary.clone(),
-                            reset_return_fn,
-                        );
-                        return Arc::new(duplicate);
-                    }
-                    BlockDuplicationPolicy::Reject => {
-                        // CRITICAL: Drop lock before calling reset_return_fn to avoid deadlock
-                        drop(attachments);
-
-                        let reset_block = registered_block.reset();
-                        let existing = existing_primary.clone();
-
-                        reset_return_fn(reset_block);
-                        return existing as Arc<dyn RegisteredBlock<T>>;
-                    }
+                    // Discard the new block by returning it to the reset pool
+                    // inner_block is already in Reset state
+                    reset_return_fn(inner_block);
+                    return existing_primary as Arc<dyn RegisteredBlock<T>>;
                 }
             }
         }
 
-        // No existing block or couldn't upgrade - create new primary
+        // No existing block - register and create new primary
+        drop(attachments);
+        let registered_block = inner_block.register_with_handle(self.clone());
+
         let primary = PrimaryBlock::new(Arc::new(registered_block), pool_return_fn);
 
         // Store weak references for future lookups
@@ -719,6 +811,7 @@ impl BlockRegistrationHandle {
         let raw_block = Arc::downgrade(primary_arc.block.as_ref().unwrap());
         let primary_block = Arc::downgrade(&primary_arc);
 
+        let mut attachments = self.inner.attachments.lock();
         attachments.weak_blocks.insert(
             type_id,
             Box::new(WeakBlockEntry {
@@ -1437,18 +1530,18 @@ pub(crate) mod tests {
                     + Sync,
             >;
 
-        let complete_block = crate::v2::logical::blocks::Block::new(0, 4)
+        // Manually create a registered block and PrimaryBlock with custom return function
+        // This is necessary because register_block() now takes &InactivePool instead of pool_return_fn
+        let complete_block = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(0, 4)
             .complete(token_block)
             .expect("Block size should match");
+        let registered_block = complete_block.register(handle.clone());
 
-        let immutable_block = handle.register_block(
-            CompleteBlock {
-                block: Some(complete_block),
-                return_fn: reset_pool.return_fn(),
-            },
-            BlockDuplicationPolicy::Allow,
-            pool_return_fn.clone(),
-        );
+        // Create PrimaryBlock with custom return function
+        let primary = PrimaryBlock::new(Arc::new(registered_block), pool_return_fn);
+
+        // Manually attach the block to the registry for future lookups
+        let immutable_block = handle.attach_block(primary);
 
         let handle_clone = handle.clone();
         let real_return_fn = registered_pool.return_fn();
@@ -1491,5 +1584,272 @@ pub(crate) mod tests {
             0,
             "Block should not be in inactive pool because Arc refcount was >= 2"
         );
+    }
+
+    /// Test helper to create an inactive pool with test infrastructure
+    fn create_test_inactive_pool() -> (
+        crate::v2::logical::pools::ResetPool<TestMetadata>,
+        InactivePool<TestMetadata>,
+    ) {
+        use crate::v2::logical::pools::backends::{FifoReusePolicy, HashMapBackend};
+        use crate::v2::logical::pools::{InactivePool, ResetPool};
+
+        let reset_blocks: Vec<_> = (0..10)
+            .map(|i| crate::v2::logical::blocks::Block::new(i, 4))
+            .collect();
+        let reset_pool = ResetPool::new(reset_blocks, 4);
+        let reuse_policy = Box::new(FifoReusePolicy::new());
+        let backend = Box::new(HashMapBackend::new(reuse_policy));
+        let inactive_pool = InactivePool::new(backend, &reset_pool);
+        (reset_pool, inactive_pool)
+    }
+
+    /// Test that attach_block_ref is called when register_block promotes a block
+    /// from inactive pool with Allow policy.
+    ///
+    /// This test verifies that after a block is promoted from the inactive pool,
+    /// its weak reference is properly attached, enabling fast lookups via try_get_block.
+    #[test]
+    fn test_attach_block_ref_called_on_inactive_promotion_allow_policy() {
+        use crate::v2::logical::pools::*;
+
+        let registry = BlockRegistry::new();
+        let (reset_pool, inactive_pool) = create_test_inactive_pool();
+
+        let tokens = vec![1u32, 2, 3, 4];
+        let token_block = create_test_token_block(&tokens);
+        let seq_hash = token_block.kvbm_sequence_hash();
+
+        // Register handle for this sequence hash
+        let handle = registry.register_sequence_hash(seq_hash);
+
+        // Create first block (block_id=100) and register it
+        let complete_block1 = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(100, 4)
+            .complete(token_block.clone())
+            .expect("Block size should match");
+
+        let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
+
+        // Register first block - this stores weak reference
+        let registered1 = handle.register_block(
+            complete_block1,
+            BlockDuplicationPolicy::Allow,
+            &inactive_pool,
+        );
+
+        // Drop first block - it goes to inactive pool
+        drop(registered1);
+
+        // Verify block is in inactive pool
+        assert!(
+            inactive_pool.has_block(seq_hash),
+            "Block should be in inactive pool after drop"
+        );
+
+        // The weak reference should be gone now (no strong refs)
+        // Calling try_get_block should return None
+        let before_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+        assert!(
+            before_result.is_none(),
+            "try_get_block should return None before re-promotion (weak ref expired)"
+        );
+
+        // Create second block (block_id=200) with same sequence hash
+        let complete_block2 = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(200, 4)
+            .complete(token_block.clone())
+            .expect("Block size should match");
+
+        let complete_block2 = CompleteBlock::new(complete_block2, reset_pool.return_fn());
+
+        // Register second block with Allow policy - this should:
+        // 1. Find existing block in inactive pool
+        // 2. Promote it and call attach_block_ref
+        // 3. Return a DuplicateBlock
+        let registered2 = handle.register_block(
+            complete_block2,
+            BlockDuplicationPolicy::Allow,
+            &inactive_pool,
+        );
+
+        // Keep registered2 alive - this keeps the promoted block alive
+        // Now try_get_block should succeed because attach_block_ref was called
+        let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+        assert!(
+            after_result.is_some(),
+            "try_get_block should succeed after promotion - attach_block_ref must have been called"
+        );
+
+        // Keep references to prevent premature drops
+        drop(registered2);
+        drop(after_result);
+    }
+
+    /// Test that attach_block_ref is called when register_block promotes a block
+    /// from inactive pool with Reject policy.
+    #[test]
+    fn test_attach_block_ref_called_on_inactive_promotion_reject_policy() {
+        use crate::v2::logical::pools::*;
+
+        let registry = BlockRegistry::new();
+        let (reset_pool, inactive_pool) = create_test_inactive_pool();
+
+        let tokens = vec![5u32, 6, 7, 8];
+        let token_block = create_test_token_block(&tokens);
+        let seq_hash = token_block.kvbm_sequence_hash();
+
+        let handle = registry.register_sequence_hash(seq_hash);
+
+        // Create and register first block
+        let complete_block1 = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(100, 4)
+            .complete(token_block.clone())
+            .expect("Block size should match");
+
+        let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
+
+        let registered1 = handle.register_block(
+            complete_block1,
+            BlockDuplicationPolicy::Reject,
+            &inactive_pool,
+        );
+
+        // Drop to inactive pool
+        drop(registered1);
+
+        assert!(inactive_pool.has_block(seq_hash));
+
+        // Weak reference should be gone
+        let before_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+        assert!(before_result.is_none());
+
+        // Create second block with same sequence hash
+        let complete_block2 = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(200, 4)
+            .complete(token_block.clone())
+            .expect("Block size should match");
+
+        let complete_block2 = CompleteBlock::new(complete_block2, reset_pool.return_fn());
+
+        // Register with Reject policy - should return existing block and call attach_block_ref
+        let registered2 = handle.register_block(
+            complete_block2,
+            BlockDuplicationPolicy::Reject,
+            &inactive_pool,
+        );
+
+        // try_get_block should succeed
+        let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+        assert!(
+            after_result.is_some(),
+            "try_get_block should succeed after Reject policy promotion"
+        );
+
+        drop(registered2);
+        drop(after_result);
+    }
+
+    /// Test that attach_block_ref is called in register_mutable_block with Allow policy.
+    #[test]
+    fn test_attach_block_ref_called_on_mutable_block_registration_allow_policy() {
+        use crate::v2::logical::pools::*;
+
+        let registry = BlockRegistry::new();
+        let (reset_pool, inactive_pool) = create_test_inactive_pool();
+
+        let tokens = vec![10u32, 11, 12, 13];
+        let token_block = create_test_token_block(&tokens);
+        let seq_hash = token_block.kvbm_sequence_hash();
+
+        let handle = registry.register_sequence_hash(seq_hash);
+
+        // Create and register first block using CompleteBlock path
+        let complete_block1 = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(100, 4)
+            .complete(token_block.clone())
+            .expect("Block size should match");
+
+        let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
+
+        let registered1 = handle.register_block(
+            complete_block1,
+            BlockDuplicationPolicy::Allow,
+            &inactive_pool,
+        );
+
+        drop(registered1);
+        assert!(inactive_pool.has_block(seq_hash));
+
+        // Now use MutableBlock path
+        // Get a mutable block from reset pool (in Reset state)
+        let mut mutable_blocks = reset_pool.allocate_blocks(1);
+        let mutable = mutable_blocks.pop().expect("Should have blocks");
+
+        // Register mutable block with Allow policy
+        // register_mutable_block takes Reset state blocks directly
+        let registered2 = handle.register_mutable_block(
+            mutable,
+            BlockDuplicationPolicy::Allow,
+            &inactive_pool,
+        );
+
+        // try_get_block should succeed
+        let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+        assert!(
+            after_result.is_some(),
+            "try_get_block should succeed after mutable block registration with Allow policy"
+        );
+
+        drop(registered2);
+        drop(after_result);
+    }
+
+    /// Test that attach_block_ref is called in register_mutable_block with Reject policy.
+    #[test]
+    fn test_attach_block_ref_called_on_mutable_block_registration_reject_policy() {
+        use crate::v2::logical::pools::*;
+
+        let registry = BlockRegistry::new();
+        let (reset_pool, inactive_pool) = create_test_inactive_pool();
+
+        let tokens = vec![20u32, 21, 22, 23];
+        let token_block = create_test_token_block(&tokens);
+        let seq_hash = token_block.kvbm_sequence_hash();
+
+        let handle = registry.register_sequence_hash(seq_hash);
+
+        // Create and register first block
+        let complete_block1 = crate::v2::logical::blocks::Block::<TestMetadata, _>::new(100, 4)
+            .complete(token_block.clone())
+            .expect("Block size should match");
+
+        let complete_block1 = CompleteBlock::new(complete_block1, reset_pool.return_fn());
+
+        let registered1 = handle.register_block(
+            complete_block1,
+            BlockDuplicationPolicy::Reject,
+            &inactive_pool,
+        );
+
+        drop(registered1);
+        assert!(inactive_pool.has_block(seq_hash));
+
+        // Get a mutable block (in Reset state)
+        let mut mutable_blocks = reset_pool.allocate_blocks(1);
+        let mutable = mutable_blocks.pop().expect("Should have blocks");
+
+        // Register with Reject policy
+        // register_mutable_block takes Reset state blocks directly
+        let registered2 = handle.register_mutable_block(
+            mutable,
+            BlockDuplicationPolicy::Reject,
+            &inactive_pool,
+        );
+
+        // try_get_block should succeed
+        let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
+        assert!(
+            after_result.is_some(),
+            "try_get_block should succeed after mutable block registration with Reject policy"
+        );
+
+        drop(registered2);
+        drop(after_result);
     }
 }

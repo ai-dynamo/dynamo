@@ -249,12 +249,14 @@ impl TransferManager {
             (src, dst)
         }; // Lock released here
 
-        let TransferOptions {
+        let (
             layer_range,
             nixl_write_notification,
             bounce_buffer,
             cuda_stream,
-        } = options;
+            src_kv_layout,
+            dst_kv_layout,
+        ) = options.dissolve();
 
         let mut internal_options = TransferOptionsInternal::builder();
 
@@ -274,6 +276,14 @@ impl TransferManager {
 
         if let Some(stream) = cuda_stream {
             internal_options = internal_options.cuda_stream(stream);
+        }
+
+        if let Some(layout) = src_kv_layout {
+            internal_options = internal_options.src_kv_layout(layout);
+        }
+
+        if let Some(layout) = dst_kv_layout {
+            internal_options = internal_options.dst_kv_layout(layout);
         }
 
         let options = internal_options.build()?;

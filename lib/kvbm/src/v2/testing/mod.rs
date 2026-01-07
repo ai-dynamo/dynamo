@@ -19,4 +19,5 @@ pub mod managers;
 pub mod nova;
 pub mod offloading;
 pub mod physical;
+pub mod scheduler;
 pub mod token_blocks;
