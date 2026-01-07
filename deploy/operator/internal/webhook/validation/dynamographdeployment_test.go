@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -715,95 +716,20 @@ func TestDifference(t *testing.T) {
 			got := difference(tt.a, tt.b)
 
 			// Sort both slices for comparison (since map iteration order is undefined)
-			sortedGot := sortedSlice(got)
-			sortedWant := sortedSlice(tt.want)
+			sort.Strings(got)
+			want := make([]string, len(tt.want))
+			copy(want, tt.want)
+			sort.Strings(want)
 
-			if len(sortedGot) != len(sortedWant) {
-				t.Errorf("difference() length = %v, want %v", len(sortedGot), len(sortedWant))
-				return
-			}
-
-			for i := range sortedGot {
-				if sortedGot[i] != sortedWant[i] {
-					t.Errorf("difference() = %v, want %v", sortedGot, sortedWant)
-					return
-				}
-			}
-		})
-	}
-}
-
-func TestSortedSlice(t *testing.T) {
-	tests := []struct {
-		name  string
-		input []string
-		want  []string
-	}{
-		{
-			name:  "empty slice",
-			input: []string{},
-			want:  []string{},
-		},
-		{
-			name:  "nil slice",
-			input: nil,
-			want:  nil,
-		},
-		{
-			name:  "single element",
-			input: []string{"backend"},
-			want:  []string{"backend"},
-		},
-		{
-			name:  "already sorted",
-			input: []string{"backend", "cache", "frontend"},
-			want:  []string{"backend", "cache", "frontend"},
-		},
-		{
-			name:  "reverse sorted",
-			input: []string{"frontend", "cache", "backend"},
-			want:  []string{"backend", "cache", "frontend"},
-		},
-		{
-			name:  "unsorted",
-			input: []string{"cache", "backend", "frontend"},
-			want:  []string{"backend", "cache", "frontend"},
-		},
-		{
-			name:  "does not modify original",
-			input: []string{"z", "a", "m"},
-			want:  []string{"a", "m", "z"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Save original for mutation test
-			original := make([]string, len(tt.input))
-			copy(original, tt.input)
-
-			got := sortedSlice(tt.input)
-
-			// Verify result
-			if len(got) != len(tt.want) {
-				t.Errorf("sortedSlice() length = %v, want %v", len(got), len(tt.want))
+			if len(got) != len(want) {
+				t.Errorf("difference() length = %v, want %v", len(got), len(want))
 				return
 			}
 
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("sortedSlice() = %v, want %v", got, tt.want)
+				if got[i] != want[i] {
+					t.Errorf("difference() = %v, want %v", got, want)
 					return
-				}
-			}
-
-			// Verify original wasn't modified (except for empty/nil cases)
-			if len(original) > 0 {
-				for i := range original {
-					if original[i] != tt.input[i] {
-						t.Errorf("sortedSlice() modified original slice: got %v, want %v", tt.input, original)
-						return
-					}
 				}
 			}
 		})

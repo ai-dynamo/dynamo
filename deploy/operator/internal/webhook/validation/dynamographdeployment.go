@@ -119,6 +119,10 @@ func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv
 		return nil
 	}
 
+	// Sort for deterministic error messages
+	sort.Strings(added)
+	sort.Strings(removed)
+
 	// Build descriptive error message
 	var errMsg string
 	switch {
@@ -126,17 +130,17 @@ func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv
 		errMsg = fmt.Sprintf(
 			"service topology is immutable and cannot be modified after creation: "+
 				"services added: %v, services removed: %v",
-			sortedSlice(added), sortedSlice(removed))
+			added, removed)
 	case len(added) > 0:
 		errMsg = fmt.Sprintf(
 			"service topology is immutable and cannot be modified after creation: "+
 				"services added: %v",
-			sortedSlice(added))
+			added)
 	case len(removed) > 0:
 		errMsg = fmt.Sprintf(
 			"service topology is immutable and cannot be modified after creation: "+
 				"services removed: %v",
-			sortedSlice(removed))
+			removed)
 	}
 
 	return errors.New(errMsg)
@@ -258,16 +262,4 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
-}
-
-// sortedSlice returns a sorted copy of the input slice for consistent error messages.
-// Ensures deterministic output for testing and better user experience.
-func sortedSlice(slice []string) []string {
-	if len(slice) == 0 {
-		return slice
-	}
-	sorted := make([]string, len(slice))
-	copy(sorted, slice)
-	sort.Strings(sorted)
-	return sorted
 }
