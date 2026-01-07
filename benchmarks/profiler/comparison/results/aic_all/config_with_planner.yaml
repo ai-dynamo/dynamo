@@ -42,7 +42,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: trtllm-disagg
       extraPodSpec:
         mainContainer:
           args: null
@@ -54,7 +53,6 @@ spec:
       subComponentType: null
     Planner:
       componentType: planner
-      dynamoNamespace: trtllm-disagg
       extraPodSpec:
         mainContainer:
           args:
@@ -89,7 +87,6 @@ spec:
       replicas: 1
     TRTLLMDecodeWorker:
       componentType: worker
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
