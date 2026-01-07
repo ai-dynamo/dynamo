@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: dynamo
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
     Planner:
-      dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
@@ -43,7 +41,6 @@ spec:
               # See docs/planner/sla_planner_quickstart.md for more details
               name: planner-profile-data
     decode:
-      dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -79,7 +76,6 @@ spec:
             - --host
             - "0.0.0.0"
     prefill:
-      dynamoNamespace: dynamo
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
