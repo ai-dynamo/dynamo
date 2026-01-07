@@ -307,6 +307,20 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
+	// Log deployment state for debugging restart sequencing issues
+	// WARNING: After SyncResource updates the Deployment, the returned object has the NEW spec
+	// but the OLD status (status is updated asynchronously by the Deployment controller).
+	// If deploymentModified=true but status shows ready, this is STALE status!
+	logger.Info("Deployment sync completed",
+		"deploymentModified", deploymentModified,
+		"deploymentName", deployment.Name,
+		"deploymentGeneration", deployment.Generation,
+		"deploymentObservedGeneration", deployment.Status.ObservedGeneration,
+		"deploymentReplicas", deployment.Status.Replicas,
+		"deploymentUpdatedReplicas", deployment.Status.UpdatedReplicas,
+		"deploymentAvailableReplicas", deployment.Status.AvailableReplicas,
+		"deploymentReadyReplicas", deployment.Status.ReadyReplicas)
+
 	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
@@ -316,7 +330,16 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		AvailableReplicas: &deployment.Status.AvailableReplicas,
 	}
 
-	if IsDeploymentReady(deployment) {
+	// POTENTIAL BUG: If deploymentModified is true, we just updated the Deployment spec.
+	// The status we're checking here is STALE - it's from BEFORE the update was processed.
+	// IsDeploymentReady may return true based on the old pod's readiness, not the new one.
+	isReady := IsDeploymentReady(deployment)
+	if deploymentModified && isReady {
+		logger.Info("WARNING: Deployment was just modified but IsDeploymentReady returned true - likely stale status",
+			"deploymentName", deployment.Name)
+	}
+
+	if isReady {
 		logger.Info("Deployment is ready. Setting available status condition to true.")
 		return ComponentReconcileResult{
 			modified:             deploymentModified,
