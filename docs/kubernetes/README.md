@@ -25,7 +25,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 - Used for: Resource isolation, RBAC, organizing deployments
 - Example: `dynamo-system`, `team-a-namespace`
 
-**Dynamo Namespace**: The logical namespace used by Dynamo components for service discovery via etcd.
+**Dynamo Namespace**: The logical namespace used by Dynamo components for [service discovery](./service_discovery.md).
 - Used for: Runtime component communication, service discovery
 - Specified in: `.spec.services.<ServiceName>.dynamoNamespace` field
 - Example: `my-llm`, `production-model`, `dynamo-dev`
@@ -170,7 +170,7 @@ When creating a deployment, select the architecture pattern that best fits your 
 You can run the Frontend on one machine (e.g., a CPU node) and workers on different machines (GPU nodes). The Frontend serves as a framework-agnostic HTTP entry point that:
 
 - Provides OpenAI-compatible `/v1/chat/completions` endpoint
-- Auto-discovers backend workers via etcd
+- Auto-discovers backend workers via [service discovery](./service_discovery.md) (Kubernetes-native by default)
 - Routes requests and handles load balancing
 - Validates and preprocesses requests
 
@@ -242,6 +242,7 @@ Key customization points include:
 - **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
 - **[Managing Models with DynamoModel](./deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](./dynamo_operator.md)** - How the platform works
+- **[Service Discovery](./service_discovery.md)** - Discovery backends and configuration
 - **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
 - **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users
 - **[Logging](./observability/logging.md)** - For logging setup

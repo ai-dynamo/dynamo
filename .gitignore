@@ -103,6 +103,8 @@ TensorRT-LLM
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
+/.cursor
+/.claude
 /CLAUDE.md
 /CLAUDE.md.bak
 
