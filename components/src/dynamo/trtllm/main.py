@@ -208,14 +208,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        # Add it to kv_cache_config while preserving cache_transceiver_config from YAML
+        # Add it to kv_cache_config while preserving all settings from YAML
         current_kv_config = arg_map["kv_cache_config"]
         if isinstance(current_kv_config, KvCacheConfig):
-            # Convert KvCacheConfig object to dict (no cache_transceiver_config to preserve)
-            arg_map["kv_cache_config"] = {
-                "free_gpu_memory_fraction": config.free_gpu_memory_fraction,
-                "event_buffer_max_size": DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
-            }
+            # Convert KvCacheConfig object to dict, preserving ALL existing settings
+            # This ensures YAML overrides are not lost when adding event_buffer_max_size
+            kv_config_dict = current_kv_config.model_dump(exclude_none=True)
+            kv_config_dict["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            arg_map["kv_cache_config"] = kv_config_dict
         elif isinstance(current_kv_config, dict):
             # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
             current_kv_config[
