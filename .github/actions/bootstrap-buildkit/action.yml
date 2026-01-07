@@ -28,7 +28,7 @@ inputs:
   ephemeral_storage:
     description: 'Ephemeral storage request for Kubernetes driver'
     required: false
-    default: '350Gi'
+    default: '240Gi'
   namespace:
     description: 'Kubernetes namespace for buildkit pods'
     required: false
