@@ -131,6 +131,12 @@ pub fn validate_response_format(
         ResponseFormat::Text => Ok(()),
         ResponseFormat::JsonObject => Ok(()),
         ResponseFormat::JsonSchema { json_schema } => {
+            // Validate name field format
+            if json_schema.name.is_empty() {
+                anyhow::bail!("`response_format.json_schema.name` cannot be empty");
+            }
+
+            // Validate schema presence
             if json_schema.schema.is_none() {
                 anyhow::bail!(
                     "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
