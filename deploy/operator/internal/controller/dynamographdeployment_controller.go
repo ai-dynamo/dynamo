@@ -380,22 +380,10 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState) (*commoncontroller.Resource, error) {
 	logger := log.FromContext(ctx)
 
-	// Fetch existing PCS restart annotations to preserve them for services not being restarted
-	existingRestartAnnotations := make(map[string]string)
-	existingPCS := &grovev1alpha1.PodCliqueSet{}
-	err := r.Client.Get(ctx, types.NamespacedName{Name: dynamoDeployment.Name, Namespace: dynamoDeployment.Namespace}, existingPCS)
-	if err == nil {
-		// Extract restart annotations from existing cliques
-		for _, clique := range existingPCS.Spec.Template.Cliques {
-			if clique.Annotations != nil {
-				if timestamp, ok := clique.Annotations[consts.RestartAnnotation]; ok {
-					// Extract service name from clique labels
-					if serviceName, ok := clique.Labels[consts.KubeLabelDynamoComponent]; ok {
-						existingRestartAnnotations[serviceName] = timestamp
-					}
-				}
-			}
-		}
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsPCS(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "failed to get existing restart annotations")
+		return nil, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
 
 	// generate the dynamoComponentsDeployments from the config
@@ -427,6 +415,28 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 		return nil, fmt.Errorf("failed to create the Grove PodClique Set resource: %w", err)
 	}
 	return syncedGrovePodCliqueSetAsResource, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsPCS(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
+	restartAnnotations := make(map[string]string)
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
+	if err != nil && !errors.IsNotFound(err) {
+		return nil, fmt.Errorf("failed to get PodCliqueSet: %w", err)
+	}
+	if errors.IsNotFound(err) {
+		return restartAnnotations, nil
+	}
+	for _, clique := range pcs.Spec.Template.Cliques {
+		if clique.Annotations != nil {
+			if timestamp, ok := clique.Annotations[consts.RestartAnnotation]; ok {
+				if serviceName, ok := clique.Labels[consts.KubeLabelDynamoComponent]; ok {
+					restartAnnotations[serviceName] = timestamp
+				}
+			}
+		}
+	}
+	return restartAnnotations, nil
 }
 
 // reconcileGroveScaling handles scaling operations for Grove resources based on service replica changes
@@ -888,21 +898,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	resources := []Resource{}
 	logger := log.FromContext(ctx)
 
-	// Fetch existing restart annotations from current DCDs.
-	// This allows GenerateDynamoComponentsDeployments to preserve annotations for services
-	// not yet in the current restart order, preventing unwanted rollouts.
-	existingRestartAnnotations := make(map[string]string)
-	for serviceName := range dynamoDeployment.Spec.Services {
-		dcdName := dynamo.GetDynamoComponentName(dynamoDeployment, serviceName)
-		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
-		if err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dynamoDeployment.Namespace}, existingDCD); err == nil {
-			if existingDCD.Spec.Annotations != nil {
-				if restartAt := existingDCD.Spec.Annotations[consts.RestartAnnotation]; restartAt != "" {
-					existingRestartAnnotations[serviceName] = restartAt
-				}
-			}
-		}
-		// Ignore NotFound errors - DCD may not exist yet
+	existingRestartAnnotations, err := r.getExistingRestartAnnotationsDCD(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "failed to get existing restart annotations")
+		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
 
 	// generate the dynamoComponentsDeployments from the config
@@ -929,6 +928,31 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
 	return result, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
+	logger := log.FromContext(ctx)
+
+	restartAnnotations := make(map[string]string)
+	for serviceName := range dgd.Spec.Services {
+		dcdName := dynamo.GetDynamoComponentName(dgd, serviceName)
+		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		err := r.Get(ctx, types.NamespacedName{Name: dcdName, Namespace: dgd.Namespace}, existingDCD)
+
+		if err != nil && !errors.IsNotFound(err) {
+			return nil, fmt.Errorf("failed to get DynamoComponentDeployment: %w", err)
+		}
+		if errors.IsNotFound(err) {
+			logger.Info("DynamoComponentDeployment not found", "dcdName", dcdName)
+			continue
+		}
+		if existingDCD.Spec.Annotations != nil {
+			if restartAt := existingDCD.Spec.Annotations[consts.RestartAnnotation]; restartAt != "" {
+				restartAnnotations[serviceName] = restartAt
+			}
+		}
+	}
+	return restartAnnotations, nil
 }
 
 // reconcilePVC reconciles a single top-level PVC defined in the DynamoGraphDeployment spec

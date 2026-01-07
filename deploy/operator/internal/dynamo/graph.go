@@ -251,10 +251,6 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
-// If restartState is provided, restart annotations will be applied to the appropriate services.
-// existingRestartAnnotations is a map of serviceName -> restartAt timestamp from existing DCDs.
-// For services not in the current restart order, their existing annotation will be preserved
-// to avoid triggering unwanted rollouts.
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
@@ -1113,11 +1109,6 @@ func GeneratePodSpecForComponent(
 }
 
 // GenerateGrovePodCliqueSet generates a Grove PodCliqueSet for the given deployment, supporting both single-node and multinode cases.
-// GenerateGrovePodCliqueSet generates a PodCliqueSet from a DynamoGraphDeployment.
-// If restartState is provided, restart annotations will be applied to the appropriate services.
-// existingRestartAnnotations is a map of serviceName -> restartAt timestamp from the existing PCS.
-// For services not in the current restart order, their existing annotation will be preserved
-// to avoid triggering unwanted rollouts when a new restart begins.
 func GenerateGrovePodCliqueSet(
 	ctx context.Context,
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
@@ -1206,6 +1197,7 @@ func GenerateGrovePodCliqueSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
 			}
+
 			// Apply restart annotation if this service should be restarted.
 			// For services not in the current restart order, preserve their existing annotation
 			// to avoid triggering unwanted rollouts when a new restart begins.
