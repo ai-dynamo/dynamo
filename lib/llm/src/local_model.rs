@@ -10,9 +10,10 @@ use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::utils::get_http_rpc_host_from_env;
 
 use crate::entrypoint::RouterConfig;
-use crate::mocker::protocols::MockEngineArgs;
+use crate::mocker::protocols::{MockEngineArgs, WorkerType};
 use crate::model_card::ModelDeploymentCard;
 use crate::model_type::{ModelInput, ModelType};
 use crate::preprocessor::media::{ImageDecoder, MediaDecoder, MediaFetcher};
@@ -249,6 +250,22 @@ impl LocalModelBuilder {
                 video: None,
             });
             self.media_fetcher = Some(MediaFetcher::default());
+
+            // Set bootstrap endpoint for prefill workers with bootstrap_port configured
+            if mocker_engine_args.worker_type == WorkerType::Prefill
+                && let Some(port) = mocker_engine_args.bootstrap_port
+            {
+                let host = get_http_rpc_host_from_env();
+                self.runtime_config.disaggregated_endpoint =
+                    Some(runtime_config::DisaggregatedEndpoint {
+                        bootstrap_host: Some(host),
+                        bootstrap_port: Some(port),
+                    });
+                tracing::info!(
+                    bootstrap_port = port,
+                    "Mocker prefill worker: publishing bootstrap endpoint to discovery"
+                );
+            }
         }
 
         // frontend and echo engine don't need a path.
