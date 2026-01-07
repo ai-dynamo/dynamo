@@ -1,0 +1,119 @@
+name: 'Bootstrap Buildkit'
+description: 'Bootstrap buildkit builders using remote workers or Kubernetes driver'
+
+# This action supports two buildkit driver modes:
+#
+# 1. Remote Driver (when buildkit_worker_addresses is provided)
+#    Uses pre-provisioned remote buildkit workers specified via buildkit_worker_addresses.
+#    This is the preferred mode for faster, more reliable builds.
+#
+# 2. Kubernetes Driver (fallback, when buildkit_worker_addresses is empty)
+#    Dynamically creates buildkit pods in Kubernetes. Use this as a fallback when
+#    remote buildkit workers are unavailable or unreachable. The Kubernetes driver
+#    is slower due to pod startup time but provides on-demand build capacity.
+
+inputs:
+  builder_name:
+    description: 'Name for the buildx builder'
+    required: true
+  buildkit_worker_addresses:
+    description: 'Comma-separated list of remote buildkit worker addresses. If empty, falls back to Kubernetes driver.'
+    required: false
+    default: ''
+  platform:
+    description: 'Docker platform (linux/amd64, linux/arm64)'
+    required: true
+
+  # Kubernetes driver inputs (used when remote_builder is false)
+  ephemeral_storage:
+    description: 'Ephemeral storage request for Kubernetes driver'
+    required: false
+    default: '350Gi'
+  namespace:
+    description: 'Kubernetes namespace for buildkit pods'
+    required: false
+    default: 'default'
+  replicas:
+    description: 'Number of buildkit replicas'
+    required: false
+    default: '1'
+  requests_cpu:
+    description: 'CPU requests for buildkit pods'
+    required: false
+    default: '14'
+  requests_memory:
+    description: 'Memory requests for buildkit pods'
+    required: false
+    default: '54Gi'
+  limits_memory:
+    description: 'Memory limits for buildkit pods'
+    required: false
+    default: '58Gi'
+  nodeselector:
+    description: 'Node selector for buildkit pods (auto-detected from platform if not set)'
+    required: false
+    default: ''
+  tolerations:
+    description: 'Tolerations for buildkit pods'
+    required: false
+    default: 'key=buildkit-worker,value=true,operator=Equal,effect=NoSchedule'
+
+runs:
+  using: "composite"
+  steps:
+    - name: Define remote buildkit builders
+      if: inputs.buildkit_worker_addresses != ''
+      shell: bash
+      run: |
+        ADDRS="${{ inputs.buildkit_worker_addresses }}"
+        IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
+        FIRST=true
+        for addr in "${ADDR_LIST[@]}"; do
+          if $FIRST; then
+            docker buildx create --use --name ${{ inputs.builder_name }} --driver remote "$addr"
+            FIRST=false
+          else
+            docker buildx create --append --name ${{ inputs.builder_name }} --driver remote "$addr"
+          fi
+        done
+        docker buildx inspect --bootstrap
+
+    - name: Create Kubernetes builder
+      if: inputs.buildkit_worker_addresses == ''
+      shell: bash
+      run: |
+        # Determine nodeselector based on platform if not provided
+        NODESELECTOR="${{ inputs.nodeselector }}"
+        
+        if [[ -z "$NODESELECTOR" ]]; then
+          if [[ "${{ inputs.platform }}" == "linux/arm64" ]]; then
+            NODESELECTOR="kubernetes.io/arch=arm64,role=buildkit-arm-worker"
+          elif [[ "${{ inputs.platform }}" == "linux/amd64" ]]; then
+            NODESELECTOR="kubernetes.io/arch=amd64,role=buildkit-amd-worker"
+          else
+            echo "ERROR: Unsupported platform '${{ inputs.platform }}'. Must be linux/amd64 or linux/arm64."
+            exit 1
+          fi
+        fi
+        
+        # Check if builder already exists
+        if docker buildx inspect ${{ inputs.builder_name }} &>/dev/null; then
+          echo "Builder ${{ inputs.builder_name }} exists, appending platform"
+          CREATE_CMD="docker buildx create --append --name ${{ inputs.builder_name }}"
+        else
+          echo "Creating new builder ${{ inputs.builder_name }}"
+          CREATE_CMD="docker buildx create --use --name ${{ inputs.builder_name }}"
+        fi
+        
+        $CREATE_CMD --driver kubernetes --platform=${{ inputs.platform }} \
+         --driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }} \
+         --driver-opt=namespace=${{ inputs.namespace }} \
+         --driver-opt=loadbalance=sticky \
+         --driver-opt=replicas=${{ inputs.replicas }} \
+         --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
+         --driver-opt=requests.memory=${{ inputs.requests_memory }} \
+         --driver-opt=limits.memory=${{ inputs.limits_memory }} \
+         "--driver-opt=nodeselector=$NODESELECTOR" \
+         "--driver-opt=tolerations=${{ inputs.tolerations }}"
+
+        docker buildx inspect --bootstrap

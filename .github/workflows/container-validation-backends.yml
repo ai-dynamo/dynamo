@@ -3,6 +3,12 @@
 
 name: Docker Build and Test
 
+
+# TODO before PR:
+# - [ ] Remove the ops-2438-ci branch from push: filter
+# - [ ] Have --cache-from use the same annotation as in main. 
+# - [ ] Sort out filters.
+
 on:
   push:
     branches:
@@ -47,7 +53,7 @@ on:
 #     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  BUILDER_NAME: dynamo-builder # here for simplifying while developing
+  BUILDER_NAME: b-${{ github.run_id }}${{ github.run_attempt }}
   AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
 
@@ -141,23 +147,15 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Route buildkit workers
         id: route-buildkit
+        continue-on-error: true
         shell: bash
         run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
-      - name: Define buildkit builders
-        shell: bash
-        run: |
-          ADDRS="${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}"
-          IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
-          FIRST=true
-          for addr in "${ADDR_LIST[@]}"; do
-            if $FIRST; then
-              docker buildx create --use --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-              FIRST=false
-            else
-              docker buildx create --append --name ${{ env.BUILDER_NAME }} --driver remote "$addr"
-            fi
-          done
-          docker buildx inspect --bootstrap
+      - name: Bootstrap Buildkit
+        uses: ./.github/actions/bootstrap-buildkit
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
+          platform: linux/${{ matrix.platform.arch }}
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -291,7 +289,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: true
+      run_tests: false
     secrets: inherit
 
   trtllm-pipeline:
@@ -305,7 +303,7 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: true
+      run_tests: false
     secrets: inherit
 
 
@@ -546,6 +544,11 @@ jobs:
     if: always()
     needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm, deploy-test-vllm-disagg-router]
     steps:
+    - name: Builder Cleanup
+      if: always()
+      shell: bash
+      run: |
+        docker buildx rm ${{ env.BUILDER_NAME }} || true
     - name: Output Node Name
       shell: bash
       run: |

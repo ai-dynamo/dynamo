@@ -215,8 +215,15 @@ for ARCH in "${ARCHS[@]}"; do
       fi
 
       if [ "$retry" -eq "$MAX_RETRIES" ]; then
-        echo "❌ Error: No BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts ($(( MAX_RETRIES * RETRY_DELAY ))s total)."
-        echo "   Please check KEDA scaling configuration and BuildKit deployment status."
+        echo "::warning::No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts ($(( MAX_RETRIES * RETRY_DELAY ))s total). Falling back to Kubernetes buildkit driver."
+        echo "⚠️  Warning: No remote BuildKit pods available for ${ARCH} after ${MAX_RETRIES} attempts."
+        echo "   Remote buildkit workers will NOT be used for this build."
+        echo "   The Kubernetes buildkit driver will be used as a fallback (slower due to pod startup time)."
+        echo "   If this persists, please contact the Ops team to check KEDA scaling and BuildKit deployment status."
+        for flavor in "${FLAVORS[@]}"; do
+          # Write empty output - bootstrap-buildkit action will fall back to k8s driver
+          echo "${flavor}_${ARCH}=" >> "$GITHUB_OUTPUT"
+        done
         exit 1
       fi
     done

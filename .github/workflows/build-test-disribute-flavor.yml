@@ -136,12 +136,27 @@ jobs:
         shell: bash
         run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ inputs.framework }}
 
-      - name: Build with Remote Buildkit
-        id: build-image
-        uses: ./.github/actions/build-with-buildkit
+      - name: Bootstrap Buildkit
+        uses: ./.github/actions/bootstrap-buildkit
         with:
           builder_name: ${{ inputs.builder_name }}
           buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.framework, matrix.platform)] }}
+          platform: linux/${{ matrix.platform }}
+
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
           image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: runtime
@@ -150,18 +165,14 @@ jobs:
           runtime_image_tag: ${{ matrix.platform == 'arm64' && inputs.arm_runtime_image_tag || '' }}
           cuda_version: ${{ matrix.platform == 'arm64' && inputs.arm_cuda_version || '' }}
           torch_backend: ${{ matrix.platform == 'arm64' && inputs.arm_torch_backend || '' }}
-          extra_tags: ${{ steps.extra-tags.outputs.tags }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
           ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           no_cache: ${{ inputs.no_cache }}
+          extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: true
 
   # ============================================================================

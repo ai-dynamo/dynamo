@@ -1,14 +1,26 @@
 name: 'Build with Remote Buildkit'
 description: 'Setup remote buildkit builders, login to registries, and build container image'
 
+# This action supports two buildkit driver modes:
+#
+# 1. Remote Driver (when buildkit_worker_addresses is provided)
+#    Uses pre-provisioned remote buildkit workers specified via buildkit_worker_addresses.
+#    This is the preferred mode for faster, more reliable builds.
+#
+# 2. Kubernetes Driver (fallback, when buildkit_worker_addresses is empty)
+#    Dynamically creates buildkit pods in Kubernetes. Use this as a fallback when
+#    remote buildkit workers are unavailable or unreachable. The Kubernetes driver
+#    is slower due to pod startup time but provides on-demand build capacity.
+
 inputs:
   # Buildkit configuration
   builder_name:
     description: 'Name for the buildx builder'
     required: true
   buildkit_worker_addresses:
-    description: 'Comma-separated list of remote buildkit worker addresses'
-    required: true
+    description: 'Comma-separated list of remote buildkit worker addresses. If empty, falls back to Kubernetes driver.'
+    required: false
+    default: ''
 
   # Docker Login inputs
   ngc_ci_access_token:
@@ -89,21 +101,12 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Define buildkit builders
-      shell: bash
-      run: |
-        ADDRS="${{ inputs.buildkit_worker_addresses }}"
-        IFS=',' read -ra ADDR_LIST <<< "$ADDRS"
-        FIRST=true
-        for addr in "${ADDR_LIST[@]}"; do
-          if $FIRST; then
-            docker buildx create --use --name ${{ inputs.builder_name }} --driver remote "$addr"
-            FIRST=false
-          else
-            docker buildx create --append --name ${{ inputs.builder_name }} --driver remote "$addr"
-          fi
-        done
-        docker buildx inspect --bootstrap
+    - name: Bootstrap Buildkit
+      uses: ./.github/actions/bootstrap-buildkit
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        buildkit_worker_addresses: ${{ inputs.buildkit_worker_addresses }}
+        platform: ${{ inputs.platform }}
 
     - name: Docker Login
       uses: ./.github/actions/docker-login
@@ -136,4 +139,3 @@ runs:
         no_cache: ${{ inputs.no_cache }}
         extra_tags: ${{ inputs.extra_tags }}
         push_image: ${{ inputs.push_image }}
-
