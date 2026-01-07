@@ -90,7 +90,7 @@ operator: &operator
 
 deploy:
   - *operator
-  - 'deploy/cloud/helm/**'
+  - 'deploy/helm/**'
   - 'deploy/utils/**'
 
 
