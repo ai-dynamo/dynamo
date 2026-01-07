@@ -338,7 +338,7 @@ def run_request(max_tokens: int, model_path: Path):
     print("-" * 50)
 
     payload = {
-        "model": str(model_path),
+        "model": "model",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "stream": True,
@@ -522,10 +522,12 @@ def main():
         return 1
 
     # SGLang uses server_args.port as the base for several internal ports.
-    # When DP attention is enabled, it derives a fixed TCP port block from it, so
-    # multiple workers on the same host must not share the same --port.
+    # When DP attention is enabled, it derives ports like:
+    #   - nccl_port = port + random(100, 1000)
+    #   - dist_init = port + 233
+    # So workers need at least 1100 port spacing to avoid nccl_port conflicts.
     base_sglang_port = 10000
-    sglang_port_stride = 1000  # keep ranges apart to avoid collisions
+    sglang_port_stride = 1500  # keep ranges apart to avoid nccl_port collisions
     worker_ports = {
         "prefill": base_sglang_port,
         "decode1": base_sglang_port + 1 * sglang_port_stride,
@@ -539,6 +541,14 @@ def main():
         "decode1": base_bootstrap_port + 1,
         "decode2": base_bootstrap_port + 2,
         "decode3": base_bootstrap_port + 3,
+    }
+    # Each worker needs an explicit NCCL port to avoid random collisions
+    base_nccl_port = 29500
+    nccl_ports = {
+        "prefill": base_nccl_port,
+        "decode1": base_nccl_port + 100,
+        "decode2": base_nccl_port + 200,
+        "decode3": base_nccl_port + 300,
     }
 
     if multi_gpu_mode:
@@ -597,6 +607,8 @@ def main():
                 "0.0.0.0",
                 "--port",
                 str(worker_ports["prefill"]),
+                "--nccl-port",
+                str(nccl_ports["prefill"]),
             ],
             env=prefill_env,
         )
@@ -641,6 +653,8 @@ def main():
                     "0.0.0.0",
                     "--port",
                     str(worker_ports[worker_name]),
+                    "--nccl-port",
+                    str(nccl_ports[worker_name]),
                     "--this-seqlen",
                     str(seqlen_tier),
                 ],

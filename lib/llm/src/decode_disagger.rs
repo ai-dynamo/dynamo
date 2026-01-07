@@ -547,18 +547,12 @@ impl MigrationContext {
                 );
             }
 
-            // Set dp_rank in routing so the destination's KV receiver targets the correct
-            // DP rank on the source worker. Required for DP attention setups where each
-            // DP rank has its own KV cache.
-            if let Some(src_dp_rank) = response.src_dp_rank {
-                let routing = migrated_request.routing_mut();
-                routing.dp_rank = Some(src_dp_rank);
-                tracing::debug!(
-                    src_dp_rank = src_dp_rank,
-                    request_id = request_id,
-                    "Set routing.dp_rank for KV receiver to target correct source DP worker",
-                );
-            }
+            // NOTE: We do NOT set routing.dp_rank here. The src_dp_rank is encoded in
+            // bootstrap_room (room % dp_size == src_dp_rank) by migration_handler.py.
+            // The destination's KV receiver will derive the source DP rank from the
+            // bootstrap_room, matching the pattern used in prefill->decode transfers.
+            // Setting routing.dp_rank would incorrectly force the request to run on a
+            // specific DP rank on decode2, breaking load balancing.
 
             let mut new_context = Context::with_id(migrated_request, request_id.to_string());
             new_context.bootstrap_info = Some(response.bootstrap_info);
