@@ -146,11 +146,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      # - name: Route buildkit workers
-      #   id: route-buildkit
-      #   continue-on-error: true
-      #   shell: bash
-      #   run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
+      - name: Route buildkit workers
+        id: route-buildkit
+        continue-on-error: true
+        shell: bash
+        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
         with:
@@ -279,6 +279,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
+      builder_name: ${{ env.BUILDER_NAME }}
     secrets: inherit
 
   sglang-pipeline:
@@ -296,6 +297,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
+      builder_name: ${{ env.BUILDER_NAME }}
     secrets: inherit
 
   trtllm-pipeline:
@@ -313,6 +315,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
+      builder_name: ${{ env.BUILDER_NAME }}
     secrets: inherit
 
 
@@ -550,27 +553,27 @@ jobs:
   # # ============================================================================
   
   
-  # clean-k8s-builder:
-  #   runs-on: builder-cpu-amd-runner
-  #   if: always()
-  #   needs: [operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
-  #   steps:
-  #   - name: Bootstrap Buildkit AMD
-  #     uses: ./.github/actions/bootstrap-buildkit
-  #     continue-on-error: true
-  #     with:
-  #       builder_name: ${{ env.BUILDER_NAME }}
-  #       buildkit_worker_addresses: '' # k8s builder
-  #   - name: Bootstrap Buildkit ARM
-  #     uses: ./.github/actions/bootstrap-buildkit
-  #     continue-on-error: true
-  #     with:
-  #       builder_name: ${{ env.BUILDER_NAME }}
-  #       buildkit_worker_addresses: '' # k8s builder
-  #   - name: Builder Cleanup in case of k8s builder 
-  #     shell: bash
-  #     run: |
-  #       docker buildx rm ${{ env.BUILDER_NAME }} || true
+  clean-k8s-builder:
+    runs-on: builder-cpu-amd-runner
+    if: always()
+    needs: [operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    steps:
+    - name: Bootstrap Buildkit AMD
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ env.BUILDER_NAME }}
+        buildkit_worker_addresses: '' # k8s builder
+    - name: Bootstrap Buildkit ARM
+      uses: ./.github/actions/bootstrap-buildkit
+      continue-on-error: true
+      with:
+        builder_name: ${{ env.BUILDER_NAME }}
+        buildkit_worker_addresses: '' # k8s builder
+    - name: Builder Cleanup in case of k8s builder 
+      shell: bash
+      run: |
+        docker buildx rm ${{ env.BUILDER_NAME }} || true
   
   # cleanup:
   #   runs-on: cpu-amd-m5-2xlarge

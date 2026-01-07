@@ -47,9 +47,8 @@ on:
         default: true
       builder_name:
         description: 'Buildkit builder name'
-        required: false
+        required: true
         type: string
-        default: 'remote-buildkit'
       extra_tags:
         description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
         required: false
