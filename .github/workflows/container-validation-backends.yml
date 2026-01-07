@@ -140,7 +140,7 @@ jobs:
       matrix:
         platform:
           - { arch: amd64 }
-          # - { arch: arm64  }
+          - { arch: arm64  }
     name: operator (${{ matrix.platform.arch }})
     runs-on: builder-cpu-amd-runner
     steps:
@@ -257,63 +257,63 @@ jobs:
   #     target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
   #     target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
 
-  # # ============================================================================
-  # # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # # ============================================================================
-  # vllm-pipeline:
-  #   needs: [changed-files]
-  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
-  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
-  #   with:
-  #     framework: vllm
-  #     arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
-  #     arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
-  #     arm_cuda_version: '12.9'
-  #     arm_torch_backend: 'cu129'
-  #     build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
-  #     extra_tags: |
-  #       ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-  #       ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-  #     no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-  #     run_tests: false
-  #     copy_to_acr: false
-  #     push_image: false
-  #     no_load: true
-  #   secrets: inherit
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build → Test → Copy)
+  # ============================================================================
+  vllm-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    with:
+      framework: vllm
+      arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+      arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+      arm_cuda_version: '12.9'
+      arm_torch_backend: 'cu129'
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: false
+      copy_to_acr: false
+      push_image: false
+      no_load: true
+    secrets: inherit
 
-  # sglang-pipeline:
-  #   needs: [changed-files]
-  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
-  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
-  #   with:
-  #     framework: sglang
-  #     build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
-  #     extra_tags: |
-  #       ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-  #       ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-  #     no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-  #     run_tests: false
-  #     copy_to_acr: false
-  #     push_image: false
-  #     no_load: true
-  #   secrets: inherit
+  sglang-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    with:
+      framework: sglang
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: false
+      copy_to_acr: false
+      push_image: false
+      no_load: true
+    secrets: inherit
 
-  # trtllm-pipeline:
-  #   needs: [changed-files]
-  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
-  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
-  #   with:
-  #     framework: trtllm
-  #     build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
-  #     extra_tags: |
-  #       ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-  #       ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-  #     no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-  #     run_tests: false
-  #     copy_to_acr: false
-  #     push_image: false
-  #     no_load: true
-  #   secrets: inherit
+  trtllm-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    with:
+      framework: trtllm
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: false
+      copy_to_acr: false
+      push_image: false
+      no_load: true
+    secrets: inherit
 
 
   # # ============================================================================
