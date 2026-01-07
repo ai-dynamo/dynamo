@@ -1060,6 +1060,16 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			existingResources: []client.Object{
+				&grovev1alpha1.PodCliqueSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: grovev1alpha1.PodCliqueSetStatus{
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
 				&grovev1alpha1.PodClique{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-dgd-0-frontend",

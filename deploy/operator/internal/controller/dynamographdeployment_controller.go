@@ -313,9 +313,30 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1alpha1.
 	return false
 }
 
+func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
+	if r.isGrovePathway(dgd) {
+		return r.getUpdatedInProgressForGrove(ctx, dgd, inProgress)
+	}
+	return r.getUpdatedInProgressForComponent(ctx, dgd, inProgress)
+}
+
 // getUpgdatedInProgressForGrove checks which services are still in progress.
-func (r *DynamoGraphDeploymentReconciler) getUpgdatedInProgressForGrove(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
+func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
 	logger := log.FromContext(ctx)
+
+	pcs := &grovev1alpha1.PodCliqueSet{}
+	err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PodCliqueSet: %w", err)
+	}
+
+	if pcs.Status.ObservedGeneration == nil {
+		return nil, fmt.Errorf("PodCliqueSet %s observedGeneration is nil", dgd.Name)
+	}
+
+	if *pcs.Status.ObservedGeneration < pcs.Generation {
+		return nil, fmt.Errorf("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d", dgd.Name, pcs.Generation, *pcs.Status.ObservedGeneration)
+	}
 
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, serviceName := range inProgress {
@@ -323,12 +344,15 @@ func (r *DynamoGraphDeploymentReconciler) getUpgdatedInProgressForGrove(ctx cont
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
 		var isReady bool
+		var reason string
 		if component.GetNumberOfNodes() > 1 {
-			isReady, _, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _ = dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+
 		} else {
-			isReady, _, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
+			isReady, reason, _ = dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
 		}
 		if !isReady {
+			logger.V(1).Info("service not ready", "serviceName", serviceName, "resourceName", resourceName, "reason", reason)
 			updatedInProgress = append(updatedInProgress, serviceName)
 		}
 	}
@@ -636,15 +660,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		}
 	}
 
-	var notFullyUpdated []string
-	var err error
-
-	if r.isGrovePathway(dgd) {
-		notFullyUpdated, err = r.getUpgdatedInProgressForGrove(ctx, dgd, servicesToCheck)
-	} else {
-		notFullyUpdated, err = r.getUpdatedInProgressForComponent(ctx, dgd, servicesToCheck)
-	}
-
+	updatedInProgress, err := r.getUpdatedInProgress(ctx, dgd, servicesToCheck)
 	if err != nil {
 		logger.Error(err, "failed to check restart progress")
 		return &nvidiacomv1alpha1.RestartStatus{
@@ -654,7 +670,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		}
 	}
 
-	if len(notFullyUpdated) == 0 {
+	if len(updatedInProgress) == 0 {
 		logger.Info("Restart completed for all services")
 		return &nvidiacomv1alpha1.RestartStatus{
 			ObservedAt: specAt,
@@ -665,7 +681,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	return &nvidiacomv1alpha1.RestartStatus{
 		ObservedAt: specAt,
 		Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
-		InProgress: notFullyUpdated,
+		InProgress: updatedInProgress,
 	}
 }
 
@@ -695,11 +711,19 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	}
 
 	// Check if the current service is fully updated
-	isFullyUpdated, reason := r.checkServiceFullyUpdated(ctx, dgd, currentService)
+	updatedInProgress, err := r.getUpdatedInProgress(ctx, dgd, []string{currentService})
+	if err != nil {
+		logger.Error(err, "failed to check current service restart progress")
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+			InProgress: []string{currentService},
+		}
+	}
 
-	if !isFullyUpdated {
+	if len(updatedInProgress) > 0 {
 		// Still restarting
-		logger.Info("Service restart not completed", "service", currentService, "reason", reason)
+		logger.Info("Service restart not completed", "service", currentService, "updatedInProgress", updatedInProgress)
 		return &nvidiacomv1alpha1.RestartStatus{
 			ObservedAt: specAt,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
@@ -740,6 +764,22 @@ func (r *DynamoGraphDeploymentReconciler) checkServiceFullyUpdated(ctx context.C
 	}
 
 	if r.isGrovePathway(dgd) {
+		pcs := &grovev1alpha1.PodCliqueSet{}
+		err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
+		if err != nil {
+			return false, fmt.Sprintf("failed to get PodCliqueSet: %v", err)
+		}
+
+		if pcs.Status.ObservedGeneration == nil {
+			return false, fmt.Sprintf("PodCliqueSet %s observedGeneration is nil", dgd.Name)
+		}
+
+		if *pcs.Status.ObservedGeneration < pcs.Generation {
+			return false, fmt.Sprintf("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d",
+				dgd.Name,
+				pcs.Generation, pcs.Status.ObservedGeneration)
+		}
+
 		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
 
 		if component.GetNumberOfNodes() > 1 {
@@ -847,10 +887,13 @@ func checkDCDReady(ctx context.Context, client client.Client, resourceName, name
 
 // getUpdatedInProgressForComponent checks which services are still in progress for DCD pathway.
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
+	logger := log.FromContext(ctx)
+
 	updatedInProgress := make([]string, 0, len(inProgress))
 	for _, serviceName := range inProgress {
-		isFullyUpdated, _ := r.checkComponentServiceFullyUpdated(ctx, dgd, serviceName)
+		isFullyUpdated, reason := r.checkComponentServiceFullyUpdated(ctx, dgd, serviceName)
 		if !isFullyUpdated {
+			logger.V(1).Info("service not fully updated", "serviceName", serviceName, "reason", reason)
 			updatedInProgress = append(updatedInProgress, serviceName)
 		}
 	}
