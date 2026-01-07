@@ -66,8 +66,6 @@ on:
         type: boolean
         default: false
     secrets:
-      NGC_CI_ACCESS_TOKEN:
-        required: true
       AWS_DEFAULT_REGION:
         required: true
       AWS_ACCOUNT_ID:
@@ -146,7 +144,6 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -190,7 +187,6 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -211,9 +207,10 @@ jobs:
   # ============================================================================
   copy-to-acr:
     needs: [build, test]
-    # Run if build succeeded AND (test succeeded OR test was skipped)
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
     if: |
       always() &&
+      inputs.copy_to_acr &&
       needs.build.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped')
     strategy:
