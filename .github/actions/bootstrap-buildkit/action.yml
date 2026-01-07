@@ -113,7 +113,7 @@ runs:
          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-         '--driver-opt=nodeselector="$NODESELECTOR"' \
-         '--driver-opt=tolerations=${{ inputs.tolerations }}'
+         '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=buildkit-amd-worker"' #\
+        #  '--driver-opt=tolerations=${{ inputs.tolerations }}'
 
         docker buildx inspect --bootstrap
