@@ -92,38 +92,10 @@ Dynamo provides sample DGDR configurations in `benchmarks/profiler/deploy/`. You
 
 **Available Sample DGDRs:**
 - **`profile_sla_dgdr.yaml`**: Standard online profiling for dense models
-- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator (TensorRT-LLM)
+- **`profile_sla_aic_dgdr.yaml`**: Fast offline profiling using AI Configurator
 - **`profile_sla_moe_dgdr.yaml`**: Online profiling for MoE models (SGLang)
 
-Or, you can create your own DGDR for your own needs:
-
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoGraphDeploymentRequest
-metadata:
-  name: my-model-deployment  # Change the name
-  namespace: default         # Change the namespace
-spec:
-  model: "Qwen/Qwen3-0.6B"     # Update to your model
-  backend: vllm                # Backend: vllm, sglang, or trtllm
-
-  profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Required
-    config:
-      sla:
-        isl: 3000    # Adjust to your workload
-        osl: 150     # Adjust to your workload
-        ttft: 200    # Your target (ms)
-        itl: 20      # Your target (ms)
-
-      sweep:
-        use_ai_configurator: false  # Set to true for fast profiling (TensorRT-LLM only)
-
-  deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"  # Optional
-
-  autoApply: true  # Auto-deploy after profiling
-```
+Or, you can create your own DGDR for your own needs.
 
 > [!TIP]
 > For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
@@ -377,6 +349,10 @@ spec:
 ```
 
 Profiling still runs against the real backend (via GPUs or AIC) to collect performance data. The mocker deployment then uses this data to simulate realistic timing behavior.
+
+### Using a Model Cache PVC
+
+For large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. See [Model Cache PVC](/docs/benchmarks/sla_driven_profiling.md#model-cache-pvc-advanced) for configuration details.
 
 ### DGDR Immutability
 

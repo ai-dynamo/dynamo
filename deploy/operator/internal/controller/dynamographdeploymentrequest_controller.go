@@ -154,6 +154,7 @@ const (
 	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
 	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
+	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
 
 	// Validation messages
 	ValidationErrorModelRequired  = "model is required"
@@ -851,6 +852,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if _, exists := cm.Data[key]; !exists {
 			return fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
+		}
+	}
+
+	// Validate model cache PVC if provided
+	modelCachePVC, _ := extractModelCachePVCConfig(dgdr)
+	if modelCachePVC != "" {
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      modelCachePVC,
+			Namespace: dgdr.Namespace,
+		}, pvc)
+
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf(MessageModelCachePVCNotFound, modelCachePVC, dgdr.Namespace)
+			}
+			return err
 		}
 	}
 

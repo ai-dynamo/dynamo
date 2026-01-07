@@ -391,6 +391,27 @@ profilingConfig:
 > [!NOTE]
 > Planner arguments use `planner_` prefix. See planner documentation for full list.
 
+### Model Cache PVC (Advanced)
+
+For large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. This is useful when:
+- The model is not publicly available on HuggingFace
+- You want to avoid repeated downloads during profiling
+- You have a shared model cache across your cluster
+
+```yaml
+profilingConfig:
+  config:
+    deployment:
+      model_cache_pvc_name: "model-cache"             # Name of PVC containing model weights (required)
+      model_cache_pvc_path: "hub/models--deepseek-ai--DeepSeek-R1"  # Subpath within PVC (optional)
+      model_cache_pvc_mount_path: "/opt/model-cache"  # Mount path in container (optional, default: /opt/model-cache)
+```
+
+**Requirements:**
+- The PVC must exist in the same namespace as the DGDR
+- The model weights must be accessible at `{mount_path}/{pvc_path}`
+- The PVC is mounted as read-only to both the profiler pod and the generated DGD worker pods
+
 ### Engine Configuration (Auto-configured)
 
 The controller automatically sets these from high-level fields:
