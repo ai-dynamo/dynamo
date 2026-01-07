@@ -76,6 +76,7 @@ jobs:
       sglang_container: ${{ steps.filter.outputs.sglang_container }}
       trtllm_all: ${{ steps.filter.outputs.trtllm_all }}
       trtllm_container: ${{ steps.filter.outputs.trtllm_container }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     permissions:
       contents: read
     steps:
@@ -123,7 +124,9 @@ jobs:
           echo "vllm_all: ${{ steps.filter.outputs.vllm_all_all_changed_files }}"
           echo "sglang_all: ${{ steps.filter.outputs.sglang_all_all_changed_files }}"
           echo "trtllm_all: ${{ steps.filter.outputs.trtllm_all_all_changed_files }}"
-
+      - name: Export builder name
+        id: export-builder-name
+        run: echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
       # - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 #v6.1.0
       # - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
       #   timeout-minutes: 3
@@ -154,7 +157,7 @@ jobs:
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
         with:
-          builder_name: ${{ env.BUILDER_NAME }}
+          builder_name: ${{ needs.changed-files.outputs.builder_name }}
           buildkit_worker_addresses: '' # ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
           platform: linux/${{ matrix.platform.arch }}
       - name: Docker Login
@@ -279,7 +282,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
-      builder_name: ${{ env.BUILDER_NAME }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
     secrets: inherit
 
   sglang-pipeline:
@@ -297,7 +300,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
-      builder_name: ${{ env.BUILDER_NAME }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
     secrets: inherit
 
   trtllm-pipeline:
@@ -315,7 +318,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
-      builder_name: ${{ env.BUILDER_NAME }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
     secrets: inherit
 
 
