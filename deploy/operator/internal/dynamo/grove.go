@@ -249,8 +249,10 @@ func CheckPCSGFullyUpdated(ctx context.Context, client client.Client, resourceNa
 }
 
 // CheckDCDFullyUpdated checks if a DynamoComponentDeployment has completed its restart.
-// A DCD is considered fully updated when it has the Available condition set to True.
-// This is used for restart detection to ensure the underlying deployment has actually rolled.
+// A DCD is considered fully updated when:
+// 1. The DCD controller has processed the latest spec (observedGeneration >= generation)
+// 2. The Available condition is set to True
+// This ensures we don't trust stale status from before the spec change was processed.
 func CheckDCDFullyUpdated(ctx context.Context, client client.Client, resourceName, namespace string, logger logr.Logger) (bool, string) {
 	dcd := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 	err := client.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: namespace}, dcd)
@@ -267,7 +269,18 @@ func CheckDCDFullyUpdated(ctx context.Context, client client.Client, resourceNam
 	logger.Info("CheckDCDFullyUpdated",
 		"resourceName", resourceName,
 		"generation", dcd.Generation,
+		"observedGeneration", dcd.Status.ObservedGeneration,
 		"conditionCount", len(dcd.Status.Conditions))
+
+	// First, check if the DCD controller has processed the latest spec.
+	// If observedGeneration < generation, the status is stale and we can't trust it.
+	if dcd.Status.ObservedGeneration < dcd.Generation {
+		logger.V(1).Info("DynamoComponentDeployment spec not yet processed",
+			"resourceName", resourceName,
+			"generation", dcd.Generation,
+			"observedGeneration", dcd.Status.ObservedGeneration)
+		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", dcd.Generation, dcd.Status.ObservedGeneration)
+	}
 
 	// Check if the Available condition is True
 	for _, condition := range dcd.Status.Conditions {
