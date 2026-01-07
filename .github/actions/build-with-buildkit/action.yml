@@ -76,6 +76,10 @@ inputs:
     description: 'Additional image tags (newline-separated list)'
     required: false
     default: ''
+  push_image:
+    description: 'Push the image to the registry'
+    required: false
+    default: 'false'
 
 outputs:
   image_tag:
@@ -131,4 +135,5 @@ runs:
         aws_secret_access_key: ${{ inputs.aws_secret_access_key }}
         no_cache: ${{ inputs.no_cache }}
         extra_tags: ${{ inputs.extra_tags }}
+        push_image: ${{ inputs.push_image }}
 

@@ -59,6 +59,10 @@ inputs:
     description: 'Additional image tags (newline-separated list of full image:tag references)'
     required: false
     default: ''
+  push_image:
+    description: 'Push the image to the registry'
+    required: false
+    default: 'false'
 outputs:
   image_tag:
     description: 'Image Tag'
@@ -133,6 +137,9 @@ runs:
         fi
         if [ "${{ inputs.no_cache }}" == "true" ]; then
           EXTRA_ARGS+=" --no-cache"
+        fi
+        if [ "${{ inputs.push_image }}" == "true" ]; then
+          EXTRA_ARGS+=" --push --no-load"
         fi
 
         # Add extra tags (each as a separate --tag argument)

@@ -162,6 +162,7 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           no_cache: ${{ inputs.no_cache }}
+          push_image: true
 
   # ============================================================================
   # TEST
