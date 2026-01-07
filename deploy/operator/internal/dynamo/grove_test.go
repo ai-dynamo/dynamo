@@ -20,6 +20,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 func TestResolveKaiSchedulerQueueName(t *testing.T) {
@@ -318,6 +319,536 @@ func TestEnsureQueueExists(t *testing.T) {
 	}
 }
 
+func TestCheckPodCliqueReady(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		resourceName       string
+		namespace          string
+		existingPodClique  *grovev1alpha1.PodClique
+		wantReady          bool
+		wantReasonContains string
+		wantServiceStatus  v1alpha1.ServiceReplicaStatus
+	}{
+		{
+			name:               "PodClique not found",
+			resourceName:       "missing-podclique",
+			namespace:          "default",
+			wantReady:          false,
+			wantReasonContains: "resource not found",
+			wantServiceStatus:  v1alpha1.ServiceReplicaStatus{},
+		},
+		{
+			name:         "PodClique fully ready",
+			resourceName: "ready-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "ready-podclique",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           3,
+					ReadyReplicas:      3,
+					UpdatedReplicas:    3,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady: true,
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "ready-podclique",
+				Replicas:        3,
+				UpdatedReplicas: 3,
+				ReadyReplicas:   ptr.To(int32(3)),
+			},
+		},
+		{
+			name:         "PodClique with zero replicas desired",
+			resourceName: "zero-replicas-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "zero-replicas-podclique",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 0,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           0,
+					ReadyReplicas:      0,
+					UpdatedReplicas:    0,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady: true,
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "zero-replicas-podclique",
+				Replicas:        0,
+				UpdatedReplicas: 0,
+				ReadyReplicas:   ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "PodClique spec not yet processed - observedGeneration < generation",
+			resourceName: "stale-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "stale-podclique",
+					Namespace:  "default",
+					Generation: 3,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 2,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           2,
+					ReadyReplicas:      2,
+					UpdatedReplicas:    2,
+					ObservedGeneration: ptr.To(int64(2)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "spec not yet processed",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "stale-podclique",
+				Replicas:        2,
+				UpdatedReplicas: 2,
+				ReadyReplicas:   ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "PodClique not ready - ready replicas less than desired",
+			resourceName: "not-ready-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "not-ready-podclique",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           3,
+					ReadyReplicas:      1,
+					UpdatedReplicas:    3,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "desired=3, ready=1",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "not-ready-podclique",
+				Replicas:        3,
+				UpdatedReplicas: 3,
+				ReadyReplicas:   ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "PodClique not fully updated - updated replicas less than desired",
+			resourceName: "not-updated-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "not-updated-podclique",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           3,
+					ReadyReplicas:      3,
+					UpdatedReplicas:    2,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "desired=3, updated=2",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "not-updated-podclique",
+				Replicas:        3,
+				UpdatedReplicas: 2,
+				ReadyReplicas:   ptr.To(int32(3)),
+			},
+		},
+		{
+			name:         "PodClique performing rolling update - replicas != desired",
+			resourceName: "rolling-update-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "rolling-update-podclique",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           4,
+					ReadyReplicas:      3,
+					UpdatedReplicas:    3,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "performing rolling update",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "rolling-update-podclique",
+				Replicas:        4,
+				UpdatedReplicas: 3,
+				ReadyReplicas:   ptr.To(int32(3)),
+			},
+		},
+		{
+			name:         "PodClique with nil observedGeneration",
+			resourceName: "nil-observed-gen-podclique",
+			namespace:    "default",
+			existingPodClique: &grovev1alpha1.PodClique{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "nil-observed-gen-podclique",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					Replicas: 2,
+				},
+				Status: grovev1alpha1.PodCliqueStatus{
+					Replicas:           2,
+					ReadyReplicas:      2,
+					UpdatedReplicas:    2,
+					ObservedGeneration: nil,
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "observedGeneration is nil",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:   v1alpha1.ComponentKindPodClique,
+				ComponentName:   "nil-observed-gen-podclique",
+				Replicas:        2,
+				UpdatedReplicas: 2,
+				ReadyReplicas:   ptr.To(int32(2)),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = grovev1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			var objects []client.Object
+			if tt.existingPodClique != nil {
+				objects = append(objects, tt.existingPodClique)
+			}
+
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			logger := log.FromContext(ctx)
+			ready, reason, serviceStatus := CheckPodCliqueReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+
+			g.Expect(ready).To(gomega.Equal(tt.wantReady))
+			if tt.wantReasonContains != "" {
+				g.Expect(reason).To(gomega.ContainSubstring(tt.wantReasonContains))
+			} else {
+				g.Expect(reason).To(gomega.Equal(""))
+			}
+			g.Expect(serviceStatus).To(gomega.Equal(tt.wantServiceStatus))
+		})
+	}
+}
+
+func TestCheckPCSGReady(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		resourceName       string
+		namespace          string
+		existingPCSG       *grovev1alpha1.PodCliqueScalingGroup
+		wantReady          bool
+		wantReasonContains string
+		wantServiceStatus  v1alpha1.ServiceReplicaStatus
+	}{
+		{
+			name:               "PCSG not found",
+			resourceName:       "missing-pcsg",
+			namespace:          "default",
+			wantReady:          false,
+			wantReasonContains: "resource not found",
+			wantServiceStatus:  v1alpha1.ServiceReplicaStatus{},
+		},
+		{
+			name:         "PCSG fully ready",
+			resourceName: "ready-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "ready-pcsg",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           3,
+					AvailableReplicas:  3,
+					UpdatedReplicas:    3,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady: true,
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "ready-pcsg",
+				Replicas:          3,
+				UpdatedReplicas:   3,
+				AvailableReplicas: ptr.To(int32(3)),
+			},
+		},
+		{
+			name:         "PCSG with zero replicas desired",
+			resourceName: "zero-replicas-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "zero-replicas-pcsg",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 0,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           0,
+					AvailableReplicas:  0,
+					UpdatedReplicas:    0,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady: true,
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "zero-replicas-pcsg",
+				Replicas:          0,
+				UpdatedReplicas:   0,
+				AvailableReplicas: ptr.To(int32(0)),
+			},
+		},
+		{
+			name:         "PCSG spec not yet processed - observedGeneration < generation",
+			resourceName: "stale-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "stale-pcsg",
+					Namespace:  "default",
+					Generation: 3,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 2,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           2,
+					AvailableReplicas:  2,
+					UpdatedReplicas:    2,
+					ObservedGeneration: ptr.To(int64(2)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "spec not yet processed",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "stale-pcsg",
+				Replicas:          2,
+				UpdatedReplicas:   2,
+				AvailableReplicas: ptr.To(int32(2)),
+			},
+		},
+		{
+			name:         "PCSG not ready - available replicas less than desired",
+			resourceName: "not-ready-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "not-ready-pcsg",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           3,
+					AvailableReplicas:  1,
+					UpdatedReplicas:    3,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "desired=3, available=1",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "not-ready-pcsg",
+				Replicas:          3,
+				UpdatedReplicas:   3,
+				AvailableReplicas: ptr.To(int32(1)),
+			},
+		},
+		{
+			name:         "PCSG not fully updated - updated replicas less than desired",
+			resourceName: "not-updated-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "not-updated-pcsg",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           3,
+					AvailableReplicas:  3,
+					UpdatedReplicas:    2,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "desired=3, updated=2",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "not-updated-pcsg",
+				Replicas:          3,
+				UpdatedReplicas:   2,
+				AvailableReplicas: ptr.To(int32(3)),
+			},
+		},
+		{
+			name:         "PCSG performing rolling update - replicas != desired",
+			resourceName: "rolling-update-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "rolling-update-pcsg",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 3,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           4,
+					AvailableReplicas:  3,
+					UpdatedReplicas:    3,
+					ObservedGeneration: ptr.To(int64(1)),
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "performing rolling update",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "rolling-update-pcsg",
+				Replicas:          4,
+				UpdatedReplicas:   3,
+				AvailableReplicas: ptr.To(int32(3)),
+			},
+		},
+		{
+			name:         "PCSG with nil observedGeneration",
+			resourceName: "nil-observed-gen-pcsg",
+			namespace:    "default",
+			existingPCSG: &grovev1alpha1.PodCliqueScalingGroup{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "nil-observed-gen-pcsg",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: grovev1alpha1.PodCliqueScalingGroupSpec{
+					Replicas: 2,
+				},
+				Status: grovev1alpha1.PodCliqueScalingGroupStatus{
+					Replicas:           2,
+					AvailableReplicas:  2,
+					UpdatedReplicas:    2,
+					ObservedGeneration: nil,
+				},
+			},
+			wantReady:          false,
+			wantReasonContains: "observedGeneration is nil",
+			wantServiceStatus: v1alpha1.ServiceReplicaStatus{
+				ComponentKind:     v1alpha1.ComponentKindPodCliqueScalingGroup,
+				ComponentName:     "nil-observed-gen-pcsg",
+				Replicas:          2,
+				UpdatedReplicas:   2,
+				AvailableReplicas: ptr.To(int32(2)),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = grovev1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			var objects []client.Object
+			if tt.existingPCSG != nil {
+				objects = append(objects, tt.existingPCSG)
+			}
+
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			logger := log.FromContext(ctx)
+			ready, reason, serviceStatus := CheckPCSGReady(ctx, fakeKubeClient, tt.resourceName, tt.namespace, logger)
+
+			g.Expect(ready).To(gomega.Equal(tt.wantReady))
+			if tt.wantReasonContains != "" {
+				g.Expect(reason).To(gomega.ContainSubstring(tt.wantReasonContains))
+			} else {
+				g.Expect(reason).To(gomega.Equal(""))
+			}
+			g.Expect(serviceStatus).To(gomega.Equal(tt.wantServiceStatus))
+		})
+	}
+}
+
 func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 	ctx := context.Background()
 
@@ -351,9 +882,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueStatus{
-						Replicas:        2,
-						UpdatedReplicas: 2,
-						ReadyReplicas:   1,
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -403,9 +935,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          2,
-						UpdatedReplicas:   2,
-						AvailableReplicas: 2,
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						AvailableReplicas:  2,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -417,9 +950,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 3,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          3,
-						UpdatedReplicas:   3,
-						AvailableReplicas: 3,
+						Replicas:           3,
+						UpdatedReplicas:    3,
+						AvailableReplicas:  3,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -467,9 +1001,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          2,
-						UpdatedReplicas:   2,
-						AvailableReplicas: 1,
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						AvailableReplicas:  1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -525,9 +1060,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueStatus{
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   1,
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -539,9 +1075,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          2,
-						UpdatedReplicas:   2,
-						AvailableReplicas: 1,
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						AvailableReplicas:  1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -553,9 +1090,10 @@ func Test_GetComponentReadinessAndServiceReplicaStatuses(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          2,
-						UpdatedReplicas:   2,
-						AvailableReplicas: 2,
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						AvailableReplicas:  2,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},

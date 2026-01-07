@@ -131,6 +131,11 @@ func CheckPodCliqueReady(ctx context.Context, client client.Client, resourceName
 		ReadyReplicas:   &readyReplicas,
 	}
 
+	if observedGeneration == nil {
+		logger.V(1).Info("PodClique observedGeneration is nil", "resourceName", resourceName)
+		return false, "observedGeneration is nil", serviceStatus
+	}
+
 	if observedGeneration != nil && *observedGeneration < generation {
 		logger.V(1).Info("PodClique spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
 		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus
@@ -199,14 +204,19 @@ func CheckPCSGReady(ctx context.Context, client client.Client, resourceName, nam
 		AvailableReplicas: &availableReplicas,
 	}
 
-	if desiredReplicas == 0 {
-		// No replicas desired, so it's ready
-		return true, "", serviceStatus
+	if observedGeneration == nil {
+		logger.V(1).Info("PodCliqueScalingGroup observedGeneration is nil", "resourceName", resourceName)
+		return false, "observedGeneration is nil", serviceStatus
 	}
 
 	if observedGeneration != nil && *observedGeneration < generation {
 		logger.V(1).Info("PodCliqueScalingGroup spec not yet processed", "resourceName", resourceName, "generation", generation, "observedGeneration", observedGeneration)
 		return false, fmt.Sprintf("spec not yet processed: generation=%d, observedGeneration=%d", generation, *observedGeneration), serviceStatus
+	}
+
+	if desiredReplicas == 0 {
+		// No replicas desired, so it's ready
+		return true, "", serviceStatus
 	}
 
 	if desiredReplicas != availableReplicas {

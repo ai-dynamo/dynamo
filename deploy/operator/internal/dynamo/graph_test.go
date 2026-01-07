@@ -5993,13 +5993,14 @@ func TestDetermineGroveRestartState(t *testing.T) {
 	tests := []struct {
 		name          string
 		dgd           *v1alpha1.DynamoGraphDeployment
+		restartStatus *v1alpha1.RestartStatus
 		want          *RestartState
 		wantNil       bool
 		wantSvcs      []string // expected services to annotate (sorted)
 		wantTimestamp *string
 	}{
 		{
-			name: "no restart requested returns nil",
+			name: "restartStatus nil returns nil",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -6007,6 +6008,22 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Worker":   {},
 					},
 				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "spec.restart.at nil and restartStatus.observedAt nil returns nil",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: nil,
 			},
 			wantNil: true,
 		},
@@ -6025,6 +6042,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						},
 					},
 				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &restartTime,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Frontend", "Worker"},
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
 			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
@@ -6046,6 +6068,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 					},
 				},
 			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &restartTime,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Worker"},
+			},
 			wantSvcs:      []string{"Worker"},
 			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
 		},
@@ -6066,13 +6093,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						},
 					},
 				},
-				Status: v1alpha1.DynamoGraphDeploymentStatus{
-					Restart: &v1alpha1.RestartStatus{
-						ObservedAt: &restartTime,
-						Phase:      v1alpha1.RestartPhaseRestarting,
-						InProgress: []string{"Worker"},
-					},
-				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &restartTime,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Worker"},
 			},
 			wantSvcs:      []string{"Frontend", "Worker"}, // Frontend completed, Worker in progress
 			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
@@ -6087,23 +6112,37 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Backend":  {},
 					},
 					Restart: &v1alpha1.Restart{
-						At:       &restartTime,
-						Strategy: &v1alpha1.RestartStrategy{},
+						At: &restartTime,
 					},
 				},
-				Status: v1alpha1.DynamoGraphDeploymentStatus{
-					Restart: &v1alpha1.RestartStatus{
-						ObservedAt: &restartTime,
-						Phase:      v1alpha1.RestartPhaseRestarting,
-						InProgress: []string{"Worker"},
-					},
-				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &restartTime,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Worker"},
 			},
 			wantSvcs:      []string{"Frontend", "Worker", "Backend"},
 			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
 		},
 		{
-			name: "completed restart preserves all annotations",
+			name: "completed restart with empty spec restart preserves all annotations",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &oldRestartTime,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(oldRestartTime.Format("2006-01-02T15:04:05Z07:00")),
+		},
+		{
+			name: "completed restart",
 			dgd: &v1alpha1.DynamoGraphDeployment{
 				Spec: v1alpha1.DynamoGraphDeploymentSpec{
 					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
@@ -6114,12 +6153,10 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						At: &restartTime,
 					},
 				},
-				Status: v1alpha1.DynamoGraphDeploymentStatus{
-					Restart: &v1alpha1.RestartStatus{
-						ObservedAt: &restartTime,
-						Phase:      v1alpha1.RestartPhaseCompleted,
-					},
-				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &restartTime,
+				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
 			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
@@ -6139,41 +6176,19 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						},
 					},
 				},
-				Status: v1alpha1.DynamoGraphDeploymentStatus{
-					Restart: &v1alpha1.RestartStatus{
-						ObservedAt: &oldRestartTime, // old time
-						Phase:      v1alpha1.RestartPhaseCompleted,
-					},
-				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &oldRestartTime,
+				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
 			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
-		},
-		{
-			name: "spec.restart removed but status exists - preserve annotations",
-			dgd: &v1alpha1.DynamoGraphDeployment{
-				Spec: v1alpha1.DynamoGraphDeploymentSpec{
-					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
-						"Frontend": {},
-						"Worker":   {},
-					},
-					// No Restart in spec
-				},
-				Status: v1alpha1.DynamoGraphDeploymentStatus{
-					Restart: &v1alpha1.RestartStatus{
-						ObservedAt: &oldRestartTime,
-						Phase:      v1alpha1.RestartPhaseCompleted,
-					},
-				},
-			},
-			wantSvcs:      []string{"Frontend", "Worker"}, // Preserve from completed
-			wantTimestamp: ptr.To(oldRestartTime.Format("2006-01-02T15:04:05Z07:00")),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DetermineRestartState(tt.dgd, nil)
+			got := DetermineRestartState(tt.dgd, tt.restartStatus)
 
 			if tt.wantNil {
 				if got != nil {
@@ -6187,10 +6202,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				return
 			}
 
-			// Check services
 			var gotSvcs []string
-			for svc := range got.ServicesToAnnotate {
-				gotSvcs = append(gotSvcs, svc)
+			for svc, shouldAnnotate := range got.ServicesToAnnotate {
+				if shouldAnnotate {
+					gotSvcs = append(gotSvcs, svc)
+				}
 			}
 			sort.Strings(gotSvcs)
 			sort.Strings(tt.wantSvcs)

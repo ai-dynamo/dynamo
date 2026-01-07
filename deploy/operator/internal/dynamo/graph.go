@@ -123,8 +123,6 @@ func IsParallelRestart(dgd *v1alpha1.DynamoGraphDeployment) bool {
 
 // getServicesToAnnotateForSequentialRestart determines which services should be annotated
 // for a sequential restart in progress.
-// It returns all services up to and including those in InProgress.
-// Services before the in-progress ones have already completed and need to keep their annotation.
 func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment, status *v1alpha1.RestartStatus) map[string]bool {
 	services := make(map[string]bool)
 
@@ -133,7 +131,7 @@ func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployme
 		return services
 	}
 
-	// New restart or Pending phase - only first service
+	// New restart or Pending phase - only first service needs to be annotated
 	if status == nil ||
 		status.Phase == v1alpha1.RestartPhasePending ||
 		len(status.InProgress) == 0 {

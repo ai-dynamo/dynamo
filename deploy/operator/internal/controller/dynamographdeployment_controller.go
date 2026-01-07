@@ -729,7 +729,6 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 }
 
 // checkServiceFullyUpdated checks if a single service is fully updated.
-// Returns true if the service has UpdatedReplicas == desired AND ReadyReplicas == desired.
 func (r *DynamoGraphDeploymentReconciler) checkServiceFullyUpdated(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) (bool, string) {
 	logger := log.FromContext(ctx)
 	component := dgd.Spec.Services[serviceName]
@@ -764,8 +763,8 @@ func getNextServiceInOrder(order []string, currentService string) string {
 func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) *nvidiacomv1alpha1.RestartStatus {
 	// No restart requested
 	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
-		// Preserve existing completed status if any
-		if dgd.Status.Restart != nil && dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted {
+		// Preserve existing terminal status
+		if dgd.Status.Restart != nil && (dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
 			return dgd.Status.Restart
 		}
 		return nil

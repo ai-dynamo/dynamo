@@ -1876,6 +1876,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 		wantConditionReason      string
 		wantConditionMessage     string
 		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
+		wantObservedGeneration   int64
 	}{
 		{
 			name: "deployment backed DCD that is unready",
@@ -1997,10 +1998,12 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Create DynamoComponentDeployment
+			generation := int64(5)
 			dcd := &v1alpha1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-component",
-					Namespace: "default",
+					Name:       "test-component",
+					Namespace:  "default",
+					Generation: generation,
 				},
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -2052,6 +2055,9 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 
 			// Assert the service replica status
 			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
+
+			// Assert the observed generation
+			g.Expect(updatedDCD.Status.ObservedGeneration).To(gomega.Equal(generation))
 		})
 	}
 }
