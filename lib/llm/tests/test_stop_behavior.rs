@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use dynamo_llm::backend::{Decoder, StopTrigger};
 use dynamo_llm::protocols::common::StopConditions;
-use dynamo_llm::tokenizers::{self, traits as tokenizer_traits, Encoding};
+use dynamo_llm::tokenizers::{self, Encoding, traits as tokenizer_traits};
 
 const HI: u32 = 1;
 const STOP: u32 = 2;
