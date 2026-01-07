@@ -6,6 +6,12 @@
 # Combined pre_merge wall time (this file):
 # - Serialized: 304.01s.
 # - Parallel (-n auto): 34.55s (269.46s saved, 8.80x).
+#
+# NOTE: TCP request plane is NOT tested here. These tests use --num-workers > 1 which spawns
+# multiple workers in a single process sharing one TCP server. The shared TCP server uses
+# endpoint_path (e.g., "generate") as the routing key, causing handler collisions when multiple
+# workers register the same endpoint. This is a test-only limitation; production deployments
+# with separate processes per worker work correctly with TCP.
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -155,6 +161,8 @@ def _build_mocker_command(
         command.extend(["--data-parallel-size", str(mocker_args["dp_size"])])
     if mocker_args.get("enable_local_indexer"):
         command.append("--enable-local-indexer")
+    if "bootstrap_ports" in mocker_args:
+        command.extend(["--bootstrap-ports", mocker_args["bootstrap_ports"]])
 
     return command
 
@@ -233,6 +241,7 @@ class DisaggMockerProcess:
         num_mockers: int = 1,
         store_backend: str = "etcd",
         request_plane: str = "nats",
+        enable_bootstrap: bool = False,
     ):
         if worker_type not in ("prefill", "decode"):
             raise ValueError(
@@ -242,6 +251,7 @@ class DisaggMockerProcess:
         self.namespace = namespace
         self.worker_type = worker_type
         self.num_workers = num_mockers
+        self._bootstrap_ports: list[int] = []
 
         # Set component name and endpoint based on worker type
         if worker_type == "prefill":
@@ -251,7 +261,17 @@ class DisaggMockerProcess:
             self.component_name = "backend"
             self.endpoint = f"dyn://{self.namespace}.backend.generate"
 
-        mocker_args = mocker_args or {}
+        mocker_args = (mocker_args or {}).copy()
+
+        # Allocate bootstrap ports for prefill workers if enabled (one per worker)
+        if enable_bootstrap and worker_type == "prefill":
+            self._bootstrap_ports = allocate_ports(num_mockers, BASE_PORT)
+            mocker_args["bootstrap_ports"] = ",".join(
+                str(p) for p in self._bootstrap_ports
+            )
+            logger.info(
+                f"Allocated bootstrap ports {self._bootstrap_ports} for {num_mockers} prefill workers"
+            )
 
         command = _build_mocker_command(
             endpoint=self.endpoint,
@@ -279,6 +299,11 @@ class DisaggMockerProcess:
             f"endpoint: {self.endpoint}"
         )
 
+    @property
+    def bootstrap_ports(self) -> list[int]:
+        """Return the allocated bootstrap ports, if any."""
+        return self._bootstrap_ports
+
     def __enter__(self):
         logger.info(
             f"Starting {self.worker_type} mocker process with {self.num_workers} worker(s)"
@@ -289,6 +314,11 @@ class DisaggMockerProcess:
     def __exit__(self, exc_type, exc_val, exc_tb):
         logger.info(f"Stopping {self.worker_type} mocker process")
         self._process.__exit__(exc_type, exc_val, exc_tb)
+        # Deallocate bootstrap ports if we allocated any
+        if self._bootstrap_ports:
+            deallocate_ports(self._bootstrap_ports)
+            logger.info(f"Deallocated bootstrap ports {self._bootstrap_ports}")
+            self._bootstrap_ports = []
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
@@ -487,9 +517,9 @@ def test_kv_push_router_bindings(
     ],
     ids=[
         "jetstream",
-        "nats",
+        "nats_core",
         "file",
-    ],  # "nats_core" commented out to match commented test case
+    ],
 )
 @pytest.mark.timeout(90)  # TODO: figure out a timeout
 def test_indexers_sync(
@@ -677,37 +707,43 @@ def test_router_decisions(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
+@pytest.mark.parametrize(
+    "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
+)
 @pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
 def test_router_decisions_disagg(
     request,
     runtime_services_dynamic_ports,
     predownload_tokenizers,
     registration_order,
-    request_plane,
+    enable_disagg_bootstrap,
 ):
     """Validate KV cache prefix reuse in disaggregated prefill-decode setup.
 
     Tests that progressive requests with overlapping prefixes are routed to the
     same prefill worker due to KV cache reuse.
 
-    Parameterized to test both registration orders:
-    - prefill_first: prefill workers register before decode workers
-    - decode_first: decode workers register before prefill workers
+    Parameterized to test:
+    - registration_order: prefill_first vs decode_first
+    - enable_disagg_bootstrap: without vs with bootstrap rendezvous
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting disaggregated router prefix reuse test "
-        f"(registration_order={registration_order})"
+        f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
     )
 
     # Generate shared namespace for prefill and decode workers
     namespace_suffix = generate_random_suffix()
     shared_namespace = f"test-namespace-{namespace_suffix}"
 
-    # Create mocker args
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Create mocker args - use JetStream for KV events (more reliable than NATS Core)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": False,
+    }
 
     prefill_workers = None
     decode_workers = None
@@ -722,7 +758,8 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="nats",
+                enable_bootstrap=enable_disagg_bootstrap,
             )
             prefill_workers.__enter__()
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
@@ -735,7 +772,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="nats",
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -748,7 +785,7 @@ def test_router_decisions_disagg(
                 worker_type="decode",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="nats",
             )
             decode_workers.__enter__()
             logger.info(f"Decode workers using endpoint: {decode_workers.endpoint}")
@@ -761,7 +798,8 @@ def test_router_decisions_disagg(
                 worker_type="prefill",
                 mocker_args=mocker_args,
                 num_mockers=4,
-                request_plane=request_plane,
+                request_plane="nats",
+                enable_bootstrap=enable_disagg_bootstrap,
             )
             prefill_workers.__enter__()
             logger.info(f"Prefill workers using endpoint: {prefill_workers.endpoint}")
@@ -779,7 +817,7 @@ def test_router_decisions_disagg(
             request=request,
             frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
-            request_plane=request_plane,
+            request_plane="nats",
         )
 
     finally:

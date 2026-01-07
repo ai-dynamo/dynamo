@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use dashmap::DashMap;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -39,6 +38,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
+    discovery::RuntimeConfigsWithNotify,
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent},
@@ -281,7 +281,7 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        workers_with_configs: Arc<DashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>>,
+        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -290,8 +290,6 @@ impl KvRouter {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-
-        let instance_ids_rx = client.instance_avail_watcher();
 
         // Watch for runtime config updates via discovery interface
         // (still needed for WorkerQueryClient and background tasks)
@@ -339,8 +337,7 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
-            instance_ids_rx,
-            workers_with_configs,
+            workers_with_configs.clone(),
             selector,
             kv_router_config.router_replica_sync,
             consumer_id.clone(),
@@ -354,90 +351,65 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // This is spawned as a background task to avoid blocking router startup.
-        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // model_manager.get_or_create_runtime_config_watcher() guarantees at least one worker exists.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            // Clone everything needed for the background task
-            let component_clone = component.clone();
-            let kv_indexer_clone = kv_indexer.clone();
-            let cancellation_token_clone = cancellation_token.clone();
-            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
-            let worker_query_client_clone =
-                worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+            // model_manager guarantees workers_with_configs is populated
+            // Wait for at least one worker before starting the subscriber
+            while workers_with_configs.configs.is_empty() {
+                tracing::info!("KV router waiting for at least one worker...");
+                workers_with_configs.notify.notified().await;
+            }
 
-            tokio::spawn(async move {
-                // Wait for runtime_configs to have at least one entry
-                let (all_local_indexer, count) = loop {
-                    {
-                        let configs = runtime_configs_rx_clone.borrow();
-                        if !configs.is_empty() {
-                            let all_local_indexer =
-                                configs.values().all(|c| c.enable_local_indexer);
-                            break (all_local_indexer, configs.len());
-                        }
-                    }
+            let count = workers_with_configs.configs.len();
+            let all_local_indexer = workers_with_configs
+                .configs
+                .iter()
+                .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
+                .all(|b| b);
 
-                    // Wait for changes to runtime_configs
-                    tokio::select! {
-                        _ = cancellation_token_clone.cancelled() => {
-                            tracing::debug!("Subscriber selection task cancelled");
-                            return;
-                        }
-                        result = runtime_configs_rx_clone.changed() => {
-                            if result.is_err() {
-                                tracing::debug!("Runtime configs channel closed");
-                                return;
-                            }
-                        }
-                    }
-                };
+            tracing::info!("Found {count} worker(s), starting KV event subscriber");
 
-                if all_local_indexer {
-                    // All workers have local_indexer enabled - use NATS Core
-                    tracing::info!(
-                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
-                    );
+            // Start subscriber - setup runs synchronously, then spawns background loop internally
+            if all_local_indexer {
+                tracing::info!(
+                    "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                );
 
-                    if let Err(e) = start_kv_router_background_nats_core(
-                        component_clone.clone(),
-                        kv_indexer_clone.event_sender(),
-                        kv_indexer_clone.remove_worker_sender(),
-                        cancellation_token_clone.clone(),
-                        worker_query_client_clone,
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to start NATS Core subscriber: {e}");
-                    }
-                } else {
-                    // Not all workers have local_indexer - use JetStream
-                    tracing::info!(
-                        "Not all workers have local_indexer enabled, using JetStream subscription"
-                    );
+                start_kv_router_background_nats_core(
+                    component.clone(),
+                    kv_indexer.event_sender(),
+                    kv_indexer.remove_worker_sender(),
+                    cancellation_token.clone(),
+                    worker_query::WorkerQueryClient::new(
+                        component.clone(),
+                        runtime_configs_rx.clone(),
+                    ),
+                )
+                .await?;
+            } else {
+                tracing::info!(
+                    "Not all workers have local_indexer enabled, using JetStream subscription"
+                );
 
-                    if let Err(e) = start_kv_router_background(
-                        component_clone.clone(),
-                        consumer_id,
-                        kv_indexer_clone.event_sender(),
-                        kv_indexer_clone.remove_worker_sender(),
-                        kv_router_config
-                            .router_snapshot_threshold
-                            .map(|_| kv_indexer_clone.get_workers_sender()),
-                        kv_router_config
-                            .router_snapshot_threshold
-                            .map(|_| kv_indexer_clone.snapshot_event_sender()),
-                        cancellation_token_clone.clone(),
-                        kv_router_config.router_snapshot_threshold,
-                        kv_router_config.router_reset_states,
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to start JetStream subscriber: {e}");
-                    }
-                }
-            });
+                start_kv_router_background(
+                    component.clone(),
+                    consumer_id,
+                    kv_indexer.event_sender(),
+                    kv_indexer.remove_worker_sender(),
+                    kv_router_config
+                        .router_snapshot_threshold
+                        .map(|_| kv_indexer.get_workers_sender()),
+                    kv_router_config
+                        .router_snapshot_threshold
+                        .map(|_| kv_indexer.snapshot_event_sender()),
+                    cancellation_token.clone(),
+                    kv_router_config.router_snapshot_threshold,
+                    kv_router_config.router_reset_states,
+                )
+                .await?;
+            }
         }
 
         tracing::info!("KV Routing initialized");
@@ -815,17 +787,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
         // Determine if this router should handle local state updates (add_request, free, etc.)
-        // Only skip local updates for GAIE Stage 2: when BOTH prefill and decode worker IDs
-        // are externally specified (indicates external orchestrator handles tracking).
-        // For internal routing (e.g., bootstrap optimization with only prefill_worker_id set),
-        // we still handle updates locally.
-        let routing = request.routing.as_ref();
-        let handle_local_updates = routing
-            .map(|r| {
-                // GAIE Stage 2 sets both worker IDs - external caller handles tracking
-                // All other cases (including backend_instance_id for routing) - we handle locally
-                r.prefill_worker_id.is_none() || r.decode_worker_id.is_none()
-            })
+        // Default is true (router handles bookkeeping). Set to false for GAIE Stage 2 where
+        // an external orchestrator (e.g., EPP sidecar) handles bookkeeping via C FFI.
+        let handle_local_updates = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.enable_local_updates)
             .unwrap_or(true);
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
@@ -917,9 +884,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // TODO: When handle_local_updates=false, consider moving mark_prefill_completed
-        // to an external caller (e.g., sidecar) if they support a first-token hook.
-        // Currently mark_prefill_completed is called here for all flows.
+        // Wrap stream with lifecycle management (mark_prefill_completed, free)
+        // Only perform these operations if handle_local_updates is true.
+        // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
 
@@ -937,7 +904,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if !prefill_marked {
+                        if handle_local_updates && !prefill_marked {
                             // Only mark prefill completed when we receive actual tokens,
                             // not empty bootstrap info (token_ids: []) from disaggregated prefill
                             let has_tokens = item.data.as_ref()
@@ -956,8 +923,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
             }
 
-            // Always call free() - it's idempotent and safe even if already freed or never added
-            if let Err(e) = chooser.free(&context_id).await {
+            // Only call free() if we handle local updates.
+            // When handle_local_updates=false, external caller handles cleanup via C FFI.
+            if handle_local_updates
+                && let Err(e) = chooser.free(&context_id).await
+            {
                 tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });
