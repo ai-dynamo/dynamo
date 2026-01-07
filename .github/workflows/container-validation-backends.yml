@@ -230,7 +230,7 @@ jobs:
           platform: 'linux/${{ matrix.platform.arch }}'
           base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
           runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
+          cuda_version: '12.9'
           torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -242,8 +242,10 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-cuda12-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -354,6 +356,7 @@ jobs:
         uses: ./.github/actions/docker-build
         with:
           framework: sglang
+          cuda_version: '12.9'
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -366,8 +369,10 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-cuda12-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -415,6 +420,7 @@ jobs:
         uses: ./.github/actions/docker-build
         with:
           framework: trtllm
+          cuda_version: '13.0'
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -427,8 +433,10 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-cuda13-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
