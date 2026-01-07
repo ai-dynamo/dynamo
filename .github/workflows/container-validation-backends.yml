@@ -201,7 +201,7 @@ jobs:
         platform:
           - { arch: amd64, runner: gpu-l40-amd64 }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm-cuda-12 (${{ matrix.platform.arch }})
+    name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Output Node Name
