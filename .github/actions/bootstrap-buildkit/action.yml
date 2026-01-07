@@ -78,34 +78,12 @@ runs:
         done
         docker buildx inspect --bootstrap
 
-    - name: Create Kubernetes builder
+    - name: Create Kubernetes builder for both platforms
       if: inputs.buildkit_worker_addresses == ''
       shell: bash
       run: |
-        # Determine nodeselector based on platform if not provided
-        NODESELECTOR="${{ inputs.nodeselector }}"
         
-        if [[ -z "$NODESELECTOR" ]]; then
-          if [[ "${{ inputs.platform }}" == "linux/arm64" ]]; then
-            NODESELECTOR="kubernetes.io/arch=arm64,role=buildkit-arm-worker"
-          elif [[ "${{ inputs.platform }}" == "linux/amd64" ]]; then
-            NODESELECTOR="kubernetes.io/arch=amd64,role=buildkit-amd-worker"
-          else
-            echo "ERROR: Unsupported platform '${{ inputs.platform }}'. Must be linux/amd64 or linux/arm64."
-            exit 1
-          fi
-        fi
-        
-        # Check if builder already exists
-        if docker buildx inspect ${{ inputs.builder_name }} &>/dev/null; then
-          echo "Builder ${{ inputs.builder_name }} exists, appending platform"
-          CREATE_CMD="docker buildx create --append --name ${{ inputs.builder_name }}"
-        else
-          echo "Creating new builder ${{ inputs.builder_name }}"
-          CREATE_CMD="docker buildx create --use --name ${{ inputs.builder_name }}"
-        fi
-        
-        $CREATE_CMD --driver kubernetes --platform=${{ inputs.platform }} \
+        docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
          '--driver-opt=namespace=${{ inputs.namespace }}' \
          '--driver-opt=loadbalance=sticky' \
@@ -113,7 +91,60 @@ runs:
          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-         '--driver-opt="nodeselector='"$NODESELECTOR"'"' \
+         '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=buildkit-amd-worker"' \
+         '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+
+        docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
+         '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+         '--driver-opt=namespace=${{ inputs.namespace }}' \
+         '--driver-opt=loadbalance=sticky' \
+         '--driver-opt=replicas=${{ inputs.replicas }}' \
+         '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+         '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+         '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+         '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=buildkit-arm-worker"' \
          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
 
         docker buildx inspect --bootstrap
+
+
+
+    # - name: Create Kubernetes builder
+    #   if: inputs.buildkit_worker_addresses == ''
+    #   shell: bash
+    #   run: |
+    #     # Determine nodeselector based on platform if not provided
+    #     NODESELECTOR="${{ inputs.nodeselector }}"
+        
+    #     if [[ -z "$NODESELECTOR" ]]; then
+    #       if [[ "${{ inputs.platform }}" == "linux/arm64" ]]; then
+    #         NODESELECTOR="kubernetes.io/arch=arm64,role=buildkit-arm-worker"
+    #       elif [[ "${{ inputs.platform }}" == "linux/amd64" ]]; then
+    #         NODESELECTOR="kubernetes.io/arch=amd64,role=buildkit-amd-worker"
+    #       else
+    #         echo "ERROR: Unsupported platform '${{ inputs.platform }}'. Must be linux/amd64 or linux/arm64."
+    #         exit 1
+    #       fi
+    #     fi
+        
+    #     # Check if builder already exists
+    #     if docker buildx inspect ${{ inputs.builder_name }} &>/dev/null; then
+    #       echo "Builder ${{ inputs.builder_name }} exists, appending platform"
+    #       CREATE_CMD="docker buildx create --append --name ${{ inputs.builder_name }}"
+    #     else
+    #       echo "Creating new builder ${{ inputs.builder_name }}"
+    #       CREATE_CMD="docker buildx create --use --name ${{ inputs.builder_name }}"
+    #     fi
+        
+    #     $CREATE_CMD --driver kubernetes --platform=${{ inputs.platform }} \
+    #      '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+    #      '--driver-opt=namespace=${{ inputs.namespace }}' \
+    #      '--driver-opt=loadbalance=sticky' \
+    #      '--driver-opt=replicas=${{ inputs.replicas }}' \
+    #      '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+    #      '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+    #      '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+    #      '--driver-opt="nodeselector='"$NODESELECTOR"'"' \
+    #      '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+
+    #     docker buildx inspect --bootstrap
