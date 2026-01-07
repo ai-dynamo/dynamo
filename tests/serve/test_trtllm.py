@@ -183,13 +183,12 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    "disaggregated_multimodal_router": TRTLLMConfig(
-        name="disaggregated_multimodal_router",
+    "aggregated_multimodal_router": TRTLLMConfig(
+        name="aggregated_multimodal_router",
         directory=trtllm_dir,
-        script_name="disagg_multimodal.sh",
-        script_args=["--router-mode=kv", "--publish-events-and-metrics"],
+        script_name="agg_multimodal.sh",
         marks=[
-            pytest.mark.gpu_2,
+            pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.nightly,
