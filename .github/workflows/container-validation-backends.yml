@@ -8,6 +8,7 @@ name: Docker Build and Test
 # - [ ] Remove the ops-2438-ci branch from push: filter
 # - [ ] Have --cache-from use the same annotation as in main. 
 # - [ ] Sort out filters.
+# - [ ] Comment in concurrency section.
 
 on:
   push:

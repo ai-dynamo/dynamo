@@ -87,9 +87,9 @@ runs:
         
         if [[ -z "$NODESELECTOR" ]]; then
           if [[ "${{ inputs.platform }}" == "linux/arm64" ]]; then
-            NODESELECTOR="kubernetes.io/arch=arm64,role=buildkit-arm-worker"
+            NODESELECTOR="'kubernetes.io/arch=arm64,role=buildkit-arm-worker'"
           elif [[ "${{ inputs.platform }}" == "linux/amd64" ]]; then
-            NODESELECTOR="kubernetes.io/arch=amd64,role=buildkit-amd-worker"
+            NODESELECTOR="'kubernetes.io/arch=amd64,role=buildkit-amd-worker'"
           else
             echo "ERROR: Unsupported platform '${{ inputs.platform }}'. Must be linux/amd64 or linux/arm64."
             exit 1
