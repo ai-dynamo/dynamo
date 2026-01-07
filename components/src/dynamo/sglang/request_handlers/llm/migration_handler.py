@@ -113,8 +113,9 @@ class MigrationHandler(BaseWorkerHandler):
         )
 
         # Extract results from scheduler response
+        # NOTE: src_dp_rank is encoded in bootstrap_room (room % dp_size == src_dp_rank)
+        # so we don't need to pass it explicitly - the receiver derives it.
         pending_outputs = result.get("pending_outputs", [])
-        src_dp_rank = result.get("src_dp_rank")
         bootstrap_room = result.get("bootstrap_room")
 
         bootstrap_info = {
@@ -130,12 +131,11 @@ class MigrationHandler(BaseWorkerHandler):
 
         logging.info(
             f"Migration initiated for rid: {rid}, room: {bootstrap_room}, "
-            f"pending_outputs: {len(pending_outputs)}, src_dp_rank: {src_dp_rank}"
+            f"pending_outputs: {len(pending_outputs)}"
         )
 
         yield {
             "rid": rid,
             "bootstrap_info": bootstrap_info,
             "pending_outputs": pending_outputs,
-            "src_dp_rank": src_dp_rank,
         }
