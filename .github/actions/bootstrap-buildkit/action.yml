@@ -106,13 +106,14 @@ runs:
         fi
         
         $CREATE_CMD --driver kubernetes --platform=${{ inputs.platform }} \
-         --driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }} \
-         --driver-opt=namespace=${{ inputs.namespace }} \
-         --driver-opt=loadbalance=sticky \
-         --driver-opt=replicas=${{ inputs.replicas }} \
-         --driver-opt=requests.cpu=${{ inputs.requests_cpu }} \
-         --driver-opt=requests.memory=${{ inputs.requests_memory }} \
-         --driver-opt=limits.memory=${{ inputs.limits_memory }} \
-         --driver-opt="nodeselector=\"$NODESELECTOR\"" #\
-        #  --driver-opt="tolerations=${{ inputs.tolerations }}"
+         '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+         '--driver-opt=namespace=${{ inputs.namespace }}' \
+         '--driver-opt=loadbalance=sticky' \
+         '--driver-opt=replicas=${{ inputs.replicas }}' \
+         '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+         '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+         '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+         '--driver-opt=nodeselector='"$NODESELECTOR" \
+         '--driver-opt=tolerations=${{ inputs.tolerations }}'
+
         docker buildx inspect --bootstrap
