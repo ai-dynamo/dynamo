@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: test3-vllm-dsr1
+  name: vllm-dsr1
 spec:
   backendFramework: vllm
   pvcs:
