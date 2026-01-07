@@ -65,6 +65,10 @@ class PreprocessedHandler(ProcessMixIn):
         multimodal_inputs,
         context,
     ):
+        # [gluo NOTE] panic for now as encoder here is for image only
+        if VIDEO_URL_KEY in multimodal_inputs or multimodal_inputs[VIDEO_URL_KEY]:
+            raise ValueError("Video URL not supported in encode worker yet")
+
         request_id = str(uuid.uuid4().hex)
 
         # Build sampling params from request using shared utility
@@ -91,8 +95,8 @@ class PreprocessedHandler(ProcessMixIn):
                     multimodal_input.image_url = url
                 elif mm_type == VIDEO_URL_KEY:
                     multimodal_input.video_url = url
-                    # [gluo NOTE] panic for now as encoder here is for image only
-                    raise ValueError("Video URL not supported in encode worker yet")
+                    # [gluo NOTE] should not reach here due to earlier check
+                    continue
                 encode_request.multimodal_inputs.append(
                     MultiModalGroup(multimodal_input=multimodal_input)
                 )
@@ -161,6 +165,8 @@ class PreprocessedHandler(ProcessMixIn):
                     metrics=output.metrics,
                 )
 
+                if not res.outputs:
+                    continue
                 output = res.outputs[0]
                 next_total_toks = len(output.token_ids)
                 out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
