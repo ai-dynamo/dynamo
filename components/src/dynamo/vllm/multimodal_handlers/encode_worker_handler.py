@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import AsyncGenerator, AsyncIterator
 import logging
 import shutil
+from typing import AsyncGenerator, AsyncIterator
+
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TextPrompt
@@ -12,15 +13,16 @@ from vllm.sampling_params import SamplingParams
 
 import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime
+
 from ..multimodal_utils import (
     ImageLoader,
     MyRequestOutput,
+    VLLMNativeEncoderRequest,
+    VLLMNativeEncoderResponse,
     encode_image_embeddings,
     get_encoder_components,
     load_vision_model,
     vLLMMultimodalRequest,
-    VLLMNativeEncoderRequest,
-    VLLMNativeEncoderResponse,
 )
 
 logger = logging.getLogger(__name__)

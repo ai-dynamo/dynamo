@@ -105,8 +105,8 @@ python -m dynamo.vllm \
     --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # Start vLLM-native encoder worker (ECConnector producer)
-echo "Starting vLLM-native encoder worker (ECConnector producer) on GPU 2..."
-CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm \
+echo "Starting vLLM-native encoder worker (ECConnector producer) on GPU 0..."
+CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm \
     --vllm-native-encoder-worker \
     --enable-multimodal \
     --model $MODEL_NAME \
@@ -118,8 +118,8 @@ CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm \
     --no-enable-prefix-caching &
 
 # Start aggregated multimodal worker (ECConnector consumer, P+D combined)
-echo "Starting aggregated multimodal worker (ECConnector consumer) on GPU 3..."
-CUDA_VISIBLE_DEVICES=3 python -m dynamo.vllm \
+echo "Starting aggregated multimodal worker (ECConnector consumer) on GPU 1..."
+CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm \
     --multimodal-worker \
     --enable-multimodal \
     --model $MODEL_NAME \

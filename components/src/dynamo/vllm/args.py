@@ -210,7 +210,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--vllm-native-encoder-worker",
         action="store_true",
-        help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage)",
+        help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
     )
     parser.add_argument(
         "--ec-connector-backend",
