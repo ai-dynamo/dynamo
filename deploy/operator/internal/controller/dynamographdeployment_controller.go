@@ -203,6 +203,15 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Both Grove and DCD pathways compute restart status during resource reconciliation
 	dynamoDeployment.Status.Restart = reconcileResult.RestartStatus
 
+	// If restart is in progress, requeue to continue processing the next service.
+	// This is necessary because the controller uses GenerationChangedPredicate which
+	// doesn't trigger reconciles on status-only changes. Without explicit requeue,
+	// the restart would get stuck after completing one service.
+	if reconcileResult.RestartStatus != nil && reconcileResult.RestartStatus.Phase == nvidiacomv1alpha1.RestartPhaseRestarting {
+		logger.V(1).Info("Restart in progress, requeueing to continue processing")
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
