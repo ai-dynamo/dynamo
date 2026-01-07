@@ -99,38 +99,8 @@ jobs:
         continue-on-error: true
         run: |
           echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64" || echo "Framework image not found in cache"
           docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
           echo "Cache pull completed"
-      - name: Build Framework Image
-        id: build_framework
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ matrix.framework }}
-          target: framework
-          platform: linux/amd64
-          base_image_tag: ''
-          runtime_image_tag: ''
-          cuda_version: ''
-          torch_backend: ''
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
-      - name: Tag and Push Framework Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: framework-${{ matrix.framework }}-amd64:${{ github.run_id }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64
-            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-amd64-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'false'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
       - name: Build Runtime Image
         id: build_runtime
         uses: ./.github/actions/docker-build
@@ -205,38 +175,8 @@ jobs:
         continue-on-error: true
         run: |
           echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64" || echo "Framework image not found in cache"
           docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
           echo "Cache pull completed"
-      - name: Build Framework Image
-        id: build_framework
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ matrix.framework }}
-          target: framework
-          platform: linux/arm64
-          base_image_tag: ${{ matrix.base_image_tag }}
-          runtime_image_tag: ${{ matrix.runtime_image_tag }}
-          cuda_version: ${{ matrix.cuda_version }}
-          torch_backend: ${{ matrix.torch_backend }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
-      - name: Tag and Push Framework Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: framework-${{ matrix.framework }}-arm64:${{ github.run_id }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64
-            ${{ env.REGISTRY_IMAGE }}:main-${{ matrix.framework }}-framework-arm64-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'false'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
       - name: Build Runtime Image
         id: build_runtime
         uses: ./.github/actions/docker-build
