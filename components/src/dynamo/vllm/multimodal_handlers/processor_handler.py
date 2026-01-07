@@ -442,7 +442,6 @@ class ECProcessorHandler(ProcessorHandler):
         (
             request,
             conversation,
-            prompt_text,
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(chat_request)
