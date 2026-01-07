@@ -145,16 +145,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Route buildkit workers
-        id: route-buildkit
-        continue-on-error: true
-        shell: bash
-        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
+      # - name: Route buildkit workers
+      #   id: route-buildkit
+      #   continue-on-error: true
+      #   shell: bash
+      #   run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
         with:
           builder_name: ${{ env.BUILDER_NAME }}
-          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
+          buildkit_worker_addresses: '' # ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
           platform: linux/${{ matrix.platform.arch }}
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -217,96 +217,102 @@ jobs:
               ${NO_CACHE_FLAG} ${EXTRA_TAGS} .
 
 
-  copy-operator-to-acr:
-    needs: [operator]
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
-    strategy:
-      fail-fast: true
-      matrix:
-        platform:
-          - { arch: amd64 }
-          # - { arch: arm64 }
-    name: copy dynamo-operator-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          TARGET_TAG="${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}"
-          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
-      - name: Copy image to target registry
-        uses: ./.github/actions/skopeo-copy
-        with:
-          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
-          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
-          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-    outputs:
-      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
-      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+  # copy-operator-to-acr:
+  #   needs: [operator]
+  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+  #   strategy:
+  #     fail-fast: true
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64 }
+  #         # - { arch: arm64 }
+  #   name: copy dynamo-operator-${{ matrix.platform.arch }}
+  #   runs-on: builder-cpu-amd-runner
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Calculate target tag
+  #       id: calculate-target-tag
+  #       shell: bash
+  #       run: |
+  #         TARGET_TAG="${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}"
+  #         echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #         echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+  #     - name: Copy image to target registry
+  #       uses: ./.github/actions/skopeo-copy
+  #       with:
+  #         source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #         source_image: ai-dynamo/dynamo
+  #         source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
+  #         target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_image: ai-dynamo/dynamo
+  #         target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+  #         source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #   outputs:
+  #     target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
+  #     target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
 
-  # ============================================================================
-  # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # ============================================================================
-  vllm-pipeline:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
-    with:
-      framework: vllm
-      arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
-      arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
-      arm_cuda_version: '12.9'
-      arm_torch_backend: 'cu129'
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: false
-      copy_to_acr: false
-    secrets: inherit
+  # # ============================================================================
+  # # FRAMEWORK PIPELINES (Build → Test → Copy)
+  # # ============================================================================
+  # vllm-pipeline:
+  #   needs: [changed-files]
+  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
+  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+  #   with:
+  #     framework: vllm
+  #     arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+  #     arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+  #     arm_cuda_version: '12.9'
+  #     arm_torch_backend: 'cu129'
+  #     build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
+  #     extra_tags: |
+  #       ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+  #       ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+  #     no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+  #     run_tests: false
+  #     copy_to_acr: false
+  #     push_image: false
+  #     no_load: true
+  #   secrets: inherit
 
-  sglang-pipeline:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
-    with:
-      framework: sglang
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: false
-      copy_to_acr: false
-    secrets: inherit
+  # sglang-pipeline:
+  #   needs: [changed-files]
+  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
+  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
+  #   with:
+  #     framework: sglang
+  #     build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
+  #     extra_tags: |
+  #       ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+  #       ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+  #     no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+  #     run_tests: false
+  #     copy_to_acr: false
+  #     push_image: false
+  #     no_load: true
+  #   secrets: inherit
 
-  trtllm-pipeline:
-    needs: [changed-files]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
-    with:
-      framework: trtllm
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: false
-      copy_to_acr: false
-    secrets: inherit
+  # trtllm-pipeline:
+  #   needs: [changed-files]
+  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
+  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+  #   with:
+  #     framework: trtllm
+  #     build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
+  #     extra_tags: |
+  #       ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+  #       ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+  #     no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+  #     run_tests: false
+  #     copy_to_acr: false
+  #     push_image: false
+  #     no_load: true
+  #   secrets: inherit
 
 
   # # ============================================================================

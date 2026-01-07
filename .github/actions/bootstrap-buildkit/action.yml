@@ -32,7 +32,7 @@ inputs:
   namespace:
     description: 'Kubernetes namespace for buildkit pods'
     required: false
-    default: 'default'
+    default: 'buildkit'
   replicas:
     description: 'Number of buildkit replicas'
     required: false

@@ -65,6 +65,16 @@ on:
         required: false
         type: boolean
         default: false
+      push_image:
+        description: 'Push image to registry'
+        required: false
+        type: boolean
+        default: true
+      no_load:
+        description: 'Do not load the image into docker (useful for validation-only builds with remote builders)'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -170,7 +180,8 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
-          push_image: true
+          push_image: ${{ inputs.push_image }}
+          no_load: ${{ inputs.no_load }}
 
   # ============================================================================
   # TEST
