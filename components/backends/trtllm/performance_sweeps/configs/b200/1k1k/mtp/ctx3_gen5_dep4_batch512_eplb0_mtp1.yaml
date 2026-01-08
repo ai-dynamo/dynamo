@@ -71,7 +71,7 @@ decode:
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.9
+      free_gpu_memory_fraction: 0.85
       dtype: fp8
     moe_config:
       backend: CUTLASS
