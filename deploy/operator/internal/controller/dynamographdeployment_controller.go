@@ -309,7 +309,7 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1alpha1.
 	return enableGrove && r.Config.Grove.Enabled
 }
 
-func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
+func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) []string {
 	if r.isGrovePathway(dgd) {
 		return r.getUpdatedInProgressForGrove(ctx, dgd, inProgress)
 	}
@@ -317,21 +317,24 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Conte
 }
 
 // getUpgdatedInProgressForGrove checks which services are still in progress.
-func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
+func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) []string {
 	logger := log.FromContext(ctx)
 
 	pcs := &grovev1alpha1.PodCliqueSet{}
 	err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get PodCliqueSet: %w", err)
+		logger.Error(err, "failed to get PodCliqueSet")
+		return inProgress
 	}
 
 	if pcs.Status.ObservedGeneration == nil {
-		return nil, fmt.Errorf("PodCliqueSet %s observedGeneration is nil", dgd.Name)
+		logger.Info("PodCliqueSet %s observedGeneration is nil", dgd.Name)
+		return inProgress
 	}
 
 	if *pcs.Status.ObservedGeneration < pcs.Generation {
-		return nil, fmt.Errorf("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d", dgd.Name, pcs.Generation, *pcs.Status.ObservedGeneration)
+		logger.Info("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d", dgd.Name, pcs.Generation, *pcs.Status.ObservedGeneration)
+		return inProgress
 	}
 
 	updatedInProgress := make([]string, 0, len(inProgress))
@@ -353,7 +356,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 		}
 	}
 
-	return updatedInProgress, nil
+	return updatedInProgress
 }
 
 func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
@@ -675,15 +678,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		}
 	}
 
-	updatedInProgress, err := r.getUpdatedInProgress(ctx, dgd, servicesToCheck)
-	if err != nil {
-		logger.Error(err, "failed to check restart progress")
-		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
-			InProgress: servicesToCheck,
-		}
-	}
+	updatedInProgress := r.getUpdatedInProgress(ctx, dgd, servicesToCheck)
 
 	if len(updatedInProgress) == 0 {
 		logger.Info("Restart completed for all services")
@@ -738,15 +733,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	}
 
 	// Check if the current service is fully updated
-	updatedInProgress, err := r.getUpdatedInProgress(ctx, dgd, []string{currentService})
-	if err != nil {
-		logger.Error(err, "failed to check current service restart progress")
-		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedID: specID,
-			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
-			InProgress: []string{currentService},
-		}
-	}
+	updatedInProgress := r.getUpdatedInProgress(ctx, dgd, []string{currentService})
 
 	if len(updatedInProgress) > 0 {
 		// Still restarting
@@ -874,7 +861,7 @@ func checkDCDReady(ctx context.Context, client client.Client, resourceName, name
 }
 
 // getUpdatedInProgressForComponent checks which services are still in progress for DCD pathway.
-func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {
+func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) []string {
 	logger := log.FromContext(ctx)
 
 	updatedInProgress := make([]string, 0, len(inProgress))
@@ -885,7 +872,7 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForComponent(ctx c
 			updatedInProgress = append(updatedInProgress, serviceName)
 		}
 	}
-	return updatedInProgress, nil
+	return updatedInProgress
 }
 
 func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Resource) ReconcileResult {

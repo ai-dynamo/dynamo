@@ -71,7 +71,7 @@ type Restart struct {
 	// Any modification to this value will initiate a restart of the graph deployment according to the strategy.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	ID string `json:"id,omitempty"`
+	ID string `json:"id"`
 
 	// Strategy specifies the restart strategy for the graph deployment.
 	// +kubebuilder:validation:Optional

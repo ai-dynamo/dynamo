@@ -975,7 +975,7 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
 		},
 		{
-			name: "adding new service with multinode is allowed",
+			name: "adding new service with multinode is not allowed", // service topology is immutable
 			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "sglang",
@@ -994,7 +994,6 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 							Multinode: nil,
 						},
 						"decode": {
-							// New service with multinode - should be allowed
 							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
 								NodeCount: 4,
 							},
@@ -1002,10 +1001,11 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [decode]",
 		},
 		{
-			name: "adding new service without multinode is allowed",
+			name: "adding new service without multinode is not allowed", // service topology is immutable
 			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "sglang",
@@ -1034,7 +1034,8 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [gateway]",
 		},
 	}
 
