@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# PodMonitor for dynamo worker pods with correct label relabeling
+# This ensures Prometheus metrics have the dynamo_namespace label required by the planner
+
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: dynamo-worker
+  namespace: dynamo-system
+spec:
+  namespaceSelector:
+    any: true
+  podMetricsEndpoints:
+  - interval: 5s
+    path: /metrics
+    port: system
+    relabelings:
+    # Add dynamo_namespace label from pod label
+    # Note: Prometheus converts all special chars (including hyphens) to underscores
+    - action: replace
+      sourceLabels:
+      - __meta_kubernetes_pod_label_nvidia_com_dynamo_namespace
+      targetLabel: dynamo_namespace
+    metricRelabelings:
+    # Copy model_name to model label for compatibility with frontend metrics
+    - action: replace
+      sourceLabels:
+      - model_name
+      targetLabel: model
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component-type: worker
+      nvidia.com/metrics-enabled: "true"
+
