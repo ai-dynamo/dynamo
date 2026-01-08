@@ -1,10 +1,7 @@
 name: 'Skopeo Login'
-description: 'Login to multiple container registries using skopeo (ECR, NGC, ACR)'
+description: 'Login to multiple container registries using skopeo (ECR, ACR)'
 
 inputs:
-  ngc_ci_access_token:
-    description: 'NGC CI Access Token'
-    required: false
   aws_default_region:
     description: 'AWS Default Region'
     required: false
@@ -52,13 +49,6 @@ runs:
       run: |
         set -euo pipefail
         aws ecr get-login-password --region ${{ inputs.aws_default_region }} | skopeo login --username AWS --password-stdin "${ECR_HOSTNAME}"
-
-    - name: NGC Login
-      if: ${{ inputs.ngc_ci_access_token != '' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "${{ inputs.ngc_ci_access_token }}" | skopeo login nvcr.io -u '$oauthtoken' --password-stdin
 
     - name: ACR Login
       shell: bash

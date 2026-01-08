@@ -21,9 +21,6 @@ inputs:
     description: 'Target image tag (defaults to source_tag if not specified)'
     required: false
   # Skopeo Login inputs for source registry
-  source_ngc_ci_access_token:
-    description: 'NGC CI Access Token for source registry'
-    required: false
   source_aws_default_region:
     description: 'AWS Default Region for source ECR'
     required: false
@@ -40,9 +37,6 @@ inputs:
     description: 'Azure ACR password for source registry'
     required: false
   # Skopeo Login inputs for target registry
-  target_ngc_ci_access_token:
-    description: 'NGC CI Access Token for target registry'
-    required: false
   target_aws_default_region:
     description: 'AWS Default Region for target ECR'
     required: false
@@ -70,7 +64,6 @@ runs:
     - name: Login to Source Registry
       uses: ./.github/actions/skopeo-login
       with:
-        ngc_ci_access_token: ${{ inputs.source_ngc_ci_access_token }}
         aws_default_region: ${{ inputs.source_aws_default_region }}
         aws_account_id: ${{ inputs.source_aws_account_id }}
         azure_acr_hostname: ${{ inputs.source_azure_acr_hostname }}
@@ -80,7 +73,6 @@ runs:
     - name: Login to Target Registry
       uses: ./.github/actions/skopeo-login
       with:
-        ngc_ci_access_token: ${{ inputs.target_ngc_ci_access_token }}
         aws_default_region: ${{ inputs.target_aws_default_region }}
         aws_account_id: ${{ inputs.target_aws_account_id }}
         azure_acr_hostname: ${{ inputs.target_azure_acr_hostname }}
