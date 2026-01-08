@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,6 +34,13 @@ def pytest_addoption(parser):
         default=False,
         help="Include tests that require custom builds (e.g., MoE models). "
         "By default, these tests are excluded.",
+    )
+    parser.addoption(
+        "--skip-service-restart",
+        action="store_true",
+        default=False,
+        help="Skip restarting NATS and etcd services before deployment. "
+        "By default, these services are restarted.",
     )
 
 
@@ -109,3 +116,9 @@ def namespace(request):
 def client_type(request):
     """Get client type from command line or use scenario default."""
     return request.config.getoption("--client-type")
+
+
+@pytest.fixture
+def skip_service_restart(request):
+    """Get skip restart services flag from command line."""
+    return request.config.getoption("--skip-service-restart")

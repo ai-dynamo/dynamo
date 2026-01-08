@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
@@ -6,8 +6,12 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 
-from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS, EngineType
-from benchmarks.profiler.utils.model_info import ModelInfo
+from benchmarks.profiler.utils.defaults import PREFILL_MAX_NUM_TOKENS
+from benchmarks.profiler.utils.model_info import (
+    MOE_ADDITIONAL_TP_ARCHITECTURES,
+    ModelInfo,
+)
+from dynamo.planner.defaults import SubComponentType
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -82,6 +86,23 @@ class ParallelizationMapping:
             The attention data parallelism size
         """
         return self.dep if self.dep is not None else 1  # TP and TEP → 1
+
+    def get_num_gpus(self) -> int:
+        """
+        Get the total number of GPUs for this parallelization mapping.
+
+        Returns:
+            The total number of GPUs used
+        """
+        if self.tp is not None:
+            return self.tp
+        if self.tep is not None:
+            return self.tep
+        if self.dep is not None:
+            return self.dep
+        raise ValueError(
+            "Invalid ParallelizationMapping: no parallelization strategy set"
+        )
 
 
 def _check_divisibility(
@@ -166,16 +187,12 @@ def get_candidate_parallel_mappings(
 
     candidates: list[ParallelizationMapping] = []
     if is_moe:
-        if phase == EngineType.PREFILL:
-            candidates = [
-                ParallelizationMapping(tep=num_gpus),
-                ParallelizationMapping(dep=num_gpus),
-            ]
-        elif phase == EngineType.DECODE:
-            candidates = [
-                ParallelizationMapping(dep=num_gpus),
-                ParallelizationMapping(tep=num_gpus),
-            ]
+        candidates = [
+            ParallelizationMapping(tep=num_gpus),
+            ParallelizationMapping(dep=num_gpus),
+        ]
+        if model_info.architecture in MOE_ADDITIONAL_TP_ARCHITECTURES:
+            candidates.append(ParallelizationMapping(tp=num_gpus))
     else:
         candidates = [ParallelizationMapping(tp=num_gpus)]
 
@@ -206,27 +223,44 @@ def get_candidate_parallel_mappings(
 def apply_parallel_mapping_to_config(
     base_config: dict,
     mapping: ParallelizationMapping,
-    phase: str,
+    phase: SubComponentType,
     config_modifier,
     num_gpus_per_node: int | None,
+    is_aggregated_config: bool = True,
 ) -> dict:
     cfg = copy.deepcopy(base_config)
+
+    # In aggregated configs (used for profiling individual phases), the worker service we mutate
+    # is always the decode worker (prefill is converted to decode in convert_config()).
+    # In disaggregated configs (final DGD), we mutate the service matching the requested phase.
+    component_type = SubComponentType.DECODE if is_aggregated_config else phase
+
     if mapping.tp is not None:
-        cfg = config_modifier.set_config_tp_size(cfg, mapping.tp)
+        cfg = config_modifier.set_config_tp_size(cfg, mapping.tp, component_type)
     elif mapping.tep is not None:
-        cfg = config_modifier.set_config_tep_size(cfg, mapping.tep, num_gpus_per_node)
+        cfg = config_modifier.set_config_tep_size(
+            cfg, mapping.tep, num_gpus_per_node, component_type
+        )
     elif mapping.dep is not None:
-        cfg = config_modifier.set_config_dep_size(cfg, mapping.dep, num_gpus_per_node)
+        cfg = config_modifier.set_config_dep_size(
+            cfg, mapping.dep, num_gpus_per_node, component_type
+        )
     else:
         raise ValueError(f"Invalid mapping: {mapping.label()}")
 
-    # for prefill,set batch size to attention_dp_size
+    # For prefill, set batch size to attention_dp_size
     # (this assume prompt is long enough to saturate the GPU, which is usually valid in disagg)
-    if phase == EngineType.PREFILL:
+    if phase == SubComponentType.PREFILL:
+        prefill_component_type = (
+            SubComponentType.DECODE
+            if is_aggregated_config
+            else SubComponentType.PREFILL
+        )
         cfg = config_modifier.set_prefill_config(
             cfg,
             max_batch_size=mapping.get_attn_dp_size(),
             # max num tokens is shared by all attention dp ranks
             max_num_tokens=PREFILL_MAX_NUM_TOKENS * mapping.get_attn_dp_size(),
+            component_type=prefill_component_type,
         )
     return cfg

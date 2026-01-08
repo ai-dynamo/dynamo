@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
 use anyhow;
-use dynamo_llm::block_manager::kv_consolidator::tracker::EventSource;
+use dynamo_llm::block_manager::kv_consolidator::EventSource;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
@@ -153,7 +153,11 @@ impl KvConnectorLeaderRecorder {
                     (consolidator_vllm_ep, consolidator_output_ep)
                 {
                     block_manager_builder =
-                        block_manager_builder.consolidator_config(vllm_ep, output_ep, EventSource::Vllm);
+                        block_manager_builder.consolidator_config(
+                            vllm_ep,
+                            Some(output_ep),
+                            EventSource::Vllm,
+                        );
                 }
 
                 let block_manager = match block_manager_builder.build().await {
@@ -169,7 +173,7 @@ impl KvConnectorLeaderRecorder {
                     block_manager.get_block_manager().clone(),
                     leader.clone(),
                     kvbm_metrics_clone.clone(),
-                    None, // Recorder doesn't need identifier
+                    Some(format!("worker-{}", worker_id)),
                 );
 
                 let _ = slot_manager_cell.set(sm);

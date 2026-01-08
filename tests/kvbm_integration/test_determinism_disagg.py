@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -38,6 +38,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_2,
+    pytest.mark.nightly,
 ]
 
 
@@ -444,7 +445,8 @@ def llm_server(request, runtime_services):
 def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
     t = DisaggDeterminismTester(
-        base_url=llm_server.base_url, server_type=llm_server.server_type
+        base_url=llm_server.base_url,
+        server_type=llm_server.server_type,
     )
     t.download_shakespeare_text()
     return t

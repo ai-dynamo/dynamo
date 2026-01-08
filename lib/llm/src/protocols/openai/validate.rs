@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Display;
@@ -109,6 +109,42 @@ pub fn validate_no_unsupported_fields(
         anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
     }
     Ok(())
+}
+
+/// Validates response_format for chat completions.
+///
+/// Dynamo currently supports translating:
+/// - `{"type":"json_object"}` -> guided decoding JSON object schema
+/// - `{"type":"json_schema","json_schema":{"schema": ...}}` -> guided decoding JSON schema
+///
+/// `{"type":"text"}` is accepted and means no structured constraint.
+pub fn validate_response_format(
+    response_format: &Option<dynamo_async_openai::types::ResponseFormat>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_async_openai::types::ResponseFormat;
+
+    let Some(fmt) = response_format else {
+        return Ok(());
+    };
+
+    match fmt {
+        ResponseFormat::Text => Ok(()),
+        ResponseFormat::JsonObject => Ok(()),
+        ResponseFormat::JsonSchema { json_schema } => {
+            // Validate name field format
+            if json_schema.name.is_empty() {
+                anyhow::bail!("`response_format.json_schema.name` cannot be empty");
+            }
+
+            // Validate schema presence
+            if json_schema.schema.is_none() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Validates the temperature parameter

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
@@ -60,11 +60,17 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository. This template will be applied by Dynamo's preprocessor and cannot be used with --use-sglang-tokenizer.",
     },
+    "endpoint-types": {
+        "flags": ["--dyn-endpoint-types"],
+        "type": str,
+        "default": "chat,completions",
+        "help": "Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    },
     "use-sglang-tokenizer": {
         "flags": ["--use-sglang-tokenizer"],
         "action": "store_true",
         "default": False,
-        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend. Cannot be used with --custom-jinja-template.",
+        "help": "Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
     "multimodal-processor": {
         "flags": ["--multimodal-processor"],
@@ -107,8 +113,15 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--request-plane"],
         "type": str,
         "choices": ["nats", "http", "tcp"],
-        "default": os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        "default": os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    },
+    "enable-local-indexer": {
+        "flags": ["--enable-local-indexer"],
+        "type": str,
+        "choices": ["true", "false"],
+        "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
 }
 
@@ -127,6 +140,9 @@ class DynamoArgs:
     reasoning_parser: Optional[str] = None
     custom_jinja_template: Optional[str] = None
 
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
+
     # preprocessing options
     use_sglang_tokenizer: bool = False
 
@@ -139,6 +155,8 @@ class DynamoArgs:
     embedding_worker: bool = False
     # config dump options
     dump_config_to: Optional[str] = None
+    # local indexer option
+    enable_local_indexer: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -461,23 +479,34 @@ async def parse_args(args: list[str]) -> Config:
         tool_call_parser=tool_call_parser,
         reasoning_parser=reasoning_parser,
         custom_jinja_template=expanded_template_path,
+        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
         use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
         multimodal_processor=parsed_args.multimodal_processor,
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
         dump_config_to=parsed_args.dump_config_to,
+        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
-    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
-    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
     model_path = parsed_args.model_path
+    # Name the model
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
+    # Download the model if necessary using modelexpress.
+    # We don't set `parsed_args.model_path` to the local path fetch_llm returns
+    # because sglang will send this to its pipeline-parallel workers, which may
+    # not have the local path.
+    # sglang will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
     if not os.path.exists(model_path):
-        parsed_args.model_path = await fetch_llm(model_path)
+        await fetch_llm(model_path)
 
+    # TODO: sglang downloads the model in `from_cli_args`, which means we had to
+    # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
+    # contain code to download a model, it should only parse the args.
     server_args = ServerArgs.from_cli_args(parsed_args)
 
     if parsed_args.use_sglang_tokenizer:

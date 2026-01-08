@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 set -e
@@ -17,7 +17,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # run ingress
-python3 -m dynamo.frontend --http-port=8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend &
 FRONTEND_PID=$!
 
 # run the mock worker + template validation generate()

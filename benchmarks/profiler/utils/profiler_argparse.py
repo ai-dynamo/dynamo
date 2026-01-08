@@ -1,8 +1,9 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
 import ast
+import os
 from typing import Any, Dict
 
 import yaml
@@ -65,7 +66,13 @@ def create_profiler_parser() -> argparse.Namespace:
         deployment:
             namespace: String (kubernetes namespace, default: dynamo-sla-profiler)
             service_name: String (service name, default: "")
-            model: String (model to serve, can be HF model name or local model path)
+            model: String (served model name)
+            model_cache_pvc_name: String (name of the PVC to mount the model cache,
+                if not provided, model must be HF name and will download from HF, default: "")
+            model_cache_pvc_path: String (path to the model cache in the PVC, default: "")
+            model_cache_pvc_mount_path: String (path to the model cache in the container,
+                note that the PVC must be mounted to the same path for the profiling job,
+                default: "/opt/model-cache")
         engine:
             backend: String (backend type, currently support [vllm, sglang, trtllm], default: vllm)
             config: String (path to the DynamoGraphDeployment config file, default: "")
@@ -84,6 +91,8 @@ def create_profiler_parser() -> argparse.Namespace:
             aic_backend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
             aic_backend_version: String (specify backend version when using aiconfigurator to estimate perf, default: None)
             dry_run: Boolean (dry run the profile job, default: False)
+            pick_with_webui: Boolean (pick the best parallelization mapping using webUI, default: False)
+            webui_port: Int (webUI port, default: $PROFILER_WEBUI_PORT or 8000)
         sla:
             isl: Int (target input sequence length, default: 3000)
             osl: Int (target output sequence length, default: 500)
@@ -113,11 +122,33 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Configuration as Python dict literal, YAML, or JSON string. CLI args override config values. "
         "Example: \"{'engine': {'backend': 'vllm', 'config': '/path'}, 'sla': {'isl': 3000}}\"",
     )
+
+    # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(
         "--model",
         type=str,
         default=config.get("deployment", {}).get("model", ""),
-        help="Model to serve, can be HF model name or local model path",
+        help="Served model name",
+    )
+    parser.add_argument(
+        "--model-cache-pvc-name",
+        type=str,
+        default=config.get("deployment", {}).get("model_cache_pvc_name", ""),
+        help="Name of the PVC that contains the model weights. If not provided, args.model must be a HF model name and will download from HF",
+    )
+    parser.add_argument(
+        "--model-cache-pvc-path",
+        type=str,
+        default=config.get("deployment", {}).get("model_cache_pvc_path", ""),
+        help="Path to the model cache in the PVC",
+    )
+    parser.add_argument(
+        "--model-cache-pvc-mount-path",
+        type=str,
+        default=config.get("deployment", {}).get(
+            "model_cache_pvc_mount_path", "/opt/model-cache"
+        ),
+        help="Path to the model cache in the container, note that the PVC must be mounted to the same path for the profiling job",
     )
     parser.add_argument(
         "--dgd-image",
@@ -126,7 +157,6 @@ def create_profiler_parser() -> argparse.Namespace:
         help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
     )
 
-    # CLI arguments with config-aware defaults (using nested .get() for cleaner code)
     parser.add_argument(
         "--namespace",
         type=str,
@@ -232,6 +262,23 @@ def create_profiler_parser() -> argparse.Namespace:
         action="store_true",
         default=config.get("hardware", {}).get("enable_gpu_discovery", False),
         help="Enable automatic GPU discovery from Kubernetes cluster nodes. When enabled, overrides any manually specified hardware configuration. Requires cluster-wide node access permissions.",
+    )
+    parser.add_argument(
+        "--pick-with-webui",
+        action="store_true",
+        default=config.get("sweep", {}).get("pick_with_webui", False),
+        help="Pick the best parallelization mapping using webUI",
+    )
+
+    default_webui_port = 8000
+    webui_port_env = os.environ.get("PROFILER_WEBUI_PORT")
+    if webui_port_env:
+        default_webui_port = int(webui_port_env)
+    parser.add_argument(
+        "--webui-port",
+        type=int,
+        default=config.get("sweep", {}).get("webui_port", default_webui_port),
+        help="WebUI port",
     )
 
     # Dynamically add all planner arguments from planner_argparse.py

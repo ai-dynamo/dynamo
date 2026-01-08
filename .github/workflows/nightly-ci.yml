@@ -1,145 +1,38 @@
-name: Nightly CI
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Nightly CI Pipeline
 
 on:
   schedule:
-    - cron: '0 8 * * *'  # Every day at 12:00 AM PST (08:00 UTC)
-  workflow_dispatch:
+    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:  # Allow manual triggering for testing
+
+permissions:
+  contents: read
 
 jobs:
-  vllm:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4.3.1
-      - name: Build vLLM Docker Image
-        id: build-vllm
-        uses: ./.github/actions/docker-build
-        with:
-          framework: vllm
-          target: runtime
-          platform: linux/${{ matrix.platform.arch }}
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: nightly-vllm-${{ matrix.platform.arch }}
-      - name: Tag and Push vLLM Nightly Image
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-vllm.outputs.image_tag }}
-          # Tag the image nightly
-          push_tag: ai-dynamo/dynamo:nightly-vllm-${{ matrix.platform.arch }}
-          aws_push: 'false'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run unit tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: nightly-vllm-${{ matrix.platform.arch }}
-          pytest_marks: "vllm and unit"
-          framework: "vllm"
-          test_type: "unit"
-          platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: nightly-vllm-${{ matrix.platform.arch }}
-          pytest_marks: "nightly and vllm and gpu_1"
-          framework: "vllm"
-          test_type: "e2e"
-          platform_arch: ${{ matrix.platform.arch }}
-
-  ####################
-  # Framework Builds #
-  ####################
-  vllm-framework:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: vllm-framework (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    env:
-      FRAMEWORK: vllm
-    steps: &framework-build-steps
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 #v4.3.1
-        with:
-          ref: main
-      - name: Build Image
-        id: build-image
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ env.FRAMEWORK }}
-          target: framework
-          platform: linux/${{ matrix.platform.arch }}
-          # Ternary operations that are specific to vllm/arm64, empty str for all other combinations
-          base_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && '129' || '' }}
-          torch_backend: ${{ (matrix.platform.arch == 'arm64' && env.FRAMEWORK == 'vllm') && 'cu129' || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:main-${{ env.FRAMEWORK }}-framework-${{ matrix.platform.arch }}
-          aws_push: 'true'
-          azure_push: 'false'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-  sglang-framework:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: sglang-framework (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    env:
-      FRAMEWORK: sglang
-    steps: *framework-build-steps
-  trtllm-framework:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: cpu-amd-m5-4xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: trtllm-framework (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    env:
-      FRAMEWORK: trtllm
-    steps: *framework-build-steps
+  ci-pipeline:
+    name: Nightly CI
+    uses: ./.github/workflows/ci-test-suite.yml
+    with:
+      pipeline_type: nightly
+      include_nightly_marks: true
+      image_prefix: nightly
+      enable_slack_notification: true
+    secrets:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      NGC_CI_ACCESS_TOKEN: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+      SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+      SLACK_OPS_SUPPORT_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+      AZURE_AKS_CI_KUBECONFIG_B64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}

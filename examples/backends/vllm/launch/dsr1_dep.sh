@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 set -ex
@@ -82,8 +82,9 @@ echo "  Model name: $MODEL"
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress if it's node 0
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 if [ $NODE_RANK -eq 0 ]; then
-    DYN_LOG=debug python -m dynamo.frontend --router-mode kv --http-port=8000 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
+    DYN_LOG=debug python -m dynamo.frontend --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
 fi
 
 mkdir -p $LOG_DIR
@@ -106,7 +107,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --max-model-len 4096 \
         --data-parallel-address $MASTER_ADDR \
         --data-parallel-rpc-port 13345 \
-        --gpu-memory-utilization 0.9 \
+        --gpu-memory-utilization 0.95 \
         --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
 done
 

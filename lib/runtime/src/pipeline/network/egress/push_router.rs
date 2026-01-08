@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
@@ -90,7 +90,7 @@ impl RouterMode {
 
 async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPushRouter>> {
     // Get network manager and create client (no mode checks!)
-    let manager = endpoint.drt().network_manager().await?;
+    let manager = endpoint.drt().network_manager();
     let req_client = manager.create_client()?;
     let resp_transport = endpoint.drt().tcp_server().await?;
 
@@ -147,8 +147,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             instance_ids[counter % count]
@@ -166,8 +166,8 @@ where
             let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
-                    "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    "no instances found for endpoint {}",
+                    self.client.endpoint.id()
                 ));
             }
             let counter = rand::rng().random::<u64>() as usize;
@@ -189,13 +189,41 @@ where
 
         if !found {
             return Err(anyhow::anyhow!(
-                "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                "instance_id={instance_id} not found for endpoint {}",
+                self.client.endpoint.id()
             ));
         }
 
         self.generate_with_fault_detection(instance_id, request)
             .await
+    }
+
+    /// Select the next worker according to the routing mode.
+    /// Increments round-robin counter if applicable.
+    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    pub fn select_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            _ => {
+                panic!(
+                    "select_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
     }
 
     /*

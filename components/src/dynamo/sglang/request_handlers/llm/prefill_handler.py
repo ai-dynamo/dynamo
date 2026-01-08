@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -57,14 +57,44 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         """Generate prefill output and provide bootstrap info for decode worker.
 
         Args:
-            request: Request dict with 'request' and 'sampling_params' keys.
+            request: Request dict with 'request', 'sampling_params', and possibly 'bootstrap_room' keys.
             context: Context object for cancellation handling.
 
         Yields:
             Bootstrap info dict with host, port, and room for decode worker connection.
         """
         logging.debug(f"New Request ID: {context.id()}")
-        bootstrap_room = self._generate_bootstrap_room()
+        trace_id = context.trace_id
+
+        if "request" in request:
+            # DisaggPreprocessedRequest format
+            inner_request = request["request"]
+            sampling_params = request.get("sampling_params", {})
+        else:
+            inner_request = request
+            sampling_opts = request.get("sampling_options", {})
+            stop_conditions = request.get("stop_conditions", {})
+            sampling_params = {
+                "temperature": sampling_opts.get("temperature"),
+                "top_p": sampling_opts.get("top_p"),
+                "top_k": sampling_opts.get("top_k"),
+                "max_new_tokens": stop_conditions.get("max_tokens"),
+            }
+            sampling_params = {
+                k: v for k, v in sampling_params.items() if v is not None
+            }
+
+        # Use provided bootstrap_room from bootstrap_info if available, otherwise generate one
+        bootstrap_room = None
+        bootstrap_info_from_req = inner_request.get("bootstrap_info")
+        if isinstance(bootstrap_info_from_req, dict):
+            bootstrap_room = bootstrap_info_from_req.get("bootstrap_room")
+            if bootstrap_room is not None:
+                logging.debug(f"Using router-provided bootstrap_room: {bootstrap_room}")
+
+        if bootstrap_room is None:
+            bootstrap_room = self._generate_bootstrap_room()
+            logging.debug(f"Generated bootstrap_room locally: {bootstrap_room}")
 
         bootstrap_info = {
             "bootstrap_host": self.bootstrap_host,
@@ -72,22 +102,36 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "bootstrap_room": bootstrap_room,
         }
 
-        yield bootstrap_info
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
+        yield {
+            "token_ids": [],
+            "text": None,
+            "finish_reason": None,
+            "disaggregated_params": bootstrap_info,
+        }
 
-        input_param = self._get_input_param(request["request"])
+        input_param = self._get_input_param(inner_request)
+
+        # Propagate trace context to SGLang
+        if self.enable_trace:
+            self._propagate_trace_context_to_sglang(context, bootstrap_room)
 
         results = await self.engine.async_generate(
             **input_param,
-            sampling_params=request["sampling_params"],
+            sampling_params=sampling_params,
             stream=True,
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
             bootstrap_room=bootstrap_room,
+            rid=trace_id,
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
         self._consume_tasks.add(task)
         task.add_done_callback(self._consume_tasks.discard)
+
+        await task
 
     async def _consume_results(
         self, results: AsyncGenerator[Any, None], context: Context

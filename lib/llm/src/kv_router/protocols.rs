@@ -1,9 +1,85 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::tokens::{SequenceHash, Token};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use xxhash_rust::xxh3;
+
+/// Seed for XXH3 hashing, consistent with indexer.rs
+pub const XXH3_SEED: u64 = 1337;
+
+/// Compute hash of data using XXH3 with the standard seed.
+pub fn compute_hash(data: &[u8]) -> u64 {
+    xxh3::xxh3_64_with_seed(data, XXH3_SEED)
+}
+
+/// Compute the hash of a local block.
+pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
+    LocalBlockHash(compute_hash(data))
+}
+
+/// Compute the hash for a sequence of tokens, optionally including multimodal metadata.
+///
+/// When multimodal extra info is provided, the mm_hashes are included in the hash computation
+/// to ensure that blocks with identical tokens but different multimodal objects produce
+/// different hashes.
+pub fn compute_block_hash_for_seq(
+    tokens: &[u32],
+    kv_block_size: u32,
+    block_mm_infos: Option<&[Option<BlockExtraInfo>]>,
+) -> Vec<LocalBlockHash> {
+    tokens
+        .chunks_exact(kv_block_size as usize)
+        .enumerate()
+        .map(|(block_idx, chunk)| {
+            let mut bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+
+            // Include MM hashes in the block hash computation if present
+            if let Some(mm_infos) = block_mm_infos
+                && let Some(Some(block_mm_info)) = mm_infos.get(block_idx)
+            {
+                let mut mm_hashes: Vec<u64> = block_mm_info
+                    .mm_objects
+                    .iter()
+                    .map(|obj| obj.mm_hash)
+                    .collect();
+                mm_hashes.sort_unstable();
+
+                for mm_hash in mm_hashes {
+                    bytes.extend_from_slice(&mm_hash.to_le_bytes());
+                }
+            }
+
+            compute_block_hash(&bytes)
+        })
+        .collect()
+}
+
+/// Compute rolling sequence hashes for a vector of block hashes.
+///
+/// - The first block's sequence hash equals its block hash
+/// - Subsequent blocks' sequence hash = hash([parent_sequence_hash, current_block_hash], seed)
+pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<SequenceHash> {
+    if block_hashes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sequence_hashes = Vec::with_capacity(block_hashes.len());
+    sequence_hashes.push(block_hashes[0].0);
+
+    for i in 1..block_hashes.len() {
+        let parent_seq_hash = sequence_hashes[i - 1];
+        let current_block_hash = block_hashes[i].0;
+
+        let combined = [parent_seq_hash, current_block_hash];
+        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
+        let seq_hash = compute_hash(&bytes);
+        sequence_hashes.push(seq_hash);
+    }
+
+    sequence_hashes
+}
 
 /// A worker identifier.
 pub type WorkerId = u64;
@@ -36,7 +112,6 @@ impl WorkerWithDpRank {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub enum RouterRequest {
-    // ini
     #[serde(rename = "new")]
     New {
         tokens: Vec<Token>,
@@ -141,6 +216,21 @@ pub struct SpecDecodeStats {
     pub num_draft_tokens: Option<u32>,
     pub num_accepted_tokens: Option<u32>,
     pub num_accepted_tokens_per_pos: Option<Vec<u32>>,
+}
+
+/// Active load metrics for a worker, used for busy detection.
+///
+/// Published by workers (with only `active_decode_blocks`) and by the scheduler
+/// (with both `active_decode_blocks` and `active_prefill_tokens`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ActiveLoad {
+    pub worker_id: WorkerId,
+    #[serde(default)]
+    pub dp_rank: DpRank,
+    /// Number of active KV cache blocks on the worker (decode phase).
+    pub active_decode_blocks: Option<u64>,
+    /// Number of active prefill tokens (from scheduler's view).
+    pub active_prefill_tokens: Option<u64>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
@@ -261,6 +351,111 @@ pub struct KvCacheStoreData {
     pub blocks: Vec<KvCacheStoredBlockData>,
 }
 
+/// Multimodal object information within a block.
+/// Offsets are relative to the block (0 to block_size-1).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockMmObjectInfo {
+    /// Hash identifying this multimodal object
+    pub mm_hash: u64,
+    /// Token offset ranges where this MM object's placeholders appear within THIS block
+    /// Each tuple is (start_offset, end_offset) relative to block start
+    pub offsets: Vec<(usize, usize)>,
+}
+
+/// Extra metadata for a block containing multimodal objects
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockExtraInfo {
+    /// All multimodal objects referenced in this block
+    pub mm_objects: Vec<BlockMmObjectInfo>,
+}
+
+/// Request-level multimodal object information.
+/// Offsets are relative to the entire request token sequence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RequestMmObjectInfo {
+    /// Hash identifying this multimodal object
+    pub mm_hash: u64,
+    /// Token offset ranges where this MM object's placeholders appear in the ENTIRE request
+    /// Each tuple is (start_offset, end_offset) relative to request start
+    pub offsets: Vec<(usize, usize)>,
+}
+
+/// Request-level multimodal metadata
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RequestExtraInfo {
+    /// All multimodal objects in this request
+    pub mm_objects: Vec<RequestMmObjectInfo>,
+}
+
+impl RequestExtraInfo {
+    /// Convert request-level MM info to block-level MM info for a sequence of blocks.
+    ///
+    /// This function splits request-level offsets (relative to the entire request token sequence)
+    /// into block-level offsets (relative to each block).
+    ///
+    /// # Arguments
+    /// * `block_size` - The size of each block in tokens
+    /// * `total_tokens` - Total number of tokens in the request
+    ///
+    /// # Returns
+    /// A vector of `Option<BlockExtraInfo>` where each element corresponds to a block.
+    /// `None` indicates a block with no multimodal objects.
+    pub fn to_block_level(
+        &self,
+        block_size: usize,
+        total_tokens: usize,
+    ) -> Vec<Option<BlockExtraInfo>> {
+        let num_blocks = total_tokens.div_ceil(block_size);
+        let mut block_infos: Vec<Option<BlockExtraInfo>> = vec![None; num_blocks];
+
+        for req_mm_obj in &self.mm_objects {
+            for (req_start, req_end) in &req_mm_obj.offsets {
+                // Find which blocks this offset range spans
+                let start_block = req_start / block_size;
+                let end_block = (req_end.saturating_sub(1)) / block_size;
+
+                let upper_bound = end_block.min(num_blocks - 1) + 1;
+                for (block_idx, block_info_opt) in block_infos
+                    .iter_mut()
+                    .enumerate()
+                    .take(upper_bound)
+                    .skip(start_block)
+                {
+                    let block_start_global = block_idx * block_size;
+                    let block_end_global = ((block_idx + 1) * block_size).min(total_tokens);
+
+                    // Calculate the intersection of this MM object's range with this block
+                    let local_start = (*req_start).max(block_start_global) - block_start_global;
+                    let local_end = (*req_end).min(block_end_global) - block_start_global;
+
+                    if local_start < local_end {
+                        let block_info = block_info_opt
+                            .get_or_insert_with(|| BlockExtraInfo { mm_objects: vec![] });
+
+                        // Check if we already have this mm_hash in this block
+                        if let Some(existing) = block_info
+                            .mm_objects
+                            .iter_mut()
+                            .find(|obj| obj.mm_hash == req_mm_obj.mm_hash)
+                        {
+                            // Add the offset range to existing object
+                            existing.offsets.push((local_start, local_end));
+                        } else {
+                            // Create new MM object entry for this block
+                            block_info.mm_objects.push(BlockMmObjectInfo {
+                                mm_hash: req_mm_obj.mm_hash,
+                                offsets: vec![(local_start, local_end)],
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        block_infos
+    }
+}
+
 /// Represents data for a stored block.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct KvCacheStoredBlockData {
@@ -268,6 +463,11 @@ pub struct KvCacheStoredBlockData {
     pub block_hash: ExternalSequenceBlockHash,
     /// The hash of the tokens in the block.
     pub tokens_hash: LocalBlockHash,
+    /// Extra multimodal metadata for this block
+    /// Note: Do NOT use skip_serializing_if with bincode - it breaks deserialization
+    /// because bincode is positional and expects all fields to be present.
+    #[serde(default)]
+    pub mm_extra_info: Option<BlockExtraInfo>,
 }
 
 /// Represents the data associated with a removed cache event.
@@ -315,6 +515,106 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
     }
 }
 
+// ------
+// TokensWithHashes
+// ------
+
+/// A container for tokens with lazily computed block and sequence hashes.
+///
+/// This struct avoids redundant hash computations by caching results:
+/// - `get_or_compute_block_hashes()` computes block hashes if not cached
+/// - `get_or_compute_seq_hashes()` computes seq hashes if not cached,
+///   and will also compute block hashes first if needed (since seq hashes depend on them)
+#[derive(Debug, Clone)]
+pub struct TokensWithHashes {
+    tokens: Vec<u32>,
+    block_size: u32,
+    block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
+    block_hashes: Option<Vec<LocalBlockHash>>,
+    seq_hashes: Option<Vec<SequenceHash>>,
+}
+
+impl TokensWithHashes {
+    /// Creates a new TokensWithHashes from tokens and block size.
+    pub fn new(tokens: Vec<u32>, block_size: u32) -> Self {
+        Self {
+            tokens,
+            block_size,
+            block_mm_infos: None,
+            block_hashes: None,
+            seq_hashes: None,
+        }
+    }
+
+    /// Adds multimodal extra info for blocks.
+    pub fn with_mm_infos(mut self, infos: Vec<Option<BlockExtraInfo>>) -> Self {
+        self.block_mm_infos = Some(infos);
+        self
+    }
+
+    /// Returns a reference to the tokens.
+    pub fn tokens(&self) -> &[u32] {
+        &self.tokens
+    }
+
+    /// Returns the number of tokens.
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Returns true if there are no tokens.
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Returns the block size.
+    pub fn block_size(&self) -> u32 {
+        self.block_size
+    }
+
+    /// Returns the multimodal extra info, if set.
+    pub fn block_mm_infos(&self) -> Option<&[Option<BlockExtraInfo>]> {
+        self.block_mm_infos.as_deref()
+    }
+
+    /// Returns block hashes, computing them if not already cached.
+    pub fn get_or_compute_block_hashes(&mut self) -> &[LocalBlockHash] {
+        if self.block_hashes.is_none() {
+            self.block_hashes = Some(compute_block_hash_for_seq(
+                &self.tokens,
+                self.block_size,
+                self.block_mm_infos.as_deref(),
+            ));
+        }
+        self.block_hashes.as_ref().unwrap()
+    }
+
+    /// Returns sequence hashes, computing them if not already cached.
+    /// This will also compute block hashes if they haven't been computed yet,
+    /// since sequence hashes depend on block hashes.
+    pub fn get_or_compute_seq_hashes(&mut self) -> &[SequenceHash] {
+        if self.seq_hashes.is_none() {
+            // Ensure block hashes are computed first
+            let block_hashes = self.get_or_compute_block_hashes();
+            self.seq_hashes = Some(compute_seq_hash_for_block(block_hashes));
+        }
+        self.seq_hashes.as_ref().unwrap()
+    }
+
+    /// Returns cached block hashes without computing. Returns None if not yet computed.
+    pub fn block_hashes(&self) -> Option<&[LocalBlockHash]> {
+        self.block_hashes.as_deref()
+    }
+
+    /// Returns cached seq hashes without computing. Returns None if not yet computed.
+    pub fn seq_hashes(&self) -> Option<&[SequenceHash]> {
+        self.seq_hashes.as_deref()
+    }
+}
+
+// ------
+// Tests
+// ------
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +647,7 @@ mod tests {
             blocks: vec![KvCacheStoredBlockData {
                 block_hash: ExternalSequenceBlockHash(2),
                 tokens_hash: LocalBlockHash(3),
+                mm_extra_info: None,
             }],
         });
 

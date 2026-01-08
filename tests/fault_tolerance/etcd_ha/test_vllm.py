@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -116,6 +116,8 @@ class DynamoWorkerProcess(ManagedProcess):
 @pytest.mark.gpu_1
 @pytest.mark.e2e
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
     """
     Test ETCD High Availability with repeated node failures and recoveries.
@@ -185,7 +187,9 @@ def test_etcd_ha_failover_vllm_aggregated(request, predownload_models):
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_ha_failover_vllm_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):
@@ -261,7 +265,9 @@ def test_etcd_ha_failover_vllm_disaggregated(
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
     """
     Test that frontend and worker shut down when single ETCD node is terminated.
@@ -315,7 +321,9 @@ def test_etcd_non_ha_shutdown_vllm_aggregated(request, predownload_models):
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
+@pytest.mark.nightly
 @pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(600)
 def test_etcd_non_ha_shutdown_vllm_disaggregated(
     request, predownload_models, set_ucx_tls_no_mm
 ):

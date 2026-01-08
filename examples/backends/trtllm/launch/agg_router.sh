@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Environment variables with defaults
@@ -19,7 +19,8 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend
-python3 -m dynamo.frontend --router-mode kv --http-port 8000 &
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+python3 -m dynamo.frontend --router-mode kv &
 DYNAMO_PID=$!
 
 # run worker

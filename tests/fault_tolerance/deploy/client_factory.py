@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,6 +42,7 @@ def get_client_function(client_type: str) -> Callable:
             output_token_length,
             max_retries,
             retry_delay_or_rate,  # Differs between implementations
+            continuous_load,
         )
 
     Raises:

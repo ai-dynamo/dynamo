@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -181,6 +181,17 @@ Dynamo provides comprehensive benchmarking tools to evaluate and optimize your d
 - **[Benchmarking Guide](docs/benchmarks/benchmarking.md)** – Compare deployment topologies (aggregated vs. disaggregated vs. vanilla vLLM) using AIPerf
 - **[SLA-Driven Dynamo Deployments](docs/planner/sla_planner_quickstart.md)** – Optimize your deployment to meet SLA requirements
 
+## Frontend OpenAPI specification
+
+The OpenAI-compatible HTTP frontend exposes an OpenAPI 3 specification at `/openapi.json`.
+To generate and persist the same specification without running the server (for example for CI, documentation, or NIM integration), run:
+
+```bash
+cargo run -p dynamo-llm --bin generate-frontend-openapi
+```
+
+This writes the current frontend spec to `docs/frontends/openapi.json` at the repository root.
+
 # Engines
 
 Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, NATS and etcd need to be installed, along with a Dynamo frontend (`python -m dynamo.frontend [--interactive]`).
@@ -224,7 +235,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 
 > [!Note]
 > Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
-> For example, if you are using `tensorrt-llm==1.1.0rc5`, use the PyTorch container image version `25.06`.
+> For example, if you are using `tensorrt-llm==1.2.0rc5`, use the PyTorch container image version `25.10`.
 > To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
 
 > [!Important]
@@ -233,13 +244,13 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 ### Install prerequisites
 
 ```
-# Optional step: Only required for Blackwell and Grace Hopper
-uv pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-
-# Required until the trtllm version is bumped to include this pinned dependency itself
-uv pip install "cuda-python>=12,<13"
+# Optional step: Only required for non-container installations. The PyTorch 25.10 container already includes PyTorch 2.9.0 with CUDA 13.0.
+uv pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
 
 sudo apt-get -y install libopenmpi-dev
+
+# Optional step: Only required for disaggregated serving
+sudo apt-get -y install libzmq3-dev
 ```
 
 > [!Tip]

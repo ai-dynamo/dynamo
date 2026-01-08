@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This module provides a high-performance interface that bridges Python
@@ -30,5 +30,6 @@ pub mod backend;
 pub mod entrypoint;
 pub mod kv;
 pub mod local_model;
+pub mod lora;
 pub mod model_card;
 pub mod preprocessor;

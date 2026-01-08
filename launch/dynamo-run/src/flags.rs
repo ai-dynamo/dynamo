@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ pub struct Flags {
 
     /// HTTP port. `in=http` only
     /// If tls_cert_path and tls_key_path are provided, this will be TLS/HTTPS.
-    #[arg(long, default_value = "8080")]
+    #[arg(long, default_value = "8000")]
     pub http_port: u16,
 
     /// TLS certificate file
@@ -127,7 +127,7 @@ pub struct Flags {
     pub store_kv: String,
 
     /// Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp].
-    #[arg(long, default_value = "nats", value_parser = ["nats", "http", "tcp"])]
+    #[arg(long, default_value = "tcp", value_parser = ["nats", "http", "tcp"])]
     pub request_plane: String,
 
     /// Everything after a `--`. Not currently used.

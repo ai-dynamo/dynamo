@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::hint::black_box;
@@ -54,7 +54,7 @@ pub fn decode(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default())
+                Decoder::new(ds, StopConditions::default(), false)
             },
             |mut decoder| {
                 for tok in black_box(TEST_TOKS) {
@@ -78,7 +78,7 @@ pub fn decode_big(c: &mut Criterion) {
                 let tokenizer: Arc<dyn Tokenizer> =
                     Arc::new(HuggingFaceTokenizer::from_file(TEST_TOKENIZER).unwrap());
                 let ds = DecodeStream::new(tokenizer, &[], false);
-                Decoder::new(ds, StopConditions::default())
+                Decoder::new(ds, StopConditions::default(), false)
             },
             |mut decoder| {
                 for tok in black_box(&BIG_TEST_TOKS) {

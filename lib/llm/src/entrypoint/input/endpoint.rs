@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -38,20 +38,20 @@ pub async fn run(
     let endpoint = component.endpoint(&endpoint_id.name);
 
     let rt_fut: Pin<Box<dyn Future<Output = _> + Send + 'static>> = match engine_config {
-        EngineConfig::StaticFull { engine, mut model } => {
+        EngineConfig::InProcessText { engine, mut model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let ingress_chat = Ingress::<
                 Context<NvCreateChatCompletionRequest>,
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
             model
-                .attach(&endpoint, ModelType::Chat, ModelInput::Text)
+                .attach(&endpoint, ModelType::Chat, ModelInput::Text, None)
                 .await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
             Box::pin(fut_chat)
         }
-        EngineConfig::StaticCore {
+        EngineConfig::InProcessTokens {
             engine: inner_engine,
             mut model,
             is_prefill,
@@ -76,13 +76,13 @@ pub async fn run(
                 ModelType::Chat | ModelType::Completions
             };
             model
-                .attach(&endpoint, model_type, ModelInput::Tokens)
+                .attach(&endpoint, model_type, ModelInput::Tokens, None)
                 .await?;
 
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)
         }
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { .. } => {
             unreachable!("An endpoint input will never have a Dynamic engine");
         }
     };
@@ -127,7 +127,7 @@ mod integration_tests {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create distributed runtime: {}", e))?;
 
-        let engine_config = EngineConfig::StaticFull {
+        let engine_config = EngineConfig::InProcessText {
             engine: crate::engines::make_echo_engine(),
             model: Box::new(
                 crate::local_model::LocalModelBuilder::default()

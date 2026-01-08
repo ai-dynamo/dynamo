@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -38,7 +38,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Conditional Disaggregation**](../../design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../planner/sla_planner.md) | ✅ |  |
-| [**Multimodal EPD Disaggregation**](multimodal_epd.md) | ✅ |  |
+| [**Multimodal Support**](../../multimodal/sglang.md) | ✅ |  |
 | [**KVBM**](../../kvbm/kvbm_architecture.md) | ❌ | Planned |
 
 
@@ -260,23 +260,6 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
 ```
-
-## Advanced Examples
-
-Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
-
-### Run a multi-node sized model
-- **[Run a multi-node model](multinode-examples.md)**
-
-### Large scale P/D disaggregation with WideEP
-- **[Run DeepSeek-R1-FP8 on H100s](dsr1-wideep-h100.md)**
-- **[Run DeepSeek-R1-FP8 on GB200s](dsr1-wideep-gb200.md)**
-
-### Hierarchical Cache (HiCache)
-- **[Enable SGLang Hierarchical Cache (HiCache)](sgl-hicache-example.md)**
-
-### Multimodal Encode-Prefill-Decode (EPD) Disaggregation with NIXL
-- **[Run a multimodal model with EPD Disaggregation](multimodal_epd.md)**
 
 ## Deployment
 

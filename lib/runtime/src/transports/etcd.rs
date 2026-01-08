@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::runtime::Runtime;
@@ -25,12 +25,10 @@ use tokio_util::sync::CancellationToken;
 mod connector;
 mod lease;
 mod lock;
-mod path;
 
 use connector::Connector;
 use lease::*;
 pub use lock::*;
-pub use path::*;
 
 use super::utils::build_in_runtime;
 use crate::config::environment_names::etcd as env_etcd;
@@ -122,7 +120,17 @@ impl Client {
         self.primary_lease
     }
 
-    /// Returns Ok(None) if value was created, Ok(Some(revision)) if the value already exists.
+    /// Atomically create a key-value pair if it doesn't already exist.
+    ///
+    /// Returns:
+    /// - `Ok(None)` if the key was successfully created
+    /// - `Ok(Some(version))` if the key already exists (returns the existing version)
+    /// - `Err(...)` only on actual errors (connection failure, timeout, etc.)
+    ///
+    /// This idempotent behavior was introduced in PR #4212 (Nov 10, 2025) to align with
+    /// the StoreOutcome pattern used in KeyValueStore implementations, where both
+    /// Created and Exists are successful outcomes rather than errors. This design supports
+    /// distributed systems where multiple processes might attempt to create the same key.
     pub async fn kv_create(
         &self,
         key: &str,
@@ -340,17 +348,23 @@ impl Client {
         prefix: impl AsRef<str> + std::fmt::Display,
         include_existing: bool,
     ) -> Result<PrefixWatcher> {
-        let (tx, rx) = mpsc::channel(32);
-
-        // Get start revision and send existing KVs
-        let mut start_revision = self
-            .get_start_revision(
-                prefix.as_ref(),
-                if include_existing { Some(&tx) } else { None },
-            )
+        let (mut start_revision, existing_kvs) = self
+            .get_start_revision(prefix.as_ref(), include_existing)
             .await?;
 
-        // Resilience watch stream in background
+        // Size channel to fit all existing KVs (avoids deadlock when sending before return)
+        let existing_count = existing_kvs.as_ref().map_or(0, |kvs| kvs.len());
+        let (tx, rx) = mpsc::channel(existing_count + 32);
+
+        // Send existing KVs before returning so they're immediately available to consumers
+        if let Some(kvs) = existing_kvs {
+            tracing::trace!("sending {} existing kvs", kvs.len());
+            for kv in kvs {
+                tx.send(WatchEvent::Put(kv)).await?;
+            }
+        }
+
+        // Watch for new events in background
         let connector = self.connector.clone();
         let prefix_str = prefix.as_ref().to_string();
         self.rt.spawn(async move {
@@ -376,15 +390,12 @@ impl Client {
         })
     }
 
-    /// Fetch the initial revision for watching and optionally send existing key-values.
-    ///
-    /// Returns the next revision to watch from. If `existing_kvs_tx` is provided,
-    /// all existing keys with the prefix are sent through the channel first.
+    /// Fetch the start revision and optionally return existing key-values.
     async fn get_start_revision(
         &self,
         prefix: impl AsRef<str> + std::fmt::Display,
-        existing_kvs_tx: Option<&mpsc::Sender<WatchEvent>>,
-    ) -> Result<i64> {
+        include_existing: bool,
+    ) -> Result<(i64, Option<Vec<KeyValue>>)> {
         let mut kv_client = self.connector.get_client().kv_client();
         let mut get_response = kv_client
             .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
@@ -398,16 +409,14 @@ impl Client {
         tracing::trace!("{prefix}: start_revision: {start_revision}");
         start_revision += 1;
 
-        // Send existing KVs from response if requested
-        if let Some(tx) = existing_kvs_tx {
+        // Return existing KVs if requested
+        let existing_kvs = include_existing.then(|| {
             let kvs = get_response.take_kvs();
             tracing::trace!("initial kv count: {:?}", kvs.len());
-            for kv in kvs.into_iter() {
-                tx.send(WatchEvent::Put(kv)).await?;
-            }
-        }
+            kvs
+        });
 
-        Ok(start_revision)
+        Ok((start_revision, existing_kvs))
     }
 
     /// Establish a new watch stream with automatic retry and reconnection.
@@ -773,9 +782,17 @@ mod tests {
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
         assert!(result.is_ok(), "");
 
-        // Try to create the key again - this should fail
+        // Try to create the key again - this should return Ok(Some(version)) indicating key already exists
+        // Note: Prior to PR #4212 (Nov 10, 2025), kv_create returned Err when key existed.
+        // PR #4212 changed the behavior to return Ok(Some(version)) for idempotency, matching
+        // the StoreOutcome::Exists pattern used in the KeyValueStore abstraction.
+        // The transaction now includes .or_else(TxnOp::get) to retrieve existing key info
+        // instead of failing, making the operation idempotent for distributed systems.
         let result = client.kv_create(key, value.to_vec(), Some(lease_id)).await;
-        assert!(result.is_err());
+        assert!(
+            result.is_ok() && result.unwrap().is_some(),
+            "Expected Ok(Some(version)) when key already exists"
+        );
 
         // Create or validate should succeed as the values match
         let result = client

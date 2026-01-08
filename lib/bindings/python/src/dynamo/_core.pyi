@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import (
     Any,
     AsyncGenerator,
     AsyncIterator,
+    Awaitable,
     Callable,
     Dict,
     List,
@@ -54,6 +55,32 @@ class DistributedRuntime:
     def child_token(self) -> CancellationToken:
         """
         Get a child cancellation token that can be passed to async tasks
+        """
+        ...
+
+    def register_engine_route(
+        self,
+        route_name: str,
+        callback: Callable[[dict], Awaitable[dict]],
+    ) -> None:
+        """
+        Register an async callback for /engine/{route_name} on the system status server.
+
+        Args:
+            route_name: The route path (e.g., "start_profile" creates /engine/start_profile)
+            callback: Async function with signature: async def(body: dict) -> dict
+
+        Example:
+            async def start_profile(body: dict) -> dict:
+                await engine.start_profile(**body)
+                return {"status": "ok", "message": "Profiling started"}
+
+            runtime.register_engine_route("start_profile", start_profile)
+
+        The callback receives the JSON request body as a dict and should return
+        a dict that will be serialized as the JSON response.
+
+        For GET requests or empty bodies, an empty dict {} is passed.
         """
         ...
 
@@ -205,16 +232,42 @@ class Client:
         ...
 
 
-def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
+def compute_block_hash_for_seq_py(
+    tokens: List[int],
+    kv_block_size: int,
+    block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None
+) -> List[int]:
     """
-    Compute block hashes for a sequence of tokens
+    Compute block hashes for a sequence of tokens, optionally including multimodal metadata.
+
+    When block_mm_infos is provided, the mm_hashes are included in the hash computation
+    to ensure that blocks with identical tokens but different multimodal objects produce
+    different hashes.
 
     Args:
         tokens: List of token IDs
-        kv_block_size: Size of each KV cache block
+        kv_block_size: Size of each block in tokens
+        block_mm_infos: Optional per-block multimodal metadata. Each element corresponds to a block
+                       and should be None or a dict with structure:
+                       {
+                           "mm_objects": [
+                               {
+                                   "mm_hash": int,  # Hash of the MM object
+                               }
+                           ]
+                       }
 
     Returns:
-        List of block hashes as integers
+        List of block hashes (one per block)
+
+    Example:
+        >>> tokens = [1, 2, 3, 4] * 8  # 32 tokens = 1 block
+        >>> mm_info = {
+        ...     "mm_objects": [{
+        ...         "mm_hash": 0xDEADBEEF,
+        ...     }]
+        ... }
+        >>> hashes = compute_block_hash_for_seq_py(tokens, 32, [mm_info])
     """
 
     ...
@@ -433,6 +486,7 @@ class ModelRuntimeConfig:
     max_num_batched_tokens: int | None
     tool_call_parser: str | None
     reasoning_parser: str | None
+    enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 
@@ -630,7 +684,7 @@ class ApproxKvIndexer:
         component: Component,
         kv_block_size: int,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1024,
+        router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
     ) -> None:
         """
@@ -640,7 +694,7 @@ class ApproxKvIndexer:
             component: The component to associate with this indexer
             kv_block_size: The KV cache block size
             router_ttl_secs: TTL for blocks in seconds (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
@@ -766,7 +820,7 @@ class KvEventPublisher:
     ...
 
     def __init__(
-        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0
+        self, component: Component, worker_id: int, kv_block_size: int, dp_rank: int = 0, enable_local_indexer: bool = False
     ) -> None:
         """
         Create a `KvEventPublisher` object
@@ -776,6 +830,7 @@ class KvEventPublisher:
             worker_id: The worker ID
             kv_block_size: The KV block size (must be > 0)
             dp_rank: The data parallel rank (defaults to 0)
+            enable_local_indexer: Enable worker-local KV indexer (defaults to False)
         """
 
     def publish_stored(
@@ -816,7 +871,8 @@ class ZmqKvEventPublisherConfig:
         worker_id: int,
         kv_block_size: int,
         zmq_endpoint: str = "tcp://127.0.0.1:5557",
-        zmq_topic: str = ""
+        zmq_topic: str = "",
+        enable_local_indexer: bool = False
     ) -> None:
         """
         Configuration for the ZmqKvEventPublisher.
@@ -825,6 +881,7 @@ class ZmqKvEventPublisherConfig:
         :param kv_block_size: The block size for the key-value store.
         :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
         :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        :param enable_local_indexer: Whether to enable the worker-local KV indexer. Defaults to False.
         """
         ...
 
@@ -1034,7 +1091,7 @@ class KvRouterConfig:
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
-        router_max_tree_size: int = 1024,
+        router_max_tree_size: int = 1048576,
         router_prune_target_ratio: float = 0.8,
     ) -> None:
         """
@@ -1049,7 +1106,7 @@ class KvRouterConfig:
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
-            router_max_tree_size: Maximum tree size before pruning (default: 1024)
+            router_max_tree_size: Maximum tree size before pruning (default: 1048576, which is 2^20)
             router_prune_target_ratio: Target size ratio after pruning (default: 0.8)
         """
         ...
@@ -1067,8 +1124,36 @@ async def register_llm(
     runtime_config: Optional[ModelRuntimeConfig] = None,
     user_data: Optional[Dict[str, Any]] = None,
     custom_template_path: Optional[str] = None,
+    lora_name: Optional[str] = None,
+    base_model_path: Optional[str] = None,
 ) -> None:
-    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    """
+    Attach the model at path to the given endpoint, and advertise it as model_type.
+    LoRA Registration:
+        The `lora_name` and `base_model_path` parameters must be provided together or not at all.
+        Providing only one of these parameters will raise a ValueError.
+        - `lora_name`: The served model name for the LoRA model
+        - `base_model_path`: Path to the base model that the LoRA extends
+
+    For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
+    and a minimal model card is registered directly. Use model_path as the display name
+    for these models.
+    """
+    ...
+
+async def unregister_llm(
+    endpoint: Endpoint,
+    lora_name: Optional[str] = None,
+) -> None:
+    """
+    Unregister a model from the discovery system.
+
+    If lora_name is provided, unregisters a LoRA adapter instead of a base model.
+    """
+    ...
+
+def lora_name_to_id(lora_name: str) -> int:
+    """Generate a deterministic integer ID from a LoRA name using blake3 hash."""
     ...
 
 async def fetch_llm(remote_name: str) -> str:

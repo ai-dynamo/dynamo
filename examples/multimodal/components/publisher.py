@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,6 +38,8 @@ class NullStatLogger(StatLoggerBase):
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
+        *args,
+        **kwargs,
     ):
         pass
 
@@ -74,6 +76,8 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
+        *args,
+        **kwargs,
     ):
         # request_total_slots and kv_total_blocks are properties of model + gpu
         # we should only publish them once, not every metric update

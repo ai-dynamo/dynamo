@@ -1,4 +1,4 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
@@ -53,15 +53,12 @@ async def echo_tensor_worker(runtime: DistributedRuntime):
     )
     assert model_config == retrieved_model_config
 
-    # [gluo FIXME] register_llm will attempt to load a LLM model,
-    # which is not well-defined for Tensor yet. Currently provide
-    # a valid model name to pass the registration.
+    # Use register_llm for tensor-based backends (skips HuggingFace downloads)
     await register_llm(
         ModelInput.Tensor,
         ModelType.TensorBased,
         endpoint,
-        "Qwen/Qwen3-0.6B",
-        "echo",
+        "echo",  # model_path (used as display name for tensor-based models)
         runtime_config=runtime_config,
     )
 

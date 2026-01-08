@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,7 +26,7 @@ from vllm.logprobs import PromptLogprobs
 from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import RequestMetrics
+from vllm.v1.metrics.stats import RequestStateStats
 
 import dynamo.nixl_connect as connect
 
@@ -150,13 +150,31 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     serialized_request: Optional[connect.RdmaMetadata] = None
 
 
+class VLLMNativeEncoderRequest(BaseModel):
+    """Request for vLLM-native encoder worker using ECConnector"""
+
+    request_id: str
+    multimodal_input: MultiModalInput
+    modality: Literal["image", "video", "audio"]
+    batch_items: Optional[List[MultiModalInput]] = None  # For future batch processing
+
+
+class VLLMNativeEncoderResponse(BaseModel):
+    """Response from vLLM-native encoder worker (ECConnector mode)"""
+
+    request_id: str
+    mm_hash: str  # vLLM's multimodal hash identifier
+    modality: str  # "image", "video", "audio"
+    connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
+
+
 class MyRequestOutput(BaseModel):
     """
     RequestOutput from vLLM is not serializable by default
     https://github.com/vllm-project/vllm/blob/a4c402a756fa3213caf9d2cde0e4ceb2d57727f2/vllm/outputs.py#L85
 
     This class is used to serialize the RequestOutput and any recursively defined types
-    We can do this because PromptLogprobs, RequestMetrics, and CompletionOutput are all serializable dataclasses
+    We can do this because PromptLogprobs, RequestStateStats, and CompletionOutput are all serializable dataclasses
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -167,7 +185,7 @@ class MyRequestOutput(BaseModel):
     prompt_logprobs: Optional[PromptLogprobs] = None
     outputs: List[CompletionOutput]
     finished: bool
-    metrics: Optional[RequestMetrics] = None
+    metrics: Optional[RequestStateStats] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
     # lora_request: Optional[LoRARequest] = None
     # encoder_prompt: Optional[str] = None

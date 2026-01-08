@@ -77,6 +77,9 @@ llm_engine.h
 ### Ruff ###
 .ruff_cache/
 
+### MyPy ###
+.mypy_cache/
+
 ### Python ###
 __pycache__/
 *.py[cod]
@@ -100,6 +103,8 @@ TensorRT-LLM
 # Ruler Generated Files
 /.cursor/instructions.md
 /.cursor/instructions.md.bak
+/.cursor
+/.claude
 /CLAUDE.md
 /CLAUDE.md.bak
 
@@ -109,3 +114,7 @@ profiling_results*
 
 # Direnv
 .envrc
+
+# Node.js
+node_modules/
+package-lock.json

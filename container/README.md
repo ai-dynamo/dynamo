@@ -15,8 +15,49 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
   - `Dockerfile.trtllm` - For TensorRT-LLM inference backend
   - `Dockerfile.sglang` - For SGLang inference backend
   - `Dockerfile` - Base/standalone configuration
-  - `Dockerfile.frontend` - For Kubernetes Gateway API Inference Extension integration with EPP
   - `Dockerfile.epp` - For building the Endpoint Picker (EPP) image
+
+### Stage Summary for Frameworks
+
+<details>
+<summary>Show Stage Summary Table</summary>
+Dockerfile.${FRAMEWORK} General Structure
+
+Below is a summary of the general file structure for the framework Dockerfile stages. Some exceptions exist.
+
+| Stage/Filepath | Target |
+| --- | --- |
+| **STAGE dynamo_base** | **FROM ${BASE_IMAGE}** |
+| /bin/uv, /bin/uvx | COPY from ghcr.io/astral-sh/uv:latest (→ framework, runtime) |
+|  /usr/bin/nats-server | Downloaded from GitHub (→ runtime) |
+|  /usr/local/bin/etcd/ | Downloaded from GitHub (→ runtime) |
+|  /usr/local/rustup/ | Installed via rustup-init (→ wheel_builder, dev) |
+|  /usr/local/cargo/ | Installed via rustup-init (→ wheel_builder, dev) |
+|  /usr/local/cuda/ | Inherited from BASE_IMAGE (→ wheel_builder, runtime) |
+| **STAGE: wheel_builder** | **FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT}** |
+|  /usr/local/ucx/ | Built from source (→ runtime)
+|  /opt/nvidia/nvda_nixl/ | Built from source (→ runtime)
+|  /opt/nvidia/nvda_nixl/lib64/ | Built from source (→ runtime)
+|  /opt/dynamo/target/ | Cargo build output (→ runtime)
+|  /opt/dynamo/dist/*.whl | Built wheels (→ runtime)
+|  /opt/dynamo/dist/nixl/ | Built nixl wheels (→ runtime)
+| **STAGE: framework** | **FROM ${BASE_IMAGE}** |
+|  /opt/dynamo/venv/ | Created with uv venv (→ runtime)
+|  /${FRAMEWORK_INSTALL} | Built framework (→ runtime)
+| **STAGE: runtime** | **FROM ${RUNTIME_IMAGE}** |
+|  /usr/local/cuda/{bin,include,nvvm}/ | COPY from dynamo_base |
+|  /usr/bin/nats-server | COPY from dynamo_base |
+|  /usr/local/bin/etcd/ | COPY from dynamo_base |
+|  /usr/local/ucx/ | COPY from wheel_builder |
+|  /opt/nvidia/nvda_nixl/ | COPY from wheel_builder |
+|  /opt/dynamo/wheelhouse/ | COPY from wheel_builder |
+|  /opt/dynamo/venv/ | COPY from framework |
+|  /opt/vllm/ | COPY from framework |
+|  /workspace/{tests,examples,deploy}/ |COPY from build context |
+| **STAGE: dev** | **FROM runtime** |
+|  /usr/local/rustup/ | COPY from dynamo_base |
+|  /usr/local/cargo/ | COPY from dynamo_base |
+</details>
 
 ### Why Containerization?
 
@@ -37,102 +78,36 @@ The `build.sh` and `run.sh` scripts are convenience wrappers that simplify commo
 
 ## Development Targets Feature Matrix
 
-These targets are specified with `build.sh --target <target>` and correspond to Docker multi-stage build targets defined in the Dockerfiles (e.g., `FROM somebase AS <target>`). Some commonly used targets include:
+**Note**: In Dynamo, "targets" and "Docker stages" are synonymous. Each target corresponds to a stage in the multi-stage Docker build. Similarly, "frameworks" and "engines" are synonymous (vLLM, TensorRT-LLM, SGLang).
 
-- `runtime` - For running pre-built containers without development tools (minimal size, runs as non-root `dynamo` user with UID 1000 and GID 0)
-- `dev` - For development (inferencing/benchmarking/etc, runs as root user for maximum flexibility)
-- `local-dev` - For development with local user permissions matching host UID/GID. This is useful when mounting host partitions (with local user permissions) to Docker partitions. The `dynamo` user UID/GID is remapped to match the host user.
+| Feature | **runtime + `run.sh`** | **local-dev (`run.sh` or Dev Container)** | **dev + `run.sh`** (legacy) |
+|---------|----------------------|-------------------------------------------|--------------------------|
+| **Usage** | Benchmarking inference and deployments, non-root | Development, compilation, testing locally | Legacy workflows, root user, use with caution |
+| **User** | dynamo (UID 1000) | dynamo (UID=host user) with sudo | root (UID 0, use with caution) |
+| **Home Directory** | `/home/dynamo` | `/home/dynamo` | `/root` |
+| **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (must be mounted w/ `--mount-workspace`) | `/workspace` (must be mounted w/ `--mount-workspace`) |
+| **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
+| **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
+| **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang |
 
-Additional targets are available in the Dockerfiles for specific build stages and use cases.
-
-| Feature | **dev + `run.sh`** | **local-dev + `run.sh`** | **local-dev + Dev Container** |
-|---------|-------------------|--------------------------|-------------------------------|
-| **Default User** | root | dynamo (matched to host UID/GID) | dynamo (matched to host UID/GID) |
-| **User Setup** | None (root) | Matches UID/GID of `build.sh` user | Matches UID/GID of `build.sh` user |
-| **Permissions** | root | dynamo with sudo | dynamo with sudo |
-| **Home Directory** | `/root` | `/home/dynamo` | `/home/dynamo` |
-| **Working Directory** | `/workspace` | `/workspace` | `/workspace` |
-| **Rust Toolchain** | System install (`/usr/local/rustup`, `/usr/local/cargo`) | User install (`~/.rustup`, `~/.cargo`) | User install (`~/.rustup`, `~/.cargo`) |
-| **Python Env** | dynamo user owned | dynamo owned venv | dynamo owned venv |
-| **File Permissions** | root-level | user-level (dynamo), safe | user-level (dynamo), safe |
-| **Compatibility** | Legacy workflows, maximum flexibility | workspace writable on NFS, non-root security | workspace writable on NFS, non-root security |
-
-## Environment Variables Across Build Stages
-
-Understanding how environment variables change across different build stages is crucial for development and debugging. The Dynamo build system uses a multi-stage Docker build process where environment variables are set, inherited, and overridden at different stages.
-
-### Build Stage Flow
-
-```
-Dockerfile → base → dev (dynamo-base image)
-              ↓
-Dockerfile.vllm → framework → runtime → dev (vllm dev image)
-                                         ↓
-Dockerfile.local_dev → local-dev (from vllm dev image)
-```
-
-### Environment Variables by Stage
-
-| Variable             | **base**            | **base→dev**         | **vllm→framework** | **vllm→runtime**   | **vllm→dev** | **local-dev** |
-|----------------------|---------------------|----------------------|--------------------|--------------------|--------------|--------------------|
-| **DYNAMO_HOME**      | ❌ Not set          | `/opt/dynamo`        | ❌ Not set         | `/opt/dynamo`      | `/workspace` ✅ **OVERRIDE** | `/workspace` (inherited) |
-| **WORKSPACE_DIR**    | ❌ Not set          | ❌ Not set           | ❌ Not set         | ❌ Not set         | `/workspace` | `/workspace` (inherited) |
-| **CARGO_TARGET_DIR** | ❌ Not set          | `/opt/dynamo/target` | ❌ Not set         | ❌ Not set         | `/workspace/target` ✅ **OVERRIDE** | `/workspace/target` (inherited) |
-| **VIRTUAL_ENV**      | `/opt/dynamo/venv`  | (inherited)          | `/opt/dynamo/venv` | `/opt/dynamo/venv` | `/opt/dynamo/venv` ✅ **REDEFINE** | `/opt/dynamo/venv` (inherited) |
-| **RUSTUP_HOME**      | `/usr/local/rustup` | (inherited)          | ❌ Not set         | ❌ Not set         | `/usr/local/rustup` | `/home/dynamo/.rustup` ✅ **OVERRIDE** |
-| **CARGO_HOME**       | `/usr/local/cargo`  | (inherited)          | ❌ Not set         | ❌ Not set         | `/usr/local/cargo` | `/home/dynamo/.cargo` ✅ **OVERRIDE** |
-| **USERNAME**         | ❌ Not set          | `dynamo`             | ❌ Not set         | `dynamo`           | ❌ Not set   | `dynamo` |
-| **HOME**             | (system default)    | `/home/dynamo`       | (system default)   | `/home/dynamo`     | (system default) | `/home/dynamo` |
-| **PATH**             | (includes cargo)    | (inherited)          | (system default)   | (includes venv, etcd, ucx) | `/usr/local/cargo/bin:$PATH` | `/home/dynamo/.cargo/bin:$PATH` ✅ **OVERRIDE** |
-
-### Key Insights
-
-**1. DYNAMO_HOME Dual Purpose:**
-- `base→dev` and `vllm→runtime`: `/opt/dynamo` - For **installed/packaged** Dynamo (CI, production)
-- `vllm→dev` and `local-dev`: `/workspace` - For **development** with source code mounted from host
-
-**2. Rust Toolchain Location:**
-- `dev` target: System-wide at `/usr/local/rustup` and `/usr/local/cargo` (suitable for root)
-- `local-dev` target: User-specific at `/home/dynamo/.rustup` and `/home/dynamo/.cargo` (proper UID/GID ownership)
-
-**3. Build Artifacts Location:**
-- `base→dev`: `/opt/dynamo/target` - Build artifacts with installed package
-- `vllm→dev` onward: `/workspace/target` - Build artifacts in mounted workspace for persistence
-
-**4. Variables That Stay Constant:**
-- `VIRTUAL_ENV`: Always `/opt/dynamo/venv` (ownership changes in local-dev via rsync)
-- `WORKSPACE_DIR`: Always `/workspace` once set in vllm→dev
-- `DYNAMO_HOME`: Always `/workspace` once overridden in vllm→dev (for development)
-
-**5. local-dev Specific Changes:**
-From `Dockerfile.local_dev`, the Rust toolchain is moved to user home because:
-- Workspace mount points may change, breaking toolchain paths
-- User needs ownership of cargo binaries and registry for package installation
-- Toolchain requires consistent system paths that don't depend on workspace location
-
-The Python venv ownership is also updated via rsync in local-dev to match the user's UID/GID, ensuring package installation permissions work correctly.
-
-**6. Non-Root User Architecture:**
-Dynamo containers implement a multi-stage user strategy:
-- **runtime stage**: Runs as non-root `dynamo` user (UID 1000, GID 0) for production workloads
-- **dev stage**: Runs as root for maximum development flexibility (builds on runtime but switches to root)
-- **local-dev stage**: Runs as `dynamo` user with UID/GID matched to host user for safe file system operations
-- **Security**: Runtime and local-dev use non-root execution to reduce attack surface
-- **File Ownership**: All application files, virtual environments, and build artifacts are owned by `dynamo:root` (1000:0) in runtime stage
-- **Environment Setup**: Launch banner moved to `/opt/dynamo/.launch_screen` (shared across all users) and venv activation configured in `/etc/bash.bashrc` for system-wide availability. This replaces the previous per-user `~/.launch_screen` and `~/.bashrc` approach.
+**Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` image creates `/opt/dynamo/venv` (and `local-dev` inherits it from `dev`) for build tooling like `maturin`.
 
 ## Usage Guidelines
 
-- **Use runtime target**: for production deployments. Runs as non-root `dynamo` user (UID 1000, GID 0) for security
-- **Use dev + `run.sh`**: for command-line testing and inferencing. Runs as root for maximum flexibility
-- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions. Runs as `dynamo` user with UID/GID matched to your local user. Add `-it` flag for interactive sessions
-- **Use local-dev + Dev Container**: VS Code/Cursor Dev Container Plugin, using `dynamo` user with UID/GID matched to your local user
+- **Use runtime target**: for benchmarking inference and deployments. Runs as non-root `dynamo` user (UID 1000, GID 0) for security
+- **Use local-dev + `run.sh`**: for command-line development and Docker mounted partitions. Runs as `dynamo` user with UID matched to your local user, GID 0. Add `-it` flag for interactive sessions
+- **Use local-dev + Dev Container**: VS Code/Cursor Dev Container Plugin, using `dynamo` user with UID matched to your local user, GID 0
+- **Use dev + `run.sh`**: Root user, use with caution. Runs as root for backward compatibility with early workflows
 
 ## Example Commands
 
-### 1. dev + `run.sh` (runs as root):
+### 1. runtime target (runs as non-root dynamo user):
 ```bash
-run.sh ...
+# Build runtime image
+./build.sh --framework vllm --target runtime
+
+# Run runtime container
+./run.sh --image dynamo:latest-vllm-runtime -it
 ```
 
 ### 2. local-dev + `run.sh` (runs as dynamo user with matched host UID/GID):
@@ -141,16 +116,7 @@ run.sh --mount-workspace -it --image dynamo:latest-vllm-local-dev ...
 ```
 
 ### 3. local-dev + Dev Container Extension:
-Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration. The `dynamo` user UID/GID is automatically matched to your local user.
-
-### 4. runtime target (runs as non-root dynamo user):
-```bash
-# Build runtime image
-./build.sh --framework vllm --target runtime
-
-# Run runtime container
-./run.sh --image dynamo:latest-vllm-runtime
-```
+Use VS Code/Cursor Dev Container Extension with devcontainer.json configuration. The `dynamo` user UID is automatically matched to your local user.
 
 ## Build and Run Scripts Overview
 
@@ -196,57 +162,24 @@ The `build.sh` script is responsible for building Docker images for different AI
 ./build.sh --build-arg CUSTOM_ARG=value
 ```
 
-### build.sh --dev-image - Local Development Image Builder
-
-The `build.sh --dev-image` option takes a dev image and then builds a local-dev image, which contains proper local user permissions. It also includes extra developer utilities (debugging tools, text editors, system monitors, etc.).
-
-**Common Usage Examples:**
-
-```bash
-# Build local-dev image from dev image dynamo:latest-vllm
-./build.sh --dev-image dynamo:latest-vllm --framework vllm
-
-# Build with custom tag from dev image dynamo:latest-vllm
-./build.sh --dev-image dynamo:latest-vllm --framework vllm --tag my-local:dev
-
-# Dry run to see what would be built
-./build.sh --dev-image dynamo:latest-vllm --framework vllm --dry-run
-```
-
 ### Building the Frontend Image
 
-The frontend image is a specialized container that includes the Dynamo components (NATS, etcd, dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
-
-**Step 1: Build the Custom Dynamo EPP Image**
-
-Follow the instructions in [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md) under "Build the custom EPP image" section. This process:
-- Clones the Gateway API Inference Extension repository
-- Applies Dynamo-specific patches for custom routing
-- Builds the Dynamo router as a static library
-- Creates a custom EPP image with integrated Dynamo routing capabilities
-
-**Step 2: Build the Dynamo Base Image**
-
-The base image contains the core Dynamo runtime components, NATS server, etcd, and Python dependencies:
-```bash
-# Build the base dev image (framework=none for frontend-only deployment)
-./build.sh --framework none --target dev
-```
-
-**Step 3: Build the Frontend Image**
-
-Now build the frontend image that combines the Dynamo base with the EPP:
+The frontend image is a specialized container that includes the Dynamo components (Dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
 
 ```bash
-# 2. Build the frontend image using the pre-built EPP
-docker buildx build --load --platform linux/amd64 \
-  --build-arg DYNAMO_BASE_IMAGE=dynamo:latest-none-dev \
-  --build-arg EPP_IMAGE={EPP_IMAGE_TAG} \
-  --build-arg PYTHON_VERSION=3.12 \
-  -f container/Dockerfile.frontend \
-  -t dynamo:latest-none-frontend \
-  .
+# Build the frontend image (automatically builds EPP image as a dependency)
+./build.sh --framework none --target frontend
 ```
+
+The build process automatically:
+1. Clones the Gateway API Inference Extension (GAIE) repository
+2. Builds the custom EPP image with Dynamo routing capabilities
+3. Builds the frontend image with the EPP binary and Dynamo runtime components
+
+For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
+
+**Note:** `--framework none` defaults `ENABLE_MEDIA_NIXL=false`.
+
 #### Frontend Image Contents
 
 The frontend image includes:
@@ -255,8 +188,6 @@ The frontend image includes:
 - **NIXL**: NVIDIA InfiniBand Library for high-performance network communication
 - **Benchmarking Tools**: Performance testing utilities (aiperf, aiconfigurator, etc)
 - **Python Environment**: Virtual environment with all required dependencies
-- **NATS Server**: Message broker for Dynamo's distributed communication
-- **etcd**: Distributed key-value store for configuration and coordination
 
 #### Deployment
 

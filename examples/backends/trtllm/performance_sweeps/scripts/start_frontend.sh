@@ -1,5 +1,5 @@
 #! /bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 echo "commit id: $TRT_LLM_GIT_COMMIT"
@@ -20,6 +20,7 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0
 sleep 2
 
 # Start OpenAI Frontend which will dynamically discover workers when they startup
+# dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
 # NOTE: This is a blocking call.
-python3 -m dynamo.frontend --http-port 8000
+python3 -m dynamo.frontend
 

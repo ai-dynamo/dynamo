@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Prometheus metric name constants and sanitization utilities
@@ -113,6 +113,9 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Number of cached tokens (prefix cache hits) per request
+    pub const CACHED_TOKENS: &str = "cached_tokens";
+
     /// Total number of output tokens generated (counter that updates in real-time)
     pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
 
@@ -143,6 +146,21 @@ pub mod frontend_service {
 
     /// Request migration limit for a worker serving the model (MDC)
     pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
+
+    /// Total number of request migrations due to worker unavailability
+    pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Label name for the type of migration
+    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Migration type label values
+    pub mod migration_type {
+        /// Migration during initial stream creation (NoResponders error)
+        pub const NEW_REQUEST: &str = "new_request";
+
+        /// Migration during ongoing request (stream disconnected)
+        pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
 
     /// Status label values
     pub mod status {
@@ -209,90 +227,6 @@ pub mod work_handler {
     }
 }
 
-/// NATS client metrics. DistributedRuntime contains a NATS client shared by all children)
-pub mod nats_client {
-    /// Macro to generate NATS client metric names with the prefix
-    macro_rules! nats_client_name {
-        ($name:expr) => {
-            concat!("nats_client_", $name)
-        };
-    }
-
-    /// Prefix for all NATS client metrics
-    pub const PREFIX: &str = nats_client_name!("");
-
-    /// Total number of bytes received by NATS client
-    pub const IN_TOTAL_BYTES: &str = nats_client_name!("in_total_bytes");
-
-    /// Total number of bytes sent by NATS client
-    pub const OUT_OVERHEAD_BYTES: &str = nats_client_name!("out_overhead_bytes");
-
-    /// Total number of messages received by NATS client
-    pub const IN_MESSAGES: &str = nats_client_name!("in_messages");
-
-    /// Total number of messages sent by NATS client
-    pub const OUT_MESSAGES: &str = nats_client_name!("out_messages");
-
-    /// Current number of active connections for NATS client
-    /// Note: Gauge metric measuring current connections, not cumulative total
-    pub const CURRENT_CONNECTIONS: &str = nats_client_name!("current_connections");
-
-    /// Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
-    pub const CONNECTION_STATE: &str = nats_client_name!("connection_state");
-}
-
-/// NATS service metrics, from the $SRV.STATS.<service_name> requests on NATS server
-pub mod nats_service {
-    /// Macro to generate NATS service metric names with the prefix
-    macro_rules! nats_service_name {
-        ($name:expr) => {
-            concat!("nats_service_", $name)
-        };
-    }
-
-    /// Prefix for all NATS service metrics
-    pub const PREFIX: &str = nats_service_name!("");
-
-    /// Average processing time in milliseconds (maps to: average_processing_time in ms)
-    pub const PROCESSING_MS_AVG: &str = nats_service_name!("processing_ms_avg");
-
-    /// Total errors across all endpoints (maps to: num_errors)
-    pub const ERRORS_TOTAL: &str = nats_service_name!("errors_total");
-
-    /// Total requests across all endpoints (maps to: num_requests)
-    pub const REQUESTS_TOTAL: &str = nats_service_name!("requests_total");
-
-    /// Total processing time in milliseconds (maps to: processing_time in ms)
-    pub const PROCESSING_MS_TOTAL: &str = nats_service_name!("processing_ms_total");
-
-    /// Number of active services (derived from ServiceSet.services)
-    pub const ACTIVE_SERVICES: &str = nats_service_name!("active_services");
-
-    /// Number of active endpoints (derived from ServiceInfo.endpoints)
-    pub const ACTIVE_ENDPOINTS: &str = nats_service_name!("active_endpoints");
-}
-
-/// All NATS client Prometheus metric names as an array for iteration/validation
-pub const DRT_NATS_METRICS: &[&str] = &[
-    nats_client::CONNECTION_STATE,
-    nats_client::CURRENT_CONNECTIONS,
-    nats_client::IN_TOTAL_BYTES,
-    nats_client::IN_MESSAGES,
-    nats_client::OUT_OVERHEAD_BYTES,
-    nats_client::OUT_MESSAGES,
-];
-
-/// All component service Prometheus metric names as an array for iteration/validation
-/// (ordered to match NatsStatsMetrics fields)
-pub const COMPONENT_NATS_METRICS: &[&str] = &[
-    nats_service::PROCESSING_MS_AVG, // maps to: average_processing_time (nanoseconds)
-    nats_service::ERRORS_TOTAL,      // maps to: num_errors
-    nats_service::REQUESTS_TOTAL,    // maps to: num_requests
-    nats_service::PROCESSING_MS_TOTAL, // maps to: processing_time (nanoseconds)
-    nats_service::ACTIVE_SERVICES,   // derived from ServiceSet.services
-    nats_service::ACTIVE_ENDPOINTS,  // derived from ServiceInfo.endpoints
-];
-
 /// Task tracker Prometheus metric name suffixes
 pub mod task_tracker {
     /// Total number of tasks issued/submitted
@@ -345,6 +279,27 @@ pub mod kvbm {
 
     /// Disk cache hit rate (0.0-1.0) from the sliding window
     pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
+
+    /// Object storage cache hit rate (0.0-1.0) from the sliding window
+    pub const OBJECT_CACHE_HIT_RATE: &str = "object_cache_hit_rate";
+
+    /// Number of blocks offloaded from device to object storage
+    pub const OFFLOAD_BLOCKS_D2O: &str = "offload_blocks_d2o";
+
+    /// Number of blocks onboarded from object storage to device
+    pub const ONBOARD_BLOCKS_O2D: &str = "onboard_blocks_o2d";
+
+    /// Bytes transferred to object storage (offload)
+    pub const OFFLOAD_BYTES_OBJECT: &str = "offload_bytes_object";
+
+    /// Bytes transferred from object storage (onboard)
+    pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
+
+    /// Number of failed object storage read operations (blocks)
+    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
+
+    /// Number of failed object storage write operations (blocks)
+    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
 /// KvStats metrics from LLM workers

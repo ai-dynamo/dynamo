@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use derive_builder::Builder;
@@ -120,6 +120,16 @@ pub struct MockEngineArgs {
     #[serde(skip)]
     #[builder(default = "Arc::new(PerfModel::default())")]
     pub perf_model: Arc<PerfModel>,
+
+    /// Enable worker-local KV indexer for tracking this worker's own KV cache state
+    #[builder(default = "false")]
+    pub enable_local_indexer: bool,
+
+    /// Bootstrap port for disaggregated serving rendezvous.
+    /// Prefill workers listen on this port; decode workers connect to it.
+    /// If None, bootstrap rendezvous is disabled.
+    #[builder(default = "None")]
+    pub bootstrap_port: Option<u16>,
 }
 
 impl Default for MockEngineArgs {
@@ -158,6 +168,8 @@ impl MockEngineArgs {
             "is_prefill",
             "is_decode",
             "planner_profile_data",
+            "enable_local_indexer",
+            "bootstrap_port",
         ]
         .iter()
         .cloned()
@@ -237,6 +249,18 @@ impl MockEngineArgs {
             && let Some(num) = value.as_f64()
         {
             builder = builder.startup_time(Some(num));
+        }
+
+        if let Some(value) = extra_args.get("enable_local_indexer")
+            && let Some(enabled) = value.as_bool()
+        {
+            builder = builder.enable_local_indexer(enabled);
+        }
+
+        if let Some(value) = extra_args.get("bootstrap_port")
+            && let Some(port) = value.as_u64()
+        {
+            builder = builder.bootstrap_port(Some(port as u16));
         }
 
         // Parse worker type from is_prefill and is_decode flags

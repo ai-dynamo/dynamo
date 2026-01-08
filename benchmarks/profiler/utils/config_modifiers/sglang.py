@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -18,6 +18,7 @@ from benchmarks.profiler.utils.config import (
     update_image,
     validate_and_get_worker_args,
 )
+from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
@@ -39,39 +40,13 @@ logger.addHandler(console_handler)
 DEFAULT_SGLANG_CONFIG_PATH = "examples/backends/sglang/deploy/disagg.yaml"
 
 
-class SGLangConfigModifier:
+class SGLangConfigModifier(BaseConfigModifier):
+    BACKEND = "sglang"
+
     @classmethod
     def load_default_config(cls) -> dict:
         with open(DEFAULT_SGLANG_CONFIG_PATH, "r") as f:
             return yaml.safe_load(f)
-
-    @classmethod
-    def update_model(cls, config, model_name: str) -> dict:
-        # change the model to serve
-        cfg = Config.model_validate(config)
-
-        # Update model for both prefill and decode workers
-        for sub_component_type in [SubComponentType.PREFILL, SubComponentType.DECODE]:
-            try:
-                worker_service = get_worker_service_from_config(
-                    cfg, backend="sglang", sub_component_type=sub_component_type
-                )
-                args = validate_and_get_worker_args(worker_service, backend="sglang")
-                args = break_arguments(args)
-
-                # Update both --model-path and --served-model-name
-                args = set_argument_value(args, "--model-path", model_name)
-                args = set_argument_value(args, "--served-model-name", model_name)
-
-                worker_service.extraPodSpec.mainContainer.args = args
-            except (ValueError, KeyError):
-                # Service might not exist (e.g., in aggregated mode)
-                logger.debug(
-                    f"Skipping {sub_component_type} service as it doesn't exist"
-                )
-                continue
-
-        return cfg.model_dump()
 
     @classmethod
     def update_image(cls, config, image: str) -> dict:
@@ -205,6 +180,18 @@ class SGLangConfigModifier:
 
         # Set --tp argument
         args = set_argument_value(args, "--tp", str(tp_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
+
+        # Remove --ep if present
+        args = remove_valued_arguments(args, "--ep")
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
+
+        # remove --dp if present
+        args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
@@ -230,12 +217,18 @@ class SGLangConfigModifier:
 
         # 1. Set --tp=tep_size, if not present add it
         args = set_argument_value(args, "--tp", str(tep_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
 
-        # 2. Set --ep-size=tep_size, if not present add it
-        args = set_argument_value(args, "--ep-size", str(tep_size))
+        # 2. Set --ep=tep_size, if not present add it
+        args = set_argument_value(args, "--ep", str(tep_size))
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
 
         # 3. Remove --dp if present
         args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         # 4. Remove --enable-dp-attention if present
         if "--enable-dp-attention" in args:
@@ -265,16 +258,22 @@ class SGLangConfigModifier:
 
         # 1. Set --tp=dep_size
         args = set_argument_value(args, "--tp", str(dep_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
 
         # 2. Set --dp=dep_size (data parallelism across experts)
         args = set_argument_value(args, "--dp", str(dep_size))
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         # 3. Enable --enable-dp-attention
         if "--enable-dp-attention" not in args:
             args = append_argument(args, "--enable-dp-attention")
 
-        # 4. Set --ep-size=dep_size (expert parallelism size)
-        args = set_argument_value(args, "--ep-size", str(dep_size))
+        # 4. Set --ep=dep_size (expert parallelism size)
+        args = set_argument_value(args, "--ep", str(dep_size))
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
@@ -356,7 +355,11 @@ class SGLangConfigModifier:
 
     @classmethod
     def set_prefill_config(
-        cls, config: dict, max_batch_size: int, max_num_tokens: int
+        cls,
+        config: dict,
+        max_batch_size: int,
+        max_num_tokens: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
     ) -> dict:
         """
         Configure prefill-related limits for aggregated prefill runs.
@@ -365,7 +368,7 @@ class SGLangConfigModifier:
         """
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
-            cfg, backend="sglang", sub_component_type=SubComponentType.DECODE
+            cfg, backend="sglang", sub_component_type=component_type
         )
         args = validate_and_get_worker_args(worker_service, backend="sglang")
         args = break_arguments(args)

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 name: Docker Build and Test
@@ -30,19 +30,26 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      has_code_changes: ${{ steps.filter.outputs.has_code_changes }}
+      core: ${{ steps.changes.outputs.core }}
+      operator: ${{ steps.changes.outputs.operator }}
+      deploy: ${{ steps.changes.outputs.deploy }}
+      vllm: ${{ steps.changes.outputs.vllm }}
+      sglang: ${{ steps.changes.outputs.sglang }}
+      trtllm: ${{ steps.changes.outputs.trtllm }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Check for changes
-        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36  # v3.0.2
-        id: filter
         with:
-          filters: .github/filters.yaml
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [vllm, sglang, trtllm, operator]
+    needs: [changed-files, vllm, sglang, trtllm, operator]
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -51,7 +58,7 @@ jobs:
 
   operator:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.operator == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -69,40 +76,40 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
         with:
-          driver: docker
-      - name: Login to ECR
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Linter
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Tester
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: Check for uncommitted changes
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           sudo apt-get update && sudo apt-get install -y make
-          cd deploy/cloud/operator
+          cd deploy/operator
           make check
       - name: Build Container
         id: build-image
@@ -110,7 +117,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          cd deploy/cloud/operator
+          cd deploy/operator
           docker buildx build --load \
               --platform linux/${{ matrix.platform.arch }} \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
@@ -120,18 +127,14 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: dynamo-operator:latest
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
           aws_push: 'false'
           azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   vllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -147,6 +150,17 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -156,9 +170,8 @@ jobs:
           platform: 'linux/${{ matrix.platform.arch }}'
           base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
           runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '129' || '' }}
+          cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
           torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -169,38 +182,27 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'false'
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-      - name: Run unit tests
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and vllm and gpu_1"
+          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
           framework: "vllm"
-          test_type: "unit"
+          test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and vllm and gpu_1 and not slow"
-          framework: "vllm"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   sglang:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -216,7 +218,17 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -224,50 +236,37 @@ jobs:
           framework: sglang
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'false'
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-      - name: Run unit tests
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and sglang and gpu_1"
+          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
           framework: "sglang"
-          test_type: "unit"
+          test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and sglang and gpu_1"
-          framework: "sglang"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   trtllm:
     needs: changed-files
-    if: needs.changed-files.outputs.has_code_changes == 'true'
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -283,7 +282,17 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
@@ -291,245 +300,37 @@ jobs:
           framework: trtllm
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
       - name: Docker Tag and Push
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tag: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          # OPS-1145: Switch aws_push to true
-          aws_push: 'false'
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-      - name: Run unit tests
+      - name: Run tests
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "unit and trtllm_marker and gpu_1"
+          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
           framework: "trtllm"
-          test_type: "unit"
+          test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
-      - name: Run e2e tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "e2e and trtllm_marker and gpu_1 and not slow"
-          framework: "trtllm"
-          test_type: "e2e, gpu_1"
-          platform_arch: ${{ matrix.platform.arch }}
-
-  deploy-test-fault-tolerance:
-    runs-on: cpu-amd-m5-2xlarge
-    if: needs.changed-files.outputs.has_code_changes == 'true'
-    needs: [changed-files, operator, vllm, trtllm, sglang]
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      # Run matrix jobs sequentially to prevent a Helm race condition
-      # Parallel jobs conflict on ClusterRole ownership when installing the chart.
-      # Error: ClusterRole "...-operator" exists... cannot be imported... current value is "...-ft-vllm"
-      max-parallel: 1
-      matrix:
-        framework:
-          - { name: vllm, test_scenario: vllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-          - { name: trtllm, test_scenario: trtllm-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-          - { name: sglang, test_scenario: sglang-disagg-prefill-tp-1-decode-tp-1-dp-2-decode_worker_pod }
-    name: deploy-test-fault-tolerance (${{ matrix.framework.name }})
-    env:
-      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
-    steps:
-      - name: Output Node Name
-        shell: bash
-        run: |
-          echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Set namespace
-        run: |
-          # Set namespace using test scenario
-          export FRAMEWORK=${{ matrix.framework.name }}
-          echo "NAMESPACE=gh-id-${{ github.run_id }}-ft-${FRAMEWORK}" >> $GITHUB_ENV
-          set -x
-
-          # Setup kubeconfig
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-          chmod 600 .kubeconfig
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-          kubectl config current-context
-      - name: Deploy Operator
-        run: |
-          set -x
-          export KUBECONFIG=$(pwd)/.kubeconfig
-
-          # Create a namespace for this job
-          echo "Creating an ephemeral namespace..."
-          kubectl delete namespace $NAMESPACE || true
-          kubectl create namespace $NAMESPACE || true
-          echo "Attaching the labels for secrets and cleanup"
-          kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
-
-          # Set the namespace as default
-          kubectl config set-context --current --namespace=$NAMESPACE
-
-          # Check if Istio is installed
-          kubectl get pods -n istio-system
-          # Check if default storage class exists
-          kubectl get storageclass
-
-          # Install Helm chart
-          export VIRTUAL_ENV=/opt/dynamo/venv
-          export KUBE_NS=$NAMESPACE
-          export ISTIO_ENABLED=true
-          export ISTIO_GATEWAY=istio-system/ingress-alb
-          export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-          export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
-
-          # Install dynamo env secrets
-          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
-          # Create docker pull secret for operator image
-          kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
-          # Install helm dependencies
-          helm repo add bitnami https://charts.bitnami.com/bitnami
-          cd deploy/cloud/helm/platform/
-          helm dep build .
-          # Install platform with namespace restriction for single profile testing
-          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
-            --set dynamo-operator.namespaceRestriction.enabled=true \
-            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
-            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
-            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
-            --timeout 10m --wait
-          # Wait for all deployments to be ready
-          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
-          cd -
-
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          kubectl config set-context --current --namespace=$NAMESPACE
-      - name: Run Fault Tolerance Tests
-        run: |
-          set -x
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          export NAMESPACE=$NAMESPACE
-          export FRAMEWORK=${{ matrix.framework.name }}
-          export IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
-
-          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
-          echo "Using namespace: $NAMESPACE"
-          echo "Using image: $IMAGE"
-
-          # Install python3-venv package if not already installed
-          sudo apt-get update && sudo apt-get install -y python3-venv
-
-          # Set up Python virtual environment and install test dependencies
-          python3 -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-          pip install -r container/deps/requirements.test.txt
-          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
-
-          # Run the pytest command (tests orchestrate K8s, don't need dynamo package)
-          pytest tests/fault_tolerance/deploy/test_deployment.py \
-            -m 'k8s and fault_tolerance' \
-            -k '${{ matrix.framework.test_scenario }}' \
-            -s -v \
-            --namespace ${NAMESPACE} \
-            --image ${IMAGE} \
-            --client-type legacy
-      - name: Cleanup
-        if: always()
-        timeout-minutes: 5
-        run: |
-          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
-          chmod 600 .kubeconfig
-          export KUBECONFIG=$(pwd)/.kubeconfig
-          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
-
-          # For debugging purposes, list all the resources before we uninstall
-          kubectl get all
-
-          echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
-          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
-
-          # Uninstall the helm chart
-          helm ls
-          helm uninstall dynamo-platform || true
-
-          echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
-          kubectl delete namespace $NAMESPACE || true
-          echo "Namespace $NAMESPACE completed."
-
-  # Upload metrics for this workflow and all its jobs
-  upload-workflow-metrics:
-    name: Upload Workflow Metrics
-    runs-on: gitlab
-    if: always()  # Always run, even if other jobs fail
-    needs: [backend-status-check]  # Wait for the status check which waits for all build jobs
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
-      - name: Download build metrics
-        uses: actions/download-artifact@v4
-        with:
-          pattern: build-metrics-*
-          path: build-metrics/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-*
-          path: test-results/
-          merge-multiple: true
-        continue-on-error: true  # Don't fail if artifacts don't exist
-
-      - name: Upload Complete Workflow Metrics
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_INDEX: ${{ secrets.WORKFLOW_INDEX }}
-          JOB_INDEX: ${{ secrets.JOB_INDEX }}
-          STEPS_INDEX: ${{ secrets.STEPS_INDEX }}
-          # Container and test index configuration
-          CONTAINER_INDEX: ${{ secrets.CONTAINER_INDEX }}
-          TEST_INDEX: ${{ secrets.TEST_INDEX }}
-        run: |
-          # Upload complete workflow metrics including container metrics
-          python3 .github/workflows/upload_complete_workflow_metrics.py
+          enable_mypy: 'true'
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-operator job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
       DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
@@ -583,7 +384,6 @@ jobs:
         export ISTIO_ENABLED=true
         export ISTIO_GATEWAY=istio-system/ingress-alb
         export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
-        export DYNAMO_CLOUD=https://${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
 
         # Install dynamo env secrets
         kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
@@ -591,7 +391,7 @@ jobs:
         kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
         # Install helm dependencies
         helm repo add bitnami https://charts.bitnami.com/bitnami
-        cd deploy/cloud/helm/platform/
+        cd deploy/helm/charts/platform/
         helm dep build .
         # Install platform with namespace restriction for single profile testing
         helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
@@ -605,9 +405,8 @@ jobs:
 
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-vllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    # Run if push to main, or manually triggered
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, vllm]
     permissions:
       contents: read
@@ -619,7 +418,7 @@ jobs:
           - agg
           - agg_router
           - disagg
-          - disagg_router
+          # - disagg_router
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
@@ -644,12 +443,16 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
         kubectl config get-contexts
     - name: Run Tests
+      id: run-tests
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
       run: |
         set -x
         export KUBECONFIG=$(pwd)/.kubeconfig
         kubectl config set-context --current --namespace=$NAMESPACE
+
+        # Redirect all output to a log file while still showing it
+        exec > >(tee -a test-output.log) 2>&1
 
         cd examples/backends/$FRAMEWORK
         export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${FRAMEWORK}-amd64"
@@ -743,6 +546,30 @@ jobs:
           echo "Test passed: Response matches expected format and content"
         fi
         exit $TEST_RESULT
+    - name: Process Deployment Test Results
+      if: always()
+      run: |
+        set -x
+
+        # Create test-results directory
+        mkdir -p test-results
+
+        # Copy and rename the test output log with unique naming
+        if [ -f "test-output.log" ]; then
+          cp test-output.log "test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log"
+          echo "✅ Test output log copied to test-results/"
+        else
+          echo "⚠️  test-output.log not found"
+        fi
+
+    - name: Upload Deployment Test Results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ env.FRAMEWORK }}-deploy-${{ matrix.profile }}-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+        path: test-results/deploy_test_output_${{ env.FRAMEWORK }}_${{ matrix.profile }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.log
+        retention-days: 7
+
     - name: Cleanup
       if: always()
       timeout-minutes: 5
@@ -754,16 +581,42 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE
 
         # For debugging purposes, list all the resources before we delete
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting DynamoGraphDeployments for this job in namespace $NAMESPACE..."
         kubectl delete dynamographdeployments ${GRAPH_NAME} -n $NAMESPACE || true
 
+  # For now, this job is separated from the job matrix above for easier flow control handling
+  # Uncomment the disagg_router matrix entry from the above job and delete the below job
+  # when we want to run them under the same conditions.
+  # Current conditions:
+  # - Run vllm disagg_router on all commits
+  # - Run rest of jobs only on push to main or manual trigger
+  deploy-test-vllm-disagg-router:
+    runs-on: cpu-amd-m5-2xlarge
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
+    needs: [changed-files, deploy-operator, vllm]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        profile:
+          - disagg_router
+    name: deploy-test-vllm (${{ matrix.profile }})
+    env:
+      FRAMEWORK: vllm
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      DEPLOYMENT_FILE: "deploy/${{ matrix.profile }}.yaml"
+      MODEL_NAME: "Qwen/Qwen3-0.6B"
+    steps: *deploy-test-steps
+
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-sglang job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    # Run if push to main, or manually triggered
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
     permissions:
       contents: read
@@ -784,9 +637,8 @@ jobs:
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment this when we have a way to test the deploy-test-trtllm job in CI.
-    #if: needs.changed-files.outputs.has_code_changes == 'true'
-    if: github.event.inputs.run_deploy_operator
+    # Run if push to main, or manually triggered
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, trtllm]
     permissions:
       contents: read
@@ -809,10 +661,8 @@ jobs:
 
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
-    # TODO: Uncomment the below if statement when we have a way to test the cleanup job in CI.
-    # if: always()
-    if: github.event.inputs.run_deploy_operator
-    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm]
+    if: always()
+    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-vllm-disagg-router]
     steps:
     - name: Output Node Name
       shell: bash
@@ -845,6 +695,7 @@ jobs:
         kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
 
         # For debugging purposes, list all the resources before we uninstall
+        kubectl get dynamographdeployments
         kubectl get all
 
         echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."

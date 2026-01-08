@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -60,7 +60,6 @@ spec:
             - --model
             - deepseek-ai/DeepSeek-V2-Lite
             - --trust-remote-code
-            - --disable-log-requests
             - --tensor-parallel-size
             - "1"
             - --data-parallel-size

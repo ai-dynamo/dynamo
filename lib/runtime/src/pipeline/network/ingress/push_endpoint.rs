@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,16 +135,26 @@ impl PushEndpoint {
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
-            tracing::info!(
-                "Waiting for {} inflight requests to complete",
-                inflight.load(Ordering::SeqCst)
-            );
-            while inflight.load(Ordering::SeqCst) > 0 {
-                notify.notified().await;
+            let inflight_count = inflight.load(Ordering::SeqCst);
+            if inflight_count > 0 {
+                tracing::info!(
+                    endpoint_name = endpoint_name_local.as_str(),
+                    inflight_count = inflight_count,
+                    "Waiting for inflight NATS requests to complete"
+                );
+                while inflight.load(Ordering::SeqCst) > 0 {
+                    notify.notified().await;
+                }
+                tracing::info!(
+                    endpoint_name = endpoint_name_local.as_str(),
+                    "All inflight NATS requests completed"
+                );
             }
-            tracing::info!("All inflight requests completed");
         } else {
-            tracing::info!("Skipping graceful shutdown, not waiting for inflight requests");
+            tracing::info!(
+                endpoint_name = endpoint_name_local.as_str(),
+                "Skipping graceful shutdown, not waiting for inflight requests"
+            );
         }
 
         Ok(())

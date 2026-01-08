@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 
@@ -40,6 +40,7 @@ class Config:
     custom_jinja_template: Optional[str] = None
     store_kv: str
     request_plane: str
+    enable_local_indexer: bool = False
 
     # mirror vLLM
     model: str
@@ -55,15 +56,33 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
+
     # multimodal options
     multimodal_processor: bool = False
+    # Emebdding Cache Processor is different from the regular processor
+    # TODO: Have a single processor for all cases and adopting rust based processor
+    ec_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
+    enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+
+    # vLLM-native encoder worker (ECConnector mode)
+    vllm_native_encoder_worker: bool = False
+    ec_connector_backend: Optional[str] = "ECExampleConnector"
+    ec_storage_path: Optional[str] = None
+    ec_extra_config: Optional[str] = None
+    ec_consumer_mode: bool = False
+
     # dump config to file
     dump_config_to: Optional[str] = None
+
+    # Use vLLM's tokenizer for pre/post processing
+    use_vllm_tokenizer: bool = False
 
     def has_connector(self, connector_name: str) -> bool:
         """
@@ -135,9 +154,20 @@ def parse_args() -> Config:
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
     parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    )
+    parser.add_argument(
         "--multimodal-processor",
         action="store_true",
         help="Run as multimodal processor component for handling multimodal requests",
+    )
+    parser.add_argument(
+        "--ec-processor",
+        action="store_true",
+        help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers)",
     )
     parser.add_argument(
         "--multimodal-encode-worker",
@@ -160,6 +190,11 @@ def parse_args() -> Config:
         help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
     )
     parser.add_argument(
+        "--enable-multimodal",
+        action="store_true",
+        help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
+    )
+    parser.add_argument(
         "--mm-prompt-template",
         type=str,
         default="USER: <image>\n<prompt> ASSISTANT:",
@@ -173,6 +208,34 @@ def parse_args() -> Config:
         ),
     )
     parser.add_argument(
+        "--vllm-native-encoder-worker",
+        action="store_true",
+        help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
+    )
+    parser.add_argument(
+        "--ec-connector-backend",
+        type=str,
+        default="ECExampleConnector",
+        help="ECConnector implementation class for encoder disaggregation. Default: ECExampleConnector (disk-based)",
+    )
+    parser.add_argument(
+        "--ec-storage-path",
+        type=str,
+        default=None,
+        help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends)",
+    )
+    parser.add_argument(
+        "--ec-extra-config",
+        type=str,
+        default=None,
+        help="Additional ECConnector configuration as JSON string",
+    )
+    parser.add_argument(
+        "--ec-consumer-mode",
+        action="store_true",
+        help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -183,14 +246,52 @@ def parse_args() -> Config:
         "--request-plane",
         type=str,
         choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--enable-local-indexer",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    )
+    parser.add_argument(
+        "--use-vllm-tokenizer",
+        action="store_true",
+        default=False,
+        help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
     )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    if hasattr(engine_args, "stream_interval") and engine_args.stream_interval != 1:
+        logger.warning(
+            "--stream-interval is currently not respected in Dynamo. "
+            "Dynamo uses its own post-processing implementation on the frontend, "
+            "bypassing vLLM's OutputProcessor buffering. "
+        )
+    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
+    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
+    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
+    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
+    # processes, avoiding the GIL contention.
+    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
+    # and forcing mp can expose race conditions in vLLM's scheduler.
+    # See: https://github.com/vllm-project/vllm/issues/29369
+    connector_list = [c.lower() for c in args.connector] if args.connector else []
+    uses_nixl = "nixl" in connector_list
+    tp_size = getattr(engine_args, "tensor_parallel_size", None) or 1
+    if uses_nixl and tp_size == 1 and engine_args.distributed_executor_backend is None:
+        logger.info(
+            "Setting --distributed-executor-backend=mp for TP=1 to avoid "
+            "UniProcExecutor GIL contention with NIXL connector"
+        )
+        engine_args.distributed_executor_backend = "mp"
 
     if engine_args.enable_prefix_caching is None:
         logger.debug(
@@ -214,24 +315,42 @@ def parse_args() -> Config:
     # Check multimodal role exclusivity
     mm_flags = (
         int(bool(args.multimodal_processor))
+        + int(bool(args.ec_processor))
         + int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
         + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
+        + int(bool(args.vllm_native_encoder_worker))
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
+            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
+            "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
         )
 
+    if mm_flags == 1 and not args.enable_multimodal:
+        raise ValueError("Use --enable-multimodal to enable multimodal processing")
+
+    # Validate vLLM-native encoder worker config
+    if args.vllm_native_encoder_worker:
+        if (
+            args.ec_connector_backend == "ECExampleConnector"
+            and not args.ec_storage_path
+        ):
+            raise ValueError(
+                "--ec-storage-path is required when using ECExampleConnector backend. "
+                "Specify a shared storage path for encoder cache."
+            )
+
     # Set component and endpoint based on worker type
-    if args.multimodal_processor:
+    if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
         config.endpoint = "generate"
-    elif args.multimodal_encode_worker:
-        config.component = "encoder"
-        config.endpoint = "generate"
-    elif args.multimodal_encode_prefill_worker:
+    elif (
+        args.vllm_native_encoder_worker
+        or args.multimodal_encode_worker
+        or args.multimodal_encode_prefill_worker
+    ):
         config.component = "encoder"
         config.endpoint = "generate"
     elif args.multimodal_decode_worker:
@@ -257,14 +376,24 @@ def parse_args() -> Config:
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.dyn_endpoint_types = args.dyn_endpoint_types
     config.multimodal_processor = args.multimodal_processor
+    config.ec_processor = args.ec_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
+    config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
+    config.ec_connector_backend = args.ec_connector_backend
+    config.ec_storage_path = args.ec_storage_path
+    config.ec_extra_config = args.ec_extra_config
+    config.ec_consumer_mode = args.ec_consumer_mode
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
+    config.enable_local_indexer = args.enable_local_indexer
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -332,24 +461,6 @@ def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     if not config.engine_args.enable_prefix_caching:
         logger.info("No kv_events_config required: prefix caching is disabled")
         return None
-
-    # There is a bug with KV events publishing when LORA is enabled.
-    # This is fixed in https://github.com/vllm-project/vllm/pull/27728 but not released yet.
-    # remove below check once new vLLM version is released with the fix.
-    if config.engine_args.enable_lora:
-        if config.engine_args.kv_events_config is None:
-            # No explicit kv events config provided by user, we'll disable kv cache because LoRA is enabled and its not supported yet.
-            return None
-        else:
-            # User provided their own kv events config and it'll not work when LoRA is enabled.
-            message = (
-                "KV events doesn't work when LoRA is enabled due to upstream vLLM bug. "
-                "Please see https://github.com/vllm-project/vllm/pull/27728."
-                "For now, either disable lora or dont use explicit kv envents config."
-                "Dont set both --kv-events-config and --enable-lora in vllm command line args."
-            )
-            logger.error(message)
-            raise ValueError(message)
 
     # If user provided their own config, use that
     if c := getattr(config.engine_args, "kv_events_config"):
@@ -438,13 +549,14 @@ def overwrite_args(config):
         ensure_side_channel_host()
 
     defaults = {
-        "task": "generate",
+        # vLLM 0.13+ renamed 'task' to 'runner'
+        "runner": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
-        "disable_log_requests": True,
+        "enable_log_requests": False,
         "disable_log_stats": False,
     }
 
@@ -463,7 +575,9 @@ def overwrite_args(config):
             setattr(config.engine_args, key, value)
             logger.debug(f" engine_args.{key} = {value}")
         else:
-            raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
+            logger.debug(
+                f" Skipping engine_args.{key} (not available in this vLLM version)"
+            )
 
 
 def get_host_ip() -> str:

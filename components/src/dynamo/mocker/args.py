@@ -1,4 +1,4 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -9,12 +9,82 @@ import tempfile
 from pathlib import Path
 
 from . import __version__
+from .utils.planner_profiler_perf_data_converter import (
+    convert_profile_results_to_npz,
+    is_mocker_format_npz,
+    is_profile_results_dir,
+)
 
 DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
 DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_PREFILL_ENDPOINT = f"dyn://{DYN_NAMESPACE}.prefill.generate"
 
 logger = logging.getLogger(__name__)
+
+
+class ProfileDataResult:
+    """Result of processing --planner-profile-data argument. Cleans up tmpdir on deletion."""
+
+    def __init__(
+        self, npz_path: Path | None, tmpdir: tempfile.TemporaryDirectory | None
+    ):
+        self.npz_path = npz_path
+        self._tmpdir = tmpdir
+
+    def __del__(self):
+        if self._tmpdir is not None:
+            try:
+                self._tmpdir.cleanup()
+                logger.debug("Cleaned up profile data temporary directory")
+            except Exception:
+                pass  # Best effort cleanup
+
+
+def resolve_planner_profile_data(
+    planner_profile_data: Path | None,
+) -> ProfileDataResult:
+    """
+    Resolve --planner-profile-data to an NPZ file path.
+
+    Handles backward compatibility by accepting either:
+    1. A mocker-format NPZ file (returned as-is)
+    2. A profiler-style results directory (converted to mocker-format NPZ)
+
+    Args:
+        planner_profile_data: Path from --planner-profile-data argument.
+
+    Returns:
+        ProfileDataResult with npz_path and optional tmpdir for cleanup.
+
+    Raises:
+        FileNotFoundError: If path doesn't contain valid profile data in any supported format.
+    """
+    if planner_profile_data is None:
+        return ProfileDataResult(npz_path=None, tmpdir=None)
+
+    # Case 1: Already a mocker-format NPZ file
+    if is_mocker_format_npz(planner_profile_data):
+        logger.info(f"Using mocker-format NPZ file: {planner_profile_data}")
+        return ProfileDataResult(npz_path=planner_profile_data, tmpdir=None)
+
+    # Case 2: Profiler-style results directory - needs conversion
+    if is_profile_results_dir(planner_profile_data):
+        logger.info(
+            f"Detected profiler-style results directory at {planner_profile_data}, converting to NPZ..."
+        )
+        tmpdir = tempfile.TemporaryDirectory(prefix="mocker_perf_data_")
+        npz_path = Path(tmpdir.name) / "perf_data.npz"
+        convert_profile_results_to_npz(planner_profile_data, npz_path)
+        return ProfileDataResult(npz_path=npz_path, tmpdir=tmpdir)
+
+    # Case 3: Invalid path - neither mocker-format NPZ nor profiler-style directory
+    raise FileNotFoundError(
+        f"Path '{planner_profile_data}' is neither a mocker-format NPZ file nor a valid profiler results directory.\n"
+        f"Expected either:\n"
+        f"  - A .npz file with keys: prefill_isl, prefill_ttft_ms, decode_active_kv_tokens, decode_context_length, decode_itl\n"
+        f"  - A directory containing selected_prefill_interpolation/raw_data.npz and selected_decode_interpolation/raw_data.npz\n"
+        f"  - A directory containing prefill_raw_data.json and decode_raw_data.json"
+    )
 
 
 def create_temp_engine_args_file(args) -> Path:
@@ -38,11 +108,15 @@ def create_temp_engine_args_file(args) -> Path:
         "speedup_ratio": getattr(args, "speedup_ratio", None),
         "dp_size": getattr(args, "dp_size", None),
         "startup_time": getattr(args, "startup_time", None),
-        "planner_profile_data": str(getattr(args, "planner_profile_data", None))
-        if getattr(args, "planner_profile_data", None)
-        else None,
+        "planner_profile_data": (
+            str(getattr(args, "planner_profile_data", None))
+            if getattr(args, "planner_profile_data", None)
+            else None
+        ),
         "is_prefill": getattr(args, "is_prefill_worker", None),
         "is_decode": getattr(args, "is_decode_worker", None),
+        "enable_local_indexer": getattr(args, "enable_local_indexer", None),
+        # Note: bootstrap_port is NOT included here - it's set per-worker in launch_workers()
     }
 
     # Remove None values to only include explicitly set arguments
@@ -69,6 +143,13 @@ def validate_worker_type_args(args):
             "Cannot specify both --is-prefill-worker and --is-decode-worker. "
             "A worker must be either prefill, decode, or aggregated (neither flag set)."
         )
+
+
+def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
+    """Parse comma-separated bootstrap ports string into list of integers."""
+    if not ports_str:
+        return []
+    return [int(p.strip()) for p in ports_str.split(",")]
 
 
 def parse_args():
@@ -182,7 +263,8 @@ def parse_args():
         "--planner-profile-data",
         type=Path,
         default=None,
-        help="Path to JSON configmap or NPZ file containing performance profiling data from planner_profiler_perf_data_converter.py (default: None, uses hardcoded polynomials)",
+        help="Path to profile results directory containing selected_prefill_interpolation/ and "
+        "selected_decode_interpolation/ subdirectories (default: None, uses hardcoded polynomials)",
     )
     parser.add_argument(
         "--num-workers",
@@ -214,6 +296,21 @@ def parse_args():
         help="Mark this as a decode worker which does not publish KV events and skips prefill cost estimation (default: False)",
     )
     parser.add_argument(
+        "--enable-local-indexer",
+        action="store_true",
+        default=False,
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (default: False)",
+    )
+    parser.add_argument(
+        "--bootstrap-ports",
+        type=str,
+        default=None,
+        help="Comma-separated list of bootstrap ports for disaggregated serving rendezvous. "
+        "One port per worker (must match --num-workers). "
+        "Prefill workers listen on these ports; decode workers connect to them. "
+        "If not specified, bootstrap rendezvous is disabled.",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -224,7 +321,7 @@ def parse_args():
         "--request-plane",
         type=str,
         choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
     )
 
@@ -234,6 +331,15 @@ def parse_args():
     # Validate num_workers
     if args.num_workers < 1:
         raise ValueError(f"--num-workers must be at least 1, got {args.num_workers}")
+
+    # Parse and validate bootstrap_ports
+    args.bootstrap_ports_list = parse_bootstrap_ports(args.bootstrap_ports)
+    if args.bootstrap_ports_list:
+        if len(args.bootstrap_ports_list) != args.num_workers:
+            raise ValueError(
+                f"--bootstrap-ports must have exactly --num-workers ({args.num_workers}) ports, "
+                f"got {len(args.bootstrap_ports_list)}: {args.bootstrap_ports_list}"
+            )
 
     # Set endpoint default based on worker type if not explicitly provided
     if args.endpoint is None:

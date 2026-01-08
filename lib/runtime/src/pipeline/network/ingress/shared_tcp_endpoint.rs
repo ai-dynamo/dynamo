@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Shared TCP Server with Endpoint Multiplexing
@@ -11,7 +11,7 @@ use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -36,7 +36,10 @@ fn get_max_message_size() -> usize {
 /// Shared TCP server that handles multiple endpoints on a single port
 pub struct SharedTcpServer {
     handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+    /// The address to bind to (may have port 0 for OS-assigned port)
     bind_addr: SocketAddr,
+    /// The actual bound address (populated after bind_and_start, contains actual port)
+    actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
 }
 
@@ -55,9 +58,81 @@ impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
+            // address we requested to bind to.
             bind_addr,
+            // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
+            actual_addr: RwLock::new(None),
             cancellation_token,
         })
+    }
+
+    /// Bind the server and start accepting connections.
+    ///
+    /// This method binds to the configured address first, then starts the accept loop.
+    /// If the configured port is 0, the OS will assign a free port.
+    /// The actual bound address is stored and can be retrieved via `actual_address()`.
+    ///
+    /// Returns the actual bound address (useful when port 0 was specified).
+    pub async fn bind_and_start(self: Arc<Self>) -> Result<SocketAddr> {
+        tracing::info!("Binding TCP server to {}", self.bind_addr);
+
+        let listener = TcpListener::bind(&self.bind_addr).await?;
+        let actual_addr = listener.local_addr()?;
+
+        tracing::info!(
+            requested = %self.bind_addr,
+            actual = %actual_addr,
+            "TCP server bound successfully"
+        );
+
+        // Store the actual bound address
+        *self.actual_addr.write() = Some(actual_addr);
+
+        // Start accepting connections in a background task
+        let server = self.clone();
+        tokio::spawn(async move {
+            server.accept_loop(listener).await;
+        });
+
+        Ok(actual_addr)
+    }
+
+    /// Get the actual bound address (after bind_and_start has been called).
+    ///
+    /// Returns None if the server hasn't been started yet.
+    pub fn actual_address(&self) -> Option<SocketAddr> {
+        *self.actual_addr.read()
+    }
+
+    /// Internal accept loop - runs after binding
+    async fn accept_loop(self: Arc<Self>, listener: TcpListener) {
+        let cancellation_token = self.cancellation_token.clone();
+
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, peer_addr)) => {
+                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
+
+                            let handlers = self.handlers.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = Self::handle_connection(stream, handlers).await {
+                                    tracing::error!("TCP connection error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to accept TCP connection: {}", e);
+                        }
+                    }
+                }
+                _ = cancellation_token.cancelled() => {
+                    tracing::info!("SharedTcpServer received cancellation signal, shutting down");
+                    return;
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -93,51 +168,52 @@ impl SharedTcpServer {
         tracing::info!(
             "Registered endpoint '{}' with shared TCP server on {}",
             endpoint_name,
-            self.bind_addr
+            self.actual_address().unwrap_or(self.bind_addr)
         );
 
         Ok(())
     }
 
     pub async fn unregister_endpoint(&self, endpoint_path: &str, endpoint_name: &str) {
-        self.handlers.remove(endpoint_path);
-        tracing::info!(
-            "Unregistered endpoint '{}' from shared TCP server",
-            endpoint_name
-        );
-    }
+        if let Some((_, handler)) = self.handlers.remove(endpoint_path) {
+            handler
+                .system_health
+                .lock()
+                .set_endpoint_health_status(endpoint_name, crate::HealthStatus::NotReady);
+            tracing::info!(
+                endpoint_name = %endpoint_name,
+                endpoint_path = %endpoint_path,
+                "Unregistered TCP endpoint handler"
+            );
 
-    pub async fn start(self: Arc<Self>) -> Result<()> {
-        tracing::info!("Starting shared TCP server on {}", self.bind_addr);
-
-        let listener = TcpListener::bind(&self.bind_addr).await?;
-        let cancellation_token = self.cancellation_token.clone();
-
-        loop {
-            tokio::select! {
-                accept_result = listener.accept() => {
-                    match accept_result {
-                        Ok((stream, peer_addr)) => {
-                            tracing::trace!("Accepted TCP connection from {}", peer_addr);
-
-                            let handlers = self.handlers.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers).await {
-                                    tracing::debug!("TCP connection error: {}", e);
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to accept TCP connection: {}", e);
-                        }
-                    }
+            let inflight_count = handler.inflight.load(Ordering::SeqCst);
+            if inflight_count > 0 {
+                tracing::info!(
+                    endpoint_name = %endpoint_name,
+                    inflight_count = inflight_count,
+                    "Waiting for inflight TCP requests to complete"
+                );
+                while handler.inflight.load(Ordering::SeqCst) > 0 {
+                    handler.notify.notified().await;
                 }
-                _ = cancellation_token.cancelled() => {
-                    tracing::info!("SharedTcpServer received cancellation signal, shutting down");
-                    return Ok(());
-                }
+                tracing::info!(
+                    endpoint_name = %endpoint_name,
+                    "All inflight TCP requests completed"
+                );
             }
         }
+    }
+
+    /// Start the server (legacy method - prefer bind_and_start for new code).
+    ///
+    /// This method is kept for backwards compatibility. It binds and starts
+    /// the server but doesn't return the actual bound address.
+    pub async fn start(self: Arc<Self>) -> Result<()> {
+        let cancel_token = self.cancellation_token.clone();
+        self.bind_and_start().await?;
+        // Wait for cancellation (the accept loop runs in background)
+        cancel_token.cancelled().await;
+        Ok(())
     }
 
     async fn handle_connection(
@@ -337,9 +413,11 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // For TCP, we use endpoint_name as both the endpoint_path (routing key) and endpoint_name
+        // Include instance_id in the routing key to avoid collisions when multiple workers
+        // share the same TCP server (e.g., --num-workers > 1 in tests)
+        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
         self.register_endpoint(
-            endpoint_name.clone(),
+            endpoint_path,
             service_handler,
             instance_id,
             namespace,
@@ -351,12 +429,27 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        self.unregister_endpoint(endpoint_name, endpoint_name).await;
+        // With multiple workers per process, each registers with a unique key
+        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
+        let suffix = format!("/{endpoint_name}");
+        let keys_to_remove: Vec<String> = self
+            .handlers
+            .iter()
+            .filter(|entry| entry.key().ends_with(&suffix))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            self.unregister_endpoint(&key, endpoint_name).await;
+        }
         Ok(())
     }
 
     fn address(&self) -> String {
-        format!("tcp://{}:{}", self.bind_addr.ip(), self.bind_addr.port())
+        // Return actual bound address if available (after bind_and_start),
+        // otherwise fall back to configured bind address
+        let addr = self.actual_address().unwrap_or(self.bind_addr);
+        format!("tcp://{}:{}", addr.ip(), addr.port())
     }
 
     fn transport_name(&self) -> &'static str {
@@ -367,5 +460,220 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         // Server is healthy if it has been created
         // TODO: Add more sophisticated health checks (e.g., check if listener is active)
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::error::PipelineError;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::time::Instant;
+
+    /// Mock handler that simulates slow request processing for testing
+    struct SlowMockHandler {
+        /// Tracks if a request is currently being processed
+        request_in_flight: Arc<AtomicBool>,
+        /// Notifies when request processing starts
+        request_started: Arc<Notify>,
+        /// Notifies when request processing completes
+        request_completed: Arc<Notify>,
+        /// Duration to simulate request processing
+        processing_duration: Duration,
+    }
+
+    impl SlowMockHandler {
+        fn new(processing_duration: Duration) -> Self {
+            Self {
+                request_in_flight: Arc::new(AtomicBool::new(false)),
+                request_started: Arc::new(Notify::new()),
+                request_completed: Arc::new(Notify::new()),
+                processing_duration,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PushWorkHandler for SlowMockHandler {
+        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+            self.request_in_flight.store(true, Ordering::SeqCst);
+            self.request_started.notify_one();
+
+            tracing::debug!(
+                "SlowMockHandler: Request started, sleeping for {:?}",
+                self.processing_duration
+            );
+
+            // Simulate slow request processing
+            tokio::time::sleep(self.processing_duration).await;
+
+            tracing::debug!("SlowMockHandler: Request completed");
+
+            self.request_in_flight.store(false, Ordering::SeqCst);
+            self.request_completed.notify_one();
+            Ok(())
+        }
+
+        fn add_metrics(
+            &self,
+            _endpoint: &crate::component::Endpoint,
+            _metrics_labels: Option<&[(&str, &str)]>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_graceful_shutdown_waits_for_inflight_tcp_requests() {
+        // Initialize tracing for test debugging
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+
+        let cancellation_token = CancellationToken::new();
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+        // Create SharedTcpServer
+        let server = SharedTcpServer::new(bind_addr, cancellation_token.clone());
+
+        // Create a handler that takes 1s to process requests
+        let handler = Arc::new(SlowMockHandler::new(Duration::from_secs(1)));
+        let request_started = handler.request_started.clone();
+        let request_completed = handler.request_completed.clone();
+        let request_in_flight = handler.request_in_flight.clone();
+
+        // Register endpoint
+        let endpoint_path = "test_endpoint".to_string();
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            crate::HealthStatus::Ready,
+            vec![],
+            "/health".to_string(),
+            "/live".to_string(),
+        )));
+
+        server
+            .register_endpoint(
+                endpoint_path.clone(),
+                handler.clone() as Arc<dyn PushWorkHandler>,
+                1,
+                "test_namespace".to_string(),
+                "test_component".to_string(),
+                "test_endpoint".to_string(),
+                system_health,
+            )
+            .await
+            .expect("Failed to register endpoint");
+
+        tracing::debug!("Endpoint registered");
+
+        // Get the endpoint handler to simulate request processing
+        let endpoint_handler = server
+            .handlers
+            .get(&endpoint_path)
+            .expect("Handler should be registered")
+            .clone();
+
+        // Spawn a task that simulates an inflight request
+        let request_task = tokio::spawn({
+            let handler = handler.clone();
+            async move {
+                let payload = Bytes::from("test payload");
+                handler.handle_payload(payload).await
+            }
+        });
+
+        // Increment inflight counter manually to simulate the request being tracked
+        endpoint_handler.inflight.fetch_add(1, Ordering::SeqCst);
+
+        // Wait for request to start processing
+        tokio::select! {
+            _ = request_started.notified() => {
+                tracing::debug!("Request processing started");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                panic!("Timeout waiting for request to start");
+            }
+        }
+
+        // Verify request is in flight
+        assert!(
+            request_in_flight.load(Ordering::SeqCst),
+            "Request should be in flight"
+        );
+
+        // Now unregister the endpoint while request is inflight
+        let unregister_start = Instant::now();
+        tracing::debug!("Starting unregister_endpoint with inflight request");
+
+        // Spawn unregister in a separate task so we can monitor its behavior
+        let unregister_task = tokio::spawn({
+            let server = server.clone();
+            let endpoint_path = endpoint_path.clone();
+            async move {
+                server
+                    .unregister_endpoint(&endpoint_path, "test_endpoint")
+                    .await;
+                Instant::now()
+            }
+        });
+
+        // Give unregister a moment to remove handler and start waiting
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Verify that unregister_endpoint hasn't returned yet (it should be waiting)
+        assert!(
+            !unregister_task.is_finished(),
+            "unregister_endpoint should still be waiting for inflight request"
+        );
+
+        tracing::debug!("Verified unregister is waiting, now waiting for request to complete");
+
+        // Wait for the request to complete
+        tokio::select! {
+            _ = request_completed.notified() => {
+                tracing::debug!("Request completed");
+            }
+            _ = tokio::time::sleep(Duration::from_secs(2)) => {
+                panic!("Timeout waiting for request to complete");
+            }
+        }
+
+        // Decrement inflight counter and notify (simulating what the real code does)
+        endpoint_handler.inflight.fetch_sub(1, Ordering::SeqCst);
+        endpoint_handler.notify.notify_one();
+
+        // Now wait for unregister to complete
+        let unregister_end = tokio::time::timeout(Duration::from_secs(2), unregister_task)
+            .await
+            .expect("unregister_endpoint should complete after inflight request finishes")
+            .expect("unregister task should not panic");
+
+        let unregister_duration = unregister_end - unregister_start;
+
+        tracing::debug!("unregister_endpoint completed in {:?}", unregister_duration);
+
+        // Verify unregister_endpoint waited for the inflight request
+        assert!(
+            unregister_duration >= Duration::from_secs(1),
+            "unregister_endpoint should have waited ~1s for inflight request, but only took {:?}",
+            unregister_duration
+        );
+
+        // Verify request completed successfully
+        assert!(
+            !request_in_flight.load(Ordering::SeqCst),
+            "Request should have completed"
+        );
+
+        // Wait for request task to finish
+        request_task
+            .await
+            .expect("Request task should complete")
+            .expect("Request should succeed");
+
+        tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
     }
 }

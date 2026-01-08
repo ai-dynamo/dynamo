@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -107,23 +107,7 @@ apt-get update && apt-get -y install git git-lfs
 > [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
-This figure shows an overview of the major components to deploy:
-
-```
-+------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| processor |----->|      Worker1     |------------>|    Worker2    |
-|      |<-----|           |<-----|                  |<------------|               |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
-```
-
-**Note:** The diagram above shows all possible components in a deployment. In disaggregated serving, Worker1 acts as the decode worker and Worker2 as the prefill worker, with the unified frontend coordinating request routing between them.
+For detailed information about the architecture and how KV-aware routing works, see the [KV Cache Routing documentation](../../router/kv_cache_routing.md).
 
 ### Aggregated
 ```bash
@@ -240,7 +224,7 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [Multimodal Support Guide](./multimodal_support.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
 
 ## Logits Processing
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -241,7 +241,7 @@ class EncodeHelper:
 
         # Create readable operation with main embeddings tensor (works for both formats)
         descriptor = nixl_connect.Descriptor(encodings)
-        with connector.create_readable(descriptor) as readable_op:
+        with await connector.create_readable(descriptor) as readable_op:
             # Get the metadata for the readable operation
             op_metadata = readable_op.metadata()
 

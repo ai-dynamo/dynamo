@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for TRTLLM backend components."""
@@ -21,8 +21,9 @@ JINJA_TEMPLATE_PATH = str(
 
 pytestmark = [
     pytest.mark.unit,
-    pytest.mark.trtllm_marker,
+    pytest.mark.trtllm,
     pytest.mark.gpu_1,
+    pytest.mark.pre_merge,
 ]
 
 

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,7 +20,6 @@ import os
 from typing import Optional
 
 import numpy as np
-import scipy
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -65,11 +64,10 @@ class PrefillInterpolator:
                         self.prefill_ttft = np.array(data["prefill_ttft"])  # type: ignore[index]
                         self.prefill_thpt_per_gpu = np.array(data["prefill_thpt_per_gpu"])  # type: ignore[index]
                 except FileNotFoundError:
-                    logger.error(
+                    raise FileNotFoundError(
                         f"Prefill interpolation files not found: {prefill_npz_fn} and {json_fn}\n"
                         f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
                     )
-                    exit(1)
 
         elif raw_data:
             self.prefill_isl = raw_data["prefill_isl"]
@@ -80,6 +78,9 @@ class PrefillInterpolator:
 
         self.min_isl = min(self.prefill_isl)
         self.max_isl = max(self.prefill_isl)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 1d interpolation
         self.ttft_interpolator = scipy.interpolate.interp1d(
@@ -133,11 +134,10 @@ class DecodeInterpolator:
                         self.z_thpt_per_gpu = np.array(data["z_thpt_per_gpu"])  # type: ignore[index]
                         self.max_kv_tokens = int(data["max_kv_tokens"])  # type: ignore[index]
                 except FileNotFoundError:
-                    logger.error(
+                    raise FileNotFoundError(
                         f"Decode interpolation files not found: {decode_npz_fn} and {json_fn}\n"
                         f"{MISSING_PROFILING_DATA_ERROR_MESSAGE}"
                     )
-                    exit(1)
         elif raw_data:
             self.x_kv_usage = raw_data["x_kv_usage"]
             self.y_context_length = raw_data["y_context_length"]
@@ -152,6 +152,9 @@ class DecodeInterpolator:
         self.xi = np.linspace(0, 1, resolution)
         self.yi = np.linspace(0, max(self.y_context_length), resolution)
         self.X, self.Y = np.meshgrid(self.xi, self.yi)
+
+        # Lazy import scipy only when interpolation is actually needed
+        import scipy.interpolate
 
         # perform 2d interpolation with fallback for NaN values
         self.itl_interpolator = scipy.interpolate.griddata(

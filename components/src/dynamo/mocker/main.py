@@ -1,12 +1,16 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 # Usage: `python -m dynamo.mocker --model-path /data/models/Qwen3-0.6B`
 # Now supports vLLM-style individual arguments for MockEngineArgs
 
 import asyncio
+import json
 import logging
 import os
+import signal
+import tempfile
+from pathlib import Path
 
 import uvloop
 
@@ -16,10 +20,21 @@ from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
-from .args import create_temp_engine_args_file, parse_args
+from .args import create_temp_engine_args_file, parse_args, resolve_planner_profile_data
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+async def graceful_shutdown(runtimes: list):
+    """
+    Shutdown dynamo distributed runtime instances.
+    The endpoints will be immediately invalidated so no new requests will be accepted.
+    """
+    logger.info("Received shutdown signal, shutting down DistributedRuntime instances")
+    for runtime in runtimes:
+        runtime.shutdown()
+    logger.info("DistributedRuntime shutdown complete")
 
 
 async def worker():
@@ -29,6 +44,10 @@ async def worker():
     while still sharing the same event loop and tokio runtime.
     """
     args = parse_args()
+
+    # Resolve planner-profile-data: convert profile results dir to NPZ if needed
+    profile_data_result = resolve_planner_profile_data(args.planner_profile_data)
+    args.planner_profile_data = profile_data_result.npz_path
 
     # Handle extra_engine_args: either use provided file or create from CLI args
     if args.extra_engine_args:
@@ -54,6 +73,8 @@ async def worker():
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary file: {e}")
 
+        del profile_data_result  # Triggers tmpdir cleanup via __del__
+
 
 async def launch_workers(args, extra_engine_args_path):
     """Launch mocker worker(s) with isolated DistributedRuntime instances.
@@ -67,6 +88,13 @@ async def launch_workers(args, extra_engine_args_path):
     loop = asyncio.get_running_loop()
     futures = []
     runtimes = []
+    per_worker_temp_files: list[Path] = []
+
+    # Load base engine args if we need to create per-worker files with bootstrap_port
+    base_engine_args = None
+    if args.bootstrap_ports_list:
+        with open(extra_engine_args_path) as f:
+            base_engine_args = json.load(f)
 
     for worker_id in range(args.num_workers):
         logger.info(f"Creating mocker worker {worker_id + 1}/{args.num_workers}")
@@ -75,13 +103,30 @@ async def launch_workers(args, extra_engine_args_path):
         runtime = DistributedRuntime(loop, args.store_kv, args.request_plane)
         runtimes.append(runtime)
 
+        # Determine which engine args file to use
+        if args.bootstrap_ports_list:
+            # Create per-worker temp file with this worker's bootstrap_port
+            worker_args = base_engine_args.copy()
+            worker_args["bootstrap_port"] = args.bootstrap_ports_list[worker_id]
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False
+            ) as f:
+                json.dump(worker_args, f)
+                worker_engine_args_path = Path(f.name)
+            per_worker_temp_files.append(worker_engine_args_path)
+            logger.debug(
+                f"Worker {worker_id}: using bootstrap_port {args.bootstrap_ports_list[worker_id]}"
+            )
+        else:
+            worker_engine_args_path = extra_engine_args_path
+
         # Create EntrypointArgs for this worker
         entrypoint_args = EntrypointArgs(
             engine_type=EngineType.Mocker,
             model_path=args.model_path,
             model_name=args.model_name,
             endpoint_id=args.endpoint,
-            extra_engine_args=extra_engine_args_path,
+            extra_engine_args=worker_engine_args_path,
             is_prefill=args.is_prefill_worker,
         )
 
@@ -94,14 +139,30 @@ async def launch_workers(args, extra_engine_args_path):
 
     logger.info(f"All {args.num_workers} mocker worker(s) created and running")
 
+    # Set up signal handler for graceful shutdown
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtimes))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logger.info("Signal handlers set up for graceful shutdown")
+
     try:
         # Wait for all futures to complete
         await asyncio.gather(*futures, return_exceptions=True)
     finally:
-        # Clean up runtimes
+        # Clean up runtimes (in case they weren't already shut down by signal handler)
         logger.info("Shutting down DistributedRuntime instances")
         for runtime in runtimes:
             runtime.shutdown()
+
+        # Clean up per-worker temp files
+        for temp_file in per_worker_temp_files:
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
 
 
 def main():

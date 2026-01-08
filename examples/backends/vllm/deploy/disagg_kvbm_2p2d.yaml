@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -33,9 +33,6 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
-            - --gpu-memory-utilization
-            - "0.3"
-            - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager
@@ -66,9 +63,6 @@ spec:
             - --model
             - Qwen/Qwen3-8B
             - --is-prefill-worker
-            - --gpu-memory-utilization
-            - "0.3"
-            - --disable-log-requests
             - --max-model-len
             - "32000"
             - --enforce-eager

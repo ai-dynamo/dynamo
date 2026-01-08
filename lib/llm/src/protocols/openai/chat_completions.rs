@@ -1,18 +1,20 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
+use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
     common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt,
     nvext::NvExtProvider,
-    validate,
+    tools, validate,
 };
 
 pub mod aggregator;
@@ -30,7 +32,7 @@ pub use delta::DeltaGenerator;
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
@@ -42,8 +44,19 @@ pub struct NvCreateChatCompletionRequest {
     pub nvext: Option<NvExt>,
 
     /// Extra args to pass to the chat template rendering context
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Also accepts "chat_template_kwargs" as an alias for compatibility
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
     pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Runtime media decoding parameters.
+    /// When provided, these override the MDC defaults
+    /// Example: `{"video": {"num_frames": 16}}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<MediaDecoder>,
 
     /// Catch-all for unsupported fields - checked during validation
     #[serde(flatten, default, skip_serializing)]
@@ -159,8 +172,48 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     }
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        self.common.guided_json.as_ref()
+    fn get_guided_json(&self) -> Option<serde_json::Value> {
+        if let Some(value) = self.common.guided_json.clone() {
+            return Some(value);
+        }
+
+        // 1) Tool-call guided decoding (highest precedence after explicit guided_json)
+        if let (Some(tool_choice), Some(tools)) =
+            (self.inner.tool_choice.as_ref(), self.inner.tools.as_deref())
+        {
+            match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
+                Ok(Some(schema)) => return Some(schema),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to derive guided_json from tool_choice"
+                    );
+                }
+            }
+        }
+
+        // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
+        if let Some(response_format) = self.inner.response_format.as_ref() {
+            use dynamo_async_openai::types::ResponseFormat;
+            match response_format {
+                ResponseFormat::Text => {}
+                ResponseFormat::JsonObject => {
+                    // Minimal JSON Schema for "any JSON object"
+                    return Some(serde_json::json!({
+                        "type": "object"
+                    }));
+                }
+                ResponseFormat::JsonSchema { json_schema } => {
+                    // validate_response_format ensures schema is present when type=json_schema
+                    if let Some(schema) = json_schema.schema.clone() {
+                        return Some(schema);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn get_guided_regex(&self) -> Option<String> {
@@ -296,7 +349,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for prediction
         // none for audio
         validate::validate_presence_penalty(self.inner.presence_penalty)?;
-        // none for response_format
+        validate::validate_response_format(&self.inner.response_format)?;
         // none for seed
         validate::validate_service_tier(&self.inner.service_tier)?;
         validate::validate_stop(&self.inner.stop)?;

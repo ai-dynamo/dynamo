@@ -1,9 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
-use dynamo_runtime::storage::key_value_store::KeyValueStoreSelect;
+use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use pyo3::IntoPyObjectExt;
@@ -22,6 +22,7 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
+use dynamo_runtime::config;
 use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
@@ -126,10 +127,7 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
         eprintln!(
             "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
@@ -174,6 +172,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
+    m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
@@ -226,8 +225,15 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 
 /// Create an engine and attach it to an endpoint to make it visible to the frontend.
 /// This is the main way you create a Dynamo worker / backend.
+///
+/// If `lora_name` is provided, this function will publish a LoRA adapter instead of a base model:
+/// - LoRA path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
+/// - Base model path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}
+///
+/// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
+/// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -245,6 +251,8 @@ fn register_llm<'p>(
     custom_template_path: Option<&str>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    lora_name: Option<&str>,
+    base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -266,10 +274,12 @@ fn register_llm<'p>(
         ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
     };
 
+    let is_tensor_based = model_type.inner.supports_tensor();
+
     let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
-    let mut model_name = model_name.map(|n| n.to_string());
+    let model_name = model_name.map(|n| n.to_string());
     let router_mode = router_mode.unwrap_or(RouterMode::RoundRobin);
     let router_config = RouterConfig::new(router_mode.into(), KvRouterConfig::default());
 
@@ -293,16 +303,57 @@ fn register_llm<'p>(
             PyErr::new::<PyException, _>(format!("Failed to convert user_data: {}", err))
         })?;
 
+    // Validate LoRA parameters: both or neither must be provided
+    if lora_name.is_some() ^ base_model_path.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "lora_name and base_model_path must both be provided together, or neither",
+        ));
+    }
+
+    // Determine source_path and lora_identifier based on registration mode
+    let (source_path, lora_identifier) = match (lora_name, base_model_path) {
+        (Some(lora), Some(base)) => (base.to_string(), Some(lora.to_string())),
+        _ => (inner_path, None),
+    };
+
+    // Model name: use lora name if present, otherwise provided name or default to source path
+    let model_name = lora_identifier
+        .clone()
+        .or(model_name)
+        .or_else(|| Some(source_path.clone()));
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let model_path = if fs::exists(&inner_path)? {
-            PathBuf::from(inner_path)
-        } else {
-            // Preserve the model name
-            if model_name.is_none() {
-                model_name = Some(inner_path.clone());
+        // For TensorBased models, skip HuggingFace downloads and register directly
+        if is_tensor_based {
+            let model_name = model_name.unwrap_or_else(|| source_path.clone());
+            let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            card.model_type = model_type_obj;
+            card.model_input = model_input;
+            card.user_data = user_data_json;
+
+            if let Some(cfg) = runtime_config {
+                card.runtime_config = cfg.inner;
             }
-            // Likely it's a Hugging Face repo, download it
-            LocalModel::fetch(&inner_path, false)
+
+            // Register the Model Deployment Card via discovery interface
+            let discovery = endpoint.inner.drt().discovery();
+            let spec = rs::discovery::DiscoverySpec::from_model(
+                endpoint.inner.component().namespace().name().to_string(),
+                endpoint.inner.component().name().to_string(),
+                endpoint.inner.name().to_string(),
+                &card,
+            )
+            .map_err(to_pyerr)?;
+            discovery.register(spec).await.map_err(to_pyerr)?;
+
+            return Ok(());
+        }
+
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
+        let model_path = if fs::exists(&source_path)? {
+            PathBuf::from(&source_path)
+        } else {
+            LocalModel::fetch(&source_path, false)
                 .await
                 .map_err(to_pyerr)?
         };
@@ -310,7 +361,7 @@ fn register_llm<'p>(
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
             .model_path(model_path)
-            .model_name(model_name)
+            .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
@@ -320,24 +371,53 @@ fn register_llm<'p>(
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
             .media_fetcher(media_fetcher.map(|m| m.inner));
-        // Load the ModelDeploymentCard
+
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        // Advertise ourself so ingress can find us
         local_model
-            .attach(&endpoint.inner, model_type_obj, model_input)
+            .attach(
+                &endpoint.inner,
+                model_type_obj,
+                model_input,
+                lora_identifier.as_deref(),
+            )
             .await
             .map_err(to_pyerr)?;
+
+        if let Some(lora_name) = lora_identifier {
+            tracing::info!("Registered LoRA '{}' MDC", lora_name);
+        } else {
+            tracing::info!("Registered base model '{:?}' MDC", model_name);
+        }
 
         Ok(())
     })
 }
 
-/// Unregister a model from the endpoint.
+/// Unregister a Model Deployment Card (MDC) from the service registry
+///
+/// This removes an LLM deployment from the discovery system.
+///
+/// # Arguments
+///
+/// * `endpoint` - The endpoint where the model is registered
+/// * `lora_name` - Optional LoRA adapter name (if unregistering a LoRA deployment)
+///
+/// # MDC Path Format
+///
+/// - Base model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}`
+/// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
 #[pyfunction]
-#[pyo3(signature = (endpoint))]
-fn unregister_llm<'p>(py: Python<'p>, endpoint: Endpoint) -> PyResult<Bound<'p, PyAny>> {
+#[pyo3(signature = (endpoint, lora_name=None))]
+fn unregister_llm<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    lora_name: Option<&str>,
+) -> PyResult<Bound<'p, PyAny>> {
+    let lora_name_owned = lora_name.map(|s| s.to_string());
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        LocalModel::detach_model_from_endpoint(&endpoint.inner)
+        // Unified detach method handles both base models and LoRA adapters
+        LocalModel::detach_from_endpoint(&endpoint.inner, lora_name_owned.as_deref())
             .await
             .map_err(to_pyerr)?;
         Ok(())
@@ -455,7 +535,7 @@ enum ModelInput {
 impl DistributedRuntime {
     #[new]
     fn new(event_loop: PyObject, store_kv: String, request_plane: String) -> PyResult<Self> {
-        let selected_kv_store: KeyValueStoreSelect = store_kv.parse().map_err(to_pyerr)?;
+        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
         let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
         // Try to get existing runtime first, create new Worker only if needed
@@ -480,10 +560,7 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
             runtime.secondary().block_on(async {
                 rs::logging::init();
             });
@@ -491,8 +568,15 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
-            nats_config: if request_plane.is_nats() {
+            // NATS is used for more than just the NATS request-plane:
+            // - KV router events (JetStream or NATS core + local indexer)
+            // - inter-router replica sync (NATS core)
+            //
+            // If a NATS server is configured via env, enable the client regardless of request plane.
+            nats_config: if request_plane.is_nats()
+                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+                    .is_ok()
+            {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None
@@ -540,6 +624,84 @@ impl DistributedRuntime {
     fn child_token(&self) -> CancellationToken {
         let inner = self.inner.runtime().child_token();
         CancellationToken { inner }
+    }
+
+    /// Register an async Python callback for /engine/{route_name}
+    ///
+    /// Args:
+    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     callback: Async function with signature: async def(body: dict) -> dict
+    ///
+    /// Example:
+    /// ```python
+    /// async def start_profile(body: dict) -> dict:
+    ///     await engine.start_profile(**body)
+    ///     return {"status": "ok"}
+    ///
+    /// runtime.register_engine_route("start_profile", start_profile)
+    /// ```
+    #[pyo3(signature = (route_name, callback))]
+    fn register_engine_route(
+        &self,
+        py: Python<'_>,
+        route_name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        // Capture TaskLocals at registration time when Python's event loop is running.
+        // This is needed because later, when the callback is invoked from an HTTP request,
+        // we'll be on a Rust thread without a running Python event loop.
+        let locals =
+            Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py).map_err(to_pyerr)?);
+        let callback = Arc::new(callback);
+
+        // Wrap Python async callback in Rust async closure
+        let rust_callback: rs::engine_routes::EngineRouteCallback =
+            Arc::new(move |body: serde_json::Value| {
+                let callback = callback.clone();
+                let locals = locals.clone();
+
+                // Return a boxed future
+                Box::pin(async move {
+                    // Acquire GIL to call Python callback and convert coroutine to future
+                    let py_future = Python::with_gil(|py| {
+                        // Convert body to Python dict
+                        let py_body = pythonize::pythonize(py, &body).map_err(|e| {
+                            anyhow::anyhow!("Failed to convert request body to Python: {}", e)
+                        })?;
+
+                        // Call Python async function to get a coroutine
+                        let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                            anyhow::anyhow!("Failed to call Python callback: {}", e)
+                        })?;
+
+                        // Use the TaskLocals captured at registration time
+                        pyo3_async_runtimes::into_future_with_locals(
+                            &locals,
+                            coroutine.into_bound(py),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
+                        })
+                    })?;
+
+                    // Await the Python coroutine (GIL is released during await)
+                    let py_result = py_future
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
+
+                    // Convert result back to serde_json::Value
+                    Python::with_gil(|py| {
+                        pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
+                            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                    })
+                })
+            });
+
+        self.inner
+            .engine_routes()
+            .register(&route_name, rust_callback);
+        tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
     }
 
     // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
@@ -605,7 +767,7 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
+        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
@@ -636,6 +798,9 @@ impl Endpoint {
         if let Some(payload) = health_payload_json {
             builder = builder.health_check_payload(payload);
         }
+
+        // Register the engine in the local endpoint registry for in-process calls
+        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
 
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

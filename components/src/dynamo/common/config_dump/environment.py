@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import os
@@ -21,6 +21,20 @@ DEFAULT_ENV_PREFIXES = [
     "UCX_",  # UCX
     "NIXL_",  # NIXL
     "OMPI_",  # OpenMPI
+    "LLM_",  # Misc trtllm variables
+    "TLLM_",
+    "TRT_LLM_",
+    "TRTLLM_",
+    "NVIDIA_",
+    "NSYS_",
+    "GENERATE_CU_",
+    "OVERRIDE_",
+    "TOKENIZERS_",
+    "DISABLE_TORCH_",
+    "PYTORCH_",
+    "ENABLE_PERFECT_ROUTER",
+    "FLA_",
+    "NEMOTRON_",
 ]
 
 # Sensitive variable patterns to redact (case-insensitive)
