@@ -307,9 +307,7 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             tensor_request.tensors.push(tensor);
         }
         if let Err(validation_error) = tensor_request.validate() {
-            return Err(Status::invalid_argument(
-                validation_error.to_string(),
-            ));
+            return Err(Status::invalid_argument(validation_error.to_string()));
         }
         Ok(tensor_request)
     }
@@ -539,8 +537,7 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
         let response = extended_response.response;
         if let Err(e) = response.validate() {
             return Err(anyhow::anyhow!(
-                "Invalid NvCreateTensorResponse: {}",
-                e.to_string()
+                "Invalid NvCreateTensorResponse: {}", e
             ));
         }
 
