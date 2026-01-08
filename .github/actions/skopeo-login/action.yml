@@ -24,13 +24,15 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install skopeo
+    - name: Install skopeo 
       shell: bash
       run: |
         if ! command -v skopeo &> /dev/null; then
           echo "Installing skopeo..."
           if [ -f /etc/debian_version ]; then
-            sudo apt-get update && sudo apt-get install -y skopeo
+            # Added --fix-missing to handle 404s on transient package versions
+            sudo apt-get update
+            sudo apt-get install -y --fix-missing skopeo
           elif [ -f /etc/redhat-release ]; then
             sudo dnf install -y skopeo
           else
