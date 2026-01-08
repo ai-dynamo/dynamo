@@ -27,7 +27,7 @@ on:
         type: boolean
         default: false
       build_operator:
-        description: 'Runs the full flow: build, test, copy, and deploy to AKS'
+        description: 'Runs operator build flow'
         required: false
         type: boolean
         default: false
@@ -112,7 +112,7 @@ jobs:
   # ============================================================================
   operator:
     needs: [init]
-    if: github.ref_name == 'main' || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -238,7 +238,7 @@ jobs:
   vllm-pipeline:
     needs: [init]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     with:
       framework: vllm
       arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
@@ -259,7 +259,7 @@ jobs:
   sglang-pipeline:
     needs: [init]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     with:
       framework: sglang
       extra_tags: |
@@ -272,7 +272,7 @@ jobs:
   trtllm-pipeline:
     needs: [init]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     with:
       framework: trtllm
       extra_tags: |
