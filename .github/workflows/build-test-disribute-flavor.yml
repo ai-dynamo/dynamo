@@ -117,7 +117,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-      - name: Calculate extra tags with platform suffix
+      - name: Calculate extra tags with platform suffix # will get redundant upon multi arch builds support 
         id: extra-tags
         shell: bash
         env:
@@ -207,11 +207,12 @@ jobs:
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ inputs.build_image && format('{0}-{1}-amd64', github.sha, inputs.framework) || format('main-{0}-amd64', inputs.framework) }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
           pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
           platform_arch: amd64
+          enable_mypy: 'true'
 
   # ============================================================================
   # COPY TO ACR
@@ -230,20 +231,9 @@ jobs:
         platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
     name: copy ${{ inputs.framework }}-${{ matrix.platform }}
     runs-on: builder-cpu-amd-runner
-    outputs:
-      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
-      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          TARGET_TAG="${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}"
-          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "target_tag_${{ matrix.platform }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
 
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
@@ -253,7 +243,7 @@ jobs:
           source_tag: ${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+          target_tag: ${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}

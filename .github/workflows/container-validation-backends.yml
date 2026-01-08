@@ -4,12 +4,13 @@
 name: Docker Build and Test
 
 
-# TODO before PR:
+# TODO before Merge:
 # - [ ] Remove the ops-2438-ci branch from push: filter
 # - [ ] Have --cache-from use the same annotation as in main. make sure it works
 # - [ ] make sure all "if" are as in main
 # - [ ] Comment in concurrency section.
 # - [ ] Bake skopeo and pre commit envs into the runner
+# - [ ] 
 
 on:
   push:
@@ -247,15 +248,15 @@ jobs:
       arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
       arm_cuda_version: '12.9'
       arm_torch_backend: 'cu129'
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.vllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_image: true 
       run_tests: true
       copy_to_acr: true
       push_image: true
-      builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
   sglang-pipeline:
@@ -269,9 +270,6 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: true
-      copy_to_acr: true
-      push_image: true
       builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
@@ -286,9 +284,6 @@ jobs:
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: true
-      copy_to_acr: true
-      push_image: true
       builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
