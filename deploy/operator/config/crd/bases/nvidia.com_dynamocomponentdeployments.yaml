@@ -10191,7 +10191,7 @@ spec:
                 replicas:
                   description: |-
                     Replicas is the desired number of Pods for this component.
-                    When scalingAdapter is enabled (default), this field is managed by the
+                    When scalingAdapter is enabled, this field is managed by the
                     DynamoGraphDeploymentScalingAdapter and should not be modified directly.
                   format: int32
                   minimum: 0
@@ -10276,15 +10276,15 @@ spec:
                 scalingAdapter:
                   description: |-
                     ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-                    When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+                    When enabled, replicas are managed via DGDSA and external autoscalers can scale
                     the service using the Scale subresource. When disabled, replicas can be modified directly.
                   properties:
-                    disable:
+                    enabled:
                       default: false
                       description: |-
-                        Disable indicates whether the ScalingAdapter should be disabled for this service.
-                        When false (default), a DGDSA is created and owns the replicas field.
-                        When true, no DGDSA is created and replicas can be modified directly in the DGD.
+                        Enabled indicates whether the ScalingAdapter should be enabled for this service.
+                        When true, a DGDSA is created and owns the replicas field.
+                        When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
                       type: boolean
                   type: object
                 serviceName:

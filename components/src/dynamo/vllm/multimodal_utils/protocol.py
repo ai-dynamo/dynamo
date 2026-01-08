@@ -150,6 +150,24 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
     serialized_request: Optional[connect.RdmaMetadata] = None
 
 
+class VLLMNativeEncoderRequest(BaseModel):
+    """Request for vLLM-native encoder worker using ECConnector"""
+
+    request_id: str
+    multimodal_input: MultiModalInput
+    modality: Literal["image", "video", "audio"]
+    batch_items: Optional[List[MultiModalInput]] = None  # For future batch processing
+
+
+class VLLMNativeEncoderResponse(BaseModel):
+    """Response from vLLM-native encoder worker (ECConnector mode)"""
+
+    request_id: str
+    mm_hash: str  # vLLM's multimodal hash identifier
+    modality: str  # "image", "video", "audio"
+    connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
+
+
 class MyRequestOutput(BaseModel):
     """
     RequestOutput from vLLM is not serializable by default

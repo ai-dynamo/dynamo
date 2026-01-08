@@ -148,11 +148,38 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        if (
-            request.multimodal_input.image_url is None
+        # ECConnector consumer mode: vLLM loads embeddings automatically from disk
+        # We need to pass multimodal_input so vLLM can generate mm_hash and look up cache
+        if self.config.ec_consumer_mode:
+            logger.debug(
+                f"[{request.request_id}] ECConnector consumer mode: "
+                f"vLLM will load embeddings from cache using mm_hash"
+            )
+            # Use PIL image loading - vLLM will detect it's already in EC cache
+            # and load from disk instead of reprocessing
+            if request.multimodal_input and request.multimodal_input.image_url:
+                multi_modal_data = {
+                    "image": await self.image_loader.load_image(
+                        request.multimodal_input.image_url
+                    )
+                }
+            elif request.multimodal_input and request.multimodal_input.video_url:
+                # For video, load as image placeholder (vLLM will use EC cache)
+                multi_modal_data = {
+                    "image": await self.image_loader.load_image(
+                        request.multimodal_input.video_url
+                    )
+                }
+            else:
+                raise ValueError(
+                    "ECConnector mode requires multimodal_input with image/video URL"
+                )
+        elif (
+            request.multimodal_input is not None
+            and request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
         ):
-            # Process embeddings using the connector
+            # Network transfer mode: receive embeddings via connector from encoder worker
             # Create a descriptor based on the embedding shape.
             embeddings = torch.empty(
                 request.embeddings_shape,
@@ -184,17 +211,22 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     image_embeds=embeddings,
                     image_grid_thw=request.image_grid_thw,
                 )
-        else:
-            # Use PIL image instead of image embeddings
+        elif request.multimodal_input is not None:
+            # Native mode: Use PIL image instead of image embeddings
             multi_modal_data = {
                 "image": await self.image_loader.load_image(
                     request.multimodal_input.image_url
                 )
             }
+        else:
+            raise ValueError(
+                "Invalid request: multimodal_input is None but not in ec_consumer_mode"
+            )
 
-        # Remove the image features from the request as they are not required
-        request.multimodal_input.image_url = None
-        request.multimodal_input.video_url = None
+        # Clear multimodal_input fields if present (not needed for engine)
+        if request.multimodal_input is not None:
+            request.multimodal_input.image_url = None
+            request.multimodal_input.video_url = None
         request.serialized_request = None
 
         pd_request = copy.deepcopy(request)
