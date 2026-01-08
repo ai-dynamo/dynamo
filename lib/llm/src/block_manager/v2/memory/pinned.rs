@@ -52,7 +52,7 @@ impl PinnedStorage {
         let ptr = unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            let ptr = cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+            let ptr = cudarc::driver::result::malloc_host(len, 0)
                 .map_err(StorageError::Cuda)?;
 
             let ptr = ptr as *mut u8;

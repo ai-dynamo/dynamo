@@ -187,15 +187,12 @@ impl PinnedStorage {
                     Ok(ptr) => ptr,
                     Err(e) => {
                         tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
-                        cudarc::driver::result::malloc_host(
-                            size,
-                            sys::CU_MEMHOSTALLOC_WRITECOMBINED,
-                        )
-                        .map_err(StorageError::Cuda)? as *mut u8
+                        cudarc::driver::result::malloc_host(size, 0)
+                            .map_err(StorageError::Cuda)? as *mut u8
                     }
                 }
             } else {
-                cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
+                cudarc::driver::result::malloc_host(size, 0)
                     .map_err(StorageError::Cuda)? as *mut u8
             };
 

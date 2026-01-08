@@ -15,7 +15,7 @@
 use super::get_current_cpu_numa_node;
 use crate::block_manager::storage::cuda::Cuda;
 use cudarc::driver::result::malloc_host;
-use cudarc::driver::sys::CU_MEMHOSTALLOC_WRITECOMBINED;
+// No special flags needed for pinned memory - using 0 for maximum compatibility across all GPU architectures
 use nix::libc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -191,7 +191,7 @@ impl NumaWorker {
             // Allocate CUDA pinned memory
             // This is called from the pinned worker thread, so pages will be
             // allocated on the correct NUMA node via first-touch
-            let ptr = malloc_host(size, CU_MEMHOSTALLOC_WRITECOMBINED)
+            let ptr = malloc_host(size, 0)
                 .map_err(|e| format!("malloc_host failed: {:?}", e))?;
 
             let ptr = ptr as *mut u8;
