@@ -100,13 +100,19 @@ pub struct Scheduler {
     /// KV cache manager for block allocation.
     kv_cache: KVCacheManager,
 
+    /// Currently running requests.
+    #[builder(setter(skip), default = "RunningRequests::new()")]
+    running: RunningRequests,
+
     /// Queue of requests waiting to be scheduled.
     #[builder(setter(skip), default = "WaitingQueue::new()")]
     waiting: WaitingQueue,
 
-    /// Currently running requests.
-    #[builder(setter(skip), default = "RunningRequests::new()")]
-    running: RunningRequests,
+    /// Paused requests that hold blocks but are not scheduled.
+    ///
+    /// Used by the projection system for proactive pause/resume.
+    #[builder(setter(skip), default = "PausedRequests::new()")]
+    paused: PausedRequests,
 
     /// Scheduling policy for request prioritization.
     ///
@@ -137,12 +143,6 @@ pub struct Scheduler {
     // =========================================================================
     // Projection System Fields
     // =========================================================================
-    /// Paused requests that hold blocks but are not scheduled.
-    ///
-    /// Used by the projection system for proactive pause/resume.
-    #[builder(setter(skip), default = "PausedRequests::new()")]
-    paused: PausedRequests,
-
     /// Block budget projector for predicting future block usage.
     ///
     /// Created when `config.enable_projection` is true.
@@ -808,6 +808,7 @@ impl Scheduler {
             if tokens_to_schedule == 0 {
                 // Can't fit any tokens - drop matched blocks and put request back
                 drop(matched_blocks);
+                // todo: do we need to reset the state of the request here?
                 self.waiting.push_front(request);
                 break;
             }

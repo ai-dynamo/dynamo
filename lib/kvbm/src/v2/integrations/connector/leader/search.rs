@@ -77,6 +77,29 @@ impl ConnectorLeader {
         // Check the status of the find session and produce outcome
         let session = slot.onboarding_state_mut().expect("session should exist");
 
+        // todo: if this changes, then we need to update the state of the find or issue a new search op.
+        if session.num_computed_tokens != num_computed_tokens {
+            // todo: add a known issue to github and remote that issue id if this warning is triggered.
+            tracing::error!(
+                "performance issue detected: num_computed_tokens changed from {} to {}; see https://github.com/ai-dynamo/dynamo/issues/5285",
+                session.num_computed_tokens,
+                num_computed_tokens
+            );
+
+            // todo: abort the search and report no matches found.
+            let session = slot.txn_take_onboarding().expect("session should exist");
+            drop(session);
+
+            // if debuging fail here
+            #[cfg(debug_assertions)]
+            panic!(
+                "performance issue detected: see https://github.com/ai-dynamo/dynamo/issues/5285"
+            );
+            // if release, return no matches found.
+            #[cfg(not(debug_assertions))]
+            return Ok(MatchCheckOutcome::NoMatch);
+        }
+
         let outcome = match &session.find_session {
             FindMatchesResult::Ready(ready) => {
                 // Ready result means immediate completion (local only, no async work)
