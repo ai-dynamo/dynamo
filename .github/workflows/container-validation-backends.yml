@@ -112,7 +112,7 @@ jobs:
   # ============================================================================
   operator:
     needs: [init]
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -198,7 +198,6 @@ jobs:
 
   copy-operator-to-acr:
     needs: [operator]
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -214,9 +213,8 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          TARGET_TAG="${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}"
-          echo "target_tag=${TARGET_TAG}" >> $GITHUB_OUTPUT
-          echo "target_tag_${{ matrix.platform.arch }}=${TARGET_TAG}" >> $GITHUB_OUTPUT
+          TARGET_TAG_PLAIN="${{ github.sha }}-dynamo-operator"
+          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
@@ -225,15 +223,14 @@ jobs:
           source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag }}
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
     outputs:
-      target_tag_amd64: ${{ steps.calculate-target-tag.outputs.target_tag_amd64 }}
-      target_tag_arm64: ${{ steps.calculate-target-tag.outputs.target_tag_arm64 }}
+      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
 
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
@@ -357,7 +354,7 @@ jobs:
           --set dynamo-operator.namespaceRestriction.enabled=true \
           --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
           --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
-          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-operator-to-acr.outputs.target_tag_amd64 }}
+          --set dynamo-operator.controllerManager.manager.image.tag=${{ needs.copy-operator-to-acr.outputs.target_tag_plain }}-amd64
         # Wait for all deployments to be ready
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 

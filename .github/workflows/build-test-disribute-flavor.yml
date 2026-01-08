@@ -96,10 +96,10 @@ on:
     outputs:
       image_tag_amd64:
         description: 'AMD64 image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_amd64 }}
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-amd64 }}
       image_tag_arm64:
         description: 'ARM64 image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_arm64 }}
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-arm64 }}
 
 jobs:
   # ============================================================================
@@ -113,6 +113,8 @@ jobs:
         platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
     name: build ${{ inputs.framework }}-${{ matrix.platform }}
     runs-on: builder-cpu-amd-runner
+    outputs:
+      target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -160,11 +162,18 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
+          echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+
       - name: Build Container
         id: build-image
         uses: ./.github/actions/docker-build
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: runtime
           platform: linux/${{ matrix.platform }}
@@ -207,7 +216,7 @@ jobs:
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ github.sha }}-${{ inputs.framework }}-amd64
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-amd64
           pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
@@ -231,6 +240,8 @@ jobs:
         platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
     name: copy ${{ inputs.framework }}-${{ matrix.platform }}
     runs-on: builder-cpu-amd-runner
+    outputs:
+      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -240,10 +251,10 @@ jobs:
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ github.sha }}-${{ inputs.framework }}-${{ matrix.platform }}
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
