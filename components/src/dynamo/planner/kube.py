@@ -46,6 +46,7 @@ class KubernetesAPI:
             config.load_kube_config()  # for out-of-cluster deployment
 
         self.custom_api = client.CustomObjectsApi()
+        self.core_api = client.CoreV1Api()
         self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> dict:

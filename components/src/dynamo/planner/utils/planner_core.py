@@ -192,6 +192,98 @@ def _apply_component_gpu_budget(
     return next_num
 
 
+def _apply_global_power_budget(
+    next_num_p: int,
+    next_num_d: int,
+    args: argparse.Namespace,
+    prometheus_traffic_client: Optional[PrometheusAPIClient] = None,
+) -> tuple[int, int]:
+    """Apply power budget constraint to both prefill and decode replicas.
+
+    When total power required exceeds the budget, scale down both proportionally.
+    Returns the adjusted replica counts.
+    """
+    if not getattr(args, "enable_power_awareness", False):
+        return next_num_p, next_num_d
+
+    # Get current actual power from Prometheus (for logging/observability)
+    if prometheus_traffic_client is not None:
+        try:
+            current_power = prometheus_traffic_client.get_total_cluster_power()
+            logger.debug(f"Current cluster power consumption: {current_power:.1f}W")
+        except Exception as e:
+            logger.warning(f"Failed to query current power, skipping enforcement: {e}")
+            return next_num_p, next_num_d
+
+    # Calculate projected power for the NEW configuration
+    requested_prefill_power = (
+        next_num_p * args.prefill_engine_num_gpu * args.prefill_engine_gpu_power_limit
+    )
+    requested_decode_power = (
+        next_num_d * args.decode_engine_num_gpu * args.decode_engine_gpu_power_limit
+    )
+    requested_total_power = requested_prefill_power + requested_decode_power
+
+    # CLAMPING LOGIC: If we exceed the budget, scale down
+    if requested_total_power > args.total_gpu_power_limit:
+        logger.warning(
+            f"POWER BUDGET EXCEEDED: "
+            f"Requested {requested_total_power:.1f}W > Budget {args.total_gpu_power_limit}W"
+        )
+
+        # Calculate reduction factor to fit within budget
+        reduction_factor = args.total_gpu_power_limit / requested_total_power
+
+        # Apply reduction proportionally
+        next_num_p_capped = max(args.min_endpoint, int(next_num_p * reduction_factor))
+        next_num_d_capped = max(args.min_endpoint, int(next_num_d * reduction_factor))
+
+        # Re-check to handle rounding errors
+        actual_prefill_power = (
+            next_num_p_capped
+            * args.prefill_engine_num_gpu
+            * args.prefill_engine_gpu_power_limit
+        )
+        actual_decode_power = (
+            next_num_d_capped
+            * args.decode_engine_num_gpu
+            * args.decode_engine_gpu_power_limit
+        )
+        actual_total_power = actual_prefill_power + actual_decode_power
+
+        # If still over (due to rounding), reduce decode further
+        if actual_total_power > args.total_gpu_power_limit:
+            remaining_budget = args.total_gpu_power_limit - actual_prefill_power
+            next_num_d_capped = max(
+                args.min_endpoint,
+                int(
+                    remaining_budget
+                    / (args.decode_engine_num_gpu * args.decode_engine_gpu_power_limit)
+                ),
+            )
+            actual_decode_power = (
+                next_num_d_capped
+                * args.decode_engine_num_gpu
+                * args.decode_engine_gpu_power_limit
+            )
+            actual_total_power = actual_prefill_power + actual_decode_power
+
+        logger.warning(
+            f"Power budget enforced: "
+            f"prefill={next_num_p}->{next_num_p_capped}, "
+            f"decode={next_num_d}->{next_num_d_capped}, "
+            f"power={requested_total_power:.1f}W->{actual_total_power:.1f}W"
+        )
+
+        return next_num_p_capped, next_num_d_capped
+    else:
+        logger.info(
+            f"Power budget OK: {requested_total_power:.1f}W / {args.total_gpu_power_limit}W"
+        )
+
+    return next_num_p, next_num_d
+
+
 def _initialize_gpu_counts(
     args: argparse.Namespace,
     connector,
@@ -663,8 +755,8 @@ class BasePlanner:
                 f"Predicted load: num_req={next_num_req:.2f}, isl={next_isl:.2f}, osl={next_osl:.2f}"
             )
             return next_num_req, next_isl, next_osl
-        except Exception as e:
-            logger.error(f"Failed to predict load: {e}")
+        except Exception:
+            logger.exception("Failed to predict load")
             return None, None, None
 
     def dryrun_observe_traffic_stats(

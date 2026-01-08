@@ -87,6 +87,12 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     loadbased_metric_samples = 10  # number of samples per interval
     loadbased_min_observations = 5  # cold start threshold
 
+    # Power awareness settings (default to False for backwards compatibility)
+    enable_power_awareness = False
+    total_gpu_power_limit = 2000  # Watts (must be configured per datacenter!)
+    prefill_engine_gpu_power_limit = 250  # Watts per prefill GPU
+    decode_engine_gpu_power_limit = 250  # Watts per decode GPU
+
 
 class VllmComponentName:
     prefill_worker_k8s_name = "VllmPrefillWorker"

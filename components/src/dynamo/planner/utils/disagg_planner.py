@@ -13,6 +13,7 @@ from dynamo.planner.utils.planner_core import (
     PlannerPrometheusMetrics,
     PlannerSharedState,
     _apply_global_gpu_budget,
+    _apply_global_power_budget,
     _initialize_gpu_counts,
 )
 from dynamo.planner.utils.prefill_planner import PrefillPlanner
@@ -59,6 +60,75 @@ class DisaggPlanner:
     async def _async_init(self):
         # Prefill/Decode share the same connector instance in disagg mode.
         await self.prefill_planner._async_init()
+
+    async def _set_pod_power_limit(
+        self, pod_name: str, namespace: str, power_limit: int
+    ):
+        """Helper to patch a single pod's power limit annotation.
+
+        Args:
+            pod_name: Name of the pod
+            namespace: Namespace of the pod
+            power_limit: Power limit in watts
+        """
+        try:
+            patch = {
+                "metadata": {
+                    "annotations": {
+                        "dynamo.nvidia.com/gpu-power-limit": str(power_limit)
+                    }
+                }
+            }
+            self.prefill_planner.connector.kube_api.core_api.patch_namespaced_pod(
+                name=pod_name, namespace=namespace, body=patch
+            )
+            logger.debug(
+                f"Set power limit annotation on {namespace}/{pod_name}: {power_limit}W"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to patch pod {namespace}/{pod_name}: {e}")
+
+    async def apply_power_limits(self):
+        """Apply power limit annotations to all active worker pods.
+
+        The Power Agent DaemonSet will watch for these annotations
+        and apply the limits via NVML on each node.
+        """
+        if not getattr(self.args, "enable_power_awareness", False):
+            return
+
+        try:
+            prefill_pods = await self.prefill_planner.connector.get_component_pods(
+                SubComponentType.PREFILL,
+                component_name=self.prefill_planner.prefill_component_name,
+            )
+            decode_pods = await self.prefill_planner.connector.get_component_pods(
+                SubComponentType.DECODE,
+                component_name=self.prefill_planner.decode_component_name,
+            )
+
+            for pod in prefill_pods:
+                await self._set_pod_power_limit(
+                    pod["name"],
+                    pod["namespace"],
+                    self.args.prefill_engine_gpu_power_limit,
+                )
+
+            for pod in decode_pods:
+                await self._set_pod_power_limit(
+                    pod["name"],
+                    pod["namespace"],
+                    self.args.decode_engine_gpu_power_limit,
+                )
+
+            logger.info(
+                f"Applied power limits: "
+                f"{len(prefill_pods)} prefill @ {self.args.prefill_engine_gpu_power_limit}W, "
+                f"{len(decode_pods)} decode @ {self.args.decode_engine_gpu_power_limit}W"
+            )
+
+        except Exception:
+            logger.exception("Failed to apply power limits")
 
     async def run(self):
         if not self.args.no_operation:
@@ -153,6 +223,19 @@ class DisaggPlanner:
                     next_num_p, next_num_d = _apply_global_gpu_budget(
                         next_num_p, next_num_d, self.args
                     )
+
+                    # Apply power budget enforcement if enabled
+                    next_num_p, next_num_d = _apply_global_power_budget(
+                        next_num_p,
+                        next_num_d,
+                        self.args,
+                        getattr(
+                            self.prefill_planner,
+                            "prometheus_traffic_client",
+                            None,
+                        ),
+                    )
+
                     self.prefill_planner.update_predicted_replicas_metric(next_num_p)
                     self.decode_planner.update_predicted_replicas_metric(next_num_d)
 
@@ -172,6 +255,9 @@ class DisaggPlanner:
                         await self.prefill_planner.connector.set_component_replicas(
                             target_replicas, blocking=False
                         )
+
+                        # Apply power limit annotations to pods
+                        await self.apply_power_limits()
 
             await asyncio.sleep(self.args.adjustment_interval / 10)
 
@@ -229,6 +315,14 @@ class DisaggPlanner:
             # Apply GPU budget
             final_p, final_d = _apply_global_gpu_budget(final_p, final_d, self.args)
 
+            # Apply power budget enforcement if enabled
+            final_p, final_d = _apply_global_power_budget(
+                final_p,
+                final_d,
+                self.args,
+                getattr(self.prefill_planner, "prometheus_traffic_client", None),
+            )
+
             logger.info(
                 f"Load-based disagg scaling: prefill {self.shared_state.num_p_workers}->{final_p}, "
                 f"decode {self.shared_state.num_d_workers}->{final_d}"
@@ -253,3 +347,6 @@ class DisaggPlanner:
                 await self.prefill_planner.connector.set_component_replicas(
                     target_replicas, blocking=True
                 )
+
+                # Apply power limit annotations to pods
+                await self.apply_power_limits()
