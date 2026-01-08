@@ -27,9 +27,7 @@ def dynamo_worker(enable_nats: bool = True):
 
     Args:
         enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                    If NATS_SERVER env var is set or request_plane is "nats",
-                    NATS is enabled regardless of this parameter.
-                    When enabled without NATS_SERVER env var, uses localhost:4222.
+                    If request_plane is "nats", NATS is always enabled.
                     Pass False (via --no-kv-events flag) to disable NATS initialization.
     """
 

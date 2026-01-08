@@ -53,9 +53,8 @@ class DistributedRuntime:
             store_kv: Key-value store backend ("etcd", "file", or "mem")
             request_plane: Request plane transport ("tcp", "http", or "nats")
             enable_nats: Whether to enable NATS for KV events. Defaults to True.
-                        If NATS_SERVER env var is set or request_plane is "nats",
-                        NATS is enabled regardless of this parameter.
-                        When enabled without NATS_SERVER env var, uses localhost:4222.
+                        If request_plane is "nats", NATS is always enabled.
+                        Pass False to disable NATS initialization (e.g., for approximate routing).
         """
         ...
 

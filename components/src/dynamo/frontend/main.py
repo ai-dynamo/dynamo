@@ -158,19 +158,19 @@ def parse_args():
         "--router-ttl",
         type=float,
         default=float(os.environ.get("DYN_ROUTER_TTL", "120.0")),
-        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled (default mode). Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
+        help="KV Router: Time-to-live in seconds for blocks when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_TTL env var (default: 120.0).",
     )
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
         default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**20))),
-        help="KV Router: Maximum tree size before pruning when KV events are disabled (default mode). Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
     )
     parser.add_argument(
         "--router-prune-target-ratio",
         type=float,
         default=float(os.environ.get("DYN_ROUTER_PRUNE_TARGET_RATIO", "0.8")),
-        help="KV Router: Target size ratio after pruning when KV events are disabled (default mode). Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
+        help="KV Router: Target size ratio after pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_PRUNE_TARGET_RATIO env var (default: 0.8).",
     )
     parser.add_argument(
         "--namespace",
@@ -327,10 +327,7 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
-    # Enable NATS for KV router mode when kv_events are used.
-    # NATS is needed for receiving KV cache events from workers.
-    # When --kv-events is set AND router mode is "kv", NATS is needed.
-    # By default (--no-kv-events), NATS is not needed.
+    # Enable NATS for KV router mode when kv_events are used (when --no-kv-events is not set)
     enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
 
     loop = asyncio.get_running_loop()

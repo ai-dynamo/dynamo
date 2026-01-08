@@ -113,8 +113,7 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    # Enable NATS based on use_kv_events flag (controlled by --no-kv-events)
-    # When enabled, NATS will use NATS_SERVER env var or default to localhost:4222
+    # Enable NATS based on use_kv_events flag (derived from publish_events_and_metrics)
     runtime = DistributedRuntime(
         loop, config.store_kv, config.request_plane, config.use_kv_events
     )

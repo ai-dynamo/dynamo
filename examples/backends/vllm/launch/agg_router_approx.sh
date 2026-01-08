@@ -4,9 +4,6 @@
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
-# Set deterministic hash for KV event IDs
-export PYTHONHASHSEED=0
-
 # Common configuration
 MODEL="Qwen/Qwen3-0.6B"
 BLOCK_SIZE=64

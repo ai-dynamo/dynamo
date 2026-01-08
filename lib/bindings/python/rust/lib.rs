@@ -579,8 +579,7 @@ impl DistributedRuntime {
         // NATS initialization logic:
         // 1. If request_plane is NATS, always enable NATS
         // 2. Otherwise, use enable_nats parameter (defaults to true for backward compat)
-        //
-        // When NATS is enabled but NATS_SERVER is not set, it will use default localhost:4222
+        //    Pass false to disable NATS (e.g., for approximate KV routing mode)
         let enable_nats = enable_nats.unwrap_or(true); // Default to true
 
         let runtime_config = DistributedConfig {
