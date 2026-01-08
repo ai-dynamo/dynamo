@@ -36,6 +36,10 @@ inputs:
     description: 'Enable mypy type checking during test run (true/false)'
     required: false
     default: 'false'
+  enable_coverage:
+    description: 'Enable code coverage collection (true/false)'
+    required: false
+    default: 'false'
 
 
 runs:
@@ -119,7 +123,12 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          COVERAGE_FLAG=""
+          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+            echo "📊 Code coverage collection enabled"
+            COVERAGE_FLAG="--cov=dynamo --cov-report=xml:/workspace/test-results/coverage_python.xml"
+          fi
+          PYTEST_CMD="pytest -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} ${COVERAGE_FLAG} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -189,6 +198,14 @@ runs:
           TOTAL_TESTS=0
           FAILED_TESTS=1  # Treat missing XML as failure
           ERROR_TESTS=0
+        fi
+
+        # Rename coverage file if it exists
+        COV_FILE="test-results/coverage_python.xml"
+        if [[ -f "$COV_FILE" ]]; then
+          COV_NAME="coverage_python_${{ inputs.framework }}_${STR_TEST_TYPE}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+          mv "$COV_FILE" "test-results/$COV_NAME"
+          echo "📊 Renamed coverage file to: $COV_NAME"
         fi
 
         # Exit with original test result to maintain workflow behavior

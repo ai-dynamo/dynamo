@@ -481,10 +481,15 @@ RUN apt-get update -y \
         libclang-dev \
         protobuf-compiler \
         pkg-config \
+        # coverage tools
+        lcov \
         # sudo for dev stage
         sudo \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* \
+    # Install Rust coverage tools
+    && rustup component add llvm-tools-preview \
+    && cargo install cargo-llvm-cov \
     # Add sudo privileges to dynamo user
     && echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
     && chmod 0440 /etc/sudoers.d/dynamo

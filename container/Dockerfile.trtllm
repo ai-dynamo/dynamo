@@ -860,9 +860,15 @@ RUN apt-get update -y && \
         clang \
         libclang-dev \
         protobuf-compiler \
-        pkg-config && \
+        pkg-config \
+        # coverage tools
+        lcov && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
+
+# Install Rust coverage tools
+RUN rustup component add llvm-tools-preview && \
+    cargo install cargo-llvm-cov
 
 # Set umask for group-writable files in dev stage (runs as root)
 RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh

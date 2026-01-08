@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_coverage:
+        description: 'Enable code coverage collection'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -119,6 +124,25 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
+      - name: Build Dev Image
+        if: inputs.enable_coverage
+        id: build_dev
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: dev
+          platform: linux/amd64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ''
+          torch_backend: ''
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: dev-${{ matrix.framework }}-amd64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -126,6 +150,21 @@ jobs:
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Tag and Push Dev Images
+        if: inputs.enable_coverage
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: dev-${{ matrix.framework }}-amd64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-dev-amd64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-dev-amd64-run-${{ github.run_id }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -195,6 +234,25 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
+      - name: Build Dev Image
+        if: inputs.enable_coverage
+        id: build_dev
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: dev
+          platform: linux/arm64
+          base_image_tag: ${{ matrix.base_image_tag }}
+          runtime_image_tag: ${{ matrix.runtime_image_tag }}
+          cuda_version: ${{ matrix.cuda_version }}
+          torch_backend: ${{ matrix.torch_backend }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: dev-${{ matrix.framework }}-arm64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -202,6 +260,21 @@ jobs:
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Tag and Push Dev Images
+        if: inputs.enable_coverage
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: dev-${{ matrix.framework }}-arm64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-dev-arm64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-dev-arm64-run-${{ github.run_id }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -330,20 +403,21 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          IMAGE_TAG: ${{ inputs.enable_coverage && format('{0}-{1}-dev-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) || format('{0}-{1}-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Unit Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          image_tag: ${{ inputs.enable_coverage && format('{0}-{1}-dev-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) || format('{0}-{1}-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) }}
           pytest_marks: ${{ inputs.include_nightly_marks && 'unit and (nightly or post_merge or pre_merge)' || 'unit and (post_merge or pre_merge)' }}
           framework: ${{ matrix.framework }}
           test_type: unit
           platform_arch: ${{ matrix.arch.arch }}
           cpu_limit: '8'
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
@@ -465,19 +539,20 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          IMAGE_TAG: ${{ inputs.enable_coverage && format('{0}-{1}-dev-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) || format('{0}-{1}-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run Integration Tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          image_tag: ${{ inputs.enable_coverage && format('{0}-{1}-dev-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) || format('{0}-{1}-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) }}
           pytest_marks: ${{ inputs.include_nightly_marks && 'integration and (nightly or post_merge or pre_merge)' || 'integration and (post_merge or pre_merge)' }}
           framework: ${{ matrix.framework }}
           test_type: integration
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
@@ -601,19 +676,20 @@ jobs:
         shell: bash
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          IMAGE_TAG: ${{ inputs.enable_coverage && format('{0}-{1}-dev-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) || format('{0}-{1}-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) }}
         run: |
           docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
           docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
       - name: Run E2E Tests (gpu_1)
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          image_tag: ${{ inputs.enable_coverage && format('{0}-{1}-dev-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) || format('{0}-{1}-{2}', env.IMAGE_PREFIX, matrix.framework, matrix.arch.arch) }}
           pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"
           framework: ${{ matrix.framework }}
           test_type: e2e-single-gpu
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
@@ -654,6 +730,9 @@ jobs:
           echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
 
           # Query GitHub API for job status
+
+
+          git
           echo ""
           echo "Querying GitHub API..."
           JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
@@ -750,6 +829,43 @@ jobs:
           test_type: e2e-multi-gpu
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: 'true'
+
+  rust-coverage:
+    name: Rust Coverage (${{ matrix.arch }})
+    needs: [build-amd64, build-arm64]
+    if: always() && inputs.enable_coverage
+    runs-on: ${{ matrix.arch == 'amd64' && 'gpu-l40-amd64' || 'cpu-arm-r8g-4xlarge' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        framework: [vllm]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-dev-${{ matrix.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} nightly-image
+      - name: Run Rust Coverage
+        run: |
+          docker run -w /workspace --name rust_cov nightly-image \
+            bash -ec 'cargo llvm-cov --workspace --lcov --output-path coverage_rust.lcov --features block-manager,media-nixl,media-ffmpeg'
+          docker cp rust_cov:/workspace/coverage_rust.lcov .
+          docker rm rust_cov
+      - name: Upload Rust Coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-coverage-${{ matrix.arch }}-${{ github.run_id }}
+          path: coverage_rust.lcov
+          retention-days: 7
 
   ############################## FAULT TOLERANCE TESTS ##############################
   fault-tolerance-tests:
@@ -938,7 +1054,7 @@ jobs:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests, rust-coverage]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
