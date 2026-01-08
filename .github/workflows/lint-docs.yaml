@@ -1,0 +1,27 @@
+name: Lint Documentation
+on:
+  push:
+    paths:
+      - "**.md"
+    branches:
+      - main
+  pull_request:
+    paths: "**.md"
+permissions:
+  contents: read
+
+jobs:
+  markdown-link-check:
+    name: Broken Links
+    runs-on: ubuntu-latest
+    steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+    - uses: tcort/github-action-markdown-link-check@e7c7a18363c842693fadde5d41a3bd3573a7a225 # v1.1.2
+      with:
+        use-quiet-mode: 'yes'
+        config-file: .markdownlinkcheck.json
