@@ -7,7 +7,7 @@ name: Docker Build and Test
 # TODO before PR:
 # - [ ] Remove the ops-2438-ci branch from push: filter
 # - [ ] Have --cache-from use the same annotation as in main. make sure it works
-# - [ ] Sort out filters.
+# - [ ] make sure all "if" are as in main
 # - [ ] Comment in concurrency section.
 
 on:
@@ -73,6 +73,7 @@ jobs:
       vllm: ${{ steps.changes.outputs.vllm }}
       sglang: ${{ steps.changes.outputs.sglang }}
       trtllm: ${{ steps.changes.outputs.trtllm }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
     permissions:
       contents: read
     steps:
@@ -516,6 +517,7 @@ jobs:
 
 
   clean-k8s-builder:
+    name: Clean K8s builder if exists
     runs-on: builder-cpu-amd-runner
     if: always()
     needs: [init, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
@@ -535,6 +537,7 @@ jobs:
         docker buildx rm ${{ needs.init.outputs.builder_name }} || true
 
   cleanup:
+    name: Cleanup AKS resources
     runs-on: cpu-amd-m5-2xlarge
     if: always()
     needs: [deploy-operator, deploy-test-sglang, deploy-test-trtllm, deploy-test-vllm, deploy-test-vllm-disagg-router]
