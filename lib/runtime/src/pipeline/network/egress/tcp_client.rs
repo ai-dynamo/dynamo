@@ -308,7 +308,7 @@ impl TcpConnection {
     /// to enable parallel encoding across multiple request handlers. The writer
     /// task then performs sequential writes with minimal overhead.
     async fn send_request(&self, payload: Bytes, headers: &Headers) -> Result<Bytes> {
-        use crate::pipeline::network::codec::TcpRequestMessage;
+        use crate::pipeline::network::codec::{TcpRequestHeader, TcpRequestMessage};
 
         // Check health before sending
         if !self.healthy.load(Ordering::Relaxed) {
@@ -321,10 +321,13 @@ impl TcpConnection {
             .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
             .to_string();
 
+        // Extract headers (endpoint path + OTEL headers) from the headers map
+        let header = TcpRequestHeader::from_headers(endpoint_path, headers);
+
         // Encode request on caller's thread (hot path optimization)
         // This allows multiple concurrent callers to encode in parallel
         // rather than serializing through the writer task
-        let request_msg = TcpRequestMessage::new(endpoint_path, payload);
+        let request_msg = TcpRequestMessage::new(header, payload);
         let encoded_data = request_msg.encode()?;
 
         // Create response channel

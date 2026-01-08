@@ -7,7 +7,9 @@
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use dynamo_runtime::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
+use dynamo_runtime::pipeline::network::codec::{
+    TcpRequestHeader, TcpRequestMessage, TcpResponseMessage,
+};
 
 /// Benchmark request encoding (hot path operation)
 fn bench_request_encoding(c: &mut Criterion) {
@@ -21,7 +23,8 @@ fn bench_request_encoding(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.iter(|| {
-                let msg = TcpRequestMessage::new(endpoint.clone(), payload.clone());
+                let header = TcpRequestHeader::new(endpoint.clone());
+                let msg = TcpRequestMessage::new(header, payload.clone());
                 let encoded = msg.encode().unwrap();
                 black_box(encoded);
             });
@@ -57,7 +60,8 @@ fn bench_request_decoding(c: &mut Criterion) {
 
     for size in [100, 1024, 10_240, 102_400].iter() {
         let payload = Bytes::from(vec![0u8; *size]);
-        let msg = TcpRequestMessage::new("api.endpoint.test".to_string(), payload);
+        let header = TcpRequestHeader::new("api.endpoint.test".to_string());
+        let msg = TcpRequestMessage::new(header, payload);
         let encoded = msg.encode().unwrap();
 
         group.throughput(Throughput::Bytes(*size as u64));
@@ -104,7 +108,8 @@ fn bench_request_roundtrip(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, _| {
             b.iter(|| {
-                let msg = TcpRequestMessage::new(endpoint.clone(), payload.clone());
+                let header = TcpRequestHeader::new(endpoint.clone());
+                let msg = TcpRequestMessage::new(header, payload.clone());
                 let encoded = msg.encode().unwrap();
                 let decoded = TcpRequestMessage::decode(&encoded).unwrap();
                 black_box(decoded);

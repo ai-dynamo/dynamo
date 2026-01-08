@@ -11,6 +11,8 @@ use crate::pipeline::network::PushWorkHandler;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
+use opentelemetry::propagation::{Extractor, TextMapPropagator};
+use opentelemetry::trace::TraceContextExt;
 use parking_lot::{Mutex, RwLock};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -216,6 +218,81 @@ impl SharedTcpServer {
         Ok(())
     }
 
+    /// Create a tracing span with OTEL context injection
+    fn create_span_with_otel_context(
+        tcp_header: &crate::pipeline::network::codec::TcpRequestHeader,
+        component_name: &str,
+        endpoint_name: &str,
+        namespace: &str,
+        instance_id: u64,
+    ) -> tracing::Span {
+        use crate::logging::parse_traceparent;
+
+        // Parse traceparent if present to extract trace_id and parent_id
+        let (trace_id, parent_id) = if let Some(ref traceparent) = tcp_header.traceparent {
+            parse_traceparent(traceparent)
+        } else {
+            (None, None)
+        };
+
+        // Extract x_request_id (either from dedicated field or fallback to header)
+        let x_request_id = tcp_header.x_request_id.as_deref();
+
+        // Create span with OTEL fields
+        let span = tracing::info_span!(
+            "handle_payload",
+            component = component_name,
+            endpoint = endpoint_name,
+            namespace = namespace,
+            instance_id = instance_id,
+            trace_id = trace_id.as_deref(),
+            parent_id = parent_id.as_deref(),
+            x_request_id = x_request_id,
+            tracestate = tcp_header.tracestate.as_deref(),
+        );
+
+        // If we have a valid traceparent, try to set the parent context using OpenTelemetry
+        if let Some(ref traceparent_str) = tcp_header.traceparent {
+            use opentelemetry_sdk::propagation::TraceContextPropagator;
+            use std::collections::HashMap;
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+            // Create a simple extractor from our OTEL headers
+            struct OtelHeaderExtractor {
+                headers: HashMap<String, String>,
+            }
+
+            impl Extractor for OtelHeaderExtractor {
+                fn get(&self, key: &str) -> Option<&str> {
+                    self.headers.get(key).map(|s| s.as_str())
+                }
+
+                fn keys(&self) -> Vec<&str> {
+                    self.headers.keys().map(|s| s.as_str()).collect()
+                }
+            }
+
+            let mut headers = HashMap::new();
+            headers.insert("traceparent".to_string(), traceparent_str.clone());
+            if let Some(ref tracestate) = tcp_header.tracestate {
+                headers.insert("tracestate".to_string(), tracestate.clone());
+            }
+
+            let extractor = OtelHeaderExtractor { headers };
+
+            // Extract trace context
+            let trace_propagator = TraceContextPropagator::new();
+            let otel_context = trace_propagator.extract(&extractor);
+
+            // Set the parent context if valid
+            if otel_context.span().span_context().is_valid() {
+                let _ = span.set_parent(otel_context);
+            }
+        }
+
+        span
+    }
+
     async fn handle_connection(
         stream: TcpStream,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
@@ -248,9 +325,9 @@ impl SharedTcpServer {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
         loop {
-            // Read endpoint path length (2 bytes)
-            let mut path_len_buf = [0u8; 2];
-            match read_half.read_exact(&mut path_len_buf).await {
+            // Read header length (4 bytes)
+            let mut header_len_buf = [0u8; 4];
+            match read_half.read_exact(&mut header_len_buf).await {
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     break;
@@ -260,11 +337,11 @@ impl SharedTcpServer {
                 }
             }
 
-            let path_len = u16::from_be_bytes(path_len_buf) as usize;
+            let header_len = u32::from_be_bytes(header_len_buf) as usize;
 
             // Read endpoint path
-            let mut path_buf = vec![0u8; path_len];
-            read_half.read_exact(&mut path_buf).await?;
+            let mut header_buf = vec![0u8; header_len];
+            read_half.read_exact(&mut header_buf).await?;
 
             // Read payload length (4 bytes)
             let mut len_buf = [0u8; 4];
@@ -293,9 +370,9 @@ impl SharedTcpServer {
             read_half.read_exact(&mut payload_buf).await?;
 
             // Reconstruct the full message buffer for decoding using BytesMut
-            let mut full_msg = BytesMut::with_capacity(2 + path_len + 4 + payload_len);
-            full_msg.extend_from_slice(&path_len_buf);
-            full_msg.extend_from_slice(&path_buf);
+            let mut full_msg = BytesMut::with_capacity(2 + header_len + 4 + payload_len);
+            full_msg.extend_from_slice(&header_len_buf);
+            full_msg.extend_from_slice(&header_buf);
             full_msg.extend_from_slice(&len_buf);
             full_msg.extend_from_slice(&payload_buf);
 
@@ -315,11 +392,11 @@ impl SharedTcpServer {
                 }
             };
 
-            let endpoint_path = request_msg.endpoint_path;
-            let payload = request_msg.payload;
+            let TcpRequestMessage { header, payload } = request_msg;
+            let endpoint_path = &header.endpoint_path;
 
             // Look up handler (lock-free read with DashMap)
-            let handler = handlers.get(&endpoint_path).map(|h| h.clone());
+            let handler = handlers.get(endpoint_path).map(|h| h.clone());
 
             let handler = match handler {
                 Some(h) => h,
@@ -361,15 +438,18 @@ impl SharedTcpServer {
             tokio::spawn(async move {
                 tracing::trace!(instance_id, "handling TCP request");
 
+                // Create span with OTEL context injection
+                let span = Self::create_span_with_otel_context(
+                    &header,
+                    &component_name,
+                    &endpoint_name,
+                    &namespace,
+                    instance_id,
+                );
+
                 let result = service_handler
                     .handle_payload(payload)
-                    .instrument(tracing::info_span!(
-                        "handle_payload",
-                        component = component_name.as_str(),
-                        endpoint = endpoint_name.as_str(),
-                        namespace = namespace.as_str(),
-                        instance_id = instance_id,
-                    ))
+                    .instrument(span)
                     .await;
 
                 match result {
