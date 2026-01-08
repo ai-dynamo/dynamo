@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -123,15 +124,6 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
-    "kv-events": {
-        "flags": ["--kv-events"],
-        "action": argparse.BooleanOptionalAction,
-        "dest": "use_kv_events",
-        "default": (
-            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
-        ),  # default is false
-        "help": "Enable/disable NATS initialization for KV events. Use --kv-events to enable or --no-kv-events to disable (default).",
-    },
 }
 
 
@@ -166,7 +158,7 @@ class DynamoArgs:
     dump_config_to: Optional[str] = None
     # local indexer option
     enable_local_indexer: bool = False
-    # Whether to enable NATS for KV events (controlled by --kv-events/--no-kv-events flags)
+    # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
 
 
@@ -480,28 +472,6 @@ async def parse_args(args: list[str]) -> Config:
                 f"Custom Jinja template file not found: {expanded_template_path}"
             )
 
-    dynamo_args = DynamoArgs(
-        namespace=parsed_namespace,
-        component=parsed_component_name,
-        endpoint=parsed_endpoint_name,
-        migration_limit=parsed_args.migration_limit,
-        store_kv=parsed_args.store_kv,
-        request_plane=parsed_args.request_plane,
-        tool_call_parser=tool_call_parser,
-        reasoning_parser=reasoning_parser,
-        custom_jinja_template=expanded_template_path,
-        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
-        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
-        multimodal_processor=parsed_args.multimodal_processor,
-        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
-        multimodal_worker=parsed_args.multimodal_worker,
-        embedding_worker=parsed_args.embedding_worker,
-        dump_config_to=parsed_args.dump_config_to,
-        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
-        use_kv_events=parsed_args.use_kv_events,
-    )
-    logging.debug(f"Dynamo args: {dynamo_args}")
-
     # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
     # That's unfortunate because `parse_args` isn't the right place for this. Fix.
     model_path = parsed_args.model_path
@@ -522,6 +492,43 @@ async def parse_args(args: list[str]) -> Config:
             "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
         )
         server_args.skip_tokenizer_init = True
+
+    # Derive use_kv_events from server_args.kv_events_config
+    # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)
+    use_kv_events = False
+    if server_args.kv_events_config:
+        try:
+            kv_cfg = json.loads(server_args.kv_events_config)
+            use_kv_events = kv_cfg.get("publisher", "null") != "null"
+        except json.JSONDecodeError:
+            logging.warning(
+                f"Failed to parse kv_events_config: {server_args.kv_events_config}"
+            )
+    logging.info(
+        f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
+    )
+
+    dynamo_args = DynamoArgs(
+        namespace=parsed_namespace,
+        component=parsed_component_name,
+        endpoint=parsed_endpoint_name,
+        migration_limit=parsed_args.migration_limit,
+        store_kv=parsed_args.store_kv,
+        request_plane=parsed_args.request_plane,
+        tool_call_parser=tool_call_parser,
+        reasoning_parser=reasoning_parser,
+        custom_jinja_template=expanded_template_path,
+        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
+        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
+        multimodal_processor=parsed_args.multimodal_processor,
+        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
+        multimodal_worker=parsed_args.multimodal_worker,
+        embedding_worker=parsed_args.embedding_worker,
+        dump_config_to=parsed_args.dump_config_to,
+        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        use_kv_events=use_kv_events,
+    )
+    logging.debug(f"Dynamo args: {dynamo_args}")
 
     return Config(server_args, dynamo_args)
 

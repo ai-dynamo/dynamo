@@ -64,13 +64,13 @@ async def worker():
     config = parse_args()
 
     loop = asyncio.get_running_loop()
+    overwrite_args(config)
+
     # Enable NATS based on use_kv_events flag (controlled by --no-kv-events)
     # When enabled, NATS will use NATS_SERVER env var or default to localhost:4222
     runtime = DistributedRuntime(
         loop, config.store_kv, config.request_plane, config.use_kv_events
     )
-
-    overwrite_args(config)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -210,6 +210,13 @@ def setup_kv_event_publisher(
         return None
 
     if config.engine_args.kv_events_config is None:
+        return None
+
+    # Check if kv_cache_events are explicitly disabled
+    if not config.engine_args.kv_events_config.enable_kv_cache_events:
+        logger.info(
+            "KV event publishing skipped: enable_kv_cache_events=False in kv_events_config"
+        )
         return None
 
     # Get data_parallel_size to create publishers for all dp_ranks

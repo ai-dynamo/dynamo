@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-import argparse
 import logging
 import os
 import socket
@@ -85,7 +84,7 @@ class Config:
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
 
-    # Whether to enable NATS for KV events (controlled by --kv-events/--no-kv-events flags)
+    # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
     use_kv_events: bool = False
 
     def has_connector(self, connector_name: str) -> bool:
@@ -261,15 +260,6 @@ def parse_args() -> Config:
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
     parser.add_argument(
-        "--kv-events",
-        action=argparse.BooleanOptionalAction,
-        dest="use_kv_events",
-        default=(
-            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
-        ),  # default is false
-        help="Enable/disable NATS initialization for KV events. Use --kv-events to enable (router receives cache state events from workers) or --no-kv-events to disable (default, router predicts cache state based on routing decisions).",
-    )
-    parser.add_argument(
         "--use-vllm-tokenizer",
         action="store_true",
         default=False,
@@ -407,7 +397,7 @@ def parse_args() -> Config:
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
-    config.use_kv_events = args.use_kv_events
+    # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -464,14 +454,6 @@ def parse_args() -> Config:
 
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
-    # Check if KV events are explicitly disabled via --no-kv-events flag
-    if not config.use_kv_events:
-        logger.info(
-            "KV events disabled by --no-kv-events flag: "
-            "kv_events_config will not be created"
-        )
-        return None
-
     if config.is_decode_worker:
         logger.info(
             f"Decode worker detected (is_decode_worker={config.is_decode_worker}): "
@@ -586,9 +568,13 @@ def overwrite_args(config):
     if kv_transfer_config:
         defaults["kv_transfer_config"] = kv_transfer_config
 
-    defaults["kv_events_config"] = create_kv_events_config(config)
+    kv_cfg = create_kv_events_config(config)
+    defaults["kv_events_config"] = kv_cfg
+    # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
+    config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
     logger.info(
-        f"Using kv_events_config for publishing vLLM kv events over zmq: {defaults['kv_events_config']}"
+        f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
+        f"(use_kv_events={config.use_kv_events})"
     )
 
     logger.debug("Setting Dynamo defaults for vLLM")

@@ -62,7 +62,7 @@ class Config:
         self.store_kv: str = ""
         self.request_plane: str = ""
         self.enable_local_indexer: bool = False
-        # Whether to enable NATS for KV events (controlled by --kv-events flag, default is false)
+        # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
         self.use_kv_events: bool = False
 
     def __str__(self) -> str:
@@ -315,13 +315,6 @@ def cmd_line_args():
         default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
         help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     )
-    parser.add_argument(
-        "--kv-events",
-        action=argparse.BooleanOptionalAction,
-        dest="use_kv_events",
-        default=os.environ.get("DYN_KV_EVENTS", "false").lower() == "true",
-        help="Enable/disable NATS initialization for KV events. Use --kv-events to enable or --no-kv-events to disable (default).",
-    )
 
     args = parser.parse_args()
 
@@ -385,7 +378,8 @@ def cmd_line_args():
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
-    config.use_kv_events = args.use_kv_events
+    # Derive use_kv_events from publish_events_and_metrics
+    config.use_kv_events = config.publish_events_and_metrics
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
