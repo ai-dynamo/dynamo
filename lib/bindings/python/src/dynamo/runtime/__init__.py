@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import signal
 from functools import wraps
 from typing import Any, AsyncGenerator, Callable, Type, Union
 
@@ -21,13 +22,31 @@ from dynamo._core import Namespace as Namespace
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker():
+def _shutdown_handler(runtime):
+    print("Shutdown signal received, cancelling runtime...")
+    runtime.shutdown()
+    print("Runtime shutdown complete.")
+
+
+def _signal_handler(runtime):
+    asyncio.create_task(_shutdown_handler(runtime))
+
+
+def _register_shutdown_signals(runtime: DistributedRuntime):
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: _signal_handler(runtime))
+
+
+def dynamo_worker(register_shutdown: bool = False) -> Callable:
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             runtime = DistributedRuntime(loop, "etcd", request_plane)
+            if register_shutdown:
+                _register_shutdown_signals(runtime)
 
             await func(runtime, *args, **kwargs)
 
