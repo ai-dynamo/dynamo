@@ -88,7 +88,6 @@ class TritonEchoClient:
             def __init__(self):
                 self._completed_requests = queue.Queue()
 
-
         # Define the callback function. Note the last two parameters should be
         # result and error. InferenceServerClient would povide the results of an
         # inference as grpcclient.InferResult in result. For successful
@@ -112,8 +111,10 @@ class TritonEchoClient:
         )
 
         data_item = user_data._completed_requests.get()
-        if isinstance(data_item, Exception):
-            raise(data_item)
+        assert (
+            isinstance(data_item, Exception) is False
+        ), f"Stream inference failed: {data_item}"
+
         output0_data = data_item.as_numpy("INPUT0")
         output1_data = data_item.as_numpy("INPUT1")
 
@@ -126,7 +127,6 @@ class TritonEchoClient:
         assert np.array_equal(input0_data, output0_data)
         assert np.array_equal(input1_data, output1_data)
 
-
     def get_config(self) -> None:
         triton_client = self._client()
         model_name = "echo"
@@ -138,6 +138,6 @@ class TritonEchoClient:
 if __name__ == "__main__":
     client = TritonEchoClient(grpc_port=8000)
     client.check_health()
-    client.run_stream_infer()
+    client.run_infer()
     client.get_config()
     print("Triton echo client ran successfully.")
