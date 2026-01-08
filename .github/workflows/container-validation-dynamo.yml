@@ -50,6 +50,10 @@ jobs:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
       PYTEST_XML_FILE: pytest_test_report.xml
       PYTEST_PARALLEL_XML_FILE: pytest_parallel.xml
+      # Coverage report filenames
+      PYTEST_COV_XML_FILE: coverage_python.xml
+      PYTEST_PARALLEL_COV_XML_FILE: coverage_python_parallel.xml
+      RUST_COV_LCOV_FILE: coverage_rust.lcov
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -77,14 +81,19 @@ jobs:
           docker compose up -d nats-server etcd-server
       - name: Run Rust checks (block-manager + media-nixl + media-ffmpeg + integration tests)
         run: |
-          docker run --rm -w /workspace/lib/llm \
+          docker run -w /workspace/lib/llm \
             --name ${{ env.CONTAINER_ID }}_rust_checks \
             ${{ steps.define_image_tag.outputs.image_tag }} \
             bash -ec 'rustup component add rustfmt clippy && \
                       cargo fmt -- --check && \
                       cargo clippy --features block-manager,media-nixl,media-ffmpeg --no-deps --all-targets -- -D warnings && \
-                      cargo test --locked --all-targets --features=block-manager,media-nixl,media-ffmpeg && \
+                      cargo llvm-cov --workspace --lcov --output-path /workspace/${{ env.RUST_COV_LCOV_FILE }} --features block-manager,media-nixl,media-ffmpeg && \
                       cargo test --locked --features integration -- --nocapture'
+      - name: Copy Rust coverage report from Container
+        if: always()
+        run: |
+          docker cp ${{ env.CONTAINER_ID }}_rust_checks:/workspace/${{ env.RUST_COV_LCOV_FILE }} . || echo "No Rust coverage report found"
+          docker rm -f ${{ env.CONTAINER_ID }}_rust_checks || true
       - name: Cleanup services
         if: always()
         working-directory: ./deploy
@@ -97,11 +106,12 @@ jobs:
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest_parallel \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
-      - name: Copy parallel test report from Container
+            bash -c "pytest --mypy --basetemp=/tmp/pytest-parallel --junitxml=${{ env.PYTEST_PARALLEL_XML_FILE }} --cov=dynamo --cov-report=xml:${{ env.PYTEST_PARALLEL_COV_XML_FILE }} -n 4 -m \"${{ env.PYTEST_MARKS }}\""
+      - name: Copy parallel test and coverage reports from Container
         if: always()
         run: |
           docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_XML_FILE }} . || echo "No parallel test report found"
+          docker cp ${{ env.CONTAINER_ID }}_pytest_parallel:/workspace/${{ env.PYTEST_PARALLEL_COV_XML_FILE }} . || echo "No parallel coverage report found"
       - name: Run pytest (sequential tests)
         env:
           PYTEST_MARKS: "pre_merge and not parallel and not (vllm or sglang or trtllm) and (gpu_0 or gpu_1)"
@@ -109,20 +119,24 @@ jobs:
           docker run -w /workspace \
             --name ${{ env.CONTAINER_ID }}_pytest \
             ${{ steps.define_image_tag.outputs.image_tag }} \
-            bash -c "pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
-      - name: Copy test report from test Container
+            bash -c "pytest --mypy --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} --cov=dynamo --cov-report=xml:${{ env.PYTEST_COV_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\" "
+      - name: Copy test and coverage reports from Container
         if: always()
         run: |
           docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
-      - name: Archive test report
+          docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_COV_XML_FILE }} . || echo "No coverage report found"
+      - name: Archive test and coverage reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: dynamo-python-test-results
-          if-no-files-found: error
+          name: dynamo-test-coverage-results
+          if-no-files-found: warn
           path: |
             ${{ env.PYTEST_XML_FILE }}
             ${{ env.PYTEST_PARALLEL_XML_FILE }}
+            ${{ env.PYTEST_COV_XML_FILE }}
+            ${{ env.PYTEST_PARALLEL_COV_XML_FILE }}
+            ${{ env.RUST_COV_LCOV_FILE }}
 
   event_file:
     name: "Event File"

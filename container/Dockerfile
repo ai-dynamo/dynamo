@@ -470,6 +470,19 @@ COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/whe
 
 FROM runtime AS dev
 
+# Set umask for group-writable files in dev stage (runs as root)
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=/workspace \
+    DYNAMO_HOME=/opt/dynamo \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/usr/local/cargo/bin:$PATH
+
 # Application environment variables
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
@@ -486,12 +499,14 @@ RUN apt-get update -y \
         # sudo for dev stage
         sudo \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/* \
-    # Install Rust coverage tools
-    && rustup component add llvm-tools-preview \
-    && cargo install cargo-llvm-cov \
-    # Add sudo privileges to dynamo user
-    && echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust coverage tools
+RUN rustup component add llvm-tools-preview && \
+    cargo install cargo-llvm-cov
+
+# Add sudo privileges to dynamo user
+RUN echo "dynamo ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/dynamo \
     && chmod 0440 /etc/sudoers.d/dynamo
 
 # Switch to dynamo user
