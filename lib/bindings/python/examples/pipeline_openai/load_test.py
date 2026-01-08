@@ -9,10 +9,16 @@ import time
 import traceback
 
 import aiohttp
+import functools
 import orjson
+import argparse
 
-PAYLOAD = "Hello from request. " * 1  # Adjust payload size as needed
+PAYLOAD_SIZE = None
+CONCURRENCY = None 
 
+@functools.lru_cache(maxsize=1) 
+def get_payload():
+    return "Hello from request. " * PAYLOAD_SIZE  # Adjust payload size as needed
 
 class LoadTestDebugger:
     def __init__(self, base_url: str = "http://localhost:8000"):
@@ -79,7 +85,11 @@ class LoadTestDebugger:
             "messages": [
                 {
                     "role": "user",
-                    "content": f"{PAYLOAD} (Request ID: {request_id})",
+                    "content": get_payload(),
+                },
+                {
+                    "role": "user",
+                    "content": f"request id {request_id}",
                 }
             ],
             "max_tokens": 2,
@@ -234,7 +244,7 @@ async def main():
         # If that works, run the full test
         print("\nRunning full load test...")
         start_time = time.time()
-        await debugger.run_load_test(total_requests=20000, concurrent=10)
+        await debugger.run_load_test(total_requests=10000, concurrent=CONCURRENCY)
         total_time = time.time() - start_time
         print(f"Total test time: {total_time:.2f}s")
 
@@ -248,4 +258,10 @@ async def main():
 
 
 if __name__ == "__main__":
+    argparse = argparse.ArgumentParser()
+    argparse.add_argument("--payload-size", type=int, default=10, help="Size of the payload in each request")
+    argparse.add_argument("--concurrency", type=int, default=48, help="Number of concurrent requests")
+    args = argparse.parse_args()
+    PAYLOAD_SIZE = args.payload_size
+    CONCURRENCY = args.concurrency
     asyncio.run(main())
