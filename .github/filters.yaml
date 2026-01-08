@@ -60,6 +60,7 @@ ignore:
 ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
+  - '.github/labeler.yaml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
 
