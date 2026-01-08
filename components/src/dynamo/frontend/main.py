@@ -150,9 +150,9 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
         default=(
-            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
-        ),  # default is false
-        help="KV Router: Enable/disable KV events. Use --kv-events to enable (router receives cache state events from workers) or --no-kv-events to disable (default, router predicts cache state based on routing decisions).",
+            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
+        ),  # default is true
+        help="KV Router: Enable/disable KV events. Use --kv-events to enable (default, router receives cache state events from workers) or --no-kv-events to disable (router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
         "--router-ttl",
