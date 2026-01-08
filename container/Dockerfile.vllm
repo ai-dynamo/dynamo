@@ -247,6 +247,9 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
+# Use CACHE_BUSTER to force rebuild of sccache layers when needed
+ARG CACHE_BUSTER=2025-01-06
+RUN echo "Cache buster: ${CACHE_BUSTER}"
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \

@@ -31,6 +31,9 @@ ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
+# Cache-busting argument - change this value to force rebuild
+ARG CACHE_BUSTER=2025-01-06
+
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
 #   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
@@ -217,6 +220,9 @@ RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/g
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET
 ARG SCCACHE_REGION
+# Use CACHE_BUSTER to force rebuild of sccache layers when needed
+ARG CACHE_BUSTER=2025-01-06
+RUN echo "Cache buster: ${CACHE_BUSTER}"
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
