@@ -13,7 +13,7 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
@@ -180,7 +180,7 @@ pub struct ModelDeploymentCard {
     /// this field preserves the original repository path needed for downloads.
     /// Falls back to `display_name` if not set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_model: Option<String>,
+    pub source_path: Option<String>,
 
     /// Model information
     pub model_info: Option<ModelInfoType>,
@@ -305,6 +305,9 @@ impl ModelDeploymentCard {
                 // Only include the important fields
                 let mut bytes_to_hash: Vec<u8> = Vec::with_capacity(512);
                 bytes_to_hash.extend(self.display_name.as_bytes());
+                if let Some(source_path) = self.source_path.as_ref() {
+                    bytes_to_hash.extend(source_path.as_bytes());
+                }
 
                 // The files can be either a URL or a local path, so we ignore that and hash their
                 // checksum instead, which won't change wherever they are.
@@ -371,15 +374,19 @@ impl ModelDeploymentCard {
         }
     }
 
+    pub(crate) fn set_source_path(&mut self, source_path: PathBuf) {
+        self.source_path = Some(source_path.display().to_string());
+    }
+
     /// Allow user to override the name we register this model under.
     /// Corresponds to vllm's `--served-model-name`.
     pub fn set_name(&mut self, name: &str) {
-        // Preserve original model path before overwriting display_name
-        if self.source_model.is_none() && !self.display_name.is_empty() {
-            self.source_model = Some(self.display_name.clone());
-        }
         self.display_name = name.to_string();
         self.slug = Slug::from_string(name);
+    }
+
+    pub fn source_path(&self) -> &str {
+        self.source_path.as_ref().unwrap_or(&self.display_name)
     }
 
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
@@ -413,10 +420,48 @@ impl ModelDeploymentCard {
         }
 
         let ignore_weights = true;
-        let model_name = self.source_model.as_ref().unwrap_or(&self.display_name);
-        let local_path = crate::hub::from_hf(model_name, ignore_weights).await?;
+        let local_path = crate::hub::from_hf(self.source_path(), ignore_weights).await?;
 
         self.update_dir(&local_path);
+        Ok(())
+    }
+
+    /// Re-write all the local disk paths as a URL. Do this before publishing the MDC.
+    /// The opposite of `move_to_url` is `update_dir`.
+    pub fn move_to_url(&mut self, base_url: &str) -> anyhow::Result<()> {
+        macro_rules! change {
+            ($field:expr, $enum_variant:path, $filename:literal) => {
+                if let Some($enum_variant(src_file)) = $field.as_mut()
+                    && src_file.is_local()
+                {
+                    let hf_url = url::Url::parse(base_url)
+                        .and_then(|u| u.join($filename))
+                        .context($filename)?;
+                    src_file.move_to_url(hf_url);
+                }
+            };
+        }
+        change!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
+        change!(
+            self.gen_config,
+            GenerationConfig::HfGenerationConfigJson,
+            "generation_config.json"
+        );
+        change!(
+            self.prompt_formatter,
+            PromptFormatterArtifact::HfTokenizerConfigJson,
+            "tokenizer_config.json"
+        );
+        change!(
+            self.chat_template_file,
+            PromptFormatterArtifact::HfChatTemplate,
+            "chat_template.jinja"
+        );
+        change!(
+            self.tokenizer,
+            TokenizerKind::HfTokenizerJson,
+            "tokenizer.json"
+        );
         Ok(())
     }
 
@@ -555,11 +600,13 @@ impl ModelDeploymentCard {
             PromptFormatterArtifact::chat_template_from_disk(local_path)?
         };
 
+        // This gets replaced when we `set_name`
         let display_name = local_path.display().to_string();
+
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
-            source_model: None,
+            source_path: None,
             model_info,
             tokenizer,
             gen_config,
