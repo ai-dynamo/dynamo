@@ -46,6 +46,7 @@ ignore:
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
+  - '.github/labeler.yml'
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
@@ -60,7 +61,6 @@ ignore:
 ci: &ci
   - '.github/workflows/**'
   - '.github/filters.yaml'
-  - '.github/labeler.yml'
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
 
