@@ -8,13 +8,6 @@ on:
     branches:
       - main
       - 'release/*.*.*'
-      - 'pvijayakrish/post-merge-workflow'  # TODO: Remove before merge
-  workflow_dispatch:  # TODO: Remove before merge (or keep for manual testing)
-
-# TODO: Uncomment before merge
-# concurrency:
-#   group: post-merge-ci-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-#   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -27,7 +20,7 @@ jobs:
       pipeline_type: post_merge
       include_nightly_marks: false
       image_prefix: main
-      enable_slack_notification: false
+      enable_slack_notification: true
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
