@@ -42,6 +42,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | WIP |
 | [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ |  |
 | [**LMCache**](./LMCache_Integration.md) | ✅ |  |
+| [**Prompt Embeddings**](./prompt-embeddings.md) | ✅ | Requires `--enable-prompt-embeds` flag |
 
 ### Large Scale P/D and WideEP Features
 
@@ -152,6 +153,10 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 - `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
 - `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 - `--connector`: Specify which kv_transfer_config you want vllm to use `[nixl, lmcache, kvbm, none]`. This is a helper flag which overwrites the engines KVTransferConfig.
+- `--enable-prompt-embeds`: **Enable prompt embeddings feature** (opt-in, default: disabled)
+  - **Required for:** Accepting pre-computed prompt embeddings via API
+  - **Default behavior:** Prompt embeddings DISABLED - requests with `prompt_embeds` will fail
+  - **Error without flag:** `ValueError: You must set --enable-prompt-embeds to input prompt_embeds`
 
 See `args.py` for the full list of configuration options and their defaults.
 
