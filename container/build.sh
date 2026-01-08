@@ -118,7 +118,10 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
+SGLANG_CUDA_VERSION_CU13="13.0.1"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
 SGLANG_PYTHON_VERSION="3.10"
 
 # GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
@@ -419,6 +422,15 @@ get_options() {
             BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${VLLM_RUNTIME_IMAGE_TAG_CU13} "
             echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
+
+
+        if [[ $FRAMEWORK == "SGLANG" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$SGLANG_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${SGLANG_BASE_IMAGE_TAG_CU13} "
+            SGLANG_CUDA_VERSION="${SGLANG_CUDA_VERSION_CU13}"
+            RUNTIME_IMAGE_TAG="${SGLANG_RUNTIME_IMAGE_TAG_CU13}"
+        fi
+
 
         if [ -z "$BASE_IMAGE" ]; then
             error "ERROR: Framework $FRAMEWORK without BASE_IMAGE"
