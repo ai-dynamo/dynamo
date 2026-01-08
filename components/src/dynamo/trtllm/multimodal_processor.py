@@ -17,20 +17,29 @@ import logging
 import time
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, Tuple, Union, Coroutine
+from typing import Any, Coroutine, Dict, List, Optional, Protocol, Tuple, Union
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import torch
-
-from transformers import AutoProcessor, ProcessorMixin
-from tensorrt_llm.inputs import (ConversationMessage, MultimodalData, load_image, 
-                                 load_video, MultimodalDataTracker,
-                                 add_multimodal_placeholders, apply_chat_template)
-from tensorrt_llm.inputs.utils import load_audio, HF_CHAT_TEMPLATE_EXCEPTIONS
+from tensorrt_llm.inputs import (
+    ConversationMessage,
+    MultimodalData,
+    MultimodalDataTracker,
+    add_multimodal_placeholders,
+    apply_chat_template,
+    load_image,
+    load_video,
+)
+from tensorrt_llm.inputs.utils import HF_CHAT_TEMPLATE_EXCEPTIONS, load_audio
 from tensorrt_llm.llmapi.llm_utils import ModelLoader
-from tensorrt_llm.llmapi.tokenizer import tokenizer_factory, TokenizerBase, TransformersTokenizer
+from tensorrt_llm.llmapi.tokenizer import (
+    TokenizerBase,
+    TransformersTokenizer,
+    tokenizer_factory,
+)
 from tensorrt_llm.serve.chat_utils import parse_chat_message_content
+from transformers import AutoProcessor, ProcessorMixin
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -72,12 +81,12 @@ class MultimodalRequestProcessor:
             self.tokenizer = tokenizer
         else:
             self.tokenizer = tokenizer_factory(model_dir)
-        
+
         self.processor = None
         if model_type not in HF_CHAT_TEMPLATE_EXCEPTIONS:
-            self.processor = AutoProcessor.from_pretrained(model_dir,
-                                use_fast=True,
-                                trust_remote_code=True)
+            self.processor = AutoProcessor.from_pretrained(
+                model_dir, use_fast=True, trust_remote_code=True
+            )
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -210,12 +219,14 @@ class MultimodalRequestProcessor:
                 loader_kwargs["mm_embeddings"] = [
                     self.load_tensor_from_path_or_url(path) for path in embedding_paths
                 ]
-                logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
+                logging.debug(
+                    f"Using embedding paths in prefill worker: {embedding_paths}"
+                )
 
             # Process with default_multimodal_input_loader
             # Pass self.tokenizer to reuse the pre-initialized tokenizer instead of
             # creating a new one per request
-            processed_inputs = default_multimodal_input_loader(
+            processed_inputs = multimodal_input_loader(
                 tokenizer=self.tokenizer,
                 processor=self.processor,
                 model_dir=self.model_dir,
@@ -268,21 +279,21 @@ class MultimodalRequestProcessor:
             "choices": [choice],
         }
 
-def default_multimodal_input_loader(
-        *,
-        tokenizer: Optional[Union[TransformersTokenizer, TokenizerBase]],
-        processor: ProcessorMixin,
-        model_dir: str,
-        model_type: str,
-        modality: str,
-        prompts: List[str],
-        media: Optional[Union[List[str], List[List[str]]]] = None,
-        image_data_format: str = "pt",
-        num_frames: int = 8,
-        mm_embeddings: Optional[Union[List[torch.Tensor],
-                                      List[List[torch.Tensor]]]] = None,
-        device: str = "cpu") -> List[dict[str, Union[str, torch.Tensor]]]:
 
+def multimodal_input_loader(
+    *,
+    tokenizer: Optional[Union[TransformersTokenizer, TokenizerBase]],
+    processor: ProcessorMixin,
+    model_dir: str,
+    model_type: str,
+    modality: str,
+    prompts: List[str],
+    media: Optional[Union[List[str], List[List[str]]]] = None,
+    image_data_format: str = "pt",
+    num_frames: int = 8,
+    mm_embeddings: Optional[Union[List[torch.Tensor], List[List[torch.Tensor]]]] = None,
+    device: str = "cpu",
+) -> List[dict[str, Union[str, torch.Tensor]]]:
     def convert_to_conversation_message(
         prompt: str,
         media: Union[Any, List[Any]],
@@ -297,16 +308,15 @@ def default_multimodal_input_loader(
                 if not isinstance(media, list):
                     media = [media]
 
-                mm_data = [{
-                    'modality': modality,
-                    'mm_embedding_info': mm
-                } for mm in media]
+                mm_data = [
+                    {"modality": modality, "mm_embedding_info": mm} for mm in media
+                ]
             else:
                 mm_data = [
-                    MultimodalData(modality=modality,
-                                   data=load_image(i,
-                                                   format=image_data_format,
-                                                   device=device))
+                    MultimodalData(
+                        modality=modality,
+                        data=load_image(i, format=image_data_format, device=device),
+                    )
                     for i in media
                 ]
         elif modality == "video":
@@ -315,11 +325,13 @@ def default_multimodal_input_loader(
                     "External embedding is not supported for video modality yet."
                 )
             mm_data = [
-                MultimodalData(modality=modality,
-                               data=load_video(i,
-                                               num_frames,
-                                               format=image_data_format,
-                                               device=device)) for i in media
+                MultimodalData(
+                    modality=modality,
+                    data=load_video(
+                        i, num_frames, format=image_data_format, device=device
+                    ),
+                )
+                for i in media
             ]
         elif modality == "audio":
             if is_embedding:
@@ -327,8 +339,8 @@ def default_multimodal_input_loader(
                     "External embedding is not supported for audio modality yet."
                 )
             mm_data = [
-                MultimodalData(modality=modality,
-                               data=load_audio(i, device=device)) for i in media
+                MultimodalData(modality=modality, data=load_audio(i, device=device))
+                for i in media
             ]
         elif modality == "image_audio":
             if is_embedding:
@@ -342,9 +354,7 @@ def default_multimodal_input_loader(
                 _modal = None
                 if _modal is None:
                     try:
-                        data = load_image(m,
-                                          format=image_data_format,
-                                          device=device)
+                        data = load_image(m, format=image_data_format, device=device)
                         _modal = "image"
                     except Exception:
                         pass
@@ -362,24 +372,29 @@ def default_multimodal_input_loader(
             for m in media:
                 if m:
                     mm_data.append(
-                        MultimodalData(modality="image",
-                                       data=load_image(m,
-                                                       format=image_data_format,
-                                                       device=device)))
+                        MultimodalData(
+                            modality="image",
+                            data=load_image(m, format=image_data_format, device=device),
+                        )
+                    )
         else:
             raise ValueError(f"Unknown modality: {modality}")
         return ConversationMessage(role="user", content=prompt, media=mm_data)
 
-    assert media is not None or mm_embeddings is not None, "Either media or mm_embeddings must be provided."
-    assert media is None or mm_embeddings is None, "Either media or mm_embeddings must be provided, not both."
+    assert (
+        media is not None or mm_embeddings is not None
+    ), "Either media or mm_embeddings must be provided."
+    assert (
+        media is None or mm_embeddings is None
+    ), "Either media or mm_embeddings must be provided, not both."
     media_or_embeddings = media if media is not None else mm_embeddings
     is_embedding = mm_embeddings is not None
 
     if len(media_or_embeddings) > len(prompts) and len(prompts) == 1:
         # 1 prompt + N media
         assert not isinstance(
-            media_or_embeddings[0],
-            list)  # media cannot be a list of lists in this case
+            media_or_embeddings[0], list
+        )  # media cannot be a list of lists in this case
         media_or_embeddings = [media_or_embeddings]
     assert len(media_or_embeddings) == len(prompts)
 
@@ -388,47 +403,43 @@ def default_multimodal_input_loader(
 
     if processor is None:
         if model_type not in HF_CHAT_TEMPLATE_EXCEPTIONS:
-            processor = AutoProcessor.from_pretrained(model_dir,
-                                                    use_fast=True,
-                                                    trust_remote_code=True)
+            processor = AutoProcessor.from_pretrained(
+                model_dir, use_fast=True, trust_remote_code=True
+            )
 
     inputs = []
-    for prompt_idx, (prompt,
-                     media) in enumerate(zip(prompts, media_or_embeddings)):
-        conv = convert_to_conversation_message(prompt, media, modality,
-                                               is_embedding)
+    for prompt_idx, (prompt, media) in enumerate(zip(prompts, media_or_embeddings)):
+        conv = convert_to_conversation_message(prompt, media, modality, is_embedding)
 
         mm_data_tracker = MultimodalDataTracker(model_type)
         for mdata in conv["media"]:
             # Check if mdata is a MultimodalData
-            if isinstance(mdata,
-                          dict) and "modality" in mdata and "data" in mdata:
+            if isinstance(mdata, dict) and "modality" in mdata and "data" in mdata:
                 mdata_modality = mdata["modality"]
                 if modality == "multiple_image":
                     mdata_modality = "image"
                 mm_data_tracker.add_data(mdata_modality, mdata["data"])
             else:
                 # Add embeddings to the tracker for placeholder handling
-                mm_data_tracker.add_data(mdata["modality"],
-                                         mdata["mm_embedding_info"])
+                mm_data_tracker.add_data(mdata["modality"], mdata["mm_embedding_info"])
         mm_placeholder_counts = mm_data_tracker.placeholder_counts()
         prompt = conv["content"]
         if mm_placeholder_counts:
             conv["content"] = add_multimodal_placeholders(
-                model_type, conv["content"], mm_placeholder_counts)
+                model_type, conv["content"], mm_placeholder_counts
+            )
         prompt = apply_chat_template(
             model_type=model_type,
             tokenizer=tokenizer,
             processor=processor,
             conversation=[conv],
             add_generation_prompt=True,
-            mm_placeholder_counts=[mm_placeholder_counts])
+            mm_placeholder_counts=[mm_placeholder_counts],
+        )
         input = {"prompt": prompt}
         if mm_placeholder_counts:
             if mm_embeddings is not None:
-                input[
-                    "multi_modal_embeddings"] = mm_data_tracker.retrieve_all_sync(
-                    )
+                input["multi_modal_embeddings"] = mm_data_tracker.retrieve_all_sync()
             else:
                 input["multi_modal_data"] = mm_data_tracker.retrieve_all_sync()
         inputs.append(input)
@@ -444,16 +455,18 @@ async def get_multimodal_inputs(
 ) -> List[Any]:
     conversation: List[ConversationMessage] = []
 
-    conversation, mm_coroutines, mm_placeholder_counts = parse_chat_messages_coroutines(messages, model_type)
-    
+    conversation, mm_coroutines, mm_placeholder_counts = parse_chat_messages_coroutines(
+        messages, model_type
+    )
+
     prompt: str = apply_chat_template(
-            model_type=model_type,
-            tokenizer=tokenizer,
-            processor=processor,
-            conversation=conversation,
-            mm_placeholder_counts=mm_placeholder_counts,
-            add_generation_prompt=True,
-        )
+        model_type=model_type,
+        tokenizer=tokenizer,
+        processor=processor,
+        conversation=conversation,
+        mm_placeholder_counts=mm_placeholder_counts,
+        add_generation_prompt=True,
+    )
     input = {"prompt": prompt}
 
     mm_data = await mm_coroutines
@@ -461,11 +474,14 @@ async def get_multimodal_inputs(
         input["multi_modal_data"] = mm_data
     return [input]
 
+
 def parse_chat_messages_coroutines(
     messages: List[Any],
     model_type: str,
-) -> Tuple[List[ConversationMessage], Optional[Coroutine[
-        Any, Any, Optional[Dict[str, List[Any]]]]]]:
+) -> Tuple[
+    List[ConversationMessage],
+    Optional[Coroutine[Any, Any, Optional[Dict[str, List[Any]]]]],
+]:
     """Parse multiple chat messages and return conversation and coroutine."""
     conversation = []
     mm_placeholder_counts = []
@@ -482,9 +498,8 @@ def parse_chat_messages_coroutines(
         mm_placeholder_count = tmp_tracker.placeholder_counts()
         if mm_placeholder_count:
             parsed_msg["content"] = add_multimodal_placeholders(
-                model_type, parsed_msg["content"],
-                mm_placeholder_count)
+                model_type, parsed_msg["content"], mm_placeholder_count
+            )
         mm_placeholder_counts.append(mm_placeholder_count)
 
-    return conversation, mm_data_tracker.retrieve_all_async(
-    ), mm_placeholder_counts
+    return conversation, mm_data_tracker.retrieve_all_async(), mm_placeholder_counts
