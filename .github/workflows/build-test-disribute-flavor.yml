@@ -147,7 +147,7 @@ jobs:
         uses: ./.github/actions/bootstrap-buildkit
         with:
           builder_name: ${{ inputs.builder_name }}
-          buildkit_worker_addresses: '' # ${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.framework, matrix.platform)] }} #todo: use remote...
+          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.framework, matrix.platform)] }} 
           platform: linux/${{ matrix.platform }}
 
       - name: Docker Login

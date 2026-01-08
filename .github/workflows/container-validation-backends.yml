@@ -6,7 +6,7 @@ name: Docker Build and Test
 
 # TODO before PR:
 # - [ ] Remove the ops-2438-ci branch from push: filter
-# - [ ] Have --cache-from use the same annotation as in main. 
+# - [ ] Have --cache-from use the same annotation as in main. make sure it works
 # - [ ] Sort out filters.
 # - [ ] Comment in concurrency section.
 
@@ -62,7 +62,7 @@ jobs:
   # ============================================================================
   # SETUP & DETECTION JOBS
   # ============================================================================
-  changed-files:
+  init:
     runs-on: ubuntu-latest
     name: Detect Changes & Pre-commit
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
@@ -126,7 +126,8 @@ jobs:
           echo "trtllm_all: ${{ steps.filter.outputs.trtllm_all_all_changed_files }}"
       - name: Export builder name
         id: export-builder-name
-        run: echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
       # - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 #v6.1.0
       # - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
       #   timeout-minutes: 3
@@ -136,8 +137,8 @@ jobs:
   # Operator
   # ============================================================================
   operator:
-    needs: [changed-files]
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+    needs: [init]
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -157,8 +158,8 @@ jobs:
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
         with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          buildkit_worker_addresses: '' # ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
+          builder_name: ${{ needs.init.outputs.builder_name }}
+          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
           platform: linux/${{ matrix.platform.arch }}
       - name: Docker Login
         uses: ./.github/actions/docker-login
@@ -223,7 +224,7 @@ jobs:
 
   # copy-operator-to-acr:
   #   needs: [operator]
-  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
+  #   # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.operator == 'true' || github.event.inputs.run_full_flow == 'true'
   #   strategy:
   #     fail-fast: true
   #     matrix:
@@ -264,16 +265,16 @@ jobs:
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
   vllm-pipeline:
-    needs: [changed-files]
+    needs: [init]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.changed-files.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'vllm') || needs.init.outputs.vllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: vllm
       arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
       arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
       arm_cuda_version: '12.9'
       arm_torch_backend: 'cu129'
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.vllm_container == 'true' }}
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.vllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
@@ -282,16 +283,16 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
   sglang-pipeline:
-    needs: [changed-files]
+    needs: [init]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.changed-files.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'sglang') || needs.init.outputs.sglang_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: sglang
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.sglang_container == 'true' }}
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.sglang_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
@@ -300,16 +301,16 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
   trtllm-pipeline:
-    needs: [changed-files]
+    needs: [init]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.changed-files.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
+    # if: github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || contains(github.event.inputs.build_flavors, 'trtllm') || needs.init.outputs.trtllm_all == 'true' || github.event.inputs.run_full_flow == 'true'
     with:
       framework: trtllm
-      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.changed-files.outputs.trtllm_container == 'true' }}
+      build_image: true # ${{ contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || github.ref_name == 'main' || startsWith(github.ref_name, 'release/') || needs.init.outputs.trtllm_container == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
@@ -318,7 +319,7 @@ jobs:
       copy_to_acr: false
       push_image: false
       no_load: true
-      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
 
@@ -559,7 +560,7 @@ jobs:
   clean-k8s-builder:
     runs-on: builder-cpu-amd-runner
     if: always()
-    needs: [operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    needs: [init, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -567,12 +568,12 @@ jobs:
       uses: ./.github/actions/bootstrap-buildkit
       continue-on-error: true
       with:
-        builder_name: ${{ env.BUILDER_NAME }}
+        builder_name: ${{ needs.init.outputs.builder_name }}
         buildkit_worker_addresses: '' # k8s builder
     - name: Builder Cleanup in case of k8s builder 
       shell: bash
       run: |
-        docker buildx rm ${{ env.BUILDER_NAME }} || true
+        docker buildx rm ${{ needs.init.outputs.builder_name }}|| true
   
   # cleanup:
   #   runs-on: cpu-amd-m5-2xlarge
