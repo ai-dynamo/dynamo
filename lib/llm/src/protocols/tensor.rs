@@ -146,7 +146,6 @@ pub struct Tensor {
 
 impl validator::Validate for Tensor {
     fn validate(&self) -> Result<(), validator::ValidationErrors> {
-        tracing::info!("Validating Tensor: {:?}", self);
         use validator::{ValidationError, ValidationErrors};
         let mut errs = ValidationErrors::new();
 
