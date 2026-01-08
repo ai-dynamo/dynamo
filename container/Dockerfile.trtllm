@@ -866,9 +866,11 @@ RUN apt-get update -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Rust coverage tools
-RUN rustup component add llvm-tools-preview && \
-    cargo install cargo-llvm-cov
+# Copy rust installation from dynamo_base to avoid duplication efforts
+# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
+COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
+RUN chmod g+w /usr/local/rustup /usr/local/cargo
 
 # Set umask for group-writable files in dev stage (runs as root)
 RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
@@ -883,11 +885,9 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
+# Install Rust coverage tools
+RUN rustup component add llvm-tools-preview && \
+    cargo install cargo-llvm-cov
 
 # Install maturin, for maturin develop
 RUN uv pip install --no-cache maturin[patchelf]
