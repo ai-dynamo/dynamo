@@ -61,12 +61,23 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
+    # Emebdding Cache Processor is different from the regular processor
+    # TODO: Have a single processor for all cases and adopting rust based processor
+    ec_processor: bool = False
     multimodal_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+
+    # vLLM-native encoder worker (ECConnector mode)
+    vllm_native_encoder_worker: bool = False
+    ec_connector_backend: Optional[str] = "ECExampleConnector"
+    ec_storage_path: Optional[str] = None
+    ec_extra_config: Optional[str] = None
+    ec_consumer_mode: bool = False
+
     # dump config to file
     dump_config_to: Optional[str] = None
 
@@ -154,6 +165,11 @@ def parse_args() -> Config:
         help="Run as multimodal processor component for handling multimodal requests",
     )
     parser.add_argument(
+        "--ec-processor",
+        action="store_true",
+        help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers)",
+    )
+    parser.add_argument(
         "--multimodal-encode-worker",
         action="store_true",
         help="Run as multimodal encode worker component for processing images/videos",
@@ -190,6 +206,34 @@ def parse_args() -> Config:
             "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
             "'USER: <image> please describe the image ASSISTANT:'."
         ),
+    )
+    parser.add_argument(
+        "--vllm-native-encoder-worker",
+        action="store_true",
+        help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
+    )
+    parser.add_argument(
+        "--ec-connector-backend",
+        type=str,
+        default="ECExampleConnector",
+        help="ECConnector implementation class for encoder disaggregation. Default: ECExampleConnector (disk-based)",
+    )
+    parser.add_argument(
+        "--ec-storage-path",
+        type=str,
+        default=None,
+        help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends)",
+    )
+    parser.add_argument(
+        "--ec-extra-config",
+        type=str,
+        default=None,
+        help="Additional ECConnector configuration as JSON string",
+    )
+    parser.add_argument(
+        "--ec-consumer-mode",
+        action="store_true",
+        help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
     parser.add_argument(
         "--store-kv",
@@ -271,27 +315,42 @@ def parse_args() -> Config:
     # Check multimodal role exclusivity
     mm_flags = (
         int(bool(args.multimodal_processor))
+        + int(bool(args.ec_processor))
         + int(bool(args.multimodal_encode_worker))
         + int(bool(args.multimodal_worker))
         + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
+        + int(bool(args.vllm_native_encoder_worker))
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --multimodal-encode-worker, --multimodal-worker, --multimodal-decode-worker, or --multimodal-encode-prefill-worker"
+            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
+            "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
         )
 
     if mm_flags == 1 and not args.enable_multimodal:
         raise ValueError("Use --enable-multimodal to enable multimodal processing")
 
+    # Validate vLLM-native encoder worker config
+    if args.vllm_native_encoder_worker:
+        if (
+            args.ec_connector_backend == "ECExampleConnector"
+            and not args.ec_storage_path
+        ):
+            raise ValueError(
+                "--ec-storage-path is required when using ECExampleConnector backend. "
+                "Specify a shared storage path for encoder cache."
+            )
+
     # Set component and endpoint based on worker type
-    if args.multimodal_processor:
+    if args.multimodal_processor or args.ec_processor:
         config.component = "processor"
         config.endpoint = "generate"
-    elif args.multimodal_encode_worker:
-        config.component = "encoder"
-        config.endpoint = "generate"
-    elif args.multimodal_encode_prefill_worker:
+    elif (
+        args.vllm_native_encoder_worker
+        or args.multimodal_encode_worker
+        or args.multimodal_encode_prefill_worker
+    ):
         config.component = "encoder"
         config.endpoint = "generate"
     elif args.multimodal_decode_worker:
@@ -319,12 +378,18 @@ def parse_args() -> Config:
     config.custom_jinja_template = args.custom_jinja_template
     config.dyn_endpoint_types = args.dyn_endpoint_types
     config.multimodal_processor = args.multimodal_processor
+    config.ec_processor = args.ec_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
+    config.ec_connector_backend = args.ec_connector_backend
+    config.ec_storage_path = args.ec_storage_path
+    config.ec_extra_config = args.ec_extra_config
+    config.ec_consumer_mode = args.ec_consumer_mode
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer
@@ -510,7 +575,9 @@ def overwrite_args(config):
             setattr(config.engine_args, key, value)
             logger.debug(f" engine_args.{key} = {value}")
         else:
-            raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
+            logger.debug(
+                f" Skipping engine_args.{key} (not available in this vLLM version)"
+            )
 
 
 def get_host_ip() -> str:

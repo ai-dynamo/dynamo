@@ -49,6 +49,7 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](in
 | E/PD (Encode Separate) | ✅ | `agg_multimodal_epd.sh` | Separate encode worker |
 | E/P/D (Full Disaggregation) | ✅ | `disagg_multimodal_epd.sh` | All stages separate |
 | EP/D (Traditional Disaggregated) | ✅ | `disagg_multimodal_llama.sh` | For Llama 4 models |
+| E/PD (EC Connector) | ✅ | `agg_multimodal_ec_connector.sh` | vLLM-native encoder with ECConnector |
 
 ### Component Flags
 
@@ -60,6 +61,7 @@ vLLM supports all multimodal deployment patterns. See [Architecture Patterns](in
 | Prefill Worker | `--multimodal-worker --is-prefill-worker` | Prefill only |
 | Decode Worker | `--multimodal-decode-worker` | Decode only |
 | Encode+Prefill Worker | `--multimodal-encode-prefill-worker --is-prefill-worker` | Combined (Llama 4) |
+| vLLM Native Encoder | `--vllm-native-encoder-worker` | vLLM-native encoding with ECConnector |
 
 ## Use the Latest Release
 
@@ -171,6 +173,34 @@ bash launch/disagg_multimodal_epd.sh --model llava-hf/llava-1.5-7b-hf
 ```
 
 > [!NOTE] Disaggregation is currently only confirmed to work with LLaVA. Qwen2.5-VL is not confirmed to be supported.
+
+## ECConnector Serving
+
+ECConnector is vLLM's native connector for transferring multimodal embeddings via an Embedding Cache. The encoder worker acts as a **producer** (writes embeddings), while the PD worker acts as a **consumer** (reads embeddings).
+
+**Workflow:**
+
+```mermaid
+flowchart LR
+  HTTP --> processor[EC Processor]
+  processor --image_url--> encoder[vLLM Native Encoder<br/>Producer]
+  encoder --writes--> cache[(Embedding Cache)]
+  cache --reads--> pd[PD Worker<br/>Consumer]
+  pd --> processor
+  processor --> HTTP
+```
+
+**Launch:**
+
+```bash
+cd $DYNAMO_HOME/examples/backends/vllm
+bash launch/agg_multimodal_ec_connector.sh --model llava-hf/llava-1.5-7b-hf
+
+# Custom storage path for Embedding Cache
+bash launch/agg_multimodal_ec_connector.sh --ec-storage-path /shared/encoder-cache
+```
+
+**Client:** Same as [E/PD Serving](#epd-serving-encode-separate)
 
 ## Llama 4 Serving
 
@@ -431,6 +461,7 @@ bash launch/audio_disagg.sh
 | E/PD (Encode Separate) | `agg_multimodal_epd.sh` | Yes | Encoder → PD (embeddings) |
 | E/P/D (Full Disaggregation) | `disagg_multimodal_epd.sh` | Yes | Encoder → Prefill (embeddings), Prefill → Decode (KV cache) |
 | EP/D (Llama 4) | `disagg_multimodal_llama.sh` | Yes | Prefill → Decode (KV cache) |
+| E/PD (EC Connector) | `agg_multimodal_ec_connector.sh` | No | ECConnector via Embedding Cache |
 
 ## ModelInput Types and Registration
 
@@ -487,5 +518,5 @@ For a complete list of multimodal models supported by vLLM, see [vLLM Supported 
 | `components/src/dynamo/vllm/main.py` | Worker initialization and setup |
 | `components/src/dynamo/vllm/args.py` | Command-line argument parsing |
 | `components/src/dynamo/vllm/multimodal_handlers/processor_handler.py` | Processor implementation |
-| `components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py` | Encode worker implementation |
+| `components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py` | Encode worker implementations (custom and vLLM-native) |
 | `components/src/dynamo/vllm/multimodal_handlers/worker_handler.py` | PD/Prefill/Decode worker implementation |
