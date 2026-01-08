@@ -26,21 +26,11 @@ on:
         required: false
         type: boolean
         default: false
-      build_operator:
-        description: 'Runs operator build flow'
-        required: false
-        type: boolean
-        default: false
       build_flavors:
         description: 'Comma-separated list of flavors to build (vllm,sglang,trtllm). Leave empty to use change detection.'
         required: false
         type: string
         default: ''
-      deployment_test:
-        description: 'If set to true, runs the deployment test'
-        required: false
-        type: boolean
-        default: false
       no_cache_builds:
         description: 'Disable Docker build cache for all container builds'
         required: false
@@ -395,7 +385,7 @@ jobs:
           framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
         if: always()
         with:
           name: test-results-vllm-${{ matrix.profile }}-${{ github.run_id }}
@@ -419,7 +409,8 @@ jobs:
     steps:
       - name: Output Node Name
         run: echo ${K8S_NODE_NAME}
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -431,7 +422,7 @@ jobs:
           framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
         if: always()
         with:
           name: test-results-vllm-${{ matrix.profile }}-${{ github.run_id }}
@@ -456,7 +447,8 @@ jobs:
     steps:
       - name: Output Node Name
         run: echo ${K8S_NODE_NAME}
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -468,7 +460,7 @@ jobs:
           framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.sglang-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
         if: always()
         with:
           name: test-results-sglang-${{ matrix.profile }}-${{ github.run_id }}
@@ -495,7 +487,8 @@ jobs:
     steps:
       - name: Output Node Name
         run: echo ${K8S_NODE_NAME}
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Run Dynamo Deploy Test
         id: deploy-test
         uses: ./.github/actions/dynamo-deploy-test
@@ -507,7 +500,7 @@ jobs:
           framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.trtllm-pipeline.outputs.image_tag_amd64 }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
         if: always()
         with:
           name: test-results-trtllm-${{ matrix.profile }}-${{ github.run_id }}
@@ -550,7 +543,8 @@ jobs:
       shell: bash
       run: |
         echo ${K8S_NODE_NAME}
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
     - name: Setup Kubeconfig
       env:
         NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
