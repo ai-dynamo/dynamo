@@ -268,7 +268,6 @@ func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1
 	return err
 }
 
-
 func (v *DynamoGraphDeploymentValidator) validateRestart() error {
 	if v.deployment.Spec.Restart == nil {
 		return nil
@@ -347,3 +346,4 @@ func difference(a, b map[string]struct{}) []string {
 		}
 	}
 	return result
+}
