@@ -490,14 +490,23 @@ async def parse_args(args: list[str]) -> Config:
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 
-    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
-    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
     model_path = parsed_args.model_path
+    # Name the model
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
+    # Download the model if necessary using modelexpress.
+    # We don't set `parsed_args.model_path` to the local path fetch_llm returns
+    # because sglang will send this to its pipeline-parallel workers, which may
+    # not have the local path.
+    # sglang will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
     if not os.path.exists(model_path):
-        parsed_args.model_path = await fetch_llm(model_path)
+        await fetch_llm(model_path)
 
+    # TODO: sglang downloads the model in `from_cli_args`, which means we had to
+    # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
+    # contain code to download a model, it should only parse the args.
     server_args = ServerArgs.from_cli_args(parsed_args)
 
     if parsed_args.use_sglang_tokenizer:
