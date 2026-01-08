@@ -18,6 +18,7 @@ prefill:
       allowed_backends:
       - cutlass
       - cublaslt
+      - cutedsl
       - cuda_core
     kv_cache_config:
       enable_block_reuse: false
@@ -70,6 +71,7 @@ decode:
       allowed_backends:
       - cutlass
       - cublaslt
+      - cutedsl
       - cuda_core
     cache_transceiver_config:
       max_tokens_in_buffer: 16384
