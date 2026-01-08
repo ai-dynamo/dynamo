@@ -44,7 +44,17 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
 
     if args.model:
         logger.info(f"Updating model in DGD config file to {args.model}")
-        config = config_modifier.update_model(config, args.model)
+        if args.model_cache_pvc_name:
+            config = config_modifier.update_model_from_pvc(
+                config,
+                args.model,
+                args.model_cache_pvc_name,
+                args.model_cache_pvc_mount_path,
+                args.model_cache_pvc_path,
+            )
+        else:
+            # Non-PVC: workers download from HF, so model_path == model_name
+            config = config_modifier.update_model(config, args.model, args.model)
         if args.dgd_image:
             logger.info(f"Updating DGD image to {args.dgd_image}")
             config = config_modifier.update_image(config, args.dgd_image)
@@ -58,11 +68,30 @@ def auto_generate_search_space(args: argparse.Namespace) -> None:
 
     # get model info and update args
     model_info: ModelInfo | None = None
-    if not args.model:
+    model_name_or_path = ""
+    if args.model:
+        # prioritize using model cache in PVC over downloading from HF
+        if args.model_cache_pvc_name:
+            # Keep consistent path normalization with config mutation logic
+            model_name_or_path = config_modifier._normalize_model_path(
+                args.model_cache_pvc_mount_path, args.model_cache_pvc_path
+            )
+        else:
+            model_name_or_path = args.model
+    else:
         # get the model name from config
         args.model = config_modifier.get_model_name(config)
-    logger.info(f"Getting model info for {args.model}...")
-    model_info = get_model_info(args.model)
+        model_name_or_path = args.model
+    logger.info(f"Getting model info for {args.model} at {model_name_or_path}...")
+    try:
+        model_info = get_model_info(model_name_or_path)
+    except Exception as e:
+        # Common in dry-run mode when the PVC isn't mounted locally.
+        logger.warning(
+            f"Failed to load model info from local path '{model_name_or_path}': {e}. "
+            f"Trying to download from HF for '{args.model}'."
+        )
+        model_info = get_model_info(args.model)
 
     num_experts_str = (
         f", num_experts={model_info.num_experts}"
