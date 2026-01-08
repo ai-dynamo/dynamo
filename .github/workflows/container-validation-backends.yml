@@ -9,6 +9,7 @@ name: Docker Build and Test
 # - [ ] Have --cache-from use the same annotation as in main. make sure it works
 # - [ ] make sure all "if" are as in main
 # - [ ] Comment in concurrency section.
+# - [ ] Bake skopeo and pre commit envs into the runner
 
 on:
   push:
@@ -63,7 +64,7 @@ jobs:
   # SETUP & DETECTION JOBS
   # ============================================================================
   init:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     name: Detect Changes & Pre-commit
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
@@ -93,6 +94,16 @@ jobs:
       - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 #v6.1.0
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
         timeout-minutes: 3
+
+
+  backend-status-check:
+    runs-on: ubuntu-slim
+    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    if: always()
+    steps:
+      - name: "Check all dependent jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
 
   # ============================================================================
