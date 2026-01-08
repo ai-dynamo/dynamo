@@ -306,11 +306,7 @@ func (r *DynamoGraphDeploymentReconciler) isGrovePathway(dgd *nvidiacomv1alpha1.
 		enableGrove = false
 	}
 
-	if enableGrove && r.Config.Grove.Enabled {
-		return true
-	}
-
-	return false
+	return enableGrove && r.Config.Grove.Enabled
 }
 
 func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgress(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, inProgress []string) ([]string, error) {

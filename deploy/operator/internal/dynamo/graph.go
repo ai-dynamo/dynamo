@@ -44,6 +44,8 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
+const rfc3339Format = "2006-01-02T15:04:05Z07:00"
+
 // RestartState holds the restart state for DGD services.
 type RestartState struct {
 	// Timestamp is the restart timestamp to apply as the annotation value.
@@ -71,17 +73,17 @@ func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v
 		// Check if there's a completed restart we need to preserve
 		if restartStatus.ObservedAt != nil {
 			return &RestartState{
-				Timestamp:          restartStatus.ObservedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Timestamp:          restartStatus.ObservedAt.Format(rfc3339Format),
 				ServicesToAnnotate: getAllServiceNames(dgd),
 			}
 		}
 		return nil
 	}
 
-	specAt := dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00")
+	specAt := dgd.Spec.Restart.At.Format(rfc3339Format)
 
 	isNewRestart := restartStatus.ObservedAt == nil ||
-		dgd.Spec.Restart.At.Format("2006-01-02T15:04:05Z07:00") != restartStatus.ObservedAt.Format("2006-01-02T15:04:05Z07:00")
+		dgd.Spec.Restart.At.Format(rfc3339Format) != restartStatus.ObservedAt.Format(rfc3339Format)
 
 	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseCompleted {
 		return &RestartState{
