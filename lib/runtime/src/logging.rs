@@ -335,6 +335,61 @@ pub fn make_handle_payload_span(
     }
 }
 
+/// Create a handle_payload span from TraceParent with component context (for TCP transport)
+///
+/// This function is used by the TCP transport layer to create spans with trace context
+/// propagated from the client. It uses the same OTEL context extraction as the NATS
+/// transport to ensure consistent distributed tracing across transport mechanisms.
+pub fn make_tcp_handle_payload_span(
+    trace_parent: &TraceParent,
+    component: &str,
+    endpoint: &str,
+    namespace: &str,
+    instance_id: u64,
+) -> Span {
+    if let (Some(trace_id), Some(parent_id)) = (&trace_parent.trace_id, &trace_parent.parent_id) {
+        // Create temporary NATS headers to extract OTEL context using existing infrastructure
+        let mut headers = async_nats::HeaderMap::new();
+        let traceparent_str = format!("00-{}-{}-01", trace_id, parent_id);
+        headers.insert("traceparent", traceparent_str.as_str());
+
+        if let Some(ref tracestate) = trace_parent.tracestate {
+            headers.insert("tracestate", tracestate.as_str());
+        }
+
+        let (otel_context, _, _) = extract_otel_context_from_nats_headers(&headers);
+
+        let span = tracing::info_span!(
+            "handle_payload",
+            trace_id = trace_id.as_str(),
+            parent_id = parent_id.as_str(),
+            x_request_id = trace_parent.x_request_id.as_deref(),
+            x_dynamo_request_id = trace_parent.x_dynamo_request_id.as_deref(),
+            tracestate = trace_parent.tracestate.as_deref(),
+            component = component,
+            endpoint = endpoint,
+            namespace = namespace,
+            instance_id = instance_id,
+        );
+
+        if let Some(context) = otel_context {
+            let _ = span.set_parent(context);
+        }
+        span
+    } else {
+        tracing::info_span!(
+            "handle_payload",
+            x_request_id = trace_parent.x_request_id.as_deref(),
+            x_dynamo_request_id = trace_parent.x_dynamo_request_id.as_deref(),
+            tracestate = trace_parent.tracestate.as_deref(),
+            component = component,
+            endpoint = endpoint,
+            namespace = namespace,
+            instance_id = instance_id,
+        )
+    }
+}
+
 /// Extract OpenTelemetry trace context from NATS headers for distributed tracing
 pub fn extract_otel_context_from_nats_headers(
     headers: &async_nats::HeaderMap,

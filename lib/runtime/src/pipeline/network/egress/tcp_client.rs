@@ -321,10 +321,23 @@ impl TcpConnection {
             .ok_or_else(|| anyhow::anyhow!("Missing x-endpoint-path header for TCP request"))?
             .to_string();
 
+        // Extract trace context headers for distributed tracing
+        let traceparent = headers.get("traceparent").cloned();
+        let tracestate = headers.get("tracestate").cloned();
+        let x_request_id = headers.get("x-request-id").cloned();
+        let x_dynamo_request_id = headers.get("x-dynamo-request-id").cloned();
+
         // Encode request on caller's thread (hot path optimization)
         // This allows multiple concurrent callers to encode in parallel
         // rather than serializing through the writer task
-        let request_msg = TcpRequestMessage::new(endpoint_path, payload);
+        let request_msg = TcpRequestMessage::with_trace_context(
+            endpoint_path,
+            traceparent,
+            tracestate,
+            x_request_id,
+            x_dynamo_request_id,
+            payload,
+        );
         let encoded_data = request_msg.encode()?;
 
         // Create response channel
@@ -514,6 +527,9 @@ impl RequestPlaneClient for TcpRequestClient {
         if let Some(endpoint_name) = endpoint_name {
             headers.insert("x-endpoint-path".to_string(), endpoint_name.clone());
         }
+
+        // Inject current trace context into headers for distributed tracing propagation
+        crate::logging::inject_trace_headers_into_map(&mut headers);
 
         // Get connection from pool (automatically filters unhealthy connections)
         let conn = self.pool.get_connection(addr).await?;

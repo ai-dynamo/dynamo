@@ -18,25 +18,113 @@ mod two_part;
 
 pub use two_part::{TwoPartCodec, TwoPartMessage, TwoPartMessageType};
 
-/// TCP request plane protocol message with endpoint routing
+/// TCP request plane protocol message with endpoint routing and trace context
 ///
 /// Wire format:
 /// - endpoint_path_len: u16 (big-endian)
 /// - endpoint_path: UTF-8 string
+/// - traceparent_len: u16 (big-endian, 0 if None)
+/// - traceparent: UTF-8 string (optional)
+/// - tracestate_len: u16 (big-endian, 0 if None)
+/// - tracestate: UTF-8 string (optional)
+/// - x_request_id_len: u16 (big-endian, 0 if None)
+/// - x_request_id: UTF-8 string (optional)
+/// - x_dynamo_request_id_len: u16 (big-endian, 0 if None)
+/// - x_dynamo_request_id: UTF-8 string (optional)
 /// - payload_len: u32 (big-endian)
 /// - payload: bytes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpRequestMessage {
     pub endpoint_path: String,
+    /// W3C traceparent header for distributed tracing
+    pub traceparent: Option<String>,
+    /// W3C tracestate header for vendor-specific trace data
+    pub tracestate: Option<String>,
+    /// Custom request ID header
+    pub x_request_id: Option<String>,
+    /// Dynamo-specific request ID header
+    pub x_dynamo_request_id: Option<String>,
     pub payload: Bytes,
 }
 
 impl TcpRequestMessage {
+    /// Create a new TCP request message without trace context (backwards compatible)
     pub fn new(endpoint_path: String, payload: Bytes) -> Self {
         Self {
             endpoint_path,
+            traceparent: None,
+            tracestate: None,
+            x_request_id: None,
+            x_dynamo_request_id: None,
             payload,
         }
+    }
+
+    /// Create a new TCP request message with trace context
+    pub fn with_trace_context(
+        endpoint_path: String,
+        traceparent: Option<String>,
+        tracestate: Option<String>,
+        x_request_id: Option<String>,
+        x_dynamo_request_id: Option<String>,
+        payload: Bytes,
+    ) -> Self {
+        Self {
+            endpoint_path,
+            traceparent,
+            tracestate,
+            x_request_id,
+            x_dynamo_request_id,
+            payload,
+        }
+    }
+
+    /// Helper to encode an optional string field: writes length (u16) and content
+    fn encode_optional_string(buf: &mut BytesMut, value: &Option<String>) {
+        match value {
+            Some(s) => {
+                let bytes = s.as_bytes();
+                buf.put_u16(bytes.len() as u16);
+                buf.put_slice(bytes);
+            }
+            None => {
+                buf.put_u16(0);
+            }
+        }
+    }
+
+    /// Helper to decode an optional string field: reads length (u16) and content
+    fn decode_optional_string(bytes: &Bytes, offset: &mut usize) -> Result<Option<String>, std::io::Error> {
+        if bytes.len() < *offset + 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for optional string length",
+            ));
+        }
+
+        let len = u16::from_be_bytes([bytes[*offset], bytes[*offset + 1]]) as usize;
+        *offset += 2;
+
+        if len == 0 {
+            return Ok(None);
+        }
+
+        if bytes.len() < *offset + len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for optional string content",
+            ));
+        }
+
+        let s = String::from_utf8(bytes[*offset..*offset + len].to_vec()).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Invalid UTF-8: {}", e),
+            )
+        })?;
+        *offset += len;
+
+        Ok(Some(s))
     }
 
     /// Encode message to bytes
@@ -58,19 +146,35 @@ impl TcpRequestMessage {
             ));
         }
 
+        // Calculate optional header sizes
+        let traceparent_len = self.traceparent.as_ref().map_or(0, |s| s.len());
+        let tracestate_len = self.tracestate.as_ref().map_or(0, |s| s.len());
+        let x_request_id_len = self.x_request_id.as_ref().map_or(0, |s| s.len());
+        let x_dynamo_request_id_len = self.x_dynamo_request_id.as_ref().map_or(0, |s| s.len());
+
+        // Total size: endpoint (2 + len) + 4 optional headers (2 + len each) + payload (4 + len)
+        let total_size = 2 + endpoint_len
+            + 2 + traceparent_len
+            + 2 + tracestate_len
+            + 2 + x_request_id_len
+            + 2 + x_dynamo_request_id_len
+            + 4 + self.payload.len();
+
         // Use BytesMut for efficient buffer building
-        let mut buf = BytesMut::with_capacity(2 + endpoint_len + 4 + self.payload.len());
+        let mut buf = BytesMut::with_capacity(total_size);
 
-        // Write endpoint path length (2 bytes)
+        // Write endpoint path length (2 bytes) and content
         buf.put_u16(endpoint_len as u16);
-
-        // Write endpoint path
         buf.put_slice(endpoint_bytes);
 
-        // Write payload length (4 bytes)
-        buf.put_u32(self.payload.len() as u32);
+        // Write optional trace headers
+        Self::encode_optional_string(&mut buf, &self.traceparent);
+        Self::encode_optional_string(&mut buf, &self.tracestate);
+        Self::encode_optional_string(&mut buf, &self.x_request_id);
+        Self::encode_optional_string(&mut buf, &self.x_dynamo_request_id);
 
-        // Write payload
+        // Write payload length (4 bytes) and content
+        buf.put_u32(self.payload.len() as u32);
         buf.put_slice(&self.payload);
 
         // Zero-copy conversion to Bytes
@@ -107,6 +211,12 @@ impl TcpRequestMessage {
             })?;
         offset += endpoint_len;
 
+        // Read optional trace headers
+        let traceparent = Self::decode_optional_string(bytes, &mut offset)?;
+        let tracestate = Self::decode_optional_string(bytes, &mut offset)?;
+        let x_request_id = Self::decode_optional_string(bytes, &mut offset)?;
+        let x_dynamo_request_id = Self::decode_optional_string(bytes, &mut offset)?;
+
         if bytes.len() < offset + 4 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
@@ -139,6 +249,10 @@ impl TcpRequestMessage {
 
         Ok(Self {
             endpoint_path,
+            traceparent,
+            tracestate,
+            x_request_id,
+            x_dynamo_request_id,
             payload,
         })
     }
@@ -169,22 +283,60 @@ impl Decoder for TcpRequestCodec {
 
         // Peek at endpoint path length without consuming
         let endpoint_len = u16::from_be_bytes([src[0], src[1]]) as usize;
-        let header_size = 2 + endpoint_len + 4; // path_len + path + payload_len
 
-        if src.len() < header_size {
+        // Minimum header size: endpoint (2 + len) + 4 optional headers (2 each) + payload_len (4)
+        // = 2 + endpoint_len + 8 + 4 = 14 + endpoint_len (without optional header contents)
+        let min_header_size = 2 + endpoint_len + 8 + 4;
+
+        if src.len() < min_header_size {
             return Ok(None);
         }
 
+        // Peek at optional header lengths to calculate total header size
+        let mut peek_offset = 2 + endpoint_len;
+
+        // Read 4 optional header lengths
+        let traceparent_len = u16::from_be_bytes([src[peek_offset], src[peek_offset + 1]]) as usize;
+        peek_offset += 2;
+
+        if src.len() < peek_offset + traceparent_len + 2 {
+            return Ok(None);
+        }
+        peek_offset += traceparent_len;
+
+        let tracestate_len = u16::from_be_bytes([src[peek_offset], src[peek_offset + 1]]) as usize;
+        peek_offset += 2;
+
+        if src.len() < peek_offset + tracestate_len + 2 {
+            return Ok(None);
+        }
+        peek_offset += tracestate_len;
+
+        let x_request_id_len = u16::from_be_bytes([src[peek_offset], src[peek_offset + 1]]) as usize;
+        peek_offset += 2;
+
+        if src.len() < peek_offset + x_request_id_len + 2 {
+            return Ok(None);
+        }
+        peek_offset += x_request_id_len;
+
+        let x_dynamo_request_id_len = u16::from_be_bytes([src[peek_offset], src[peek_offset + 1]]) as usize;
+        peek_offset += 2;
+
+        if src.len() < peek_offset + x_dynamo_request_id_len + 4 {
+            return Ok(None);
+        }
+        peek_offset += x_dynamo_request_id_len;
+
         // Peek at payload length
-        let payload_len_offset = 2 + endpoint_len;
         let payload_len = u32::from_be_bytes([
-            src[payload_len_offset],
-            src[payload_len_offset + 1],
-            src[payload_len_offset + 2],
-            src[payload_len_offset + 3],
+            src[peek_offset],
+            src[peek_offset + 1],
+            src[peek_offset + 2],
+            src[peek_offset + 3],
         ]) as usize;
 
-        let total_len = header_size + payload_len;
+        let total_len = peek_offset + 4 + payload_len;
 
         // Check max message size
         if let Some(max_size) = self.max_message_size
@@ -204,28 +356,9 @@ impl Decoder for TcpRequestCodec {
             return Ok(None);
         }
 
-        // We have a complete message, advance past length prefix
-        src.advance(2);
-
-        // Read endpoint path
-        let endpoint_bytes = src.split_to(endpoint_len);
-        let endpoint_path = String::from_utf8(endpoint_bytes.to_vec()).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Invalid UTF-8 in endpoint path: {}", e),
-            )
-        })?;
-
-        // Advance past payload length
-        src.advance(4);
-
-        // Read payload
-        let payload = src.split_to(payload_len).freeze();
-
-        Ok(Some(TcpRequestMessage {
-            endpoint_path,
-            payload,
-        }))
+        // We have a complete message - use the standalone decode for consistency
+        let msg_bytes = src.split_to(total_len).freeze();
+        TcpRequestMessage::decode(&msg_bytes).map(Some)
     }
 }
 
@@ -233,52 +366,26 @@ impl Encoder<TcpRequestMessage> for TcpRequestCodec {
     type Error = std::io::Error;
 
     fn encode(&mut self, item: TcpRequestMessage, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let endpoint_bytes = item.endpoint_path.as_bytes();
-        let endpoint_len = endpoint_bytes.len();
-
-        if endpoint_len > u16::MAX as usize {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Endpoint path too long: {} bytes", endpoint_len),
-            ));
-        }
-
-        if item.payload.len() > u32::MAX as usize {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Payload too large: {} bytes", item.payload.len()),
-            ));
-        }
-
-        let total_len = 2 + endpoint_len + 4 + item.payload.len();
+        // Use the standalone encode method for consistency
+        let encoded = item.encode()?;
 
         // Check max message size
         if let Some(max_size) = self.max_message_size
-            && total_len > max_size
+            && encoded.len() > max_size
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "Request too large: {} bytes (max: {} bytes)",
-                    total_len, max_size
+                    encoded.len(),
+                    max_size
                 ),
             ));
         }
 
-        // Reserve space
-        dst.reserve(total_len);
-
-        // Write endpoint path length
-        dst.put_u16(endpoint_len as u16);
-
-        // Write endpoint path
-        dst.put_slice(endpoint_bytes);
-
-        // Write payload length
-        dst.put_u32(item.payload.len() as u32);
-
-        // Write payload
-        dst.put_slice(&item.payload);
+        // Reserve space and copy encoded data
+        dst.reserve(encoded.len());
+        dst.put_slice(&encoded);
 
         Ok(())
     }
@@ -722,5 +829,83 @@ mod tests {
             assert_eq!(decoded.endpoint_path, "test");
             assert_eq!(decoded.payload, Bytes::from("hello"));
         }
+    }
+
+    #[test]
+    fn test_tcp_request_with_trace_context() {
+        let msg = TcpRequestMessage::with_trace_context(
+            "test.endpoint".to_string(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string()),
+            Some("congo=t61rcWkgMzE".to_string()),
+            Some("req-12345".to_string()),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Bytes::from(vec![1, 2, 3, 4, 5]),
+        );
+
+        let encoded = msg.encode().unwrap();
+        let decoded = TcpRequestMessage::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.endpoint_path, "test.endpoint");
+        assert_eq!(
+            decoded.traceparent,
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string())
+        );
+        assert_eq!(decoded.tracestate, Some("congo=t61rcWkgMzE".to_string()));
+        assert_eq!(decoded.x_request_id, Some("req-12345".to_string()));
+        assert_eq!(
+            decoded.x_dynamo_request_id,
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+        assert_eq!(decoded.payload, Bytes::from(vec![1, 2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn test_tcp_request_with_partial_trace_context() {
+        // Test with only some trace headers set
+        let msg = TcpRequestMessage::with_trace_context(
+            "test.endpoint".to_string(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string()),
+            None, // No tracestate
+            Some("req-12345".to_string()),
+            None, // No dynamo request id
+            Bytes::from("test payload"),
+        );
+
+        let encoded = msg.encode().unwrap();
+        let decoded = TcpRequestMessage::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.endpoint_path, "test.endpoint");
+        assert_eq!(
+            decoded.traceparent,
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string())
+        );
+        assert_eq!(decoded.tracestate, None);
+        assert_eq!(decoded.x_request_id, Some("req-12345".to_string()));
+        assert_eq!(decoded.x_dynamo_request_id, None);
+        assert_eq!(decoded.payload, Bytes::from("test payload"));
+    }
+
+    #[test]
+    fn test_tcp_request_codec_with_trace_context() {
+        use tokio_util::codec::{Decoder, Encoder};
+
+        let msg = TcpRequestMessage::with_trace_context(
+            "test.endpoint".to_string(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string()),
+            Some("congo=t61rcWkgMzE".to_string()),
+            Some("req-12345".to_string()),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string()),
+            Bytes::from(vec![1, 2, 3, 4, 5]),
+        );
+
+        let mut codec = TcpRequestCodec::new(None);
+        let mut buf = BytesMut::new();
+
+        // Encode
+        codec.encode(msg.clone(), &mut buf).unwrap();
+
+        // Decode
+        let decoded = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(decoded, msg);
     }
 }

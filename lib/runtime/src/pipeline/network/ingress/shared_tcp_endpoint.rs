@@ -7,7 +7,9 @@
 //! by adding endpoint routing to the TCP wire protocol.
 
 use crate::SystemHealth;
+use crate::logging::{GenericHeaders, TraceParent, make_tcp_handle_payload_span};
 use crate::pipeline::network::PushWorkHandler;
+use crate::pipeline::network::codec::TcpRequestMessage;
 use anyhow::Result;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -21,6 +23,19 @@ use tokio::sync::Notify;
 use tokio_util::bytes::BytesMut;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
+
+/// Implement GenericHeaders for TcpRequestMessage to enable trace context extraction
+impl GenericHeaders for TcpRequestMessage {
+    fn get(&self, key: &str) -> Option<&str> {
+        match key {
+            "traceparent" => self.traceparent.as_deref(),
+            "tracestate" => self.tracestate.as_deref(),
+            "x-request-id" => self.x_request_id.as_deref(),
+            "x-dynamo-request-id" => self.x_dynamo_request_id.as_deref(),
+            _ => None,
+        }
+    }
+}
 
 /// Default maximum message size for TCP server (32 MB)
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
@@ -315,6 +330,9 @@ impl SharedTcpServer {
                 }
             };
 
+            // Extract trace context from request message for distributed tracing
+            let trace_parent = TraceParent::from_headers(&request_msg);
+
             let endpoint_path = request_msg.endpoint_path;
             let payload = request_msg.payload;
 
@@ -359,22 +377,25 @@ impl SharedTcpServer {
             let endpoint_name = handler.endpoint_name.clone();
 
             tokio::spawn(async move {
-                tracing::trace!(instance_id, "handling TCP request");
+                tracing::info!(instance_id, "handling TCP request");
+
+                // Create span with trace context for distributed tracing
+                let span = make_tcp_handle_payload_span(
+                    &trace_parent,
+                    &component_name,
+                    &endpoint_name,
+                    &namespace,
+                    instance_id,
+                );
 
                 let result = service_handler
                     .handle_payload(payload)
-                    .instrument(tracing::info_span!(
-                        "handle_payload",
-                        component = component_name.as_str(),
-                        endpoint = endpoint_name.as_str(),
-                        namespace = namespace.as_str(),
-                        instance_id = instance_id,
-                    ))
+                    .instrument(span)
                     .await;
 
                 match result {
                     Ok(_) => {
-                        tracing::trace!(instance_id, "TCP request handled successfully");
+                        tracing::info!(instance_id, "TCP request handled successfully");
                     }
                     Err(e) => {
                         tracing::warn!("Failed to handle TCP request: {}", e);
