@@ -20,6 +20,7 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -79,6 +80,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 		return warnings, err
 	}
 
+	// Validate service topology is unchanged (service names must remain the same)
+	if err := v.validateServiceTopology(old); err != nil {
+		return warnings, err
+	}
+
 	// Validate replicas changes for services with scaling adapter enabled
 	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
 	if err := v.validateReplicasChanges(old, userInfo); err != nil {
@@ -117,6 +123,48 @@ func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv
 
 	return errors.Join(errs...)
 
+}
+
+// validateServiceTopology ensures the set of service names remains unchanged.
+// Users can modify service specifications, but cannot add or remove services.
+// This maintains graph topology immutability while allowing configuration updates.
+func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	oldServices := getServiceNames(old.Spec.Services)
+	newServices := getServiceNames(v.deployment.Spec.Services)
+
+	added := difference(newServices, oldServices)
+	removed := difference(oldServices, newServices)
+
+	// Fast path: no changes
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+
+	// Sort for deterministic error messages
+	sort.Strings(added)
+	sort.Strings(removed)
+
+	// Build descriptive error message
+	var errMsg string
+	switch {
+	case len(added) > 0 && len(removed) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services added: %v, services removed: %v",
+			added, removed)
+	case len(added) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services added: %v",
+			added)
+	case len(removed) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services removed: %v",
+			removed)
+	}
+
+	return errors.New(errMsg)
 }
 
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
@@ -213,4 +261,26 @@ func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1
 	}
 
 	return err
+}
+
+// getServiceNames extracts service names from a services map.
+// Returns a set-like map for efficient lookup and comparison.
+func getServiceNames(services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) map[string]struct{} {
+	names := make(map[string]struct{}, len(services))
+	for name := range services {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// difference returns elements in set a that are not in set b (a - b).
+// This is used to find added or removed services.
+func difference(a, b map[string]struct{}) []string {
+	var result []string
+	for name := range a {
+		if _, exists := b[name]; !exists {
+			result = append(result, name)
+		}
+	}
+	return result
 }
