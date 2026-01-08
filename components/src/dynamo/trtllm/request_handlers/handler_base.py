@@ -340,14 +340,23 @@ class HandlerBase:
         elif self.max_seq_len is not None:
             # Dynamic default: use remaining context window when max_tokens not specified
             # This mirrors the fix applied to the vLLM backend in PR #4156
-            token_ids = request.get("token_ids", [])
-            input_length = len(token_ids)
-            dynamic_default = max(1, self.max_seq_len - input_length)
-            sampling_params.max_tokens = dynamic_default
-            logging.debug(
-                f"Using dynamic default max_tokens={dynamic_default} "
-                f"(max_seq_len={self.max_seq_len}, input_length={input_length})"
-            )
+            if self.multimodal_processor and processed_input is not None:
+                # Multimodal request - skip dynamic default as we can't accurately
+                # calculate total input tokens (images consume additional context)
+                logging.debug(
+                    "Skipping dynamic max_tokens default for multimodal request "
+                    "(image tokens not accounted for in token_ids)"
+                )
+            else:
+                # Text-only request - safe to calculate dynamic default
+                token_ids = request.get("token_ids", [])
+                input_length = len(token_ids)
+                dynamic_default = max(1, self.max_seq_len - input_length)
+                sampling_params.max_tokens = dynamic_default
+                logging.debug(
+                    f"Using dynamic default max_tokens={dynamic_default} "
+                    f"(max_seq_len={self.max_seq_len}, input_length={input_length})"
+                )
 
         ignore_eos = request["stop_conditions"].get("ignore_eos")
         if ignore_eos:
