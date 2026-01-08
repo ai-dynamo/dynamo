@@ -212,7 +212,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
@@ -356,8 +356,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
+    git checkout ${NIXL_REF} && \
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
+    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
+        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
+        exit 1; \
+    fi && \
+    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
@@ -387,7 +395,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     cd /workspace/nixl && \
-    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -481,12 +489,15 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}
 
 # Install common and test dependencies
