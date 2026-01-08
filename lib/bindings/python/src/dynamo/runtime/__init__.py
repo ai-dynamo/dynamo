@@ -38,13 +38,16 @@ def _register_shutdown_signals(runtime: DistributedRuntime):
         loop.add_signal_handler(sig, lambda: _signal_handler(runtime))
 
 
-def dynamo_worker(register_shutdown: bool = False) -> Callable:
+def dynamo_worker(
+    register_shutdown: bool = False,
+    kv_store: str = "etcd",
+) -> Callable:
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
-            runtime = DistributedRuntime(loop, "etcd", request_plane)
+            runtime = DistributedRuntime(loop, kv_store, request_plane)
             if register_shutdown:
                 _register_shutdown_signals(runtime)
 
