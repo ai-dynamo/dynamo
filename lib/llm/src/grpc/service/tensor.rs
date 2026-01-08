@@ -536,9 +536,7 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
     fn try_from(extended_response: ExtendedNvCreateTensorResponse) -> Result<Self, Self::Error> {
         let response = extended_response.response;
         if let Err(e) = response.validate() {
-            return Err(anyhow::anyhow!(
-                "Invalid NvCreateTensorResponse: {}", e
-            ));
+            return Err(anyhow::anyhow!("Invalid NvCreateTensorResponse: {}", e));
         }
 
         // Convert response-level parameters
