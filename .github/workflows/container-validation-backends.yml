@@ -10,7 +10,7 @@ name: Docker Build and Test
 # - [ ] make sure all "if" are as in main
 # - [ ] Comment in concurrency section.
 # - [ ] Bake skopeo and pre commit envs into the runner
-# - [ ] 
+# - [ ]
 
 on:
   push:
@@ -253,7 +253,7 @@ jobs:
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_image: true 
+      build_image: true
       run_tests: true
       copy_to_acr: true
       push_image: true
