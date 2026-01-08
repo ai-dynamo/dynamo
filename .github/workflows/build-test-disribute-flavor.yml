@@ -213,6 +213,29 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
+
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-amd64"
+          echo "Running sanity check on image: $IMAGE_TAG"
+
+          # Run the sanity check script inside the container
+          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+
+
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
