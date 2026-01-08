@@ -1078,7 +1078,7 @@ use regex::Regex;
 
 /// Static W3C Trace Context propagator instance to avoid repeated allocations
 static TRACE_PROPAGATOR: Lazy<opentelemetry_sdk::propagation::TraceContextPropagator> =
-    Lazy::new(|| opentelemetry_sdk::propagation::TraceContextPropagator::new());
+    Lazy::new(opentelemetry_sdk::propagation::TraceContextPropagator::new);
 
 fn parse_tracing_duration(s: &str) -> Option<u64> {
     static RE: Lazy<Regex> =
