@@ -4,17 +4,17 @@
 """
 CLI entry point for scale testing tool.
 
-Provides commands to start, run, and cleanup scale test deployments.
+Provides commands to start, run, and cleanup scale test DGD deployments
+on Kubernetes.
 """
 
 import argparse
 import asyncio
 import logging
 import sys
-import time
 
 from tests.scale_test.load_generator import LoadGenerator
-from tests.scale_test.scale_manager import ScaleManager, setup_signal_handlers
+from tests.scale_test.scale_manager import ScaleManager
 from tests.scale_test.utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ def create_parser() -> argparse.ArgumentParser:
     """Create the argument parser with all subcommands."""
     parser = argparse.ArgumentParser(
         prog="python -m tests.scale_test",
-        description="Scale testing tool for Dynamo mocker instances",
+        description="Scale testing tool for Dynamo DGD deployments on Kubernetes",
     )
 
     parser.add_argument(
@@ -39,14 +39,14 @@ def create_parser() -> argparse.ArgumentParser:
     # 'start' command - start deployments and wait for manual testing
     start_parser = subparsers.add_parser(
         "start",
-        help="Start N deployments and wait (for manual testing)",
+        help="Deploy N DGDs and wait (for manual testing)",
     )
     _add_common_args(start_parser)
 
     # 'run' command - start + load + cleanup
     run_parser = subparsers.add_parser(
         "run",
-        help="Run full test: start + load + cleanup",
+        help="Run full test: deploy DGDs + load test + cleanup",
     )
     _add_common_args(run_parser)
     run_parser.add_argument(
@@ -62,10 +62,22 @@ def create_parser() -> argparse.ArgumentParser:
         help="Queries per second to send (default: 1.0)",
     )
 
-    # 'cleanup' command - cleanup any leftover processes
-    subparsers.add_parser(
+    # 'cleanup' command - cleanup any leftover DGDs
+    cleanup_parser = subparsers.add_parser(
         "cleanup",
-        help="Cleanup any leftover scale test processes",
+        help="Cleanup any leftover scale test DGDs",
+    )
+    cleanup_parser.add_argument(
+        "--namespace",
+        type=str,
+        default="default",
+        help="Kubernetes namespace (default: default)",
+    )
+    cleanup_parser.add_argument(
+        "--name-prefix",
+        type=str,
+        default="scale-test",
+        help="DGD name prefix to match (default: scale-test)",
     )
 
     return parser
@@ -77,7 +89,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         "--count",
         type=int,
         default=5,
-        help="Number of deployments to create (default: 5)",
+        help="Number of DGD deployments to create (default: 5)",
     )
     parser.add_argument(
         "--model-path",
@@ -92,83 +104,113 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Mocker speedup multiplier (default: 10.0)",
     )
     parser.add_argument(
-        "--base-port",
-        type=int,
-        default=8001,
-        help="Starting frontend port (default: 8001)",
+        "--namespace",
+        type=str,
+        default="default",
+        help="Kubernetes namespace for DGD deployments (default: default)",
     )
     parser.add_argument(
-        "--display-output",
+        "--image",
+        type=str,
+        default="nvcr.io/nvidia/ai-dynamo/dynamo-base:latest",
+        help="Container image for all services (default: nvcr.io/nvidia/ai-dynamo/dynamo-base:latest)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="Timeout in seconds for DGDs to become ready (default: 600)",
+    )
+    parser.add_argument(
+        "--name-prefix",
+        type=str,
+        default="scale-test",
+        help="Prefix for DGD names (default: scale-test)",
+    )
+    parser.add_argument(
+        "--no-cleanup",
         action="store_true",
-        help="Display process output to console",
+        help="Do not cleanup DGDs on exit (useful for debugging)",
     )
 
 
-def cmd_start(args: argparse.Namespace) -> int:
-    """Handle the 'start' command - start and wait."""
-    logger.info(f"Starting {args.count} deployments...")
+async def cmd_start_async(args: argparse.Namespace) -> int:
+    """Handle the 'start' command - deploy DGDs and wait."""
+    logger.info(f"Starting {args.count} DGD deployments...")
     logger.info(f"Model: {args.model_path}")
     logger.info(f"Speedup ratio: {args.speedup_ratio}")
-    logger.info(f"Base frontend port: {args.base_port}")
+    logger.info(f"Namespace: {args.namespace}")
+    logger.info(f"Image: {args.image}")
 
     manager = ScaleManager(
         num_deployments=args.count,
         model_path=args.model_path,
         speedup_ratio=args.speedup_ratio,
-        base_frontend_port=args.base_port,
-        display_output=args.display_output,
+        kubernetes_namespace=args.namespace,
+        image=args.image,
+        timeout=args.timeout,
+        name_prefix=args.name_prefix,
+        cleanup_on_exit=not args.no_cleanup,
     )
 
-    # Set up signal handlers for graceful cleanup
-    setup_signal_handlers(manager)
-
     try:
-        print("\nStarting shared NATS and etcd...")
-        manager.start_infrastructure()
-        print(f"NATS started on port {manager.nats_port}")
-        print(f"etcd started on port {manager.etcd_port}")
+        print(f"\nDeploying {args.count} DGD resources to Kubernetes...")
+        print(f"Namespace: {args.namespace}")
+        print(f"Image: {args.image}")
 
-        print(f"\nStarting {args.count} mocker processes...")
-        manager.start_mockers()
+        await manager._init_kubernetes()
+        await manager.deploy_dgds()
 
-        print(f"\nStarting {args.count} frontend processes...")
-        manager.start_frontends()
-
-        # Wait for all services to be ready
-        print("\nWaiting for all services to be ready...")
-        if not manager.wait_for_all_ready(timeout=120):
-            print("ERROR: Not all services became ready in time")
-            manager.cleanup()
+        print("\nWaiting for all DGDs to be ready...")
+        if not await manager.wait_for_dgds_ready():
+            print("ERROR: Not all DGDs became ready in time")
+            await manager.cleanup()
             return 1
 
         print("\n" + "=" * 60)
-        print("All services ready!")
+        print("All DGDs ready!")
         print("=" * 60)
-        print("\nFrontend URLs:")
-        for url in manager.get_frontend_urls():
-            print(f"  {url}")
-        print("\nPress Ctrl+C to stop all services...")
+
+        print("\nDeployment Names:")
+        for name in manager._deployment_names:
+            print(f"  - {name}")
+
+        frontend_urls = await manager.get_frontend_urls()
+        print("\nFrontend Service URLs (cluster-internal):")
+        for url in frontend_urls:
+            print(f"  - {url}")
+
+        print("\nTo run load tests from within the cluster:")
+        print(f"  kubectl exec -it <pod> -- curl {frontend_urls[0]}/health")
+
+        print("\nPress Ctrl+C to cleanup and exit...")
 
         # Wait indefinitely
-        while True:
-            time.sleep(1)
+        try:
+            while True:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
 
     except KeyboardInterrupt:
         print("\nReceived interrupt, cleaning up...")
-        manager.cleanup()
-        return 0
     except Exception as e:
         logger.exception(f"Error during start: {e}")
-        manager.cleanup()
+        await manager.cleanup()
         return 1
+    finally:
+        if manager.cleanup_on_exit:
+            await manager.cleanup()
+
+    return 0
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    """Handle the 'run' command - start, load test, and cleanup."""
-    logger.info(f"Running scale test with {args.count} deployments...")
+async def cmd_run_async(args: argparse.Namespace) -> int:
+    """Handle the 'run' command - deploy, load test, and cleanup."""
+    logger.info(f"Running scale test with {args.count} DGD deployments...")
     logger.info(f"Model: {args.model_path}")
     logger.info(f"Speedup ratio: {args.speedup_ratio}")
-    logger.info(f"Base frontend port: {args.base_port}")
+    logger.info(f"Namespace: {args.namespace}")
     logger.info(f"Duration: {args.duration}s")
     logger.info(f"QPS: {args.qps}")
 
@@ -176,106 +218,151 @@ def cmd_run(args: argparse.Namespace) -> int:
         num_deployments=args.count,
         model_path=args.model_path,
         speedup_ratio=args.speedup_ratio,
-        base_frontend_port=args.base_port,
-        display_output=args.display_output,
+        kubernetes_namespace=args.namespace,
+        image=args.image,
+        timeout=args.timeout,
+        name_prefix=args.name_prefix,
+        cleanup_on_exit=True,  # Always cleanup after run
     )
 
-    # Set up signal handlers for graceful cleanup
-    setup_signal_handlers(manager)
-
     try:
-        print("\nStarting shared NATS and etcd...")
-        manager.start_infrastructure()
-        print(f"NATS started on port {manager.nats_port}")
-        print(f"etcd started on port {manager.etcd_port}")
+        print(f"\nDeploying {args.count} DGD resources to Kubernetes...")
+        await manager._init_kubernetes()
+        await manager.deploy_dgds()
 
-        print(f"\nStarting {args.count} mocker processes...")
-        manager.start_mockers()
-
-        print(f"\nStarting {args.count} frontend processes...")
-        manager.start_frontends()
-
-        # Wait for all services to be ready
-        print("\nWaiting for all services to be ready...")
-        if not manager.wait_for_all_ready(timeout=120):
-            print("ERROR: Not all services became ready in time")
-            manager.cleanup()
+        print("\nWaiting for all DGDs to be ready...")
+        if not await manager.wait_for_dgds_ready():
+            print("ERROR: Not all DGDs became ready in time")
+            await manager.cleanup()
             return 1
 
         print("\n" + "=" * 60)
-        print("All services ready!")
+        print("All DGDs ready!")
         print("=" * 60)
 
-        # Run load generation
-        frontend_urls = manager.get_frontend_urls()
+        # Get frontend URLs for load generation
+        frontend_urls = await manager.get_frontend_urls()
         print(f"\nGenerating load for {args.duration} seconds at {args.qps} QPS...")
         print(f"Targeting {len(frontend_urls)} frontends...")
+
+        if not frontend_urls:
+            print("ERROR: No frontend URLs found")
+            await manager.cleanup()
+            return 1
 
         load_generator = LoadGenerator(
             frontend_urls=frontend_urls,
             model=args.model_path,
         )
 
-        # Run the async load generator
-        asyncio.run(
-            load_generator.generate_load(
-                duration_sec=args.duration,
-                qps=args.qps,
-            )
+        # Run load generation
+        await load_generator.generate_load(
+            duration_sec=args.duration,
+            qps=args.qps,
         )
 
         print("\nLoad generation complete.")
         load_generator.print_summary()
 
         # Cleanup
-        print("\nCleaning up...")
-        manager.cleanup()
-        print("All processes terminated.")
+        print("\nCleaning up DGDs...")
+        await manager.cleanup()
+        print("All DGDs deleted.")
 
         return 0
 
     except KeyboardInterrupt:
         print("\nReceived interrupt, cleaning up...")
-        manager.cleanup()
+        await manager.cleanup()
         return 0
     except Exception as e:
         logger.exception(f"Error during run: {e}")
-        manager.cleanup()
+        await manager.cleanup()
         return 1
 
 
-def cmd_cleanup(args: argparse.Namespace) -> int:
-    """Handle the 'cleanup' command - kill any leftover processes."""
-    import psutil
+async def cmd_cleanup_async(args: argparse.Namespace) -> int:
+    """Handle the 'cleanup' command - delete any leftover DGDs."""
+    from kubernetes_asyncio import client, config
+    from kubernetes_asyncio.client import exceptions
 
-    logger.info("Cleaning up any leftover scale test processes...")
+    logger.info(f"Cleaning up scale test DGDs in namespace {args.namespace}...")
 
-    # Patterns to look for in command lines
-    patterns = [
-        "dynamo.mocker",
-        "dynamo.frontend",
-        "scale-test-",
-    ]
-
-    killed_count = 0
-
-    for proc in psutil.process_iter(["name", "cmdline"]):
+    try:
+        # Initialize Kubernetes
         try:
-            cmdline = proc.cmdline()
-            cmdline_str = " ".join(cmdline) if cmdline else ""
+            config.load_incluster_config()
+        except Exception:
+            await config.load_kube_config()
 
-            for pattern in patterns:
-                if pattern in cmdline_str:
-                    logger.info(f"Killing process {proc.pid}: {cmdline_str[:80]}...")
-                    proc.terminate()
-                    killed_count += 1
-                    break
+        k8s_client = client.ApiClient()
+        custom_api = client.CustomObjectsApi(k8s_client)
 
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            pass
+        # List all DGDs in the namespace
+        dgds = await custom_api.list_namespaced_custom_object(
+            group="nvidia.com",
+            version="v1alpha1",
+            namespace=args.namespace,
+            plural="dynamographdeployments",
+        )
 
-    print(f"Killed {killed_count} processes.")
-    return 0
+        # Filter by name prefix
+        matching_dgds = [
+            dgd["metadata"]["name"]
+            for dgd in dgds.get("items", [])
+            if dgd["metadata"]["name"].startswith(args.name_prefix)
+        ]
+
+        if not matching_dgds:
+            print(
+                f"No DGDs found with prefix '{args.name_prefix}' in namespace '{args.namespace}'"
+            )
+            return 0
+
+        print(f"Found {len(matching_dgds)} DGDs to delete:")
+        for name in matching_dgds:
+            print(f"  - {name}")
+
+        # Delete each DGD
+        deleted_count = 0
+        for name in matching_dgds:
+            try:
+                await custom_api.delete_namespaced_custom_object(
+                    group="nvidia.com",
+                    version="v1alpha1",
+                    namespace=args.namespace,
+                    plural="dynamographdeployments",
+                    name=name,
+                )
+                print(f"Deleted: {name}")
+                deleted_count += 1
+            except exceptions.ApiException as e:
+                if e.status == 404:
+                    print(f"Already deleted: {name}")
+                else:
+                    logger.warning(f"Error deleting {name}: {e}")
+
+        print(f"\nDeleted {deleted_count} DGDs.")
+        return 0
+
+    except Exception as e:
+        logger.exception(f"Error during cleanup: {e}")
+        return 1
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    """Wrapper to run async start command."""
+    return asyncio.run(cmd_start_async(args))
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Wrapper to run async run command."""
+    return asyncio.run(cmd_run_async(args))
+
+
+def cmd_cleanup(args: argparse.Namespace) -> int:
+    """Wrapper to run async cleanup command."""
+    return asyncio.run(cmd_cleanup_async(args))
 
 
 def main() -> int:

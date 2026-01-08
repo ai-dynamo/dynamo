@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# DGD Template for Scale Testing with Mocker Backend
+# Variables to be replaced:
+#   - metadata.name: deployment name (e.g., scale-test-1)
+#   - metadata.namespace: Kubernetes namespace
+#   - services.*.dynamoNamespace: Dynamo namespace for service discovery
+#   - services.*.extraPodSpec.mainContainer.image: container image
+#   - services.MockerWorker.extraPodSpec.mainContainer.args: model-path, speedup-ratio
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: scale-test-placeholder
+  namespace: default
+  annotations:
+    nvidia.com/dynamo-discovery-backend: kubernetes
+spec:
+  envs:
+    - name: DYN_LOG
+      value: "info"
+  services:
+    Frontend:
+      dynamoNamespace: scale-test-placeholder
+      componentType: frontend
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 20
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 5
+        failureThreshold: 6
+      resources:
+        requests:
+          cpu: "1"
+          memory: "1Gi"
+        limits:
+          cpu: "4"
+          memory: "4Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-base:latest
+          args:
+            - --http-port
+            - "8000"
+            - --router-mode
+            - round-robin
+    MockerWorker:
+      dynamoNamespace: scale-test-placeholder
+      componentType: worker
+      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 6
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "4"
+          memory: "8Gi"
+      envs:
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/dynamo-base:latest
+          command:
+            - python
+            - -m
+            - dynamo.mocker
+          args:
+            - --model-path
+            - TinyLlama/TinyLlama-1.1B-Chat-v1.0
+            - --speedup-ratio
+            - "10.0"
+            - --num-workers
+            - "1"
+
