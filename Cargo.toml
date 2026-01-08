@@ -12,6 +12,7 @@ members = [
     "lib/async-openai",
     "lib/parsers",
     "lib/bindings/c",
+    "lib/bindings/kvbm",
     "lib/bindings/python/codegen",
     "lib/engines/*",
     "lib/discovery",

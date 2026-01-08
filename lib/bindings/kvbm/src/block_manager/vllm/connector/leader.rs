@@ -19,9 +19,13 @@ use dynamo_llm::block_manager::{
     BasicMetadata, DiskStorage, ImmutableBlock, PinnedStorage,
     block::{
         data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
-        locality::Logical,
+        locality::Logical, transfer::remote::RemoteKey,
     },
     connector::*,
+    distributed::registry::{
+        BinaryCodec, NoMetadata, PositionalKey, RegistryClient, RegistryClientConfig, ZmqTransport,
+        ZmqTransportConfig,
+    },
     kv_consolidator::EventSource,
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
@@ -87,6 +91,52 @@ pub struct KvConnectorLeader {
     kvbm_metrics: KvbmMetrics,
 }
 
+/// Type alias for the registry client used by the connector.
+type DistributedRegistryClient = RegistryClient<
+    PositionalKey,
+    RemoteKey,
+    NoMetadata,
+    ZmqTransport,
+    BinaryCodec<PositionalKey, RemoteKey, NoMetadata>,
+>;
+
+/// Create a DistributedRegistryClient if enabled via environment.
+///
+/// Checks `DYN_REGISTRY_ENABLE` and creates a ZMQ-based registry client
+/// that connects to the distributed registry hub.
+fn create_distributed_registry_client() -> Option<Arc<DistributedRegistryClient>> {
+    if !RegistryClientConfig::is_enabled() {
+        tracing::debug!("Distributed registry disabled (DYN_REGISTRY_ENABLE not set)");
+        return None;
+    }
+
+    let config = RegistryClientConfig::from_env();
+    tracing::info!(
+        "Creating distributed registry client: query={}, register={}",
+        config.hub_query_addr,
+        config.hub_register_addr
+    );
+
+    let transport_config =
+        ZmqTransportConfig::new(&config.hub_query_addr, &config.hub_register_addr)
+            .with_timeout(config.request_timeout);
+
+    let transport = match ZmqTransport::connect(transport_config) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to connect to distributed registry hub: {}", e);
+            return None;
+        }
+    };
+
+    let client = RegistryClient::new(transport, BinaryCodec::new())
+        .with_batch_size(config.batch_size)
+        .with_batch_timeout(config.batch_timeout);
+
+    tracing::info!("Distributed registry client created successfully");
+    Some(Arc::new(client))
+}
+
 impl KvConnectorLeader {
     fn new(
         worker_id: String,
@@ -102,6 +152,9 @@ impl KvConnectorLeader {
 
         let leader = leader_py.get_inner().clone();
         let handle: Handle = get_current_tokio_handle();
+
+        // Note: distributed registry initialization is deferred to the async block below
+        // because tmq (ZeroMQ) requires an active Tokio runtime to connect sockets.
 
         let kvbm_metrics = KvbmMetrics::new(
             &KvbmMetricsRegistry::default(),
@@ -126,6 +179,14 @@ impl KvConnectorLeader {
                         "KvConnectorLeader init aborted: leader worker barrier not ready!",
                     );
                     return;
+                }
+
+                // Initialize remote registry if enabled (must be in async context for tmq sockets)
+                if create_distributed_registry_client()
+                    .map(|client| leader.set_remote_registry(client))
+                    == Some(false)
+                {
+                    tracing::warn!("Remote registry was already set on leader");
                 }
 
                 let mut block_manager_builder = BlockManagerBuilder::new()

@@ -6,9 +6,7 @@ use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
-use dynamo_llm::block_manager::kv_consolidator::{
-    EventSource, KvEventConsolidatorConfig,
-};
+use dynamo_llm::block_manager::kv_consolidator::{EventSource, KvEventConsolidatorConfig};
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use dynamo_runtime::DistributedRuntime;
@@ -368,7 +366,8 @@ impl BlockManagerBuilder {
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            config_builder = config_builder.consolidator_config(engine_ep, output_ep, engine_source);
+            config_builder =
+                config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
         let config = config_builder.build()?;

@@ -21,6 +21,7 @@ testing-full = ["testing-cuda", "testing-nixl"]
 testing-cuda = ["dep:cudarc"]
 testing-nixl = ["dep:nixl-sys"]
 testing-etcd = []
+testing-remote-storage = []  # Requires NIXL OBJ/POSIX backends for remote transfer tests
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:nix", "dep:aligned-vec"]
 block-manager-bench = ["block-manager", "testing-full", "dep:clap", "dep:indicatif"]
 cuda = ["dep:cudarc"]

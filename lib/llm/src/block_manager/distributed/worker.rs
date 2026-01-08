@@ -5,7 +5,11 @@ use super::*;
 
 use async_trait::async_trait;
 use transfer::*;
-use utils::*;
+use utils::{
+    LeaderMetadata, RemoteTransferRequest, WorkerMetadata, ZMQ_LEADER_METADATA_MESSAGE,
+    ZMQ_PING_MESSAGE, ZMQ_REMOTE_TRANSFER_MESSAGE, ZMQ_TRANSFER_BLOCKS_MESSAGE,
+    ZMQ_WORKER_METADATA_MESSAGE,
+};
 use zmq::*;
 
 use crate::block_manager::{
@@ -14,6 +18,7 @@ use crate::block_manager::{
         Block, layout_to_blocks, locality,
         transfer::{PoolConfig, TransferContext},
     },
+    config::RemoteTransferContext,
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
@@ -105,10 +110,57 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;
     agent.create_backend("POSIX", &posix_params)?;
 
+    // Check if object storage should be enabled
+    // Enabled when DYN_KVBM_OBJECT_BUCKET is set
+    let use_obj = std::env::var("DYN_KVBM_OBJECT_BUCKET").is_ok();
+    if use_obj {
+        // Lock to prevent race conditions when multiple workers initialize concurrently.
+        // We need to set env vars, have NIXL read them, then create the backend atomically.
+        static OBJ_BACKEND_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = OBJ_BACKEND_INIT_LOCK.lock().unwrap();
+
+        // Apply worker_id templating to bucket name before NIXL reads env vars
+        // This allows per-worker buckets like "kvcache-worker-{worker_id}" -> "kvcache-worker-0"
+        // SAFETY: set_var is unsafe due to potential data races with concurrent env access.
+        // We hold the OBJ_BACKEND_INIT_LOCK to ensure exclusive access during this section.
+        if let Ok(bucket_template) = std::env::var("DYN_KVBM_OBJECT_BUCKET") {
+            let templated_bucket = bucket_template.replace("{worker_id}", &worker_id.to_string());
+            unsafe {
+                std::env::set_var("AWS_DEFAULT_BUCKET", &templated_bucket);
+            }
+            tracing::info!(
+                worker_id = worker_id,
+                bucket = %templated_bucket,
+                "Set AWS_DEFAULT_BUCKET for NIXL OBJ backend"
+            );
+        }
+
+        // Also set endpoint if configured via DYN_KVBM_OBJECT_ENDPOINT
+        if let Ok(endpoint) = std::env::var("DYN_KVBM_OBJECT_ENDPOINT") {
+            unsafe {
+                std::env::set_var("AWS_ENDPOINT_OVERRIDE", &endpoint);
+            }
+            tracing::debug!(endpoint = %endpoint, "Set AWS_ENDPOINT_OVERRIDE for NIXL OBJ backend");
+        }
+
+        match agent.get_plugin_params("OBJ") {
+            Ok((_, obj_params)) => match agent.create_backend("OBJ", &obj_params) {
+                Ok(_) => tracing::info!(worker_id = worker_id, "Created OBJ backend for object storage"),
+                Err(e) => tracing::warn!(worker_id = worker_id, error = %e, "Failed to create OBJ backend"),
+            },
+            Err(e) => tracing::warn!(worker_id = worker_id, error = %e, "OBJ plugin not available"),
+        }
+        // Lock released here when _guard drops
+    }
+
     Ok(agent)
 }
 
-// Helper: perform allocation and build transfer handler (factored from previous code)
+struct AllocationResult {
+    transfer_handler: Arc<dyn BlockTransferHandler>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn perform_allocation_and_build_handler(
     device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
     mut layout_builder: LayoutConfigBuilder,
@@ -117,7 +169,8 @@ async fn perform_allocation_and_build_handler(
     worker_id: usize,
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
-) -> anyhow::Result<Arc<dyn BlockTransferHandler>> {
+    cancel_token: CancellationToken,
+) -> anyhow::Result<AllocationResult> {
     let use_v2_transfer = std::env::var("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL")
         .unwrap_or("0".to_string())
         .parse::<usize>()
@@ -206,7 +259,9 @@ async fn perform_allocation_and_build_handler(
             scheduler_client,
         )?;
 
-        Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
+        Ok(AllocationResult {
+            transfer_handler: Arc::new(handler) as Arc<dyn BlockTransferHandler>,
+        })
     } else {
         let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
         let pool_config = PoolConfig {
@@ -263,15 +318,55 @@ async fn perform_allocation_and_build_handler(
             None
         };
 
+        // Create remote context if we have host blocks (for bounce buffers)
+        let remote_context = if host_blocks.is_some() {
+            // Get bucket from environment variable, with worker_id templating support
+            // Supports {worker_id} placeholder, e.g. "kvcache-worker-{worker_id}" -> "kvcache-worker-0"
+            let bucket = std::env::var("DYN_KVBM_OBJECT_BUCKET")
+                .or_else(|_| std::env::var("AWS_DEFAULT_BUCKET"))
+                .ok()
+                .map(|b| b.replace("{worker_id}", &worker_id.to_string()));
+
+            let endpoint = std::env::var("DYN_KVBM_OBJECT_ENDPOINT")
+                .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
+                .or_else(|_| std::env::var("AWS_ENDPOINT_OVERRIDE"))
+                .ok();
+
+            let region = std::env::var("DYN_KVBM_OBJECT_REGION")
+                .or_else(|_| std::env::var("AWS_REGION"))
+                .ok();
+
+            tracing::info!(
+                worker_id = worker_id,
+                bucket = ?bucket,
+                endpoint = ?endpoint,
+                "Creating remote context for object storage"
+            );
+
+            Some(Arc::new(RemoteTransferContext::for_object_with_options(
+                transfer_context.clone(),
+                bucket,
+                endpoint,
+                region,
+                worker_id as u64,
+            )))
+        } else {
+            None
+        };
+
         let handler = BlockTransferHandlerV1::new(
             device_blocks,
             host_blocks,
             disk_blocks,
             transfer_context,
             scheduler_client,
+            remote_context,
+            cancel_token,
         )?;
 
-        Ok(Arc::new(handler) as Arc<dyn BlockTransferHandler>)
+        Ok(AllocationResult {
+            transfer_handler: Arc::new(handler) as Arc<dyn BlockTransferHandler>,
+        })
     }
 }
 
@@ -310,6 +405,7 @@ struct LeaderMetadataHandler {
     scheduler_client: Option<TransferSchedulerClient>,
     handler_cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
     handler_tx: Arc<TransferHandlerSender>,
+    cancel_token: CancellationToken,
     started: AtomicBool,
 }
 
@@ -371,6 +467,7 @@ impl Handler for LeaderMetadataHandler {
         let handler_cell = self.handler_cell.clone();
         let handler_tx = self.handler_tx.clone();
         let state = self.state.clone();
+        let cancel_token = self.cancel_token.clone();
 
         tokio::spawn(async move {
             match perform_allocation_and_build_handler(
@@ -381,20 +478,21 @@ impl Handler for LeaderMetadataHandler {
                 worker_id,
                 device_id,
                 scheduler_client,
+                cancel_token,
             )
             .await
             {
-                Ok(handler) => {
-                    // Install transfer handler
+                Ok(result) => {
+                    // Install transfer handler (includes remote transfer support if configured)
                     {
                         let mut w = handler_cell.write().await;
-                        *w = Some(handler.clone());
+                        *w = Some(result.transfer_handler.clone());
                     }
                     // Return handler to creator (once)
                     {
                         let mut g = handler_tx.lock().await;
                         if let Some(tx) = g.take() {
-                            let _ = tx.send(handler);
+                            let _ = tx.send(result.transfer_handler);
                         }
                     }
                     // Now the worker can ACK pings
@@ -459,6 +557,58 @@ impl Handler for BlockTransferDispatch {
         } else {
             Err(anyhow::anyhow!("transfer handler not ready yet"))
         }
+    }
+}
+
+// Remote transfer dispatcher for G4/object storage transfers
+struct RemoteTransferDispatch {
+    cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>>,
+}
+
+#[async_trait]
+impl Handler for RemoteTransferDispatch {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        let handler = { self.cell.read().await.clone() };
+
+        let handler = match handler {
+            Some(h) => h,
+            None => {
+                tracing::warn!("Transfer handler not ready - remote transfer request dropped");
+                message.mark_handled();
+                return Ok(());
+            }
+        };
+
+        if message.data.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "Remote transfer request must have exactly one data element"
+            ));
+        }
+
+        let request: RemoteTransferRequest = serde_json::from_slice(&message.data[0])?;
+
+        tracing::debug!(
+            target = "kvbm-g4",
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            direction = if request.is_onboard() { "onboard" } else { "offload" },
+            num_blocks = request.num_blocks(),
+            "Received remote transfer request"
+        );
+
+        // Execute the remote transfer
+        match handler.execute_remote_transfer(request).await {
+            Ok(()) => {
+                tracing::debug!("Remote transfer completed successfully");
+            }
+            Err(e) => {
+                tracing::error!("Remote transfer failed: {e:#}");
+                // Still ACK to avoid blocking leader
+            }
+        }
+
+        message.ack().await?;
+        Ok(())
     }
 }
 
@@ -789,7 +939,7 @@ impl KvbmWorker {
         // Readiness gating for ping
         let state = Arc::new(WorkerState::new());
 
-        // Cell to publish the transfer handler
+        // Cell to publish the transfer handler (used for both local and remote transfers)
         let transfer_handler_cell: Arc<RwLock<Option<Arc<dyn BlockTransferHandler>>>> =
             Arc::new(RwLock::new(None));
 
@@ -824,6 +974,7 @@ impl KvbmWorker {
                 scheduler_client,
                 handler_cell: transfer_handler_cell.clone(),
                 handler_tx, // sends BlockTransferHandler to caller
+                cancel_token: cancel_token.clone(),
                 started: AtomicBool::new(false),
             }) as Arc<dyn Handler>,
         );
@@ -832,6 +983,14 @@ impl KvbmWorker {
         handlers.insert(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
             Arc::new(BlockTransferDispatch {
+                cell: transfer_handler_cell.clone(),
+            }) as Arc<dyn Handler>,
+        );
+
+        // remote transfer requests (G4 object storage, remote disk)
+        handlers.insert(
+            ZMQ_REMOTE_TRANSFER_MESSAGE.to_string(),
+            Arc::new(RemoteTransferDispatch {
                 cell: transfer_handler_cell.clone(),
             }) as Arc<dyn Handler>,
         );

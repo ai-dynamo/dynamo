@@ -9,7 +9,9 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{self as rs, RuntimeConfig, logging, traits::DistributedRuntimeProvider, config};
+use dynamo_runtime::{
+    self as rs, RuntimeConfig, config, logging, traits::DistributedRuntimeProvider,
+};
 
 use dynamo_llm::{self as llm_rs};
 
@@ -23,8 +25,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize tokio runtime first to avoid panics when OTEL_EXPORT_ENABLED=1
     init_pyo3_tokio_rt();
 
-    if config::env_is_truthy("OTEL_EXPORT_ENABLED")
-    {
+    if config::env_is_truthy("OTEL_EXPORT_ENABLED") {
         // OTLP batch exporter needs runtime context to spawn background tasks
         let handle = get_current_tokio_handle();
         let _guard = handle.enter();
@@ -47,7 +48,8 @@ static PYO3_TOKIO_CANCEL_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
 // The runtime's threads do not survive when passing DistributedRuntime across bindings,
 // so we need to reinitialize the runtime thread pool.
 // This is also required in environments without a DistributedRuntime.
-fn init_pyo3_tokio_rt() {
+// Made pub(crate) so e2e tests can initialize before using ConnectorSlotManager.
+pub(crate) fn init_pyo3_tokio_rt() {
     PYO3_TOKIO_INIT.get_or_init(|| {
         let cfg =
             RuntimeConfig::from_settings().expect("failed to build runtime config from settings");
@@ -85,8 +87,23 @@ pub fn get_current_tokio_handle() -> tokio::runtime::Handle {
 pub fn get_current_cancel_token() -> CancellationToken {
     PYO3_TOKIO_CANCEL_TOKEN
         .get()
-        .expect("Cancellation token not initialized!")
+        .expect("Cancellation token must be initialized!")
         .clone()
+}
+
+/// Initialize the cancel token and runtime for tests.
+/// This is safe to call multiple times (OnceLock ensures single initialization).
+#[cfg(test)]
+pub(crate) fn init_test_cancel_token() {
+    let _ = PYO3_TOKIO_CANCEL_TOKEN.get_or_init(CancellationToken::new);
+    // Also set the runtime if not already set (for get_current_tokio_handle)
+    let _ = PYO3_TOKIO_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("failed to build test tokio runtime")
+    });
 }
 
 pub fn to_pyerr<E>(err: E) -> PyErr

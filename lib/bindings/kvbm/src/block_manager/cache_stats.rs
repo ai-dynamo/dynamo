@@ -17,17 +17,18 @@ const DEFAULT_LOG_INTERVAL_SECS: u64 = 5;
 /// Cache statistics entry for a single request
 #[derive(Clone, Copy, Debug)]
 struct CacheStatsEntry {
-    host_blocks: u64,      // Blocks found in host cache
-    disk_blocks: u64,      // Blocks found in disk cache
-    total_blocks: u64,     // Total blocks queried from host/disk
+    host_blocks: u64,  // Blocks found in host cache
+    disk_blocks: u64,  // Blocks found in disk cache
+    total_blocks: u64, // Total blocks queried from host/disk
 }
 
 /// Aggregated cache statistics for the current sliding window
 #[derive(Default)]
 struct AggregatedStats {
-    total_blocks_queried: u64,  // Total blocks queried from host/disk (same for both tiers)
-    host_blocks_hit: u64,        // Blocks found in host cache
-    disk_blocks_hit: u64,        // Blocks found in disk cache
+    total_blocks_queried: u64, // Total blocks queried from host/disk (same for both tiers)
+    host_blocks_hit: u64,      // Blocks found in host cache
+    disk_blocks_hit: u64,      // Blocks found in disk cache
+    object_blocks_hit: u64,    // Blocks found in object cache
 }
 
 /// Cache statistics tracker with sliding window
@@ -222,6 +223,15 @@ impl CacheStatsTracker {
         }
     }
 
+    /// Get current object cache hit rate (0.0-1.0) from the sliding window
+    pub fn object_hit_rate(&self) -> f32 {
+        let aggregated = self.aggregated.lock().unwrap();
+        if aggregated.total_blocks_queried == 0 {
+            0.0
+        } else {
+            aggregated.object_blocks_hit as f32 / aggregated.total_blocks_queried as f32
+        }
+    }
     /// Reset the statistics (clears the sliding window)
     /// Useful for test isolation
     #[cfg(test)]

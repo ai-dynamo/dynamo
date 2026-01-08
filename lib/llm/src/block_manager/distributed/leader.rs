@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::registry::{NoMetadata, PositionalKey, Registry};
+use super::remote::PositionalRemoteHandle;
 use super::*;
+use crate::block_manager::block::transfer::remote::RemoteKey;
 
 use utils::*;
 use zmq::*;
 
 use derive_builder::Builder;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -37,6 +41,11 @@ fn compute_num_blocks(
 
 #[derive(Builder, Clone, Debug)]
 pub struct KvbmLeaderConfig {
+    /// The worker rank (0-indexed).
+    /// Used as worker_id in positional registry keys.
+    #[builder(default = "0")]
+    pub rank: usize,
+
     /// The world size.
     #[builder(default = "1")]
     world_size: usize,
@@ -112,6 +121,9 @@ pub struct KvbmLeader {
     state: Arc<KvbmLeaderState>,
     zmq_leader: Arc<OnceCell<ZmqActiveMessageLeader>>,
     config: KvbmLeaderConfig,
+    /// Handle for remote registry operations (e.g., G4 object storage).
+    /// Uses channels to avoid blocking Tokio worker threads.
+    remote_handle: RwLock<Option<PositionalRemoteHandle>>,
 }
 
 impl KvbmLeader {
@@ -122,12 +134,65 @@ impl KvbmLeader {
             state: Arc::new(KvbmLeaderState::default()),
             zmq_leader: Arc::new(tokio::sync::OnceCell::new()),
             config,
+            remote_handle: RwLock::new(None),
         };
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         leader.spawn_zmq_task(leader_sockets, cancel_token);
 
         Ok(leader)
+    }
+
+    /// Set the remote registry by spawning a RemoteHandle task.
+    ///
+    /// The registry should be created externally and passed in.
+    /// This spawns a background task that handles registry operations via channels,
+    /// avoiding blocking of Tokio worker threads.
+    ///
+    /// Returns `true` if set successfully, `false` if already set.
+    pub fn set_remote_registry(
+        &self,
+        registry: Arc<dyn Registry<PositionalKey, RemoteKey, NoMetadata> + Send + Sync>,
+    ) -> bool {
+        let mut guard = self.remote_handle.write();
+        if guard.is_some() {
+            tracing::warn!("Remote registry already set");
+            return false;
+        }
+
+        let handle = PositionalRemoteHandle::spawn(registry);
+        *guard = Some(handle);
+        tracing::info!("Remote registry enabled via RemoteHandle");
+        true
+    }
+
+    /// Get the remote handle if available.
+    pub fn remote_handle(&self) -> Option<PositionalRemoteHandle> {
+        self.remote_handle.read().clone()
+    }
+
+    /// Check if remote registry is enabled.
+    pub fn remote_registry_enabled(&self) -> bool {
+        self.remote_handle.read().is_some()
+    }
+
+    /// Get the worker ID used for registry operations.
+    pub fn worker_id(&self) -> u64 {
+        self.config.rank as u64
+    }
+
+    /// Send a remote transfer request to the workers.
+    /// Used for both G4 onboard (object -> device) and offload (device -> object).
+    pub async fn remote_transfer_request(
+        &self,
+        request: RemoteTransferRequest,
+    ) -> anyhow::Result<oneshot::Receiver<()>> {
+        let zmq = self
+            .zmq_leader
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("ZMQ leader not ready"))?;
+        let data = vec![serde_json::to_vec(&request)?];
+        zmq.broadcast(ZMQ_REMOTE_TRANSFER_MESSAGE, data).await
     }
 
     fn spawn_zmq_task(

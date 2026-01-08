@@ -3,6 +3,7 @@
 
 use super::events::EventManager;
 use super::*;
+use crate::block_manager::block::transfer::TransferContext;
 use dynamo_runtime::config::environment_names::kvbm::cpu_cache as env_cpu_cache;
 use dynamo_runtime::config::environment_names::kvbm::disk_cache as env_disk_cache;
 use prometheus::Registry;
@@ -302,4 +303,314 @@ pub fn should_bypass_cpu_cache() -> bool {
     let disk_cache_set = disk_cache_gb_set || disk_cache_override_set;
 
     disk_cache_set && !cpu_cache_set
+}
+
+#[derive(Clone, Debug)]
+pub enum RemoteStorageConfig {
+    Object {
+        default_bucket: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+    },
+    Disk {
+        base_path: String,
+        use_gds: bool,
+    },
+}
+
+impl RemoteStorageConfig {
+    pub fn object(bucket: impl Into<String>) -> Self {
+        Self::Object {
+            default_bucket: Some(bucket.into()),
+            endpoint: None,
+            region: None,
+        }
+    }
+
+    pub fn object_with_options(
+        bucket: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+    ) -> Self {
+        Self::Object {
+            default_bucket: bucket,
+            endpoint,
+            region,
+        }
+    }
+
+    pub fn disk(base_path: impl Into<String>, use_gds: bool) -> Self {
+        Self::Disk {
+            base_path: base_path.into(),
+            use_gds,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RemoteTransferContext {
+    base: Arc<TransferContext>,
+    config: RemoteStorageConfig,
+    worker_id: u64,
+}
+
+#[derive(Clone)]
+pub struct RemoteContextConfig {
+    pub remote_storage_config: RemoteStorageConfig,
+    pub worker_id: u64,
+}
+
+impl RemoteTransferContext {
+    pub fn for_object(base: Arc<TransferContext>, default_bucket: Option<String>) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Object {
+                default_bucket,
+                endpoint: None,
+                region: None,
+            },
+            worker_id: 0,
+        }
+    }
+
+    pub fn for_object_with_options(
+        base: Arc<TransferContext>,
+        default_bucket: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        worker_id: u64,
+    ) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Object {
+                default_bucket,
+                endpoint,
+                region,
+            },
+            worker_id,
+        }
+    }
+
+    pub fn for_disk(base: Arc<TransferContext>, base_path: String, use_gds: bool) -> Self {
+        Self {
+            base,
+            config: RemoteStorageConfig::Disk { base_path, use_gds },
+            worker_id: 0,
+        }
+    }
+
+    pub fn new(base: Arc<TransferContext>, config: RemoteStorageConfig) -> Self {
+        Self {
+            base,
+            config,
+            worker_id: 0,
+        }
+    }
+
+    pub fn with_worker_id(mut self, worker_id: u64) -> Self {
+        self.worker_id = worker_id;
+        self
+    }
+
+    pub fn base(&self) -> &Arc<TransferContext> {
+        &self.base
+    }
+
+    pub fn config(&self) -> &RemoteStorageConfig {
+        &self.config
+    }
+
+    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
+        self.base.nixl_agent()
+    }
+
+    pub fn async_rt_handle(&self) -> &tokio::runtime::Handle {
+        self.base.async_rt_handle()
+    }
+
+    pub fn worker_id(&self) -> u64 {
+        self.worker_id
+    }
+
+    pub fn default_bucket(&self) -> Option<&str> {
+        match &self.config {
+            RemoteStorageConfig::Object { default_bucket, .. } => default_bucket.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn base_path(&self) -> Option<&str> {
+        match &self.config {
+            RemoteStorageConfig::Disk { base_path, .. } => Some(base_path),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Debug for RemoteTransferContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteTransferContext")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod remote_storage_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_object_with_bucket() {
+            let config = RemoteStorageConfig::object("my-bucket");
+            match config {
+                RemoteStorageConfig::Object {
+                    default_bucket,
+                    endpoint,
+                    region,
+                } => {
+                    assert_eq!(default_bucket, Some("my-bucket".to_string()));
+                    assert!(endpoint.is_none());
+                    assert!(region.is_none());
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_object_with_options() {
+            let config = RemoteStorageConfig::object_with_options(
+                Some("test-bucket".to_string()),
+                Some("http://localhost:9000".to_string()),
+                Some("us-west-2".to_string()),
+            );
+            match config {
+                RemoteStorageConfig::Object {
+                    default_bucket,
+                    endpoint,
+                    region,
+                } => {
+                    assert_eq!(default_bucket, Some("test-bucket".to_string()));
+                    assert_eq!(endpoint, Some("http://localhost:9000".to_string()));
+                    assert_eq!(region, Some("us-west-2".to_string()));
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_object_with_no_bucket() {
+            let config = RemoteStorageConfig::object_with_options(None, None, None);
+            match config {
+                RemoteStorageConfig::Object {
+                    default_bucket,
+                    endpoint,
+                    region,
+                } => {
+                    assert!(default_bucket.is_none());
+                    assert!(endpoint.is_none());
+                    assert!(region.is_none());
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_disk_config() {
+            let config = RemoteStorageConfig::disk("/mnt/kv-cache", false);
+            match config {
+                RemoteStorageConfig::Disk { base_path, use_gds } => {
+                    assert_eq!(base_path, "/mnt/kv-cache");
+                    assert!(!use_gds);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_disk_config_with_gds() {
+            let config = RemoteStorageConfig::disk("/mnt/nvme", true);
+            match config {
+                RemoteStorageConfig::Disk { base_path, use_gds } => {
+                    assert_eq!(base_path, "/mnt/nvme");
+                    assert!(use_gds);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_config_clone() {
+            let config = RemoteStorageConfig::object("bucket");
+            let cloned = config.clone();
+            match (config, cloned) {
+                (
+                    RemoteStorageConfig::Object {
+                        default_bucket: b1, ..
+                    },
+                    RemoteStorageConfig::Object {
+                        default_bucket: b2, ..
+                    },
+                ) => {
+                    assert_eq!(b1, b2);
+                }
+                _ => panic!("Clone should preserve variant"),
+            }
+        }
+
+        #[test]
+        fn test_config_debug() {
+            let config = RemoteStorageConfig::object("debug-bucket");
+            let debug_str = format!("{:?}", config);
+            assert!(debug_str.contains("Object"));
+            assert!(debug_str.contains("debug-bucket"));
+        }
+    }
+
+    mod remote_context_config_tests {
+        use super::*;
+
+        #[test]
+        fn test_remote_context_config_object() {
+            let config = RemoteContextConfig {
+                remote_storage_config: RemoteStorageConfig::object("test-bucket"),
+                worker_id: 42,
+            };
+            assert_eq!(config.worker_id, 42);
+            match config.remote_storage_config {
+                RemoteStorageConfig::Object { default_bucket, .. } => {
+                    assert_eq!(default_bucket, Some("test-bucket".to_string()));
+                }
+                _ => panic!("Expected Object variant"),
+            }
+        }
+
+        #[test]
+        fn test_remote_context_config_disk() {
+            let config = RemoteContextConfig {
+                remote_storage_config: RemoteStorageConfig::disk("/data/cache", true),
+                worker_id: 7,
+            };
+            assert_eq!(config.worker_id, 7);
+            match config.remote_storage_config {
+                RemoteStorageConfig::Disk { base_path, use_gds } => {
+                    assert_eq!(base_path, "/data/cache");
+                    assert!(use_gds);
+                }
+                _ => panic!("Expected Disk variant"),
+            }
+        }
+
+        #[test]
+        fn test_remote_context_config_clone() {
+            let config = RemoteContextConfig {
+                remote_storage_config: RemoteStorageConfig::object("clone-bucket"),
+                worker_id: 123,
+            };
+            let cloned = config.clone();
+            assert_eq!(cloned.worker_id, 123);
+        }
+    }
 }
