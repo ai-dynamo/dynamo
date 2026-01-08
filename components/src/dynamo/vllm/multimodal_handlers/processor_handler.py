@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import json
 import logging
 import uuid
 from enum import Enum
-from typing import AsyncIterator, Union
+from typing import Any, AsyncIterator, Dict, List, Union
 
 from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -199,6 +200,279 @@ class ProcessorHandler(ProcessMixIn):
                 f"Generated response type {type(response)}, content: {response}"
             )
             # reconstructing back the OpenAI chat response as dynamo egress expects it
+            if response.startswith("data: [DONE]"):
+                break
+            response = json.loads(response.lstrip("data: "))
+            yield response
+
+
+class ECProcessorHandler(ProcessorHandler):
+    """
+    Processor handler for ECConnector-based encoder
+    """
+
+    def __init__(
+        self,
+        engine_args: AsyncEngineArgs,
+        encoder_worker_client: Client,
+        pd_worker_client: Client,
+        prompt_template: str,
+    ):
+        """
+        Initialize the ECConnector processor.
+
+        Args:
+            engine_args: vLLM engine arguments for model config
+            encoder_worker_client: Client for encoder worker endpoints
+            pd_worker_client: Client for PD worker endpoints
+            prompt_template: Multimodal prompt template
+        """
+        # Initialize base class with encoder client
+        super().__init__(engine_args, encoder_worker_client, prompt_template)
+
+        # Store additional PD client for disaggregated architecture
+        self.encoder_client = encoder_worker_client
+        self.pd_client = pd_worker_client
+
+        logger.info("ECProcessorHandler initialized with disaggregated architecture")
+
+    @staticmethod
+    def _extract_multimodal_items(request_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Extract all multimodal items (images/videos) from the request messages.
+
+        Args:
+            request_data: The request dictionary
+
+        Returns:
+            List of multimodal content items
+        """
+        items = []
+        messages = request_data.get("messages", [])
+
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+
+            for item in content:
+                item_type = item.get("type")
+                if item_type in ("image_url", "video_url"):
+                    items.append(item)
+
+        return items
+
+    @staticmethod
+    def _create_encoder_request(
+        mm_item: Dict[str, Any],
+        model: str,
+        request_id: str,
+    ) -> Dict[str, Any]:
+        # Create MultiModalInput from the item
+        multimodal_input = {}
+        modality = None
+
+        if mm_item.get("type") == "image_url":
+            multimodal_input["image_url"] = mm_item["image_url"]["url"]
+            modality = "image"
+        elif mm_item.get("type") == "video_url":
+            multimodal_input["video_url"] = mm_item["video_url"]["url"]
+            modality = "video"
+        else:
+            raise ValueError(f"Unsupported multimodal type: {mm_item.get('type')}")
+
+        return {
+            "request_id": request_id,
+            "multimodal_input": multimodal_input,
+            "modality": modality,
+        }
+
+    async def _encode_multimodal_items(
+        self,
+        mm_items: List[Dict[str, Any]],
+        model: str,
+        request_id: str,
+    ) -> None:
+        """
+        Send all multimodal items to encoder workers concurrently.
+
+        Each item is sent as a separate request to an encoder worker.
+        The encoder processes the item and stores embeddings to shared storage.
+        """
+        if not mm_items:
+            logger.debug(f"[{request_id}] No multimodal items to encode")
+            return
+
+        logger.info(f"[{request_id}] Encoding {len(mm_items)} multimodal item(s)")
+
+        tasks = []
+        for idx, mm_item in enumerate(mm_items):
+            # Create unique request ID for each item
+            item_request_id = f"{request_id}_mm_{idx}"
+
+            # Build encoder request
+            encoder_request = self._create_encoder_request(
+                mm_item=mm_item,
+                model=model,
+                request_id=item_request_id,
+            )
+
+            # Create task for this encoder request
+            task = self._send_to_encoder(encoder_request, item_request_id)
+            tasks.append(task)
+
+        # Wait for all encoder requests to complete
+        try:
+            await asyncio.gather(*tasks)
+            logger.info(f"[{request_id}] All encoders completed successfully")
+        except Exception as e:
+            logger.error(f"[{request_id}] Encoder encoding failed: {e}")
+            raise
+
+    async def _send_to_encoder(
+        self,
+        encoder_request: Dict[str, Any],
+        request_id: str,
+    ) -> None:
+        """
+        Send a single request to an encoder worker and wait for completion.
+        """
+        try:
+            # Convert to JSON
+            request_json = json.dumps(encoder_request)
+
+            # Send to encoder worker (round-robin)
+            response_stream = await self.encoder_client.round_robin(request_json)
+
+            # Consume the response stream
+            async for chunk in response_stream:
+                pass
+
+            logger.debug(f"[{request_id}] Encoder completed successfully")
+
+        except Exception as e:
+            logger.error(f"[{request_id}] Encoder request failed: {e}")
+            raise
+
+    async def generate(self, raw_request: MultiModalRequest, context):
+        """
+        Main endpoint handler for chat completion requests with ECConnector.
+        """
+        logger.debug(f"ECProcessor received request: {raw_request}")
+
+        if not isinstance(raw_request, MultiModalRequest):
+            raw_request = MultiModalRequest.model_validate(raw_request)
+
+        # Ensure the configured template includes the placeholder
+        template = self.prompt_template
+        if "<prompt>" not in template:
+            raise ValueError("prompt_template must contain '<prompt>' placeholder")
+
+        # Safely extract user text
+        user_text = None
+        for message in raw_request.messages:
+            for item in message.content:
+                if item.type == "text":
+                    user_text = item.text
+                    break
+        if not user_text:
+            raise ValueError("No text content found in request")
+
+        prompt = template.replace("<prompt>", user_text)
+
+        msg = {
+            "role": "user",
+            "content": prompt,
+        }
+
+        # Generate single request ID for entire flow
+        request_id = str(uuid.uuid4().hex)
+
+        # Create chat request for preprocessing
+        chat_request = ChatCompletionRequest(
+            model=raw_request.model,
+            messages=[msg],
+            stream=True,
+            max_tokens=raw_request.max_tokens,
+            temperature=raw_request.temperature,
+            request_id=request_id,
+        )
+
+        # Step 1: Extract multimodal input (needed for PD worker to generate mm_hash)
+        multimodal_input = MultiModalInput()
+        for message in raw_request.messages:
+            for item in message.content:
+                if item.type == "image_url":
+                    multimodal_input.image_url = item.image_url.url
+                elif item.type == "video_url":
+                    if multimodal_input.image_url is not None:
+                        raise ValueError("Cannot provide both image and video URLs")
+                    multimodal_input.video_url = item.video_url.url
+
+        if multimodal_input.image_url is None and multimodal_input.video_url is None:
+            raise ValueError("Either image URL or video URL is required")
+
+        # Step 2: Send multimodal items to encoder (ECConnector producer)
+        mm_items = self._extract_multimodal_items(raw_request.model_dump())
+
+        if mm_items:
+            logger.info(
+                f"[{request_id}] Encoding {len(mm_items)} multimodal item(s) via encoder..."
+            )
+            try:
+                await self._encode_multimodal_items(
+                    mm_items=mm_items,
+                    model=raw_request.model,
+                    request_id=request_id,
+                )
+            except Exception as e:
+                logger.error(f"[{request_id}] Encoder processing failed: {e}")
+                error_response = {
+                    "error": {
+                        "message": f"Encoder processing failed: {str(e)}",
+                        "type": "encoder_error",
+                        "code": 500,
+                    }
+                }
+                yield error_response
+                return
+
+        # Step 2: Preprocess request (parse chat, tokenize, create engine prompt)
+        logger.debug(f"[{request_id}] Preprocessing request...")
+        (
+            request,
+            conversation,
+            engine_prompt,
+            sampling_params,
+        ) = await self._parse_raw_request(chat_request)
+
+        # Step 3: Create worker request for PD worker (WITH multimodal_input)
+        # PD worker needs multimodal_input to generate mm_hash and lookup EC cache
+        # vLLM will see the multimodal items, generate mm_hash, and load from cache
+        worker_request = vLLMMultimodalRequest(
+            engine_prompt=engine_prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            multimodal_input=multimodal_input,  # ✓ Keep this so vLLM can generate mm_hash
+        )
+
+        logger.debug(
+            f"[{request_id}] Forwarding to PD worker (vLLM will load from ECConnector cache using mm_hash)..."
+        )
+
+        # Step 4: Send to PD worker (ECConnector consumer - will load from storage)
+        response_generator = await self.pd_client.round_robin(
+            worker_request.model_dump_json()
+        )
+
+        # Step 5: Generate and stream responses (reuse base class method)
+        output = self._generate_responses(response_generator, RequestType.CHAT)
+
+        async for response in await self._stream_response(
+            request, output, request_id, conversation
+        ):
+            logger.debug(f"[{request_id}] Generated response: {type(response)}")
+            # Reconstruct OpenAI chat response
             if response.startswith("data: [DONE]"):
                 break
             response = json.loads(response.lstrip("data: "))

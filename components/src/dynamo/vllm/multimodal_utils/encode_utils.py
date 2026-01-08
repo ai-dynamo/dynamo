@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import logging
 from typing import Any, Dict, Optional
 
 import torch
+from vllm.config import ECTransferConfig
 
 from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 
@@ -130,3 +132,51 @@ def get_encoder_components(
 
     else:
         raise NotImplementedError(f"Model not supported: {model_name}")
+
+
+def create_ec_transfer_config(
+    engine_id: str,
+    ec_role: str,
+    ec_connector_backend: str = "ECExampleConnector",
+    ec_storage_path: Optional[str] = None,
+    ec_extra_config: Optional[str] = None,
+) -> ECTransferConfig:
+    """
+    Create ECTransferConfig for vLLM encoder disaggregation.
+
+    Args:
+        engine_id: Unique identifier for this engine instance
+        ec_role: Role of this instance - "ec_producer" (encoder) or "ec_consumer" (PD worker)
+        ec_connector_backend: ECConnector implementation class name
+        ec_storage_path: Storage path for disk-based connectors
+        ec_extra_config: Additional connector config as JSON string
+
+    Returns:
+        ECTransferConfig configured for the specified role
+    """
+    # Parse extra config if provided
+    extra_config: Dict[str, Any] = {}
+    if ec_extra_config:
+        try:
+            extra_config = json.loads(ec_extra_config)
+            logger.debug(f"Parsed ec_extra_config: {extra_config}")
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in --ec-extra-config: {e}")
+
+    # Add storage path to config if provided
+    if ec_storage_path:
+        extra_config["shared_storage_path"] = ec_storage_path
+    else:
+        raise ValueError("ec_storage_path is not provided")
+
+    logger.info(
+        f"Creating ECTransferConfig: engine_id={engine_id}, role={ec_role}, "
+        f"backend={ec_connector_backend}, config={extra_config}"
+    )
+
+    return ECTransferConfig(
+        engine_id=engine_id,
+        ec_role=ec_role,
+        ec_connector=ec_connector_backend,
+        ec_connector_extra_config=extra_config,
+    )

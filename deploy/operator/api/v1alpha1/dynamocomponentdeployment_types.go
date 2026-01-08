@@ -280,6 +280,10 @@ func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
 }
 
+func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
+	return s.GetNumberOfNodes() > 1
+}
+
 func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	if s.Multinode != nil {
 		return s.Multinode.NodeCount
