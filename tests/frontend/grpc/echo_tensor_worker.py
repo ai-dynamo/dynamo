@@ -83,6 +83,15 @@ async def generate(request, context):
                 "parameters": params,
             }
             return
+        elif "data_mismatch" in request["parameters"]:
+            # Modify the data type to trigger data mismatch error
+            request["tensors"][0]["data"]["values"] = []
+            yield {
+                "model": request["model"],
+                "tensors": request["tensors"],
+                "parameters": params,
+            }
+            return
         elif "raise_exception" in request["parameters"]:
             raise ValueError("Intentional exception raised by echo_tensor_worker.")
 

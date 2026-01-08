@@ -157,8 +157,9 @@ def test_model_infer_failure(start_services_with_echo_worker, request_params):
     [
         {"malformed_response": True},
         {"raise_exception": True},
+        {"data_mismatch": True},
     ],
-    ids=["malformed_response", "raise_exception"],
+    ids=["malformed_response", "raise_exception", "data_mismatch"],
 )
 def test_model_stream_infer_failure(start_services_with_echo_worker, request_params):
     """Test gRPC request-level parameters are echoed through tensor models.
@@ -212,5 +213,7 @@ def test_model_stream_infer_failure(start_services_with_echo_worker, request_par
             raise data_item
     if "malformed_response" in request_params:
         assert "missing field `data_type`" in str(excinfo.value).lower()
+    elif "data_mismatch" in request_params:
+        assert "shape implies" in str(excinfo.value).lower()
     elif "raise_exception" in request_params:
         assert "intentional exception" in str(excinfo.value).lower()

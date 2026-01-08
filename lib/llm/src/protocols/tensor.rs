@@ -114,6 +114,7 @@ impl FlattenTensor {
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct TensorMetadata {
     pub name: String,
     pub data_type: DataType,
@@ -125,6 +126,7 @@ pub struct TensorMetadata {
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TensorModelConfig {
     pub name: String,
     pub inputs: Vec<TensorMetadata>,
@@ -136,6 +138,7 @@ pub struct TensorModelConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Tensor {
     pub metadata: TensorMetadata,
     pub data: FlattenTensor,
@@ -143,6 +146,7 @@ pub struct Tensor {
 
 impl validator::Validate for Tensor {
     fn validate(&self) -> Result<(), validator::ValidationErrors> {
+        tracing::info!("Validating Tensor: {:?}", self);
         use validator::{ValidationError, ValidationErrors};
         let mut errs = ValidationErrors::new();
 
@@ -182,6 +186,7 @@ impl validator::Validate for Tensor {
 }
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NvCreateTensorRequest {
     /// ID of the request
     pub id: Option<String>,
@@ -190,6 +195,7 @@ pub struct NvCreateTensorRequest {
     pub model: String,
 
     /// Input tensors.
+    #[validate(nested)]
     pub tensors: Vec<Tensor>,
 
     /// Optional request-level parameters
@@ -203,6 +209,7 @@ pub struct NvCreateTensorRequest {
 /// A response structure for unary chat completion responses, embedding OpenAI's
 /// `CreateChatCompletionResponse`.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct NvCreateTensorResponse {
     /// ID of the corresponding request.
     pub id: Option<String>,
@@ -211,6 +218,7 @@ pub struct NvCreateTensorResponse {
     pub model: String,
 
     /// Output tensors.
+    #[validate(nested)]
     pub tensors: Vec<Tensor>,
 
     /// Optional response-level parameters
