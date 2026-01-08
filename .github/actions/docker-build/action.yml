@@ -110,15 +110,13 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
         EXTRA_ARGS="--cache-to type=inline "
-        # Always cache from main
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
         EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
         if [[ "$GITHUB_REF_NAME" =~ ^release ]]; then
           # Release branches also use release cache
           EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-${PLATFORM##*/}-cache "
           EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:release-${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
         elif [[ "$GITHUB_REF_NAME" == "main" ]]; then
-          # main pushes to main cache
           EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
         fi
 
