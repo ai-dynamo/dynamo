@@ -1,6 +1,6 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2022 Atalaya Tech. Inc
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,7 +14,7 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- * Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+ * Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES
  */
 
 package v1alpha1
@@ -111,14 +111,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ReadinessProbe to signal when the container is ready to receive traffic.
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	// Replicas is the desired number of Pods for this component.
-	// When scalingAdapter is enabled (default), this field is managed by the
+	// When scalingAdapter is enabled, this field is managed by the
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
@@ -278,6 +278,10 @@ func (s *DynamoComponentDeployment) IsMultinode() bool {
 
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
+	return s.GetNumberOfNodes() > 1
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {

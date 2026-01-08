@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # DynamoGraphDeploymentRequest for MoE model profiling
@@ -20,6 +20,12 @@ spec:
         # Standard online profiling (not using AI Configurator)
         use_ai_configurator: false
 
+      hardware:
+        # for h200, sweep over 8-16 GPUs per engine
+        min_num_gpus_per_engine: 8
+        max_num_gpus_per_engine: 16
+        num_gpus_per_node: 8
+
       # SLA targets for profiling
       sla:
         isl: 3000   # Input sequence length
@@ -29,7 +35,7 @@ spec:
 
     # Reference to ConfigMap containing the DGD base config
     # For MoE models, this should point to the appropriate disagg config
-    # Original path: /sgl-workspace/dynamo/recipes/deepseek-r1/sglang/disagg-16gpu.yaml
+    # Original path: /sgl-workspace/dynamo/recipes/deepseek-r1/sglang/disagg-16gpu/deploy.yaml
     configMapRef:
       name: deepseek-r1-config
       key: tep16p-dep16d-disagg.yaml

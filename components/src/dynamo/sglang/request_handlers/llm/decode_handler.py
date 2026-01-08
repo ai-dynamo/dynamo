@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -12,9 +12,6 @@ from dynamo._core import Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-
-# Timeout for decode engine to receive first response when waiting for KV cache transfer
-DECODE_KV_TRANSFER_TIMEOUT_SECONDS = 60.0
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -107,12 +104,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # Check if bootstrap_info is in the request
+            # Check if bootstrap_info is pre-computed in the request (from frontend)
             bootstrap_info = request.get("bootstrap_info")
 
             if not bootstrap_info:
                 raise RuntimeError(
-                    "bootstrap_info is required for disaggregated decode but was not provided."
+                    "bootstrap_info is required for disaggregated decode but was not provided"
                 )
 
             logging.debug(
@@ -137,28 +134,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
             )
 
-            # Wait for first token with timeout
-            decode_iter = decode.__aiter__()
-            try:
-                first_res = await asyncio.wait_for(
-                    decode_iter.__anext__(), timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS
-                )
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"Decode timed out after {DECODE_KV_TRANSFER_TIMEOUT_SECONDS}s waiting for first token. "
-                )
-
-            # Create stream starting with first result
-            async def decode_stream() -> AsyncGenerator[Dict[str, Any], None]:
-                yield first_res
-                async for res in decode_iter:
-                    yield res
-
             if self.skip_tokenizer_init:
-                async for out in self._process_token_stream(decode_stream(), context):
+                async for out in self._process_token_stream(decode, context):
                     yield out
             else:
-                async for out in self._process_text_stream(decode_stream(), context):
+                async for out in self._process_text_stream(decode, context):
                     yield out
         else:
             if self.enable_trace:

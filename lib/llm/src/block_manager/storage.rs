@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // TODO: Add docs.
@@ -69,10 +69,12 @@ pub mod arena;
 pub mod cuda;
 pub mod disk;
 pub mod nixl;
+pub mod object;
 pub mod torch;
 
 pub use cuda::*;
 pub use disk::*;
+pub use object::ObjectStorage;
 use torch::*;
 
 use std::{

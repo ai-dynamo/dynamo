@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -72,7 +72,7 @@ Test the deployment locally by port-forwarding and sending a request:
 
 ```bash
 # Port-forward the frontend Service to localhost:8000 (replace <frontend-svc> with the actual Service name)
-kubectl port-forward svc/test3-vllm-dsr1-frontend 8000:8000 -n ${NAMESPACE} &
+kubectl port-forward svc/vllm-dsr1-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
 ```bash

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +20,7 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
@@ -79,6 +80,11 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 		return warnings, err
 	}
 
+	// Validate service topology is unchanged (service names must remain the same)
+	if err := v.validateServiceTopology(old); err != nil {
+		return warnings, err
+	}
+
 	// Validate replicas changes for services with scaling adapter enabled
 	// Pass userInfo (may be nil - will fail closed for DGDSA-enabled services)
 	if err := v.validateReplicasChanges(old, userInfo); err != nil {
@@ -91,11 +97,74 @@ func (v *DynamoGraphDeploymentValidator) ValidateUpdate(old *nvidiacomv1alpha1.D
 // validateImmutableFields checks that immutable fields have not been changed.
 // Appends warnings to the provided slice.
 func (v *DynamoGraphDeploymentValidator) validateImmutableFields(old *nvidiacomv1alpha1.DynamoGraphDeployment, warnings *admission.Warnings) error {
+	var errs []error
+
 	if v.deployment.Spec.BackendFramework != old.Spec.BackendFramework {
 		*warnings = append(*warnings, "Changing spec.backendFramework may cause unexpected behavior")
-		return fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation")
+		errs = append(errs, fmt.Errorf("spec.backendFramework is immutable and cannot be changed after creation"))
 	}
-	return nil
+
+	// Validate that node topology (single-node vs multi-node) is not changed for each service.
+	for serviceName, newService := range v.deployment.Spec.Services {
+		// Get old service (if exists)
+		oldService, exists := old.Spec.Services[serviceName]
+		if !exists {
+			// New service, no comparison needed
+			continue
+		}
+
+		if oldService.IsMultinode() != newService.IsMultinode() {
+			errs = append(errs, fmt.Errorf(
+				"spec.services[%s] cannot change node topology (between single-node and multi-node) after creation",
+				serviceName,
+			))
+		}
+	}
+
+	return errors.Join(errs...)
+
+}
+
+// validateServiceTopology ensures the set of service names remains unchanged.
+// Users can modify service specifications, but cannot add or remove services.
+// This maintains graph topology immutability while allowing configuration updates.
+func (v *DynamoGraphDeploymentValidator) validateServiceTopology(old *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	oldServices := getServiceNames(old.Spec.Services)
+	newServices := getServiceNames(v.deployment.Spec.Services)
+
+	added := difference(newServices, oldServices)
+	removed := difference(oldServices, newServices)
+
+	// Fast path: no changes
+	if len(added) == 0 && len(removed) == 0 {
+		return nil
+	}
+
+	// Sort for deterministic error messages
+	sort.Strings(added)
+	sort.Strings(removed)
+
+	// Build descriptive error message
+	var errMsg string
+	switch {
+	case len(added) > 0 && len(removed) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services added: %v, services removed: %v",
+			added, removed)
+	case len(added) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services added: %v",
+			added)
+	case len(removed) > 0:
+		errMsg = fmt.Sprintf(
+			"service topology is immutable and cannot be modified after creation: "+
+				"services removed: %v",
+			removed)
+	}
+
+	return errors.New(errMsg)
 }
 
 // validateReplicasChanges checks if replicas were changed for services with scaling adapter enabled.
@@ -110,14 +179,11 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 	var errs []error
 
 	for serviceName, newService := range v.deployment.Spec.Services {
-		// Check if scaling adapter is enabled for this service (enabled by default)
-		scalingAdapterEnabled := true
-		if newService.ScalingAdapter != nil && newService.ScalingAdapter.Disable {
-			scalingAdapterEnabled = false
-		}
+		// Check if scaling adapter is enabled for this service (disabled by default)
+		scalingAdapterEnabled := newService.ScalingAdapter != nil && newService.ScalingAdapter.Enabled
 
 		if !scalingAdapterEnabled {
-			// Scaling adapter is disabled, users can modify replicas directly
+			// Scaling adapter is not enabled, users can modify replicas directly
 			continue
 		}
 
@@ -195,4 +261,26 @@ func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1
 	}
 
 	return err
+}
+
+// getServiceNames extracts service names from a services map.
+// Returns a set-like map for efficient lookup and comparison.
+func getServiceNames(services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) map[string]struct{} {
+	names := make(map[string]struct{}, len(services))
+	for name := range services {
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// difference returns elements in set a that are not in set b (a - b).
+// This is used to find added or removed services.
+func difference(a, b map[string]struct{}) []string {
+	var result []string
+	for name := range a {
+		if _, exists := b[name]; !exists {
+			result = append(result, name)
+		}
+	}
+	return result
 }

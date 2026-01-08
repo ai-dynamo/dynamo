@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -17,6 +17,9 @@ spec:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/model
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
@@ -57,6 +60,8 @@ spec:
             - decode
             - --disaggregation-bootstrap-port
             - "30001"
+            - --mem-fraction-static
+            - "0.75"
             - --host
             - 0.0.0.0
             - --prefill-round-robin-balance
@@ -94,6 +99,8 @@ spec:
             - prefill
             - --disaggregation-bootstrap-port
             - "30001"
+            - --mem-fraction-static
+            - "0.75"
             - --host
             - 0.0.0.0
             - --load-balance-method
