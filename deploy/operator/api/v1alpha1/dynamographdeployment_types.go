@@ -67,9 +67,11 @@ type DynamoGraphDeploymentSpec struct {
 }
 
 type Restart struct {
-	// If set or modified, will trigger a restart of the graph deployment according to the strategy.
+	// ID is an arbitrary string that triggers a restart when changed.
+	// Any modification to this value will initiate a restart of the graph deployment according to the strategy.
 	// +kubebuilder:validation:Required
-	At *metav1.Time `json:"at,omitempty"`
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id,omitempty"`
 
 	// Strategy specifies the restart strategy for the graph deployment.
 	// +kubebuilder:validation:Optional
@@ -113,9 +115,9 @@ type DynamoGraphDeploymentStatus struct {
 
 // RestartStatus contains the status of the restart of the graph deployment.
 type RestartStatus struct {
-	// ObservedAt is the time at which the restart was observed.
-	// Matches the Restart.At field in the spec.
-	ObservedAt *metav1.Time `json:"observedAt,omitempty"`
+	// ObservedID is the restart ID that has been observed and is being processed.
+	// Matches the Restart.ID field in the spec.
+	ObservedID string `json:"observedID,omitempty"`
 	// Phase is the phase of the restart.
 	Phase RestartPhase `json:"phase,omitempty"`
 	// InProgress contains the names of the services that are currently being restarted.

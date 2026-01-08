@@ -44,8 +44,6 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
-const rfc3339Format = "2006-01-02T15:04:05Z07:00"
-
 // RestartState holds the restart state for DGD services.
 type RestartState struct {
 	// Timestamp is the restart timestamp to apply as the annotation value.
@@ -69,39 +67,39 @@ func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v
 		return nil
 	}
 
-	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
 		// Check if there's a completed restart we need to preserve
-		if restartStatus.ObservedAt != nil {
+		if restartStatus.ObservedID != "" {
 			return &RestartState{
-				Timestamp:          restartStatus.ObservedAt.Format(rfc3339Format),
+				Timestamp:          restartStatus.ObservedID,
 				ServicesToAnnotate: getAllServiceNames(dgd),
 			}
 		}
 		return nil
 	}
 
-	specAt := dgd.Spec.Restart.At.Format(rfc3339Format)
+	specID := dgd.Spec.Restart.ID
 
-	isNewRestart := restartStatus.ObservedAt == nil ||
-		dgd.Spec.Restart.At.Format(rfc3339Format) != restartStatus.ObservedAt.Format(rfc3339Format)
+	isNewRestart := restartStatus.ObservedID == "" ||
+		dgd.Spec.Restart.ID != restartStatus.ObservedID
 
 	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseCompleted {
 		return &RestartState{
-			Timestamp:          specAt,
+			Timestamp:          specID,
 			ServicesToAnnotate: getAllServiceNames(dgd),
 		}
 	}
 
 	if IsParallelRestart(dgd) {
 		return &RestartState{
-			Timestamp:          specAt,
+			Timestamp:          specID,
 			ServicesToAnnotate: getAllServiceNames(dgd),
 		}
 	}
 
 	// Sequential restart (default or specified)
 	return &RestartState{
-		Timestamp:          specAt,
+		Timestamp:          specID,
 		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, restartStatus),
 	}
 }

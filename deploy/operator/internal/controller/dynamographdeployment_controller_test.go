@@ -688,8 +688,8 @@ func Test_reconcileGroveResources(t *testing.T) {
 
 func Test_computeRestartStatus(t *testing.T) {
 	ctx := context.Background()
-	now := metav1.Now()
-	oldTime := metav1.NewTime(now.Add(-1 * 60 * 1000000000)) // 1 minute ago
+	newID := "restart-1"
+	oldID := "restart-0"
 
 	tests := []struct {
 		name              string
@@ -712,12 +712,12 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "no restart requested but has completed status - preserves status",
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &oldTime,
+					ObservedID: oldID,
 					Phase:      v1alpha1.RestartPhaseCompleted,
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &oldTime,
+				ObservedID: oldID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 		},
@@ -725,7 +725,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "no restart requested but has restarting status - returns nil",
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &oldTime,
+					ObservedID: oldID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 				},
 			},
@@ -734,17 +734,17 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "restart already processed (completed) - returns existing status",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 				},
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseCompleted,
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 		},
@@ -752,17 +752,17 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "restart already processed (failed) - returns existing status",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 				},
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseFailed,
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseFailed,
 			},
 		},
@@ -770,7 +770,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "parallel restart - all services complete (DCD pathway)",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type: v1alpha1.RestartStrategyTypeParallel,
 					},
@@ -783,7 +783,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend"},
 				},
@@ -807,7 +807,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 		},
@@ -816,7 +816,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				BackendFramework: "vllm",
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type: v1alpha1.RestartStrategyTypeParallel,
 					},
@@ -836,7 +836,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend", "decode"},
 				},
@@ -876,7 +876,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"decode"},
 			},
@@ -885,7 +885,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "sequential restart - first service starting",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type:  v1alpha1.RestartStrategyTypeSequential,
 						Order: []string{"frontend", "decode"},
@@ -901,7 +901,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"frontend"},
 			},
@@ -910,7 +910,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "sequential restart - first service done, moving to second",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type:  v1alpha1.RestartStrategyTypeSequential,
 						Order: []string{"frontend", "decode"},
@@ -927,7 +927,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend"},
 				},
@@ -951,7 +951,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"decode"},
 			},
@@ -960,7 +960,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "sequential restart - all services complete",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type: v1alpha1.RestartStrategyTypeSequential,
 					},
@@ -973,7 +973,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend"},
 				},
@@ -997,7 +997,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 		},
@@ -1005,7 +1005,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "default strategy (sequential) - no strategy specified",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 				},
 				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
 					"frontend": {
@@ -1015,7 +1015,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"frontend"},
 			},
@@ -1024,7 +1024,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "parallel restart with empty services - returns completed",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type: v1alpha1.RestartStrategyTypeParallel,
 					},
@@ -1033,7 +1033,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 		},
@@ -1041,7 +1041,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "Grove pathway - parallel restart complete",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type: v1alpha1.RestartStrategyTypeParallel,
 					},
@@ -1054,7 +1054,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend"},
 				},
@@ -1089,7 +1089,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			groveEnabled: true,
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 		},
@@ -1097,7 +1097,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "Grove pathway - sequential restart in progress",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now,
+					ID: newID,
 					Strategy: &v1alpha1.RestartStrategy{
 						Type:  v1alpha1.RestartStrategyTypeSequential,
 						Order: []string{"frontend"},
@@ -1111,7 +1111,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &now,
+					ObservedID: newID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend"},
 				},
@@ -1136,7 +1136,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			groveEnabled: true,
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"frontend"},
 			},
@@ -1145,7 +1145,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "parallel restart - new restart request during ongoing restart resets to all services (DCD pathway)",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now, // NEW timestamp
+					ID: newID, // NEW timestamp
 					Strategy: &v1alpha1.RestartStrategy{
 						Type: v1alpha1.RestartStrategyTypeParallel,
 					},
@@ -1164,7 +1164,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &oldTime,
+					ObservedID: oldID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"frontend", "decode"}, // completed service already done
 				},
@@ -1212,7 +1212,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"completed", "decode", "frontend"}, // ALL services, sorted
 			},
@@ -1221,7 +1221,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			name: "sequential restart - new restart request during ongoing restart resets to first service (DCD pathway)",
 			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
 				Restart: &v1alpha1.Restart{
-					At: &now, // NEW timestamp
+					ID: newID, // NEW timestamp
 					Strategy: &v1alpha1.RestartStrategy{
 						Type:  v1alpha1.RestartStrategyTypeSequential,
 						Order: []string{"frontend", "decode", "worker"},
@@ -1241,7 +1241,7 @@ func Test_computeRestartStatus(t *testing.T) {
 			},
 			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
 				Restart: &v1alpha1.RestartStatus{
-					ObservedAt: &oldTime,
+					ObservedID: oldID,
 					Phase:      v1alpha1.RestartPhaseRestarting,
 					InProgress: []string{"decode"},
 				},
@@ -1288,7 +1288,7 @@ func Test_computeRestartStatus(t *testing.T) {
 				},
 			},
 			wantRestartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &now,
+				ObservedID: newID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"frontend"}, // Reset to FIRST service
 			},

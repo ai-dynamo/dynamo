@@ -5986,9 +5986,8 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 }
 
 func TestDetermineGroveRestartState(t *testing.T) {
-	now := time.Now()
-	restartTime := metav1.NewTime(now)
-	oldRestartTime := metav1.NewTime(now.Add(-1 * time.Hour))
+	restartID := "restart-1"
+	oldRestartID := "restart-0"
 
 	tests := []struct {
 		name          string
@@ -6023,7 +6022,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: nil,
+				ObservedID: "",
 			},
 			wantNil: true,
 		},
@@ -6036,7 +6035,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Worker":   {},
 					},
 					Restart: &v1alpha1.Restart{
-						At: &restartTime,
+						ID: restartID,
 						Strategy: &v1alpha1.RestartStrategy{
 							Type: v1alpha1.RestartStrategyTypeParallel,
 						},
@@ -6044,12 +6043,12 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &restartTime,
+				ObservedID: restartID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"Frontend", "Worker"},
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
-			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(restartID),
 		},
 		{
 			name: "new sequential restart annotates only first service",
@@ -6060,7 +6059,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Worker":   {},
 					},
 					Restart: &v1alpha1.Restart{
-						At: &restartTime,
+						ID: restartID,
 						Strategy: &v1alpha1.RestartStrategy{
 							Type:  v1alpha1.RestartStrategyTypeSequential,
 							Order: []string{"Worker", "Frontend"},
@@ -6069,12 +6068,12 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &restartTime,
+				ObservedID: restartID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"Worker"},
 			},
 			wantSvcs:      []string{"Worker"},
-			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(restartID),
 		},
 		{
 			name: "sequential restart in progress annotates completed + in-progress",
@@ -6086,7 +6085,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Backend":  {},
 					},
 					Restart: &v1alpha1.Restart{
-						At: &restartTime,
+						ID: restartID,
 						Strategy: &v1alpha1.RestartStrategy{
 							Type:  v1alpha1.RestartStrategyTypeSequential,
 							Order: []string{"Frontend", "Worker", "Backend"},
@@ -6095,12 +6094,12 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &restartTime,
+				ObservedID: restartID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"Worker"},
 			},
 			wantSvcs:      []string{"Frontend", "Worker"}, // Frontend completed, Worker in progress
-			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(restartID),
 		},
 		{
 			name: "default restart in progress annotates completed + in-progress",
@@ -6112,17 +6111,17 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Backend":  {},
 					},
 					Restart: &v1alpha1.Restart{
-						At: &restartTime,
+						ID: restartID,
 					},
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &restartTime,
+				ObservedID: restartID,
 				Phase:      v1alpha1.RestartPhaseRestarting,
 				InProgress: []string{"Worker"},
 			},
 			wantSvcs:      []string{"Frontend", "Worker", "Backend"},
-			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(restartID),
 		},
 		{
 			name: "completed restart with empty spec restart preserves all annotations",
@@ -6135,11 +6134,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &oldRestartTime,
+				ObservedID: oldRestartID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
-			wantTimestamp: ptr.To(oldRestartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(oldRestartID),
 		},
 		{
 			name: "completed restart",
@@ -6150,16 +6149,16 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Worker":   {},
 					},
 					Restart: &v1alpha1.Restart{
-						At: &restartTime,
+						ID: restartID,
 					},
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &restartTime,
+				ObservedID: restartID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
-			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(restartID),
 		},
 		{
 			name: "new restart after completed restart",
@@ -6170,7 +6169,7 @@ func TestDetermineGroveRestartState(t *testing.T) {
 						"Worker":   {},
 					},
 					Restart: &v1alpha1.Restart{
-						At: &restartTime, // new time
+						ID: restartID, // new time
 						Strategy: &v1alpha1.RestartStrategy{
 							Type: v1alpha1.RestartStrategyTypeParallel,
 						},
@@ -6178,11 +6177,11 @@ func TestDetermineGroveRestartState(t *testing.T) {
 				},
 			},
 			restartStatus: &v1alpha1.RestartStatus{
-				ObservedAt: &oldRestartTime,
+				ObservedID: oldRestartID,
 				Phase:      v1alpha1.RestartPhaseCompleted,
 			},
 			wantSvcs:      []string{"Frontend", "Worker"},
-			wantTimestamp: ptr.To(restartTime.Format("2006-01-02T15:04:05Z07:00")),
+			wantTimestamp: ptr.To(restartID),
 		},
 	}
 

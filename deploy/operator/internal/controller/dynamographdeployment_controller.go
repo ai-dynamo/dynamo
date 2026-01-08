@@ -357,15 +357,15 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 }
 
 func isRestartAlreadyProcessed(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
-	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
 		return true
 	}
 
-	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedAt == nil {
+	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedID == "" {
 		return false
 	}
 
-	if *dgd.Spec.Restart.At == *dgd.Status.Restart.ObservedAt &&
+	if dgd.Spec.Restart.ID == dgd.Status.Restart.ObservedID &&
 		(dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted ||
 			dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
 		return true
@@ -629,12 +629,12 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	return result, nil
 }
 
-// isNewRestartRequest checks if the current spec.restart.at represents a new restart request
+// isNewRestartRequest checks if the current spec.restart.id represents a new restart request
 func isNewRestartRequest(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
-	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedAt == nil || dgd.Spec.Restart.At == nil {
+	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedID == "" || dgd.Spec.Restart.ID == "" {
 		return true
 	}
-	return !dgd.Spec.Restart.At.Equal(dgd.Status.Restart.ObservedAt)
+	return dgd.Spec.Restart.ID != dgd.Status.Restart.ObservedID
 }
 
 // computeParallelRestartStatus handles parallel restart where all services restart together.
@@ -644,11 +644,11 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 ) *nvidiacomv1alpha1.RestartStatus {
 	logger := log.FromContext(ctx)
 
-	specAt := dgd.Spec.Restart.At
+	specID := dgd.Spec.Restart.ID
 
 	var servicesToCheck []string
 	if isNewRestartRequest(dgd) {
-		logger.Info("New restart request detected, resetting to all services", "specAt", specAt)
+		logger.Info("New restart request detected, resetting to all services", "specID", specID)
 		servicesToCheck = make([]string, 0, len(dgd.Spec.Services))
 		for serviceName := range dgd.Spec.Services {
 			servicesToCheck = append(servicesToCheck, serviceName)
@@ -659,7 +659,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 		// Continuing existing restart: use current InProgress list
 		servicesToCheck = dgd.Status.Restart.InProgress
 	} else {
-		// No in-progress list but same timestamp - use all services
+		// No in-progress list but same ID - use all services
 		servicesToCheck = make([]string, 0, len(dgd.Spec.Services))
 		for serviceName := range dgd.Spec.Services {
 			servicesToCheck = append(servicesToCheck, serviceName)
@@ -670,7 +670,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 
 	if len(servicesToCheck) == 0 {
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseCompleted,
 		}
 	}
@@ -679,7 +679,7 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	if err != nil {
 		logger.Error(err, "failed to check restart progress")
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 			InProgress: servicesToCheck,
 		}
@@ -688,13 +688,13 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	if len(updatedInProgress) == 0 {
 		logger.Info("Restart completed for all services")
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseCompleted,
 		}
 	}
 
 	return &nvidiacomv1alpha1.RestartStatus{
-		ObservedAt: specAt,
+		ObservedID: specID,
 		Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 		InProgress: updatedInProgress,
 	}
@@ -708,16 +708,16 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 ) *nvidiacomv1alpha1.RestartStatus {
 	logger := log.FromContext(ctx)
 
-	specAt := dgd.Spec.Restart.At
+	specID := dgd.Spec.Restart.ID
 
 	// Get the current service being restarted from previous status
 	var currentService string
 	if isNewRestartRequest(dgd) {
 		// New restart request: start fresh from the first service
-		logger.Info("New restart request detected, starting from first service", "specAt", specAt, "firstService", order[0])
+		logger.Info("New restart request detected, starting from first service", "specID", specID, "firstService", order[0])
 		currentService = order[0]
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 			InProgress: []string{currentService},
 		}
@@ -731,7 +731,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	if currentService == "" {
 		currentService = order[0]
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 			InProgress: []string{currentService},
 		}
@@ -742,7 +742,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	if err != nil {
 		logger.Error(err, "failed to check current service restart progress")
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 			InProgress: []string{currentService},
 		}
@@ -752,7 +752,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 		// Still restarting
 		logger.Info("Service restart not completed", "service", currentService, "updatedInProgress", updatedInProgress)
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 			InProgress: []string{currentService},
 		}
@@ -768,7 +768,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 		// No more services, restart is complete
 		logger.Info("Restart completed for all services")
 		return &nvidiacomv1alpha1.RestartStatus{
-			ObservedAt: specAt,
+			ObservedID: specID,
 			Phase:      nvidiacomv1alpha1.RestartPhaseCompleted,
 		}
 	}
@@ -776,7 +776,7 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	// Move to the next service
 	logger.Info("Starting next service restart", "service", nextService)
 	return &nvidiacomv1alpha1.RestartStatus{
-		ObservedAt: specAt,
+		ObservedID: specID,
 		Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
 		InProgress: []string{nextService},
 	}
@@ -794,7 +794,7 @@ func getNextServiceInOrder(order []string, currentService string) string {
 
 func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) *nvidiacomv1alpha1.RestartStatus {
 	// No restart requested
-	if dgd.Spec.Restart == nil || dgd.Spec.Restart.At == nil {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
 		// Preserve existing terminal status
 		if dgd.Status.Restart != nil && (dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseCompleted || dgd.Status.Restart.Phase == nvidiacomv1alpha1.RestartPhaseFailed) {
 			return dgd.Status.Restart

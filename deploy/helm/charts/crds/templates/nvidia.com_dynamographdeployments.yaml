@@ -211,9 +211,11 @@ spec:
                 restart:
                   description: Restart specifies the restart policy for the graph deployment.
                   properties:
-                    at:
-                      description: If set or modified, will trigger a restart of the graph deployment according to the strategy.
-                      format: date-time
+                    id:
+                      description: |-
+                        ID is an arbitrary string that triggers a restart when changed.
+                        Any modification to this value will initiate a restart of the graph deployment according to the strategy.
+                      minLength: 1
                       type: string
                     strategy:
                       description: Strategy specifies the restart strategy for the graph deployment.
@@ -232,7 +234,7 @@ spec:
                           type: string
                       type: object
                   required:
-                    - at
+                    - id
                   type: object
                 services:
                   additionalProperties:
@@ -10564,11 +10566,10 @@ spec:
                       items:
                         type: string
                       type: array
-                    observedAt:
+                    observedID:
                       description: |-
-                        ObservedAt is the time at which the restart was observed.
-                        Matches the Restart.At field in the spec.
-                      format: date-time
+                        ObservedID is the restart ID that has been observed and is being processed.
+                        Matches the Restart.ID field in the spec.
                       type: string
                     phase:
                       description: Phase is the phase of the restart.

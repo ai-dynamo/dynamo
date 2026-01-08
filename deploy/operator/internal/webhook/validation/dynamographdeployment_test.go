@@ -335,15 +335,15 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"main": {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: nil,
+						ID: "",
 					},
 				},
 			},
 			wantErr: true,
-			errMsg:  "spec.restart.at is required",
+			errMsg:  "spec.restart.id is required",
 		},
 		{
-			name: "restart with valid at and no strategy",
+			name: "restart with valid id and no strategy",
 			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-graph",
@@ -354,7 +354,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"main": {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 					},
 				},
 			},
@@ -373,7 +373,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"prefill": {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 						Strategy: &nvidiacomv1alpha1.RestartStrategy{
 							Type:  nvidiacomv1alpha1.RestartStrategyTypeParallel,
 							Order: []string{"main", "prefill"},
@@ -397,7 +397,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"prefill": {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 						Strategy: &nvidiacomv1alpha1.RestartStrategy{
 							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
 							Order: []string{"main", "main", "prefill"},
@@ -422,7 +422,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"prefill": {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 						Strategy: &nvidiacomv1alpha1.RestartStrategy{
 							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
 							Order: []string{"main", "unknown"},
@@ -448,7 +448,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"decode":  {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 						Strategy: &nvidiacomv1alpha1.RestartStrategy{
 							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
 							Order: []string{"main", "prefill"},
@@ -474,7 +474,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"decode":  {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 						Strategy: &nvidiacomv1alpha1.RestartStrategy{
 							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
 							Order: []string{"prefill", "decode", "main"},
@@ -496,7 +496,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 						"main": {},
 					},
 					Restart: &nvidiacomv1alpha1.Restart{
-						At: &metav1.Time{},
+						ID: "restart-id",
 						Strategy: &nvidiacomv1alpha1.RestartStrategy{
 							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
 							Order: []string{},

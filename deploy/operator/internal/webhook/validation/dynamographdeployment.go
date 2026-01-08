@@ -277,8 +277,8 @@ func (v *DynamoGraphDeploymentValidator) validateRestart() error {
 	restart := v.deployment.Spec.Restart
 
 	var err error
-	if restart.At == nil {
-		err = errors.Join(err, fmt.Errorf("spec.restart.at is required"))
+	if restart.ID == "" {
+		err = errors.Join(err, fmt.Errorf("spec.restart.id is required"))
 	}
 
 	return errors.Join(err, v.validateRestartStrategyOrder())

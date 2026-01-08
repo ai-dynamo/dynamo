@@ -757,7 +757,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `at` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | If set or modified, will trigger a restart of the graph deployment according to the strategy. |  | Required: \{\} <br /> |
+| `id` _string_ | ID is an arbitrary string that triggers a restart when changed.<br />Any modification to this value will initiate a restart of the graph deployment according to the strategy. |  | MinLength: 1 <br />Required: \{\} <br /> |
 | `strategy` _[RestartStrategy](#restartstrategy)_ | Strategy specifies the restart strategy for the graph deployment. |  | Optional: \{\} <br /> |
 
 
@@ -793,7 +793,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `observedAt` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | ObservedAt is the time at which the restart was observed.<br />Matches the Restart.At field in the spec. |  |  |
+| `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  |  |
 | `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  |  |
 | `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  |  |
 
