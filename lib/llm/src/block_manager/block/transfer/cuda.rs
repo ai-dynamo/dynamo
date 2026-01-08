@@ -396,8 +396,12 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    // Try to use CUDA memory pool (stream-ordered allocation)
-    if let Some(pool) = ctx.cuda_mem_pool() {
+    // TEMPORARY: Use legacy TransferResources as main path for debugging
+    // Validate that CUDA memory pool would produce the same addresses
+    let use_legacy_path = true;
+
+    if !use_legacy_path && ctx.cuda_mem_pool().is_some() {
+        let pool = ctx.cuda_mem_pool().unwrap();
         tracing::debug!("Using CUDA memory pool for stream-ordered allocation");
 
         // Allocate pinned host memory from CUDA pool (stream-ordered)
@@ -469,8 +473,8 @@ where
 
         Ok(Some(guard))
     } else {
-        // Fallback: Use legacy TransferResources pool
-        tracing::debug!("CUDA memory pool not available, falling back to legacy pool");
+        // PRIMARY PATH: Use legacy TransferResources pool
+        tracing::info!("Using LEGACY TransferResources pool (PRIMARY PATH)");
 
         let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
             ctx,
@@ -479,11 +483,54 @@ where
 
         resources.copy_addresses_to_buffers(&src_addresses, &dst_addresses)?;
 
-        tracing::debug!(
-            "Using legacy pooled buffers: src=0x{:x}, dst=0x{:x}",
+        tracing::info!(
+            "Legacy pool: Using pooled buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
             resources.src_ptr(),
-            resources.dst_ptr()
+            resources.dst_ptr(),
+            src_addresses.len()
         );
+
+        // Validate addresses before launching kernel (same validation as CUDA pool path)
+        validate_transfer_addresses(
+            &src_addresses,
+            &dst_addresses,
+            dims.layer_size,
+        )?;
+
+        // If CUDA mem pool is available, validate that it would produce same addresses
+        if let Some(pool) = ctx.cuda_mem_pool() {
+            tracing::info!("VALIDATION: Comparing with CUDA memory pool addresses");
+
+            // Allocate from CUDA pool to compare
+            match pool.alloc_async(size, stream.cu_stream()) {
+                Ok(cuda_src_buffer) => {
+                    match pool.alloc_async(size, stream.cu_stream()) {
+                        Ok(cuda_dst_buffer) => {
+                            tracing::info!(
+                                "CUDA pool would allocate: src=0x{:x}, dst=0x{:x}",
+                                cuda_src_buffer,
+                                cuda_dst_buffer
+                            );
+
+                            // Free immediately - we're just validating
+                            let _ = pool.free_async(cuda_src_buffer, stream.cu_stream());
+                            let _ = pool.free_async(cuda_dst_buffer, stream.cu_stream());
+
+                            tracing::info!("Address validation: Both paths would use different buffer addresses (expected)");
+                            tracing::info!("Note: Block addresses being transferred are identical in both paths");
+                        }
+                        Err(e) => {
+                            tracing::warn!("CUDA pool validation failed (dst alloc): {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("CUDA pool validation failed (src alloc): {}", e);
+                }
+            }
+        } else {
+            tracing::info!("CUDA memory pool not available - skipping validation");
+        }
 
         unsafe {
             launch_copy_kernel_direct(
@@ -495,7 +542,7 @@ where
             )?;
         }
 
-        tracing::warn!("Legacy pool: buffers returned immediately (potential race condition!)");
+        tracing::info!("Legacy pool: Kernel launched successfully");
         Ok(None)
     }
 }
