@@ -98,7 +98,7 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
 # Use an arch-specific base image tag to avoid cross-arch tag clobbering.
 # BuildKit provides TARGETARCH automatically for buildx builds.
 ARG TARGETARCH
-FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v7-${TARGETARCH}
+FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v8-${TARGETARCH}
 #FROM sgl-dd-local
 WORKDIR /sgl-workspace
 
@@ -161,8 +161,6 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-p
     rm -f /usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin/ptxas && \
     ln -s /usr/local/cuda/bin/ptxas /usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin/ptxas; \
 fi
-
-
 
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1

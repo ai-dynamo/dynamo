@@ -13,12 +13,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-**/*.onnx
-**/*.plan
+# Python bytecode and caches (many small files that slow down layer export)
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+
+# Compiled shared libraries (rebuilt in container)
+**/*.so
+**/*.abi3.so
+
+# Build logs and debug artifacts
+**/check_fingerprint.log
+**/metadata_debug.log
+**/build-logs
+**/*.log
+
+# Model files
 **/*.onnx
 **/*.plan
 **/*.etcd
-**/.cache/*
 **/*onnx*
 # Engine must be allowed because code contains dynamo_engine.py
 **/*tensorrtllm_engines*
@@ -32,13 +49,22 @@
 **/*.model-store/*
 **/*.model.*/*
 **/*.cache/*
+**/.cache/*
 **/*.libtorch_model_store/*
+**/*safetensors
+
+# Git and CI
 **/.git
 **/.github
 **/*backup*/
+
+# Docker and build
 .dockerignore
 **/target/*
-**/*safetensors
 container/Dockerfile*
+
+# Virtual environments
 .venv
 .venv-docs
+**/.venv
+**/venv
