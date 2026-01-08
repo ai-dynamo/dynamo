@@ -873,6 +873,16 @@ class ManagedDeployment:
     def frontend_service_name(self):
         return self.deployment_spec.frontend_service.name
 
+    def get_log_pvc_name(self) -> Optional[str]:
+        """Return the PVC name if log collection is enabled.
+
+        This allows ManagedLoad to use the same PVC for storing load test results.
+
+        Returns:
+            The PVC name if log collection is enabled, None otherwise.
+        """
+        return getattr(self.deployment_spec, "_log_collection_pvc_name", None)
+
     def __post_init__(self):
         self._deployment_name = self.deployment_spec.name
 
