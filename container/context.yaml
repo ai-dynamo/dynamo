@@ -1,4 +1,12 @@
-dynamo_base:
+# This file represents the default ARG values of Dockerfiles generated
+# by render.py. These are the recommended default values for users and
+# is the source of truth for the values used in our delivered images.
+#
+# Some ARGs have multiple valid values and can be changed for local testing, 
+# you can do so locally in this file, or pass the --build-arg into docker build 
+# when building.
+
+dynamo:
   base_image: nvcr.io/nvidia/cuda-dl-base
   base_image_tag: 25.01-cuda12.8-devel-ubuntu24.04
   python_version: "3.12"
@@ -10,61 +18,51 @@ dynamo_base:
   nixl_ucx_ref: v1.19.0
   nixl_gdrcopy_ref: v2.5.1
   nixl_ucx_efa_ref: 9d2b88a1f67faf9876f267658bd077b379b8bb76
+  nixl_libfabric_ref: v2.3.0
   enable_kvbm: "true"
+  enable_media_nixl: "false"
+  enable_media_ffmpeg: "false"
+  ffmpeg_version: "7.1"
 
 vllm:
-  ref: v0.11.0
-  flashinf_ref: v0.3.1
-  amd64:
-    base_image: nvcr.io/nvidia/cuda-dl-base
-    base_image_tag: 25.01-cuda12.8-devel-ubuntu24.04
-    runtime_image: nvcr.io/nvidia/cuda
-    runtime_image_tag: 12.8.0-runtime-ubuntu24.04
-    cuda_version: "128"
-    torch_backend: cu128
-  arm64:
-    base_image: nvcr.io/nvidia/cuda-dl-base
-    base_image_tag: 25.06-cuda12.8-devel-ubuntu24.04
-    runtime_image: nvcr.io/nvidia/cuda
-    runtime_image_tag: 12.9.0-runtime-ubuntu24.04
-    cuda_version: "129"
-    torch_backend: cu129
+  base_image: nvcr.io/nvidia/cuda-dl-base
+  runtime_image: nvcr.io/nvidia/cuda
+  runtime_image_tag: ${CUDA_VERSION}.0-runtime-ubuntu24.04
+  vllm_ref: v0.12.0
+  flashinf_ref: v0.5.3
+  lmcache_ref: 0.3.10
+  max_jobs: "10"
+  enable_media_nixl: "true"
+  enable_media_ffmpeg: "true"
+  cuda12.9:
+    base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  cuda13.0:
+    base_image_tag: 25.11-cuda13.0-devel-ubuntu24.04
 
 sglang:
   base_image: nvcr.io/nvidia/cuda-dl-base
-  base_image_tag: 25.01-cuda12.8-devel-ubuntu24.04
-  runtime_image: nvcr.io/nvidia/cuda
-  runtime_image_tag: 12.9.1-cudnn-runtime-ubuntu24.04
-  python_version: "3.10"
-  cuda_version: 12.9.1
-  build_type: all
-  cmake_build_parallel_level: "2"
-  deepep_commit: 9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
-  deepep_gb_commit: 1b14ad661c7640137fcfe93cccb2694ede1220b0
-  kernel_version: 0.3.16.post5
-  commit: 0.5.4.post3
-  gdrcopy_commit: v2.4.4
-  nvshmem_version: 3.3.9
-  grace_blackwell: false
+  base_image_tag: 25.06-cuda12.9-devel-ubuntu24.04
+  runtime_image: lmsysorg/sglang
+  runtime_image_tag: v0.5.7-runtime
+  enable_media_nixl: "true"
+  enable_media_ffmpeg: "true"
 
 trtllm:
-  base_image: nvcr.io/nvidia/cuda-dl-base
-  base_image_tag: 25.10-cuda13.0-devel-ubuntu24.04
+  base_image: nvcr.io/nvidia/pytorch
+  base_image_tag: 25.10-py3
   runtime_image: nvcr.io/nvidia/cuda-dl-base
   runtime_image_tag: 25.10-cuda13.0-runtime-ubuntu24.04
-  pytorch_base_image: nvcr.io/nvidia/pytorch
-  pytorch_base_image_tag: 25.10-py3
+  enable_media_nixl: "true"
+  enable_media_ffmpeg: "true"
   python_version: "3.12"
   index_url: https://pypi.nvidia.com/
   pip_wheel_dir: /tmp/trtllm_wheel/
   pip_wheel: tensorrt-llm==1.2.0rc2
+  github_trtllm_commit: 1.2.0rc6
   torch_version: 2.9.0a0+145a3a7bda.nv25.10
   torch_tensorrt_version: 2.9.0a0
   torchvision_version: 0.24.0a0+094e7af5
   jinja2_version: 3.1.6
   sympy_version: 1.14.0
   flash_attn_version: 2.7.4.post1+25.10
-  experimental:
-    enable: false
-    commit: 31116825b39f4e6a6a1e127001f5204b73d1dc32
-    use_nixl_kvcache_experimental: false
+  has_trtllm_context: "0"

@@ -11,17 +11,24 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
+ARG ENABLE_MEDIA_FFMPEG
 
 WORKDIR /workspace
 
+# Copy CUDA from dynamo_base stage
+COPY --from=dynamo_base /usr/local/cuda /usr/local/cuda
+COPY --from=dynamo_base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
+
+# Set environment variables first so they can be used in COPY commands
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    PATH=/usr/local/cargo/bin:$PATH
+
+# Copy artifacts from dynamo_base stage
+COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
+COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
 RUN yum groupinstall -y 'Development Tools' &&  \
     dnf install -y almalinux-release-synergy && \
@@ -31,7 +38,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -46,7 +56,17 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad \
         libibumad-devel \
         librdmacm-devel \
-        numactl-devel
+        numactl-devel \
+        # Libfabric support
+        hwloc \
+        hwloc-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
+
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -66,18 +86,33 @@ RUN set -eux; \
 # Point build tools explicitly at the modern protoc
 ENV PROTOC=/usr/local/bin/protoc
 
-# Set environment variables first so they can be used in COPY commands
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/opt/dynamo/target \
-    PATH=/usr/local/cargo/bin:$PATH
+ENV CUDA_PATH=/usr/local/cuda \
+    PATH=/usr/local/cuda/bin:$PATH \
+    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
+    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 
-# Copy artifacts from base stage
-COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
-COPY --from=base $CARGO_HOME $CARGO_HOME
+# Create virtual environment for building wheels
+ARG PYTHON_VERSION
+ENV VIRTUAL_ENV=/workspace/.venv
+RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+
+ARG NIXL_UCX_REF
+ARG NIXL_REF
+ARG NIXL_GDRCOPY_REF
+
+# Build and install gdrcopy
+RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
+    cd gdrcopy/packages && \
+    CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
+    rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
+    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
+    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
 
 # Install SCCACHE if requested
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET
+ARG SCCACHE_REGION
 COPY container/use-sccache.sh /tmp/use-sccache.sh
 RUN if [ "$USE_SCCACHE" = "true" ]; then \
         /tmp/use-sccache.sh install; \
@@ -88,36 +123,56 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
-# Copy CUDA from base stage
-COPY --from=base /usr/local/cuda /usr/local/cuda
-COPY --from=base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
-
-ENV CUDA_PATH=/usr/local/cuda \
-    PATH=/usr/local/cuda/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib:/usr/local/lib64:$LD_LIBRARY_PATH \
-    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
-
-# Create virtual environment for building wheels
-ENV VIRTUAL_ENV=/workspace/.venv
-RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
-
-# Build and install gdrcopy
-RUN git clone --depth 1 --branch ${NIXL_GDRCOPY_REF} https://github.com/NVIDIA/gdrcopy.git && \
-    cd gdrcopy/packages && \
-    CUDA=/usr/local/cuda ./build-rpm-packages.sh && \
-    rpm -Uvh gdrcopy-kmod-*.el8.noarch.rpm && \
-    rpm -Uvh gdrcopy-*.el8.${ARCH_ALT}.rpm && \
-    rpm -Uvh gdrcopy-devel-*.el8.noarch.rpm
+# Build FFmpeg from source
+# Do not delete the source tarball for legal reasons
+ARG FFMPEG_VERSION
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-gpl \
+        --disable-nonfree \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --disable-libdrm \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "FFMPEG" && \
+    ldconfig && \
+    mkdir -p /usr/local/src/ffmpeg && \
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
+fi
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    CC=${USE_SCCACHE:+sccache gcc} && \
-    CXX=${USE_SCCACHE:+sccache g++} && \
-    export CC=${CC} && \
-    export CXX=${CXX} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
@@ -144,10 +199,46 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+ARG NIXL_LIBFABRIC_REF
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
+    cd /usr/local/src && \
+    git clone https://github.com/ofiwg/libfabric.git && \
+    cd libfabric && \
+    git checkout $NIXL_LIBFABRIC_REF && \
+    ./autogen.sh && \
+    ./configure --prefix="/usr/local/libfabric" \
+                --disable-verbs \
+                --disable-psm3 \
+                --disable-opx \
+                --disable-usnic \
+                --disable-rstream \
+                --enable-efa \
+                --with-cuda=/usr/local/cuda \
+                --enable-cuda-dlopen \
+                --with-gdrcopy \
+                --enable-gdrcopy-dlopen && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
+    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
+    ldconfig
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
@@ -155,7 +246,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" && \
+    -Ducx_path="/usr/local/ucx" \
+    -Dlibfabric_path="/usr/local/libfabric" && \
     cd build && \
     ninja && \
     ninja install && \
@@ -173,6 +265,11 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /workspace/nixl && \
     uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
@@ -183,14 +280,31 @@ COPY lib/ /opt/dynamo/lib/
 COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
+ARG ENABLE_KVBM
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
-    maturin build --release --out /opt/dynamo/dist && \
+    FEATURES=""; \
+    if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
+    else \
+        maturin build --release --out /opt/dynamo/dist; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
@@ -198,6 +312,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
+            --exclude 'lib*.so*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \

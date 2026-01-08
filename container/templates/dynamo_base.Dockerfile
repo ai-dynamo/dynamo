@@ -2,47 +2,32 @@
 ########## Base Image ############
 ##################################
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
 
-# Redeclare ARGs for this stage
 ARG ARCH
 ARG ARCH_ALT
-ARG PYTHON_VERSION
-ARG USE_SCCACHE
-ARG SCCACHE_BUCKET
-ARG SCCACHE_REGION
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
 
 USER root
 WORKDIR /opt/dynamo
 
-##################################
-########## Tool Installation #####
-##################################
-
 # Install uv package manager
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install SCCACHE if requested
-COPY container/use-sccache.sh /tmp/use-sccache.sh
-RUN if [ "$USE_SCCACHE" = "true" ]; then \
-        /tmp/use-sccache.sh install; \
-    fi
+# Install NATS server
+ARG NATS_VERSION
+RUN --mount=type=cache,target=/var/cache/apt \
+    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
+    dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
 
-# Set SCCACHE environment variables
-ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache} \
-    CMAKE_C_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CXX_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache} \
-    CMAKE_CUDA_COMPILER_LAUNCHER=${USE_SCCACHE:+sccache}
+# Install etcd
+ARG ETCD_VERSION
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
+    mkdir -p /usr/local/bin/etcd && \
+    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
+    rm /tmp/etcd.tar.gz
+ENV PATH=/usr/local/bin/etcd/:$PATH
 
-##################################
-########## Rust Setup ############
-##################################
-
+# Rust Setup
 # Rust environment setup
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -58,21 +43,3 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-##################################
-########## External Services #####
-##################################
-
-# Install NATS server
-ENV NATS_VERSION={{ context.dynamo_base.nats_version }}
-RUN --mount=type=cache,target=/var/cache/apt \
-    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
-    dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
-
-# Install etcd
-ENV ETCD_VERSION={{ context.dynamo_base.etcd_version }}
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
-ENV PATH=/usr/local/bin/etcd/:$PATH

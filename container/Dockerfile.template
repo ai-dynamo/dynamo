@@ -5,12 +5,10 @@
 {% include "templates/args.Dockerfile" %}
 
 ### Base Image Stages
-
-{% if framework != "none" %}
+{% if framework != "dynamo" %}
     {% include "templates/dynamo_base.Dockerfile" %}
     {% include "templates/wheel_builder.Dockerfile" %}
-    {% include "templates/dynamo_dev.Dockerfile" %}
-{% elif framework == "none" %}
+{% elif framework == "dynamo" %}
     {% if target == "dev" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
@@ -24,8 +22,10 @@
 {% endif %}
 
 ### Framework Stages
-
-{% if target == "framework" and framework != "none" %}
+# SGLang is the only framework without a `framework` target currently, needs special treatment
+{% if framework == "sglang" %}
+    {% include "templates/sglang_runtime.Dockerfile" %}
+{% elif target == "framework" and framework != "none" %}
     {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
 {% elif target == "runtime" and framework != "none" %}
     {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
