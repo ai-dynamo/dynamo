@@ -53,6 +53,12 @@ frontend:
   - changed-files:
       - any-glob-to-any-file:
           - components/src/dynamo/frontend/**
+          - lib/llm/src/http/**
+          - lib/llm/src/grpc/**
+          - lib/llm/src/preprocessor/**
+          - lib/llm/src/protocols/**
+          - lib/llm/src/preprocessor.rs
+          - lib/llm/src/tokenizers.rs
 
 dynamo-planner:
   - changed-files:
