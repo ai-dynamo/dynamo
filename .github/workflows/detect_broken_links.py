@@ -474,7 +474,30 @@ def validate_links(
 
                 # Only check if the target should be a markdown file
                 if is_markdown_file(resolved_path):
-                    if not resolved_path.exists():
+                    link_valid = resolved_path.exists()
+
+                    # If the file is a symlink, also validate that the link works from the symlink location
+                    if link_valid and md_file.is_symlink():
+                        # For relative links (not starting with / and not absolute paths)
+                        if not link_url.startswith("/") and not os.path.isabs(link_url):
+                            # Resolve the link from the symlink location (without following the symlink)
+                            symlink_dir = md_file.parent
+                            symlink_resolved_path = (symlink_dir / link_url.split("#")[0]).resolve()
+
+                            if not symlink_resolved_path.exists():
+                                logger.warning(
+                                    f"Link works from real file location but BROKEN from symlink location: "
+                                    f"{md_file}:{line_num} - {link_url} -> {symlink_resolved_path}"
+                                )
+                                link_valid = False
+                                resolved_path = symlink_resolved_path  # Report the broken symlink-relative path
+                            else:
+                                logger.debug(
+                                    f"Link validated from both real file and symlink locations: "
+                                    f"{md_file}:{line_num} - {link_url}"
+                                )
+
+                    if not link_valid:
                         # Generate GitHub URL for the broken link line
                         file_for_github = (
                             path_relative_to_git_root(md_file, git_root_dir, logger)
