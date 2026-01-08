@@ -325,8 +325,7 @@ fn extract_otel_context_from_http_headers(
     }
 
     let extractor = HttpHeaderExtractor(headers);
-    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
-    let otel_context = propagator.extract(&extractor);
+    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
 
     if otel_context.span().span_context().is_valid() {
         Some(otel_context)
@@ -454,8 +453,7 @@ fn extract_otel_context_from_tcp_headers(
     }
 
     let extractor = TcpHeaderExtractor(headers);
-    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
-    let otel_context = propagator.extract(&extractor);
+    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
 
     let context_with_trace = if otel_context.span().span_context().is_valid() {
         Some(otel_context)
@@ -497,8 +495,7 @@ pub fn extract_otel_context_from_nats_headers(
     }
 
     let extractor = NatsHeaderExtractor(headers);
-    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
-    let otel_context = propagator.extract(&extractor);
+    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
 
     let context_with_trace = if otel_context.span().span_context().is_valid() {
         Some(otel_context)
@@ -525,8 +522,7 @@ pub fn inject_otel_context_into_nats_headers(
     }
 
     let mut injector = NatsHeaderInjector(headers);
-    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
-    propagator.inject_context(&otel_context, &mut injector);
+    TRACE_PROPAGATOR.inject_context(&otel_context, &mut injector);
 }
 
 /// Inject trace context from current span into NATS headers
@@ -1079,6 +1075,11 @@ impl CustomJsonFormatter {
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+
+/// Static W3C Trace Context propagator instance to avoid repeated allocations
+static TRACE_PROPAGATOR: Lazy<opentelemetry_sdk::propagation::TraceContextPropagator> =
+    Lazy::new(|| opentelemetry_sdk::propagation::TraceContextPropagator::new());
+
 fn parse_tracing_duration(s: &str) -> Option<u64> {
     static RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r#"^["']?\s*([0-9.]+)\s*(µs|us|ns|ms|s)\s*["']?$"#).unwrap());
