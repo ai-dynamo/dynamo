@@ -128,8 +128,8 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "action": argparse.BooleanOptionalAction,
         "dest": "use_kv_events",
         "default": (
-            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
-        ),  # default is false
+            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
+        ),  # default is true
         "help": "Enable/disable NATS initialization for KV events. Use --kv-events to enable or --no-kv-events to disable (default).",
     },
 }

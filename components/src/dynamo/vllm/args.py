@@ -265,8 +265,8 @@ def parse_args() -> Config:
         action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
         default=(
-            os.environ.get("DYN_KV_EVENTS", "false").lower() == "true"
-        ),  # default is false
+            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
+        ),  # default is true
         help="Enable/disable NATS initialization for KV events. Use --kv-events to enable (router receives cache state events from workers) or --no-kv-events to disable (default, router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
