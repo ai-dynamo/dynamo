@@ -67,16 +67,12 @@ jobs:
     name: Detect Changes & Pre-commit
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
     outputs:
-      core: ${{ steps.filter.outputs.core }}
-      operator: ${{ steps.filter.outputs.operator }}
-      deploy: ${{ steps.filter.outputs.deploy }}
-      vllm_all: ${{ steps.filter.outputs.vllm_all }}
-      vllm_container: ${{ steps.filter.outputs.vllm_container }}
-      sglang_all: ${{ steps.filter.outputs.sglang_all }}
-      sglang_container: ${{ steps.filter.outputs.sglang_container }}
-      trtllm_all: ${{ steps.filter.outputs.trtllm_all }}
-      trtllm_container: ${{ steps.filter.outputs.trtllm_container }}
-      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+      core: ${{ steps.changes.outputs.core }}
+      operator: ${{ steps.changes.outputs.operator }}
+      deploy: ${{ steps.changes.outputs.deploy }}
+      vllm: ${{ steps.changes.outputs.vllm }}
+      sglang: ${{ steps.changes.outputs.sglang }}
+      trtllm: ${{ steps.changes.outputs.trtllm }}
     permissions:
       contents: read
     steps:
@@ -84,46 +80,11 @@ jobs:
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
         with:
           fetch-depth: 0
-      # - name: Check for changes
-      #   id: changes
-      #   uses: ./.github/actions/changed-files
-      #   with:
-      #     files_yaml_from_source_file: .github/filters.yaml
-      #     base_sha: ${{ steps.merge-base.outputs.base_sha }}
-      # - name: Debug changed files
-      #   run: |
-      #     echo "=== Base SHA Used ==="
-      #     echo "base_sha: ${{ steps.merge-base.outputs.base_sha || 'default (previous commit)' }}"
-      #     echo ""
-      #     echo "=== All Changed Files (${{ steps.filter.outputs.all_all_changed_files_count }} total) ==="
-      #     echo "${{ steps.filter.outputs.all_all_changed_files }}"
-      #     echo ""
-      #     echo "=== Filters That Matched ==="
-      #     echo "changed_keys: ${{ steps.filter.outputs.changed_keys }}"
-      #     echo ""
-      #     echo "=== Filter Results (any_changed) ==="
-      #     echo "docs: ${{ steps.filter.outputs.docs_any_changed }}"
-      #     echo "ci: ${{ steps.filter.outputs.ci_any_changed }}"
-      #     echo "core_code: ${{ steps.filter.outputs.core_code_any_changed }}"
-      #     echo "core_container: ${{ steps.filter.outputs.core_container_any_changed }}"
-      #     echo "operator: ${{ steps.filter.outputs.operator_any_changed }}"
-      #     echo "deploy: ${{ steps.filter.outputs.deploy_any_changed }}"
-      #     echo "planner: ${{ steps.filter.outputs.planner_any_changed }}"
-      #     echo "vllm_all: ${{ steps.filter.outputs.vllm_all_any_changed }}"
-      #     echo "sglang_all: ${{ steps.filter.outputs.sglang_all_any_changed }}"
-      #     echo "trtllm_all: ${{ steps.filter.outputs.trtllm_all_any_changed }}"
-      #     echo ""
-      #     echo "=== Files Matching Each Filter ==="
-      #     echo "docs: ${{ steps.filter.outputs.docs_all_changed_files }}"
-      #     echo "ci: ${{ steps.filter.outputs.ci_all_changed_files }}"
-      #     echo "core_code: ${{ steps.filter.outputs.core_code_all_changed_files }}"
-      #     echo "core_container: ${{ steps.filter.outputs.core_container_all_changed_files }}"
-      #     echo "operator: ${{ steps.filter.outputs.operator_all_changed_files }}"
-      #     echo "deploy: ${{ steps.filter.outputs.deploy_all_changed_files }}"
-      #     echo "planner: ${{ steps.filter.outputs.planner_all_changed_files }}"
-      #     echo "vllm_all: ${{ steps.filter.outputs.vllm_all_all_changed_files }}"
-      #     echo "sglang_all: ${{ steps.filter.outputs.sglang_all_all_changed_files }}"
-      #     echo "trtllm_all: ${{ steps.filter.outputs.trtllm_all_all_changed_files }}"
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
       - name: Export builder name
         id: export-builder-name
         run: |
@@ -278,11 +239,10 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: false
-      copy_to_acr: false
-      push_image: false
-      no_load: true
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: true
+      copy_to_acr: true
+      push_image: true
       builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
@@ -296,11 +256,10 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: false
-      copy_to_acr: false
-      push_image: false
-      no_load: true
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: true
+      copy_to_acr: true
+      push_image: true
       builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 
@@ -314,11 +273,10 @@ jobs:
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: false # ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      run_tests: false
-      copy_to_acr: false
-      push_image: false
-      no_load: true
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      run_tests: true
+      copy_to_acr: true
+      push_image: true
       builder_name: ${{ needs.init.outputs.builder_name }}
     secrets: inherit
 

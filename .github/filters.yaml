@@ -63,7 +63,13 @@ ci: &ci
   - '.github/actions/**'
   - '.github/scripts/parse_buildkit_output.py'
 
-core_code: &core_code
+core:
+  - *ci
+  - 'container/build.sh'
+  - 'container/Dockerfile'
+  - '.dockerignore'
+  - 'container/deps/*'
+  - '.cargo/config.toml'
   - 'lib/**'
   - 'tests/**'
   - 'components/src/dynamo/router/**'
@@ -79,64 +85,34 @@ core_code: &core_code
   - '!**/*.rst'
   - '!**/*.txt'
 
-core_container: &core_container
-  - 'container/build.sh'
-  - 'container/deps/*'
-  - '.cargo/config.toml'
-
-operator: &operator
+operator:
+  - *ci
   - 'deploy/operator/**'
   - 'deploy/operator/.*'
 
 deploy:
-  - *operator
   - 'deploy/helm/**'
   - 'deploy/utils/**'
-
 
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
 
-vllm_code: &vllm_code
-  - *core_code
-  - 'examples/backends/vllm/**'
-  - 'components/src/dynamo/vllm/**'
-
-vllm_container: &vllm_container
-  - *core_container
+vllm:
   - 'container/Dockerfile.vllm'
   - 'container/deps/requirements.vllm.txt'
   - 'container/deps/vllm/**'
+  - 'examples/backends/vllm/**'
+  - 'components/src/dynamo/vllm/**'
 
-vllm_all:
-  - *vllm_code
-  - *vllm_container
-
-sglang_code: &sglang_code
-  - *core_code
+sglang:
+  - 'container/Dockerfile.sglang'
   - 'examples/backends/sglang/**'
   - 'components/src/dynamo/sglang/**'
 
-sglang_container: &sglang_container
-  - *core_container
-  - 'container/Dockerfile.sglang'
-
-sglang_all:
-  - *sglang_code
-  - *sglang_container
-
-trtllm_code: &trtllm_code
-  - *core_code
+trtllm:
+  - 'container/Dockerfile.trtllm'
+  - 'container/deps/trtllm/**'
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
-
-trtllm_container: &trtllm_container
-  - *core_container
-  - 'container/Dockerfile.trtllm'
   - 'container/build_trtllm_wheel.sh'
-  - 'container/deps/trtllm/**'
-
-trtllm_all:
-  - *trtllm_code
-  - *trtllm_container
