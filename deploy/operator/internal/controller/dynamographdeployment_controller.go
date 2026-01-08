@@ -633,24 +633,43 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 	return result, nil
 }
 
+// isNewRestartRequest checks if the current spec.restart.at represents a new restart request
+func isNewRestartRequest(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
+	if dgd.Status.Restart == nil || dgd.Status.Restart.ObservedAt == nil || dgd.Spec.Restart.At == nil {
+		return true
+	}
+	return !dgd.Spec.Restart.At.Equal(dgd.Status.Restart.ObservedAt)
+}
+
 // computeParallelRestartStatus handles parallel restart where all services restart together.
 func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	specAt *metav1.Time,
 ) *nvidiacomv1alpha1.RestartStatus {
 	logger := log.FromContext(ctx)
 
-	// If restart is in progress, use the in-progress services
+	specAt := dgd.Spec.Restart.At
+
 	var servicesToCheck []string
-	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
-		servicesToCheck = dgd.Status.Restart.InProgress
-	} else {
-		// If restart is not in progress, use all services
+	if isNewRestartRequest(dgd) {
+		logger.Info("New restart request detected, resetting to all services", "specAt", specAt)
 		servicesToCheck = make([]string, 0, len(dgd.Spec.Services))
 		for serviceName := range dgd.Spec.Services {
 			servicesToCheck = append(servicesToCheck, serviceName)
 		}
+		// Sort for deterministic output
+		sort.Strings(servicesToCheck)
+	} else if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
+		// Continuing existing restart: use current InProgress list
+		servicesToCheck = dgd.Status.Restart.InProgress
+	} else {
+		// No in-progress list but same timestamp - use all services
+		servicesToCheck = make([]string, 0, len(dgd.Spec.Services))
+		for serviceName := range dgd.Spec.Services {
+			servicesToCheck = append(servicesToCheck, serviceName)
+		}
+		// Sort for deterministic output
+		sort.Strings(servicesToCheck)
 	}
 
 	if len(servicesToCheck) == 0 {
@@ -689,13 +708,25 @@ func (r *DynamoGraphDeploymentReconciler) computeParallelRestartStatus(
 func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	specAt *metav1.Time,
 	order []string,
 ) *nvidiacomv1alpha1.RestartStatus {
 	logger := log.FromContext(ctx)
 
+	specAt := dgd.Spec.Restart.At
+
 	// Get the current service being restarted from previous status
 	var currentService string
+	if isNewRestartRequest(dgd) {
+		// New restart request: start fresh from the first service
+		logger.Info("New restart request detected, starting from first service", "specAt", specAt, "firstService", order[0])
+		currentService = order[0]
+		return &nvidiacomv1alpha1.RestartStatus{
+			ObservedAt: specAt,
+			Phase:      nvidiacomv1alpha1.RestartPhaseRestarting,
+			InProgress: []string{currentService},
+		}
+	}
+
 	if dgd.Status.Restart != nil && len(dgd.Status.Restart.InProgress) > 0 {
 		currentService = dgd.Status.Restart.InProgress[0] // For sequential, there's only one
 	}
@@ -755,44 +786,6 @@ func (r *DynamoGraphDeploymentReconciler) computeSequentialRestartStatus(
 	}
 }
 
-// checkServiceFullyUpdated checks if a single service is fully updated.
-func (r *DynamoGraphDeploymentReconciler) checkServiceFullyUpdated(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment, serviceName string) (bool, string) {
-	logger := log.FromContext(ctx)
-	component := dgd.Spec.Services[serviceName]
-	if component == nil {
-		return false, fmt.Sprintf("service %s not found in spec", serviceName)
-	}
-
-	if r.isGrovePathway(dgd) {
-		pcs := &grovev1alpha1.PodCliqueSet{}
-		err := r.Client.Get(ctx, types.NamespacedName{Name: dgd.Name, Namespace: dgd.Namespace}, pcs)
-		if err != nil {
-			return false, fmt.Sprintf("failed to get PodCliqueSet: %v", err)
-		}
-
-		if pcs.Status.ObservedGeneration == nil {
-			return false, fmt.Sprintf("PodCliqueSet %s observedGeneration is nil", dgd.Name)
-		}
-
-		if *pcs.Status.ObservedGeneration < pcs.Generation {
-			return false, fmt.Sprintf("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d",
-				dgd.Name,
-				pcs.Generation, pcs.Status.ObservedGeneration)
-		}
-
-		resourceName := fmt.Sprintf("%s-0-%s", dgd.Name, strings.ToLower(serviceName))
-
-		if component.GetNumberOfNodes() > 1 {
-			isReady, reason, _ := dynamo.CheckPCSGReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
-			return isReady, reason
-		}
-		isReady, reason, _ := dynamo.CheckPodCliqueReady(ctx, r.Client, resourceName, dgd.Namespace, logger)
-		return isReady, reason
-	}
-
-	return r.checkComponentServiceFullyUpdated(ctx, dgd, serviceName)
-}
-
 // getNextServiceInOrder returns the service after the given service in the order, or empty string if none.
 func getNextServiceInOrder(order []string, currentService string) string {
 	for i, svc := range order {
@@ -818,14 +811,13 @@ func (r *DynamoGraphDeploymentReconciler) computeRestartStatus(ctx context.Conte
 		return dgd.Status.Restart
 	}
 
-	specAt := dgd.Spec.Restart.At
 	order := dynamo.GetRestartOrder(dgd)
 
 	if dynamo.IsParallelRestart(dgd) {
-		return r.computeParallelRestartStatus(ctx, dgd, specAt)
+		return r.computeParallelRestartStatus(ctx, dgd)
 	}
 
-	return r.computeSequentialRestartStatus(ctx, dgd, specAt, order)
+	return r.computeSequentialRestartStatus(ctx, dgd, order)
 }
 
 // checkComponentServiceFullyUpdated checks if a DynamoComponentDeployment is fully updated.

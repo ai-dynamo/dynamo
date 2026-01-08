@@ -1141,6 +1141,158 @@ func Test_computeRestartStatus(t *testing.T) {
 				InProgress: []string{"frontend"},
 			},
 		},
+		{
+			name: "parallel restart - new restart request during ongoing restart resets to all services (DCD pathway)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					At: &now, // NEW timestamp
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"completed": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedAt: &oldTime,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend", "decode"}, // completed service already done
+				},
+			},
+			existingResources: []client.Object{
+				// All services are now ready (simulating state after new restart timestamp is applied)
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-decode",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-completed",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &now,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"completed", "decode", "frontend"}, // ALL services, sorted
+			},
+		},
+		{
+			name: "sequential restart - new restart request during ongoing restart resets to first service (DCD pathway)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					At: &now, // NEW timestamp
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode", "worker"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"worker": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedAt: &oldTime,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"decode"},
+				},
+			},
+			existingResources: []client.Object{
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-decode",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-worker",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedAt: &now,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"}, // Reset to FIRST service
+			},
+		},
 	}
 
 	for _, tt := range tests {
