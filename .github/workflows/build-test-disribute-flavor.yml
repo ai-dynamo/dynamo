@@ -96,10 +96,10 @@ on:
     outputs:
       image_tag_amd64:
         description: 'AMD64 image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-amd64 }}
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-amd64
       image_tag_arm64:
         description: 'ARM64 image tag in ACR'
-        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-arm64 }}
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-arm64
 
 jobs:
   # ============================================================================
