@@ -20,9 +20,15 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
+llm_max_num_tokens = int(os.getenv("TRTLLM_MAX_NUM_TOKENS", "8192"))
 # Debug flag: set DYNAMO_DEBUG=1 to enable debug file dumps
 DEBUG_ENABLED = os.environ.get("DYNAMO_DEBUG", "0") == "1"
 DEBUG_WORKER_KV_FILE = "/tmp/debug_worker_kv.txt"
+# As api.py spins up 2 workers by default, we split the single GPU memory between 2
+# workers. Hence, 0.4.
+# TODO: allow memory args passing so that the caller can decide the best way to
+# allocate memory.
+kv_cache_free_gpu_memory_fraction = float(os.getenv("TRTLLM_FREE_GPU_FRAC", "0.4"))
 
 # Qwen2-VL specific token ID for image placeholders
 IMAGE_TOKEN_ID = 151937
@@ -347,7 +353,9 @@ class TrtllmWorker:
             kv_cache_config=KvCacheConfig(
                 enable_block_reuse=True,
                 event_buffer_max_size=DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
+                free_gpu_memory_fraction=kv_cache_free_gpu_memory_fraction,
             ),
+            max_num_tokens=llm_max_num_tokens,
         )
 
         self.metrics_publisher = MetricsPublisher(metrics_port)
