@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.12.0"
+VLLM_VER="0.13.0"
 VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
@@ -24,8 +24,7 @@ TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to ad
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.5.3"
-# LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
-LMCACHE_REF="0.3.10"
+LMCACHE_REF="0.3.12"
 
 while [[ $# -gt 0 ]]; do
     case $1 in

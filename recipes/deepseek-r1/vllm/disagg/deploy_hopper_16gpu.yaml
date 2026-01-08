@@ -4,11 +4,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: test3-vllm-dsr1
+  name: vllm-dsr1
 spec:
   backendFramework: vllm
   pvcs:
-    - name: model-cache-pvc
+    - name: model-cache
       create: false
   services:
     Frontend:
@@ -37,7 +37,7 @@ spec:
           custom:
             rdma/ib: "8"
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
@@ -104,7 +104,7 @@ spec:
           custom:
             rdma/ib: "8"
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /model-cache
       sharedMemory:
         size: 80Gi

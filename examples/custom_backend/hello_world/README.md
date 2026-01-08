@@ -106,7 +106,7 @@ Hello star!
 Note that this a very simple degenerate example which does not demonstrate the standard Dynamo FrontEnd-Backend deployment. The hello-world client is not a web server, it is a one-off function which sends the predefined text "world,sun,moon,star" to the backend. The example is meant to show the HelloWorldWorker. As such you will only see the HelloWorldWorker pod in deployment. The client will run and exit and the pod will not be operational.
 
 
-Follow the [Quickstart Guide](../../../docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
+Follow the [Quickstart Guide](/docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
 Then deploy to kubernetes using
 
 ```bash
