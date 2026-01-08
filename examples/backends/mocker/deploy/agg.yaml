@@ -8,6 +8,7 @@ metadata:
 spec:
   services:
     Frontend:
+      envFromSecret: hf-token-secret
       dynamoNamespace: mocker-agg
       componentType: frontend
       replicas: 1
