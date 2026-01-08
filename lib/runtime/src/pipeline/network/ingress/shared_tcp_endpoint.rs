@@ -370,7 +370,7 @@ impl SharedTcpServer {
             read_half.read_exact(&mut payload_buf).await?;
 
             // Reconstruct the full message buffer for decoding using BytesMut
-            let mut full_msg = BytesMut::with_capacity(2 + header_len + 4 + payload_len);
+            let mut full_msg = BytesMut::with_capacity(4 + header_len + 4 + payload_len);
             full_msg.extend_from_slice(&header_len_buf);
             full_msg.extend_from_slice(&header_buf);
             full_msg.extend_from_slice(&len_buf);
