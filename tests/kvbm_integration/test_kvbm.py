@@ -14,7 +14,7 @@ These tests validate core KVBM functionality:
 import pytest
 import requests
 
-from .common import llm_server_kvbm  # noqa: F401, F811
+from .common import llm_server_kvbm  # noqa: F401
 from .common import DeterminismTester, assert_deterministic, fetch_kvbm_metrics
 
 # Test configuration
@@ -96,17 +96,23 @@ def reset_cache(base_url: str) -> None:
         print(f"Warning: Cache reset failed: {e}")
 
 
+# Model used for test_kvbm tests (smaller model for faster CI)
+KVBM_TEST_MODEL = "Qwen/Qwen3-0.6B"
+
+
 # Fixtures
 @pytest.fixture(scope="function")
 def tester(llm_server_kvbm):  # noqa: F811
     """Create tester bound to the KVBM-enabled server."""
     return DeterminismTester(
         base_url=llm_server_kvbm.base_url,
+        model_id=KVBM_TEST_MODEL,
         server_type=llm_server_kvbm.server_type,
     )
 
 
 # Tests
+@pytest.mark.parametrize("llm_server_kvbm", [{"model": KVBM_TEST_MODEL}], indirect=True)
 def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
     """
     Test offload → cache reset → onboard cycle with determinism verification.
@@ -169,7 +175,9 @@ def test_offload_and_onboard(tester, llm_server_kvbm):  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "llm_server_kvbm", [{"cpu_blocks": 200, "gpu_blocks": 20}], indirect=True
+    "llm_server_kvbm",
+    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    indirect=True,
 )
 def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
     """
@@ -241,7 +249,9 @@ def test_gpu_cache_eviction(tester, llm_server_kvbm):  # noqa: F811
 
 
 @pytest.mark.parametrize(
-    "llm_server_kvbm", [{"cpu_blocks": 200, "gpu_blocks": 20}], indirect=True
+    "llm_server_kvbm",
+    [{"cpu_blocks": 200, "gpu_blocks": 20, "model": KVBM_TEST_MODEL}],
+    indirect=True,
 )
 def test_onboarding_determinism(tester, llm_server_kvbm):  # noqa: F811
     """

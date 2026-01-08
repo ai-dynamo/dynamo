@@ -111,14 +111,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ReadinessProbe to signal when the container is ready to receive traffic.
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	// Replicas is the desired number of Pods for this component.
-	// When scalingAdapter is enabled (default), this field is managed by the
+	// When scalingAdapter is enabled, this field is managed by the
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
@@ -278,6 +278,10 @@ func (s *DynamoComponentDeployment) IsMultinode() bool {
 
 func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
+}
+
+func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
+	return s.GetNumberOfNodes() > 1
 }
 
 func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {

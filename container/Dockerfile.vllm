@@ -74,13 +74,13 @@ ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.12.0"
+ARG VLLM_REF="v0.13.0"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
 ARG FLASHINF_REF="v0.5.3"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
-ARG LMCACHE_REF="0.3.10"
+ARG LMCACHE_REF="0.3.12"
 
 ##################################
 ########## Base Image ############
@@ -168,7 +168,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -191,6 +194,12 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         openssl-devel \
         libuuid-devel \
         zlib-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
 
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)

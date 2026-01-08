@@ -102,6 +102,7 @@ Options:
     --runtime-check   Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
                       and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
     --no-gpu-check    Skip GPU detection and information collection (useful for environments without GPU access)
+    --no-framework-check Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
 """
 
 import datetime
@@ -353,11 +354,13 @@ class SystemInfo(NodeInfo):
         terse: bool = False,
         runtime_check: bool = False,
         no_gpu_check: bool = False,
+        no_framework_check: bool = False,
     ):
         self.thorough_check = thorough_check
         self.terse = terse
         self.runtime_check = runtime_check
         self.no_gpu_check = no_gpu_check
+        self.no_framework_check = no_framework_check
         if hostname is None:
             hostname = platform.node()
 
@@ -421,7 +424,7 @@ class SystemInfo(NodeInfo):
             self.add_child(gpu_info)
 
         # Add Framework info (vllm, sglang, tensorrt_llm)
-        self.add_child(FrameworkInfo())
+        self.add_child(FrameworkInfo(no_framework_check=self.no_framework_check))
 
         # In terse mode, only add other components if they have errors
         if not self.terse:
@@ -2091,8 +2094,15 @@ class PythonInfo(NodeInfo):
 class FrameworkInfo(NodeInfo):
     """LLM Framework information"""
 
-    def __init__(self):
+    def __init__(self, no_framework_check: bool = False):
         super().__init__(label="🤖Framework", status=NodeStatus.INFO)
+
+        if no_framework_check:
+            # Why: In some environments (CI, minimal runtime containers) we may want to
+            # validate the Dynamo install without requiring a framework/engine package
+            # (vllm/sglang/tensorrt_llm) to be present.
+            self.desc = "skipped (--no-framework-check)"
+            return
 
         # Check for framework packages (mandatory to show)
         frameworks_to_check = [
@@ -2990,6 +3000,12 @@ def main():
         action="store_true",
         help="Skip GPU detection and information collection (useful for CI environments without GPU access)",
     )
+    parser.add_argument(
+        "--no-framework-check",
+        dest="no_framework_check",
+        action="store_true",
+        help="Skip LLM framework package checks (vllm, sglang, tensorrt_llm)",
+    )
     args = parser.parse_args()
 
     # Validate mutual exclusion
@@ -3013,6 +3029,7 @@ def main():
         terse=args.terse or args.json_output,
         runtime_check=args.runtime_check,
         no_gpu_check=args.no_gpu_check,
+        no_framework_check=args.no_framework_check,
     )
 
     framework_errors = has_framework_errors(tree)

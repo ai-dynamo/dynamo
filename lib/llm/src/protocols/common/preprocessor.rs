@@ -42,6 +42,11 @@ pub struct RoutingHints {
     /// - `Some(false)`: External caller (e.g., GAIE sidecar) handles bookkeeping via C FFI
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable_local_updates: Option<bool>,
+
+    /// Expected number of output tokens for this request.
+    /// Used as a hint for routing decisions to estimate resource requirements.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_output_tokens: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
