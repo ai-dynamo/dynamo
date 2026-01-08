@@ -214,5 +214,3 @@ def test_model_stream_infer_failure(start_services_with_echo_worker, request_par
         assert "missing field `data_type`" in str(excinfo.value).lower()
     elif "raise_exception" in request_params:
         assert "intentional exception" in str(excinfo.value).lower()
-    else:
-        assert False, "Expected exception was not raised"

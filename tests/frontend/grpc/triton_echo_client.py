@@ -110,7 +110,7 @@ class TritonEchoClient:
             inputs=inputs,
         )
 
-        data_item = user_data._completed_requests.get()
+        data_item = user_data._completed_requests.get(timeout=5)
         assert (
             isinstance(data_item, Exception) is False
         ), f"Stream inference failed: {data_item}"
