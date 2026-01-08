@@ -140,6 +140,7 @@ jobs:
 
       - name: Route buildkit workers
         id: route-buildkit
+        continue-on-error: true
         shell: bash
         run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ inputs.framework }}
 

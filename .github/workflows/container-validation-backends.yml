@@ -564,12 +564,13 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-    - name: Bootstrap Buildkit 
+    - name: Create K8s builders (skip bootstrap)
       uses: ./.github/actions/bootstrap-buildkit
       continue-on-error: true
       with:
         builder_name: ${{ needs.init.outputs.builder_name }}
         buildkit_worker_addresses: '' # k8s builder
+        skip_bootstrap: true
     - name: Builder Cleanup in case of k8s builder 
       shell: bash
       run: |
