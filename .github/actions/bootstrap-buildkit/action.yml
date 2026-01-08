@@ -89,7 +89,7 @@ runs:
       if: inputs.buildkit_worker_addresses == ''
       shell: bash
       run: |
-        
+
         docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
          '--driver-opt=namespace=${{ inputs.namespace }}' \
@@ -126,7 +126,7 @@ runs:
     #   run: |
     #     # Determine nodeselector based on platform if not provided
     #     NODESELECTOR="${{ inputs.nodeselector }}"
-        
+
     #     if [[ -z "$NODESELECTOR" ]]; then
     #       if [[ "${{ inputs.platform }}" == "linux/arm64" ]]; then
     #         NODESELECTOR="kubernetes.io/arch=arm64,role=buildkit-arm-worker"
@@ -137,7 +137,7 @@ runs:
     #         exit 1
     #       fi
     #     fi
-        
+
     #     # Check if builder already exists
     #     if docker buildx inspect ${{ inputs.builder_name }} &>/dev/null; then
     #       echo "Builder ${{ inputs.builder_name }} exists, appending platform"
@@ -146,7 +146,7 @@ runs:
     #       echo "Creating new builder ${{ inputs.builder_name }}"
     #       CREATE_CMD="docker buildx create --use --name ${{ inputs.builder_name }}"
     #     fi
-        
+
     #     $CREATE_CMD --driver kubernetes --platform=${{ inputs.platform }} \
     #      '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
     #      '--driver-opt=namespace=${{ inputs.namespace }}' \
