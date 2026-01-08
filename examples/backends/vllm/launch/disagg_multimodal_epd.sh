@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 set -e
 trap 'echo Cleaning up...; kill 0' EXIT
@@ -79,7 +79,6 @@ python -m dynamo.frontend &
 echo "Starting processor..."
 python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
-# Configure GPU memory optimization for specific models
 EXTRA_ARGS=""
 
 # Start encode worker

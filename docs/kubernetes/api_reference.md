@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -199,9 +199,9 @@ _Appears in:_
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled (default), this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled (default), replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
 
 
 #### DynamoComponentDeploymentSpec
@@ -237,9 +237,9 @@ _Appears in:_
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled (default), this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled (default), replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
 
 
 #### DynamoGraphDeployment
@@ -747,7 +747,7 @@ _Appears in:_
 
 
 ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-for replica management. When enabled (default), the DGDSA owns the replicas field and
+for replica management. When enabled, the DGDSA owns the replicas field and
 external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
 
 
@@ -758,7 +758,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `disable` _boolean_ | Disable indicates whether the ScalingAdapter should be disabled for this service.<br />When false (default), a DGDSA is created and owns the replicas field.<br />When true, no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
+| `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
 
 
 #### ServiceReplicaStatus
@@ -964,9 +964,10 @@ For multinode deployments, the operator modifies probes based on the backend fra
 
 The operator automatically selects between two deployment modes based on parallelism configuration:
 
-**Ray-Based Mode** (when `world_size > GPUs_per_node`):
-- **Worker nodes**: All probes (liveness, readiness, startup) are removed
-- **Leader nodes**: All probes remain active
+**Tensor/Pipeline Parallel Mode** (when `world_size > GPUs_per_node`):
+- Uses Ray for distributed execution (`--distributed-executor-backend ray`)
+- **Leader nodes**: Starts Ray head and runs vLLM; all probes remain active
+- **Worker nodes**: Run Ray agents only; all probes (liveness, readiness, startup) are removed
 
 **Data Parallel Mode** (when `world_size × data_parallel_size > GPUs_per_node`):
 - **Worker nodes**: All probes (liveness, readiness, startup) are removed
@@ -1068,7 +1069,7 @@ Default container ports are configured based on component type:
 ## Backend-Specific Configurations
 
 ### VLLM
-- **Ray Head Port**: 6379 (for Ray-based multinode deployments)
+- **Ray Head Port**: 6379 (for Ray cluster coordination in multinode TP/PP deployments)
 - **Data Parallel RPC Port**: 13445 (for data parallel multinode deployments)
 
 ### SGLang
@@ -1082,17 +1083,17 @@ Default container ports are configured based on component type:
 
 For users who want to understand the implementation details or contribute to the operator, the default values described in this document are set in the following source files:
 
-- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
+- **Health Probes, Security Context & Pod Specifications**: [`internal/dynamo/graph.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/graph.go) - Contains the main logic for applying default probes, security context, environment variables, shared memory, and pod configurations
 - **Component-Specific Defaults**:
-  - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_frontend.go)
-  - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_worker.go)
-  - [`internal/dynamo/component_planner.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/component_planner.go)
-- **Image Pull Secrets**: [`internal/secrets/docker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/secrets/docker.go) - Implements the docker secret indexer and automatic discovery
+  - [`internal/dynamo/component_frontend.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_frontend.go)
+  - [`internal/dynamo/component_worker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_worker.go)
+  - [`internal/dynamo/component_planner.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/component_planner.go)
+- **Image Pull Secrets**: [`internal/secrets/docker.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/secrets/docker.go) - Implements the docker secret indexer and automatic discovery
 - **Backend-Specific Behavior**:
-  - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend_vllm.go)
-  - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend_sglang.go)
-  - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/dynamo/backend_trtllm.go)
-- **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/operator/internal/consts/consts.go) - Defines annotation keys and other constants
+  - [`internal/dynamo/backend_vllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_vllm.go)
+  - [`internal/dynamo/backend_sglang.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_sglang.go)
+  - [`internal/dynamo/backend_trtllm.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/dynamo/backend_trtllm.go)
+- **Constants & Annotations**: [`internal/consts/consts.go`](https://github.com/ai-dynamo/dynamo/blob/main/deploy/operator/internal/consts/consts.go) - Defines annotation keys and other constants
 
 ## Notes
 

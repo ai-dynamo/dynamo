@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /*
@@ -160,6 +160,7 @@ async fn parse_response_stream(
             Box::pin(OpenAIPreprocessor::apply_tool_calling_jail(
                 Some(tool_parser),
                 None, // No tool_choice in this test
+                None, // No tool_definitions in this test
                 stream,
             ))
         } else {

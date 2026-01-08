@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::local_model::LocalModel;
@@ -22,6 +22,7 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::Instrument;
 
+use dynamo_runtime::config;
 use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
@@ -126,10 +127,7 @@ fn create_request_context(
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
-    if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
         eprintln!(
             "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
         );
@@ -562,10 +560,7 @@ impl DistributedRuntime {
 
         // Initialize logging in context where tokio runtime is available
         // otel exporter requires it
-        if std::env::var(env_otlp::OTEL_EXPORT_ENABLED)
-            .map(|v| v == "1")
-            .unwrap_or(false)
-        {
+        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
             runtime.secondary().block_on(async {
                 rs::logging::init();
             });
@@ -573,8 +568,15 @@ impl DistributedRuntime {
 
         let runtime_config = DistributedConfig {
             store_backend: selected_kv_store,
-            // We only need NATS here to monitor it's metrics, so only if it's our request plane.
-            nats_config: if request_plane.is_nats() {
+            // NATS is used for more than just the NATS request-plane:
+            // - KV router events (JetStream or NATS core + local indexer)
+            // - inter-router replica sync (NATS core)
+            //
+            // If a NATS server is configured via env, enable the client regardless of request plane.
+            nats_config: if request_plane.is_nats()
+                || std::env::var(dynamo_runtime::config::environment_names::nats::NATS_SERVER)
+                    .is_ok()
+            {
                 Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
                 None

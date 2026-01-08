@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -50,12 +50,16 @@ from benchmarks.profiler.utils.profile_prefill import (
     profile_prefill_aiconfigurator,
 )
 from benchmarks.profiler.utils.profiler_argparse import create_profiler_parser
-from benchmarks.profiler.webui.select_config import pick_config_with_webui
+from benchmarks.profiler.webui.select_config import (
+    add_profiling_error,
+    clear_profiling_errors,
+    pick_config_with_webui,
+)
 from deploy.utils.dynamo_deployment import (
     DynamoDeploymentClient,
     cleanup_remaining_deployments,
 )
-from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SubComponentType
 
 
 @dataclass
@@ -130,6 +134,9 @@ logger.addHandler(console_handler)
 async def run_profile(args):
     # List to track all created deployment clients for cleanup in case of failure
     deployment_clients = []
+
+    # Clear any errors from previous profiling runs
+    clear_profiling_errors()
 
     # Inherit aic_backend from backend if not explicitly set
     if not args.aic_backend:
@@ -232,7 +239,7 @@ async def run_profile(args):
                 prefill_config = apply_parallel_mapping_to_config(
                     base_prefill_config,
                     mapping,
-                    EngineType.PREFILL,
+                    SubComponentType.PREFILL,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -337,7 +344,7 @@ async def run_profile(args):
                 decode_config = apply_parallel_mapping_to_config(
                     base_decode_config,
                     mapping,
-                    EngineType.DECODE,
+                    SubComponentType.DECODE,
                     config_modifier,
                     args.num_gpus_per_node,
                 )
@@ -476,7 +483,9 @@ async def run_profile(args):
             logger.info("Analyzing results and generate recommendations...")
             # Safety guards: no results → exit early with a clear message
             if not prefill_data.num_gpus:
-                logger.error("No prefill results produced; skipping recommendations.")
+                error_msg = "No prefill results produced; skipping recommendations."
+                logger.error(error_msg)
+                add_profiling_error(error_msg)
                 return
 
             if args.pick_with_webui:
@@ -484,13 +493,16 @@ async def run_profile(args):
                 selected_prefill_idx, selected_decode_idx = pick_config_with_webui(
                     prefill_data, decode_data, args
                 )
+                # update TTFT/ITL SLA based on selected config
+                args.ttft = prefill_data.ttft[selected_prefill_idx]
+                args.itl = decode_data.itl[selected_decode_idx]
             else:
                 # automatically select P/D config within SLA with the highest throughput/GPU
                 # select best parallel mapping for prefill
                 if min(prefill_data.ttft) > args.ttft:
-                    logger.warning(
-                        "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
-                    )
+                    warning_msg = "No engine configuration satisfies the TTFT requirement, please try a smaller model or more powerful hardware"
+                    logger.warning(warning_msg)
+                    add_profiling_error(warning_msg)
                     selected_prefill_idx = int(np.argmin(np.array(prefill_data.ttft)))
                 else:
                     valid_indices = [
@@ -508,14 +520,14 @@ async def run_profile(args):
 
                 # select best parallel mapping for decode
                 if not decode_data.num_gpus:
-                    logger.error(
-                        "No decode results produced; skipping recommendations."
-                    )
+                    error_msg = "No decode results produced; skipping recommendations."
+                    logger.error(error_msg)
+                    add_profiling_error(error_msg)
                     return
                 if min(decode_data.itl) > args.itl:
-                    logger.warning(
-                        "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
-                    )
+                    warning_msg = "No engine configuration satisfies the ITL requirement, please try a smaller model or more powerful hardware"
+                    logger.warning(warning_msg)
+                    add_profiling_error(warning_msg)
                     selected_decode_idx = int(np.argmin(np.array(decode_data.itl)))
                 else:
                     valid_indices = [
@@ -554,7 +566,7 @@ async def run_profile(args):
         prefill_config = apply_parallel_mapping_to_config(
             prefill_config,
             best_prefill_mapping,
-            EngineType.PREFILL,
+            SubComponentType.PREFILL,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -638,7 +650,7 @@ async def run_profile(args):
         decode_config = apply_parallel_mapping_to_config(
             decode_config,
             best_decode_mapping,
-            EngineType.DECODE,
+            SubComponentType.DECODE,
             config_modifier,
             args.num_gpus_per_node,
         )
@@ -729,17 +741,17 @@ async def run_profile(args):
         # save DGD config with planner; support multi-document output when a ConfigMap is included
         with open(f"{args.output_dir}/config_with_planner.yaml", "w") as f:
             if isinstance(config, list):
-                yaml.dump_all(config, f)
+                yaml.safe_dump_all(config, f, sort_keys=False)
             else:
-                yaml.dump(config, f)
+                yaml.safe_dump(config, f, sort_keys=False)
 
         # save mocker config with planner for testing purposes
         logger.debug(f"Mocker config with planner: {mocker_config}")
         with open(f"{args.output_dir}/mocker_config_with_planner.yaml", "w") as f:
             if isinstance(mocker_config, list):
-                yaml.dump_all(mocker_config, f)
+                yaml.safe_dump_all(mocker_config, f, sort_keys=False)
             else:
-                yaml.dump(mocker_config, f)
+                yaml.safe_dump(mocker_config, f, sort_keys=False)
 
     except Exception as e:
         logger.error(f"Profile job failed with error: {e}")

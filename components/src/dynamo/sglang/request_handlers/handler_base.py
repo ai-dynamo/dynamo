@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -15,7 +15,7 @@ import sglang as sgl
 from sglang.srt.tracing import trace as sglang_trace
 from sglang.srt.utils import get_local_ip_auto
 
-from dynamo._core import Client, Component, Context
+from dynamo._core import Component, Context
 from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
@@ -30,7 +30,6 @@ class BaseWorkerHandler(ABC):
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
-        prefill_client: Optional[Client] = None,
     ) -> None:
         """Initialize base worker handler.
 
@@ -39,7 +38,6 @@ class BaseWorkerHandler(ABC):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
-            prefill_client: Optional client for prefill worker in disaggregated mode.
         """
         self.component = component
         self.engine = engine
@@ -50,7 +48,6 @@ class BaseWorkerHandler(ABC):
         else:
             self.metrics_publisher = None
             self.kv_publisher = None
-        self.prefill_client = prefill_client
         self.serving_mode = config.serving_mode
         self.skip_tokenizer_init = config.server_args.skip_tokenizer_init
         self.enable_trace = config.server_args.enable_trace
@@ -110,11 +107,39 @@ class BaseWorkerHandler(ABC):
         bootstrap_port = inner_tm.server_args.disaggregation_bootstrap_port
 
         if inner_tm.server_args.dist_init_addr:
-            bootstrap_host = socket.gethostbyname(
-                inner_tm.server_args.dist_init_addr.split(":")[0]
-            )
+            # IPv6-ready host extraction and resolution:
+            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
+            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
+            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
+            addr = inner_tm.server_args.dist_init_addr.strip()
+            if addr.startswith("["):
+                end = addr.find("]")
+                host_core = addr[1:end] if end != -1 else addr.strip("[]")
+            else:
+                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
+                if addr.count(":") == 1:
+                    host_candidate, maybe_port = addr.rsplit(":", 1)
+                    host_core = host_candidate if maybe_port.isdigit() else addr
+                else:
+                    host_core = addr
+            try:
+                infos = socket.getaddrinfo(
+                    host_core,
+                    None,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                )
+                resolved = infos[0][4][0]  # let OS policy pick v4/v6
+                bootstrap_host = resolved
+            except socket.gaierror:
+                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
+                bootstrap_host = host_core
         else:
             bootstrap_host = get_local_ip_auto()
+
+        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
+            bootstrap_host = f"[{bootstrap_host}]"
 
         return bootstrap_host, bootstrap_port
 

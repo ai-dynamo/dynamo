@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig, input::common},
     grpc::service::kserve,
+    http::service::metrics::Metrics,
     namespace::is_global_namespace,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -21,16 +22,21 @@ pub async fn run(
     distributed_runtime: DistributedRuntime,
     engine_config: EngineConfig,
 ) -> anyhow::Result<()> {
-    let grpc_service_builder = kserve::KserveService::builder()
+    let mut grpc_service_builder = kserve::KserveService::builder()
         .port(engine_config.local_model().http_port()) // [WIP] generalize port..
         .with_request_template(engine_config.local_model().request_template());
 
+    // Set HTTP metrics port if provided (for parallel test execution)
+    if let Some(http_metrics_port) = engine_config.local_model().http_metrics_port() {
+        grpc_service_builder = grpc_service_builder.http_metrics_port(http_metrics_port);
+    }
+
     let grpc_service = match engine_config {
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { ref model, .. } => {
             let grpc_service = grpc_service_builder.build()?;
-            let router_config = engine_config.local_model().router_config();
+            let router_config = model.router_config();
             // Listen for models registering themselves, add them to gRPC service
-            let namespace = engine_config.local_model().namespace().unwrap_or("");
+            let namespace = model.namespace().unwrap_or("");
             let target_namespace = if is_global_namespace(namespace) {
                 None
             } else {
@@ -105,7 +111,9 @@ async fn run_watcher(
     router_config: RouterConfig,
     target_namespace: Option<String>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config);
+    // Create metrics for migration tracking (not exposed via /metrics in gRPC mode)
+    let metrics = Arc::new(Metrics::new());
+    let watch_obj = ModelWatcher::new(runtime.clone(), model_manager, router_config, None, metrics);
     tracing::debug!("Waiting for remote model");
     let discovery = runtime.discovery();
     let discovery_stream = discovery

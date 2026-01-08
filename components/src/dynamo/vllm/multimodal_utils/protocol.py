@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -148,6 +148,24 @@ class vLLMMultimodalRequest(vLLMGenerateRequest):
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
+
+
+class VLLMNativeEncoderRequest(BaseModel):
+    """Request for vLLM-native encoder worker using ECConnector"""
+
+    request_id: str
+    multimodal_input: MultiModalInput
+    modality: Literal["image", "video", "audio"]
+    batch_items: Optional[List[MultiModalInput]] = None  # For future batch processing
+
+
+class VLLMNativeEncoderResponse(BaseModel):
+    """Response from vLLM-native encoder worker (ECConnector mode)"""
+
+    request_id: str
+    mm_hash: str  # vLLM's multimodal hash identifier
+    modality: str  # "image", "video", "audio"
+    connector_metadata: dict[str, Any]  # ECConnector config info for PD workers
 
 
 class MyRequestOutput(BaseModel):

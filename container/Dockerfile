@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # NOTE FOR dynamo_base AND wheel_builder STAGES:
@@ -23,10 +23,12 @@
 
 ARG BASE_IMAGE
 ARG BASE_IMAGE_TAG
+ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1"
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -51,6 +53,7 @@ ARG SCCACHE_REGION=""
 ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
+ARG NIXL_LIBFABRIC_REF
 
 ##################################
 ########## Base Image ############
@@ -112,6 +115,7 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
+ARG ENABLE_MEDIA_FFMPEG
 
 WORKDIR /workspace
 
@@ -138,7 +142,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -153,7 +160,17 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad \
         libibumad-devel \
         librdmacm-devel \
-        numactl-devel
+        numactl-devel \
+        # Libfabric support
+        hwloc \
+        hwloc-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
+
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -210,6 +227,47 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
     SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
     RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
 
+# Build FFmpeg from source
+# Do not delete the source tarball for legal reasons
+ARG FFMPEG_VERSION=7.1
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-gpl \
+        --disable-nonfree \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --disable-libdrm \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "FFMPEG" && \
+    ldconfig && \
+    mkdir -p /usr/local/src/ffmpeg && \
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
+fi
+
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -245,6 +303,37 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+ARG NIXL_LIBFABRIC_REF
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
+    cd /usr/local/src && \
+    git clone https://github.com/ofiwg/libfabric.git && \
+    cd libfabric && \
+    git checkout $NIXL_LIBFABRIC_REF && \
+    ./autogen.sh && \
+    ./configure --prefix="/usr/local/libfabric" \
+                --disable-verbs \
+                --disable-psm3 \
+                --disable-opx \
+                --disable-usnic \
+                --disable-rstream \
+                --enable-efa \
+                --with-cuda=/usr/local/cuda \
+                --enable-cuda-dlopen \
+                --with-gdrcopy \
+                --enable-gdrcopy-dlopen && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
+    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
+    ldconfig
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -261,7 +350,8 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" && \
+    -Ducx_path="/usr/local/ucx" \
+    -Dlibfabric_path="/usr/local/libfabric" && \
     cd build && \
     ninja && \
     ninja install && \
@@ -307,8 +397,15 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
@@ -319,6 +416,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
+            --exclude 'lib*.so*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \
@@ -354,6 +452,14 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
+# Copy ffmpeg
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
+    true # in case ffmpeg not enabled
+
 # Copy built artifacts
 COPY --chown=dynamo: --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
@@ -374,6 +480,7 @@ RUN apt-get update -y \
         clang \
         libclang-dev \
         protobuf-compiler \
+        pkg-config \
         # sudo for dev stage
         sudo \
     && apt-get clean \
@@ -439,3 +546,69 @@ USER dynamo
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+##############################################
+########## Frontend entrypoint image #########
+##############################################
+FROM ${EPP_IMAGE} AS epp
+
+FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
+
+ARG PYTHON_VERSION
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        # required for EPP
+        ca-certificates \
+        libstdc++6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown -R dynamo: /opt/dynamo /home/dynamo/.cache /workspace \
+    && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
+
+# Set HOME so ModelExpress can find the cache directory
+ENV HOME=/home/dynamo
+
+# Switch to dynamo user
+USER dynamo
+ENV DYNAMO_HOME=/opt/dynamo
+
+WORKDIR /
+COPY --chown=dynamo: --from=epp /epp /epp
+
+COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
+# Copy tests, benchmarks, deploy and components with correct ownership
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: recipes/ /workspace/recipes/
+# Copy attribution files with correct ownership
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="/opt/dynamo/venv/bin:$PATH"
+# Copy virtual environment directly from dynamo_base (dev image)
+# This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
+# Copy uv to system /bin
+COPY --chown=dynamo: --from=dev /bin/uv /bin/uvx /bin/
+RUN uv python install $PYTHON_VERSION
+COPY --chown=dynamo: --from=dev /opt/dynamo/venv/ /opt/dynamo/venv/
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
+
+ENTRYPOINT ["/epp"]
+CMD ["/bin/bash"]

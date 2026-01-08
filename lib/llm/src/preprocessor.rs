@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! The Preprocessor consists of the following modules
@@ -31,7 +31,7 @@ use crate::model_card::{ModelDeploymentCard, ModelInfo};
 use crate::preprocessor::media::MediaLoader;
 use crate::preprocessor::prompt::OAIChatLikeRequest;
 use crate::protocols::common::preprocessor::{
-    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder,
+    MultimodalData, MultimodalDataMap, PreprocessedRequestBuilder, RoutingHints,
 };
 use crate::tokenizers::Encoding;
 
@@ -237,11 +237,18 @@ impl OpenAIPreprocessor {
         builder.output_options(request.extract_output_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
-        builder.estimated_prefix_hit_num_blocks(None);
-        // Extract backend_instance_id and extra_fields from nvext if present
+        // Extract routing hints from nvext if present
         if let Some(nvext) = request.nvext() {
-            builder.backend_instance_id(nvext.backend_instance_id);
-            builder.extra_fields(nvext.extra_fields.clone());
+            // Build routing hints from nvext fields
+            let routing = RoutingHints {
+                backend_instance_id: nvext.backend_instance_id,
+                prefill_worker_id: nvext.prefill_worker_id,
+                decode_worker_id: nvext.decode_worker_id,
+                dp_rank: None, // dp_rank is set later in the pipeline
+                enable_local_updates: nvext.enable_local_updates,
+                expected_output_tokens: nvext.expected_output_tokens,
+            };
+            builder.routing(Some(routing));
         }
 
         Ok(builder)
@@ -343,11 +350,10 @@ impl OpenAIPreprocessor {
         #[cfg(feature = "media-nixl")]
         if !fetch_tasks.is_empty() {
             let loader = self.media_loader.as_ref().unwrap();
-            let results = futures::future::join_all(
-                fetch_tasks
-                    .iter()
-                    .map(|(_, content_part)| loader.fetch_and_decode_media_part(content_part)),
-            )
+            let media_io_kwargs = request.media_io_kwargs();
+            let results = futures::future::join_all(fetch_tasks.iter().map(|(_, content_part)| {
+                loader.fetch_and_decode_media_part(content_part, media_io_kwargs)
+            }))
             .await;
 
             for ((type_str, _), result) in fetch_tasks.into_iter().zip(results.into_iter()) {
@@ -801,6 +807,7 @@ impl OpenAIPreprocessor {
     pub fn apply_tool_calling_jail<S>(
         tool_call_parser: Option<String>,
         tool_choice: Option<dynamo_async_openai::types::ChatCompletionToolChoiceOption>,
+        tool_definitions: Option<Vec<dynamo_parsers::tool_calling::ToolDefinition>>,
         stream: S,
     ) -> impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send
     where
@@ -809,6 +816,13 @@ impl OpenAIPreprocessor {
         use dynamo_async_openai::types::ChatCompletionToolChoiceOption;
 
         let mut builder = JailedStream::builder();
+
+        // Set tool definitions if provided
+        if let Some(tool_definitions) = tool_definitions
+            && !tool_definitions.is_empty()
+        {
+            builder = builder.tool_definitions(tool_definitions);
+        }
 
         // Configure jail based on tool_choice
         match tool_choice {
@@ -932,12 +946,18 @@ impl
         let response_generator = request.response_generator(context.id().to_string());
 
         // convert the chat completion request to a common completion request
-        let (common_request, annotations) = self.preprocess_request(&request).await?;
+        let (mut common_request, annotations) = self.preprocess_request(&request).await?;
+
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
 
         let mut response_generator = Box::new(response_generator);
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -991,11 +1011,23 @@ impl
             has_tools,
         )?;
 
+        // Convert OpenAI tools to parser ToolDefinition format before applying jail
+        let tool_definitions = request.inner.tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| dynamo_parsers::tool_calling::ToolDefinition {
+                    name: tool.function.name.clone(),
+                    parameters: tool.function.parameters.clone(),
+                })
+                .collect()
+        });
+
         // Apply jail conditionally
         let transformed_stream: Pin<Box<dyn Stream<Item = _> + Send>> = if should_jail {
             Box::pin(Self::apply_tool_calling_jail(
                 self.tool_call_parser.clone(),
                 request.inner.tool_choice.clone(),
+                tool_definitions,
                 stream,
             ))
         } else {
@@ -1066,13 +1098,32 @@ impl
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
-        let annotations = self.gather_tokens(&request, &mut builder, None)?;
+
+        // Check if embeddings are provided - skip tokenization path
+        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
+            // Skip tokenization for embeddings
+            builder.token_ids(vec![]); // Empty token IDs
+            builder.prompt_embeds(Some(prompt_embeds.clone()));
+            // No token annotations
+            HashMap::new()
+        } else {
+            // Normal path: tokenize the prompt
+            self.gather_tokens(&request, &mut builder, None)?
+        };
+
+        // Gather multimodal data (works with both embeddings and text prompts)
         self.gather_multi_modal_data(&request, &mut builder).await?;
 
-        let common_request = builder.build()?;
+        let mut common_request = builder.build()?;
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Attach the timing tracker to the request so downstream components can record metrics
+        common_request.tracker = response_generator.tracker();
+
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);

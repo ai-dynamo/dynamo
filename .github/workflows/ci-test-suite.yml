@@ -1,0 +1,1113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reusable CI Test Suite Workflow
+# This workflow is called by nightly-ci.yml and post-merge-ci.yml
+# to run the full test suite with configurable parameters.
+
+name: CI Test Suite
+
+on:
+  workflow_call:
+    inputs:
+      pipeline_type:
+        description: 'Type of pipeline: nightly or post_merge'
+        required: true
+        type: string
+      include_nightly_marks:
+        description: 'Include nightly pytest marks in test selection'
+        required: true
+        type: boolean
+      image_prefix:
+        description: 'Prefix for image tags (nightly or main)'
+        required: true
+        type: string
+      enable_slack_notification:
+        description: 'Enable Slack notifications on completion'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      NGC_CI_ACCESS_TOKEN:
+        required: true
+      CI_TOKEN:
+        required: true
+      SCCACHE_S3_BUCKET:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL:
+        required: false
+      SLACK_OPS_SUPPORT_GROUP_ID:
+        required: false
+      AZURE_AKS_CI_KUBECONFIG_B64:
+        required: false
+      HF_TOKEN:
+        required: false
+      DYNAMO_INGRESS_SUFFIX:
+        required: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -eo pipefail {0}
+
+env:
+  REGISTRY_IMAGE: ai-dynamo/dynamo
+  IMAGE_PREFIX: ${{ inputs.image_prefix }}
+
+############################## BUILD JOBS ##############################
+
+jobs:
+  build-amd64:
+    name: Build ${{ matrix.framework }} (amd64)
+    runs-on: cpu-amd-m5-4xlarge
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull existing images for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing images for layer caching..."
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
+          echo "Cache pull completed"
+      - name: Build Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/amd64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: ''
+          torch_backend: ''
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
+      - name: Tag and Push Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  build-arm64:
+    name: Build ${{ matrix.framework }} (arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: vllm
+            base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+            cuda_version: '12.9'
+            torch_backend: 'cu129'
+          - framework: trtllm
+            base_image_tag: '25.06-py3'
+            runtime_image_tag: ''
+            cuda_version: '12.9'
+            torch_backend: 'cu129'
+          - framework: sglang
+            base_image_tag: ''
+            runtime_image_tag: ''
+            cuda_version: ''
+            torch_backend: ''
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull existing images for cache
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "Attempting to pull existing images for layer caching..."
+          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
+          echo "Cache pull completed"
+      - name: Build Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/arm64
+          base_image_tag: ${{ matrix.base_image_tag }}
+          runtime_image_tag: ${{ matrix.runtime_image_tag }}
+          cuda_version: ${{ matrix.cuda_version }}
+          torch_backend: ${{ matrix.torch_backend }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
+      - name: Tag and Push Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+############################## TEST JOBS ##############################
+
+  unit-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            exit 1
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Unit Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && 'unit and (nightly or post_merge or pre_merge)' || 'unit and (post_merge or pre_merge)' }}
+          framework: ${{ matrix.framework }}
+          test_type: unit
+          platform_arch: ${{ matrix.arch.arch }}
+          cpu_limit: '8'
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  integration-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 90
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            exit 1
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run Integration Tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && 'integration and (nightly or post_merge or pre_merge)' || 'integration and (post_merge or pre_merge)' }}
+          framework: ${{ matrix.framework }}
+          test_type: integration
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-single-gpu-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 120
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            exit 1
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_1)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: "${{ matrix.framework }} and e2e and gpu_1"
+          framework: ${{ matrix.framework }}
+          test_type: e2e-single-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+
+  e2e-multi-gpu-tests:
+    name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
+    needs: [build-amd64, build-arm64]
+    if: always()
+    runs-on: ${{ matrix.arch.runner }}
+    timeout-minutes: ${{ matrix.arch.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, trtllm, sglang]
+        arch:
+          - arch: amd64
+            runner: gpu-l40-amd64
+            timeout: 150
+          - arch: arm64
+            runner: cpu-arm-r8g-4xlarge
+            timeout: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          echo "==========================================="
+          echo "DEBUG: Checking build status"
+          echo "==========================================="
+          echo "Framework: ${{ matrix.framework }}"
+          echo "Architecture: ${{ matrix.arch.arch }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Run ID: ${{ github.run_id }}"
+
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework }} (${{ matrix.arch.arch }})"
+          echo "Looking for job pattern: '$BUILD_JOB_PATTERN'"
+
+          # Query GitHub API for job status
+          echo ""
+          echo "Querying GitHub API..."
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+
+          echo "HTTP Response Code: $HTTP_CODE"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            echo "Response: $JOBS"
+            exit 1
+          fi
+
+          # Debug: Show total jobs and all job names
+          TOTAL_JOBS=$(echo "$JOBS" | jq '.jobs | length')
+          echo ""
+          echo "Total jobs found: $TOTAL_JOBS"
+          echo ""
+          echo "All job names in this workflow run:"
+          echo "$JOBS" | jq -r '.jobs[] | "  - \(.name) [status: \(.status), conclusion: \(.conclusion)]"'
+          echo ""
+
+          # Try exact endswith match
+          echo "Searching for jobs ending with: '$BUILD_JOB_PATTERN'"
+          MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | endswith($pattern))] | length')
+          echo "Jobs matching endswith pattern: $MATCHING_JOBS"
+
+          if [ "$MATCHING_JOBS" -eq 0 ]; then
+            echo ""
+            echo "WARNING: No jobs found with endswith pattern"
+            echo "Trying contains pattern instead..."
+            MATCHING_JOBS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '[.jobs[] | select(.name | contains($pattern))] | length')
+            echo "Jobs matching contains pattern: $MATCHING_JOBS"
+
+            if [ "$MATCHING_JOBS" -gt 0 ]; then
+              BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+              MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .name' | head -1)
+            fi
+          else
+            BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .conclusion' | head -1)
+            MATCHED_JOB_NAME=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | endswith($pattern)) | .name' | head -1)
+          fi
+
+          echo ""
+          echo "==========================================="
+          echo "RESULT:"
+          echo "  Matched job: ${MATCHED_JOB_NAME:-none}"
+          echo "  Build status: ${BUILD_STATUS:-not found}"
+          echo "==========================================="
+
+          # Handle various status cases
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" = "" ]; then
+            echo ""
+            echo "ERROR: Could not determine build status"
+            echo "This could mean:"
+            echo "  1. The build job is still running"
+            echo "  2. The job name pattern doesn't match"
+            echo "  3. The API response doesn't include this job yet"
+            exit 1
+          fi
+
+          if [ "$BUILD_STATUS" != "success" ]; then
+            echo ""
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+
+          echo ""
+          echo "✅ Build succeeded. Proceeding with tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      - name: Pull image
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          IMAGE_TAG: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+        run: |
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG}
+          docker tag ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${IMAGE_TAG} ${IMAGE_TAG}
+      - name: Run E2E Tests (gpu_2)
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-${{ matrix.arch.arch }}
+          pytest_marks: ${{ inputs.include_nightly_marks && '(nightly or post_merge or pre_merge) and e2e and gpu_2' || '(post_merge or pre_merge) and e2e and gpu_2' }}
+          framework: ${{ matrix.framework }}
+          test_type: e2e-multi-gpu
+          platform_arch: ${{ matrix.arch.arch }}
+          dry_run: 'true'
+
+  ############################## FAULT TOLERANCE TESTS ##############################
+  fault-tolerance-tests:
+    name: ${{ matrix.framework.name }}-ft-k8s
+    needs: [build-amd64]
+    if: always()
+    runs-on: cpu-amd-m5-4xlarge
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        framework:
+          - name: vllm
+            test_scenario: "vllm-agg"
+          - name: trtllm
+            test_scenario: "trtllm-agg"
+          - name: sglang
+            test_scenario: "sglang-agg"
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      NIGHTLY_IMAGE_PREFIX: ${{ inputs.image_prefix }}
+      NAMESPACE: ft-${{ matrix.framework.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check if build succeeded
+        id: check_build
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +x
+          BUILD_JOB_PATTERN="Build ${{ matrix.framework.name }} (amd64)"
+          JOBS_RESPONSE=$(curl -s -S -L -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+          HTTP_CODE=$(echo "$JOBS_RESPONSE" | tail -n1)
+          JOBS=$(echo "$JOBS_RESPONSE" | sed '$d')
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Error: GitHub API returned non-200 status code"
+            exit 1
+          fi
+          BUILD_STATUS=$(echo "$JOBS" | jq -r --arg pattern "$BUILD_JOB_PATTERN" '.jobs[] | select(.name | contains($pattern)) | .conclusion' | head -1)
+          if [ -z "$BUILD_STATUS" ] || [ "$BUILD_STATUS" = "null" ] || [ "$BUILD_STATUS" != "success" ]; then
+            echo "ERROR: Build did not succeed (status: $BUILD_STATUS)"
+            exit 1
+          fi
+          echo "✅ Build succeeded. Proceeding with fault tolerance tests."
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Setup Kubernetes
+        run: |
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl cluster-info
+      - name: Deploy Operator
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          # Create a namespace for this job
+          echo "Creating an ephemeral namespace..."
+          kubectl delete namespace $NAMESPACE || true
+          kubectl create namespace $NAMESPACE || true
+          echo "Attaching the labels for secrets and cleanup"
+          kubectl label namespaces ${NAMESPACE} nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+          # Set the namespace as default
+          kubectl config set-context --current --namespace=$NAMESPACE
+          # Check if Istio is installed
+          kubectl get pods -n istio-system
+          # Check if default storage class exists
+          kubectl get storageclass
+          # Install Helm chart
+          export VIRTUAL_ENV=/opt/dynamo/venv
+          export KUBE_NS=$NAMESPACE
+          export ISTIO_ENABLED=true
+          export ISTIO_GATEWAY=istio-system/ingress-alb
+          export VIRTUAL_SERVICE_SUPPORTS_HTTPS=true
+          # Install dynamo env secrets
+          kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} -n $KUBE_NS || true
+          # Create docker pull secret for operator image
+          kubectl create secret docker-registry docker-imagepullsecret --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} --docker-username=${{ secrets.AZURE_ACR_USER }} --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} --namespace=${NAMESPACE}
+          # Pull operator image (using nightly tag for operator too)
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          docker pull ${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-operator-amd64 || echo "Operator image not found, will use SHA-based tag"
+          # Install helm dependencies
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          cd deploy/helm/charts/platform/
+          helm dep build .
+          # Install platform with namespace restriction
+          helm upgrade --install dynamo-platform . --namespace ${NAMESPACE} \
+            --set dynamo-operator.namespaceRestriction.enabled=true \
+            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+            --set dynamo-operator.controllerManager.manager.image.repository=${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo \
+            --set dynamo-operator.controllerManager.manager.image.tag=${{ github.sha }}-operator-amd64 \
+            --set dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret \
+            --timeout 10m --wait
+          # Wait for all deployments to be ready
+          timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
+          cd -
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE
+      - name: Run Fault Tolerance Tests
+        id: run-ft-tests
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          export NAMESPACE=$NAMESPACE
+          export FRAMEWORK=${{ matrix.framework.name }}
+          export ECR_HOSTNAME=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          export IMAGE="${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
+          echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
+          echo "Using namespace: $NAMESPACE"
+          echo "Using image: $IMAGE"
+          # Install python3-venv package if not already installed
+          sudo apt-get update && sudo apt-get install -y python3-venv
+          # Set up Python virtual environment and install test dependencies
+          python3 -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip
+          pip install -r container/deps/requirements.test.txt
+          pip install kubernetes==32.0.1 kubernetes_asyncio kr8s pyyaml requests tabulate pydantic
+          # Create test-results directory
+          mkdir -p test-results
+          # Run the pytest command with JUnit XML output
+          set +e  # Don't exit on test failures
+          pytest tests/fault_tolerance/deploy/test_deployment.py \
+            -m 'k8s and fault_tolerance' \
+            -k '${{ matrix.framework.test_scenario }}' \
+            -s -v \
+            --namespace ${NAMESPACE} \
+            --image ${IMAGE} \
+            --client-type legacy \
+            --junitxml=test-results/pytest_ft_report.xml \
+            --tb=short
+          TEST_EXIT_CODE=$?
+          echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
+          echo "🧪 Fault tolerance tests completed with exit code: ${TEST_EXIT_CODE}"
+          exit ${TEST_EXIT_CODE}
+        continue-on-error: true
+      - name: Process Fault Tolerance Test Results
+        if: always()
+        run: |
+          set -x
+          # Rename JUnit XML with unique naming if it exists
+          if [ -f "test-results/pytest_ft_report.xml" ]; then
+            mv "test-results/pytest_ft_report.xml" "test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml"
+            echo "✅ JUnit XML report renamed with unique identifier"
+          else
+            echo "⚠️  JUnit XML report not found"
+          fi
+      - name: Upload Fault Tolerance Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.framework.name }}-fault_tolerance-amd64-${{ github.run_id }}-${{ job.check_run_id }}
+          path: test-results/pytest_ft_report_${{ matrix.framework.name }}_amd64_${{ github.run_id }}_${{ job.check_run_id }}.xml
+          retention-days: 7
+      - name: Cleanup
+        if: always()
+        timeout-minutes: 5
+        run: |
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          export KUBECONFIG=$(pwd)/.kubeconfig
+          kubectl config set-context --current --namespace=$NAMESPACE --kubeconfig "${KUBECONFIG}"
+          # For debugging purposes, list all the resources before we uninstall
+          kubectl get all
+          echo "Deleting all DynamoGraphDeployments in namespace $NAMESPACE..."
+          kubectl delete dynamographdeployments --all -n $NAMESPACE || true
+          # Uninstall the helm chart
+          helm ls
+          helm uninstall dynamo-platform || true
+          echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
+          kubectl delete namespace $NAMESPACE || true
+          echo "Namespace $NAMESPACE completed."
+
+  ############################## RESULTS SUMMARY ##############################
+  results-summary:
+    name: Results Summary
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Gather job metadata
+        id: gather
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PIPELINE_TYPE: ${{ inputs.pipeline_type }}
+        run: |
+          set +x -e
+          echo "# ${PIPELINE_TYPE^} CI Results Summary" > results.md
+          echo "" >> results.md
+          echo "| Stage | Status | Runner | Duration (min) | Artifacts |" >> results.md
+          echo "|-------|--------|--------|----------------|-----------|" >> results.md
+
+          curl -s -S -L --fail-with-body \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            2>/dev/null | jq -c '.jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}' > jobs.jsonl
+
+          while read job_entry; do
+            job_id=$(echo "$job_entry" | jq -r '.id')
+            name=$(echo "$job_entry" | jq -r '.name')
+            runner=$(echo "$job_entry" | jq -r '.runner_name')
+            status=$(echo "$job_entry" | jq -r '.conclusion')
+            started=$(echo "$job_entry" | jq -r '.started_at')
+            completed=$(echo "$job_entry" | jq -r '.completed_at')
+            minutes="N/A"
+            if [[ "$started" != "null" && "$completed" != "null" ]]; then
+              start_epoch=$(date -d "$started" +%s)
+              end_epoch=$(date -d "$completed" +%s)
+              minutes=$(( (end_epoch - start_epoch)/60 ))
+            fi
+            artifact_link="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#job-$job_id"
+            printf "| %s | %s | %s | %s | [Log & Artifacts](%s) |\n" "$name" "$status" "$runner" "$minutes" "$artifact_link" >> results.md
+          done < jobs.jsonl
+
+          echo "" >> results.md
+          echo "---" >> results.md
+      - name: Display workflow summary
+        run: cat results.md
+      - name: Upload results summary as job summary
+        run: cat results.md >> $GITHUB_STEP_SUMMARY
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ inputs.pipeline_type }}-results-summary
+          path: results.md
+          retention-days: 7
+
+  ############################## SLACK NOTIFICATION ##############################
+  notify-slack:
+    name: Notify Slack
+    runs-on: cpu-amd-m5-4xlarge
+    if: always() && inputs.enable_slack_notification && !github.event.repository.fork
+    needs: results-summary
+    permissions:
+      contents: read
+    env:
+      HAS_SLACK_WEBHOOK: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL != '' }}
+    steps:
+      - name: Send Slack notification
+        if: env.HAS_SLACK_WEBHOOK == 'true'
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+          SLACK_OPS_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PIPELINE_TYPE: ${{ inputs.pipeline_type }}
+        run: |
+          set -euo pipefail
+
+          JOBS_JSON=$(mktemp)
+          trap 'rm -f "$JOBS_JSON"' EXIT
+
+          if ! curl -sSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
+            > "$JOBS_JSON"; then
+            echo "Error: Failed to fetch job data from GitHub API"
+            exit 1
+          fi
+
+          if [ ! -s "$JOBS_JSON" ]; then
+            echo "Error: No job data received"
+            exit 1
+          fi
+
+          TOTAL_JOBS=$(jq '[.jobs[]] | length' "$JOBS_JSON")
+          SUCCESS_COUNT=$(jq '[.jobs[] | select(.conclusion == "success")] | length' "$JOBS_JSON")
+          FAILED_COUNT=$(jq '[.jobs[] | select(.conclusion == "failure")] | length' "$JOBS_JSON")
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            STATUS="Success ✅"
+            STATUS_EMOJI=":white_check_mark:"
+          else
+            STATUS="Failed ❌"
+            STATUS_EMOJI=":x:"
+          fi
+
+          # Capitalize pipeline type for display
+          DISPLAY_TYPE="${PIPELINE_TYPE^}"
+
+          # Main message with summary
+          SUMMARY_TEXT="*${DISPLAY_TYPE} CI Pipeline - ${STATUS}*"$'\n'"Summary: ${SUCCESS_COUNT}/${TOTAL_JOBS} jobs passed"$'\n'"<${RUN_URL}|View Workflow Summary>"
+
+          if [ "$FAILED_COUNT" -eq 0 ]; then
+            # Success - simple message
+            PAYLOAD=$(jq -n \
+              --arg text "$SUMMARY_TEXT" \
+              '{text: $text}')
+          else
+            # Failed - message with blocks
+            FAILED_JOBS=$(jq -r '.jobs[] | select(.conclusion == "failure") | "• " + .name' "$JOBS_JSON")
+            FAILED_JOBS_TEXT="*Failed Jobs (${FAILED_COUNT}):*"$'\n'"${FAILED_JOBS}"
+
+            # Build ops-support mention (use group ID if available, otherwise plain text)
+            if [ -n "${SLACK_OPS_GROUP_ID:-}" ]; then
+              OPS_MENTION="<!subteam^${SLACK_OPS_GROUP_ID}|@ops-support>"
+            else
+              OPS_MENTION="@ops-support"
+            fi
+            ACTION_TEXT=":rotating_light: cc ${OPS_MENTION} - Please investigate the failures above."
+
+            PAYLOAD=$(jq -n \
+              --arg summary "$SUMMARY_TEXT" \
+              --arg failed "$FAILED_JOBS_TEXT" \
+              --arg action "$ACTION_TEXT" \
+              '{
+                text: $summary,
+                blocks: [
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $summary
+                    }
+                  },
+                  {
+                    type: "section",
+                    text: {
+                      type: "mrkdwn",
+                      text: $failed
+                    }
+                  },
+                  {
+                    type: "divider"
+                  },
+                  {
+                    type: "context",
+                    elements: [
+                      {
+                        type: "mrkdwn",
+                        text: $action
+                      }
+                    ]
+                  }
+                ]
+              }')
+          fi
+
+          if curl -sSf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$SLACK_WEBHOOK_URL"; then
+            echo "Slack notification sent successfully"
+          else
+            echo "Warning: Failed to send Slack notification"
+            exit 1
+          fi
+

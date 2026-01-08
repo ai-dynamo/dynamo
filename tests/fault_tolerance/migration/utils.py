@@ -1,9 +1,7 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-import os
-import shutil
 import threading
 import time
 
@@ -11,67 +9,31 @@ import pytest
 import requests
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
+from tests.utils.managed_process import (
+    DynamoFrontendProcess as BaseDynamoFrontendProcess,
+)
 from tests.utils.managed_process import ManagedProcess
-from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
 
 
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
+class DynamoFrontendProcess(BaseDynamoFrontendProcess):
+    """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
     def __init__(self, request):
-        # Allocate frontend port
-        frontend_port = allocate_port(8100)
-        self.frontend_port = frontend_port
-
-        command = [
-            "python",
-            "-m",
-            "dynamo.frontend",
-            "--router-mode",
-            "round-robin",
-            "--http-port",
-            str(frontend_port),
-        ]
-
-        env = os.environ.copy()
-        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
-        # Disable canary health check - these tests expect full control over requests
-        # sent to the workers where canary health check intermittently sends dummy
-        # requests to workers interfering with the test process which may cause
-        # intermittent failures
-        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
-        # Unset DYN_SYSTEM_PORT - frontend doesn't use system metrics server
-        env.pop("DYN_SYSTEM_PORT", None)
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
+        extra_env = {
+            "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
+            # These tests expect full control over requests sent to workers. The canary
+            # health check can inject extra requests and cause intermittent failures.
+            "DYN_HEALTH_CHECK_ENABLED": "false",
+        }
         super().__init__(
-            command=command,
-            env=env,
-            display_output=True,
-            terminate_existing=False,  # Don't terminate other processes of the same name, we'll only terminate our own PID
-            log_dir=log_dir,
+            request,
+            frontend_port=0,  # allocate a free port (xdist-safe)
+            router_mode="round-robin",
+            extra_env=extra_env,
+            terminate_existing=False,
         )
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release allocated port when frontend exits."""
-        try:
-            # frontend_port is always allocated in __init__
-            deallocate_port(self.frontend_port)
-        except Exception as e:
-            logger.warning(f"Failed to release frontend port: {e}")
-
-        return super().__exit__(exc_type, exc_val, exc_tb)
 
 
 def start_completion_request(frontend_port: int) -> tuple:
@@ -247,3 +209,87 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
     assert (
         "Cannot recreate stream: " not in log_content
     ), "'Cannot recreate stream: ...' error found in logs"
+
+
+def _parse_migration_metric(
+    metrics_text: str, model_name: str, migration_type: str
+) -> int:
+    """
+    Parse the migration metric value from Prometheus metrics text.
+
+    Args:
+        metrics_text: Raw Prometheus metrics text
+        model_name: The model name label value
+        migration_type: The migration_type label value ("ongoing_request" or "new_request")
+
+    Returns:
+        The metric count, or 0 if not found
+    """
+    import re
+
+    # Match pattern like:
+    # dynamo_frontend_model_migration_total{migration_type="ongoing_request",model="Qwen/Qwen3-0.6B"} 1
+    # Labels can be in any order
+    pattern = rf'dynamo_frontend_model_migration_total\{{[^}}]*migration_type="{migration_type}"[^}}]*model="{re.escape(model_name)}"[^}}]*\}}\s+(\d+)'
+    match = re.search(pattern, metrics_text)
+
+    if match:
+        return int(match.group(1))
+
+    # Try with labels in reverse order
+    pattern = rf'dynamo_frontend_model_migration_total\{{[^}}]*model="{re.escape(model_name)}"[^}}]*migration_type="{migration_type}"[^}}]*\}}\s+(\d+)'
+    match = re.search(pattern, metrics_text)
+
+    if match:
+        return int(match.group(1))
+
+    return 0
+
+
+def verify_migration_metrics(
+    frontend_port: int,
+    expected_ongoing_request_count: int = 0,
+    expected_new_request_count: int = 0,
+) -> None:
+    """
+    Verify migration metrics by querying the frontend's /metrics endpoint.
+
+    Args:
+        frontend_port: Port where the frontend is running
+        expected_ongoing_request_count: Expected count of ongoing_request migrations
+        expected_new_request_count: Expected count of new_request migrations
+    """
+    metrics_url = f"http://localhost:{frontend_port}/metrics"
+
+    try:
+        response = requests.get(metrics_url, timeout=1)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        pytest.fail(f"Failed to fetch metrics from {metrics_url}: {e}")
+
+    metrics_text = response.text
+    logger.info(f"Fetched metrics from {metrics_url}")
+
+    # Parse metrics to find migration counts
+    ongoing_count = _parse_migration_metric(
+        metrics_text, FAULT_TOLERANCE_MODEL_NAME, "ongoing_request"
+    )
+    new_request_count = _parse_migration_metric(
+        metrics_text, FAULT_TOLERANCE_MODEL_NAME, "new_request"
+    )
+
+    logger.info(
+        f"Migration metrics - ongoing_request: {ongoing_count}, new_request: {new_request_count}"
+    )
+
+    if expected_ongoing_request_count > 0:
+        assert ongoing_count >= expected_ongoing_request_count, (
+            f"Expected at least {expected_ongoing_request_count} ongoing_request migrations, "
+            f"but got {ongoing_count}"
+        )
+
+    if expected_new_request_count > 0:
+        assert new_request_count >= expected_new_request_count, (
+            f"Expected at least {expected_new_request_count} new_request migrations, "
+            f"but got {new_request_count}"
+        )

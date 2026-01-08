@@ -1,5 +1,7 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
+
+use serde_json::Value;
 
 pub mod config;
 pub mod dsml;
@@ -12,6 +14,13 @@ pub mod response;
 pub mod tests;
 pub mod tools;
 pub mod xml;
+
+/// Represents a tool definition with function schema.
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub parameters: Option<Value>,
+}
 
 // Re-export main types and functions for convenience
 pub use config::{JsonParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig};
