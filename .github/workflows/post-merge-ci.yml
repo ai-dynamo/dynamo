@@ -8,6 +8,7 @@ on:
     branches:
       - main
       - 'release/*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,6 +22,7 @@ jobs:
       include_nightly_marks: false
       image_prefix: main
       enable_slack_notification: true
+      enable_coverage: true
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
