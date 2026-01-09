@@ -121,7 +121,7 @@ SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_CUDA_VERSION_CU13="13.0.1"
-SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.6.post2-cu130-runtime"
 SGLANG_PYTHON_VERSION="3.10"
 
 # GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
