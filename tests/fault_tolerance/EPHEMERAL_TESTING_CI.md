@@ -12,36 +12,63 @@ This framework provides:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                           Test Execution                                 │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  ManagedDeployment (async context manager)                       │   │
-│  │                                                                  │   │
-│  │  - Creates ephemeral namespace                                   │   │
-│  │  - Deploys dynamo-platform (NATS + etcd) if needed              │   │
-│  │  - Creates DynamoGraphDeployment                                │   │
-│  │  - Waits for pods to be ready                                   │   │
-│  │  - Injects HW faults (if enabled)                               │   │
-│  │  - Collects logs/metrics on exit                                │   │
-│  │  - Cleans up everything                                         │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-│                              │                                          │
-│                              ▼                                          │
-│  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │  HWFaultManager                                                  │   │
-│  │                                                                  │   │
-│  │  - Builds CUDA shim library                                     │   │
-│  │  - Patches deployments with LD_PRELOAD                          │   │
-│  │  - Manages port-forward to fault-injection-api                  │   │
-│  │  - Injects XID faults via API                                   │   │
-│  │  - Toggles CUDA faults without restarts                         │   │
-│  │  - Cleans up (uncordons nodes, removes artifacts)               │   │
-│  └─────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────┘
++-------------------------------------------------------------------------+
+|                           Test Execution                                 |
+|                                                                          |
+|  +-------------------------------------------------------------------+  |
+|  |  ManagedDeployment (async context manager)                         |  |
+|  |                                                                    |  |
+|  |  - Creates ephemeral namespace                                     |  |
+|  |  - Deploys dynamo-platform (NATS + etcd) if needed                |  |
+|  |  - Creates DynamoGraphDeployment                                  |  |
+|  |  - Waits for pods to be ready                                     |  |
+|  |  - Injects HW faults (if enabled)                                 |  |
+|  |  - Collects logs/metrics on exit                                  |  |
+|  |  - Cleans up everything                                           |  |
+|  +-------------------------------------------------------------------+  |
+|                              |                                           |
+|                              v                                           |
+|  +-------------------------------------------------------------------+  |
+|  |  HWFaultManager                                                    |  |
+|  |                                                                    |  |
+|  |  - Builds CUDA shim library                                       |  |
+|  |  - Patches deployments with LD_PRELOAD                            |  |
+|  |  - Manages port-forward to fault-injection-api                    |  |
+|  |  - Injects XID faults via API                                     |  |
+|  |  - Toggles CUDA faults without restarts                           |  |
+|  |  - Cleans up (uncordons nodes, removes artifacts)                 |  |
+|  +-------------------------------------------------------------------+  |
++-------------------------------------------------------------------------+
 ```
 
 ## Quick Start
+
+### Prerequisites for Local Testing
+
+**kubectl context:** The tests use your current kubectl context. Ensure you're connected to a GPU cluster:
+
+```bash
+# Check current context
+kubectl config current-context
+
+# Switch to GPU cluster context (example)
+kubectl config use-context my-gpu-cluster
+
+# Verify GPU nodes are available
+kubectl get nodes -l nvidia.com/gpu.present=true
+
+# Verify fault-injection-system is deployed
+kubectl get pods -n fault-injection-system
+```
+
+**Environment variables (optional):**
+```bash
+# Override kubeconfig location
+export KUBECONFIG=/path/to/kubeconfig
+
+# Override default namespace
+export FAULT_TEST_NAMESPACE=my-test-namespace
+```
 
 ### Run Tests Locally
 
@@ -195,9 +222,12 @@ jobs:
 
 ### Pytest Configuration
 
-Add to `conftest.py`:
+The HW fault test options are defined in `tests/fault_tolerance/conftest.py`. If you need to add them to a different conftest or customize:
 
 ```python
+# tests/fault_tolerance/conftest.py (already exists)
+# These options are already configured - shown here for reference
+
 def pytest_addoption(parser):
     parser.addoption(
         "--enable-hw-faults",
@@ -247,6 +277,8 @@ def hw_fault_backend(request):
 def skip_service_restart(request):
     return request.config.getoption("--skip-service-restart")
 ```
+
+**Note:** The conftest.py is not in the root `tests/` directory because these options are specific to fault tolerance tests and would add unnecessary flags to all test runs.
 
 ## Test Phases
 
@@ -323,32 +355,73 @@ manager.wait_for_node_cordon(timeout=180)
 await manager.cleanup()
 ```
 
-## Troubleshooting CI
+## Troubleshooting
 
-### Test timeout
+### Local Testing Issues
+
+```bash
+# Check kubectl context
+kubectl config current-context
+kubectl cluster-info
+
+# Verify namespace doesn't exist (or is clean)
+kubectl get namespace hw-fault-test
+
+# Check GPU node availability
+kubectl get nodes -l nvidia.com/gpu.present=true -o wide
+
+# Verify fault-injection-system
+kubectl get pods -n fault-injection-system
+kubectl logs -n fault-injection-system -l app=fault-injection-api --tail=50
+```
+
+### CI-Specific Issues
+
+**Test timeout:**
 - Increase `timeout-minutes` in workflow
 - Check if pods are stuck in `Pending` (resource constraints)
 - Verify image pull succeeds
 
-### Namespace not cleaned
+**Namespace not cleaned:**
 - Add `if: always()` to cleanup step
 - Use unique namespace per run: `ci-hw-fault-${{ github.run_id }}`
 
-### NVSentinel not cordoning
+**NVSentinel not cordoning:**
 - Verify NVSentinel pods are running
 - Check `syslog-health-monitor` logs
 - Ensure test namespace is in `node-drainer.userNamespaces`
 
-### Pods not rescheduling
+**Pods not rescheduling:**
 - Need at least 2 GPU nodes
 - Check other nodes have available GPU resources
 - Verify node affinity was removed from DGD spec
+
+### General Debugging
+
+```bash
+# Get test pod logs
+kubectl logs -n <test-namespace> -l nvidia.com/dynamo-component-type=worker --tail=100
+
+# Check events in namespace
+kubectl get events -n <test-namespace> --sort-by='.lastTimestamp'
+
+# Describe stuck pods
+kubectl describe pod -n <test-namespace> <pod-name>
+
+# Check NVSentinel status
+kubectl get pods -n nvsentinel
+kubectl logs -n nvsentinel -l app.kubernetes.io/name=node-drainer --tail=50
+```
 
 ## Files Reference
 
 | File | Purpose |
 |------|---------|
-| `tests/utils/managed_deployment.py` | Core ephemeral deployment framework |
-| `tests/utils/hw_fault_helpers.py` | HW fault manager and config |
-| `tests/fault_tolerance/deploy/test_hw_faults.py` | Integration test example |
-| `tests/fault_tolerance/hardware/fault_injection_service/` | Fault injection components |
+| [`tests/utils/managed_deployment.py`](../utils/managed_deployment.py) | Core ephemeral deployment framework |
+| [`tests/utils/hw_fault_helpers.py`](../utils/hw_fault_helpers.py) | HW fault manager and config |
+| [`tests/fault_tolerance/deploy/test_hw_faults.py`](deploy/test_hw_faults.py) | Integration test example |
+| [`tests/fault_tolerance/hardware/fault_injection_service/`](hardware/fault_injection_service/) | Fault injection components |
+| [`tests/fault_tolerance/hardware/fault_injection_service/FAULT_INJECTION_OVERVIEW.md`](hardware/fault_injection_service/FAULT_INJECTION_OVERVIEW.md) | Fault injection service overview |
+| [`tests/fault_tolerance/hardware/fault_injection_service/NETWORK_PARTITIONS.md`](hardware/fault_injection_service/NETWORK_PARTITIONS.md) | Network partition injection docs |
+| [`tests/fault_tolerance/hardware/fault_injection_service/agents/GPU_XID_FAULT_INJECTION.md`](hardware/fault_injection_service/agents/GPU_XID_FAULT_INJECTION.md) | XID injection agent docs |
+| [`tests/fault_tolerance/hardware/fault_injection_service/cuda_fault_injection/CUDA_SHIM_LIBRARY.md`](hardware/fault_injection_service/cuda_fault_injection/CUDA_SHIM_LIBRARY.md) | CUDA shim library docs |
