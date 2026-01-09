@@ -20,17 +20,21 @@ logger = logging.getLogger(__name__)
 class DynamoFrontendProcess(BaseDynamoFrontendProcess):
     """Fault-tolerance frontend wrapper (keeps env settings from the historical helper)."""
 
-    def __init__(self, request):
+    def __init__(self, request, enforce_disagg: bool = False):
         extra_env = {
             "DYN_REQUEST_PLANE": request.getfixturevalue("request_plane"),
             # These tests expect full control over requests sent to workers. The canary
             # health check can inject extra requests and cause intermittent failures.
             "DYN_HEALTH_CHECK_ENABLED": "false",
         }
+        extra_args = []
+        if enforce_disagg:
+            extra_args.append("--enforce-disagg")
         super().__init__(
             request,
             frontend_port=0,  # allocate a free port (xdist-safe)
             router_mode="round-robin",
+            extra_args=extra_args if extra_args else None,
             extra_env=extra_env,
             terminate_existing=False,
         )
@@ -99,6 +103,8 @@ def determine_request_receiving_worker(
     """
     worker1_results: list[bool] = []
     worker2_results: list[bool] = []
+    # Event to signal all threads to exit when one finds the pattern
+    found_event = threading.Event()
 
     # Poll both workers in parallel
     def poll_worker(worker: ManagedProcess, result_list: list[bool]):
@@ -107,13 +113,14 @@ def determine_request_receiving_worker(
         max_iterations = max_wait_ms // poll_interval_ms
         iteration = 0
 
-        while iteration < max_iterations:
-            # Check if the worker logs contain 'New Request ID:' message
+        while iteration < max_iterations and not found_event.is_set():
+            # Check if the worker logs contain the pattern
             try:
                 with open(worker.log_path, "r") as f:
                     log_content = f.read()
                     if receiving_pattern in log_content:
                         result_list.append(True)
+                        found_event.set()  # Signal other thread to exit
                         return
             except Exception as e:
                 logger.error(f"Could not read log file {worker.log_path}: {e}")
