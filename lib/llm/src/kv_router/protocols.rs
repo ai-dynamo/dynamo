@@ -293,6 +293,7 @@ pub enum ActiveSequenceEventData {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
     },
     Free,
     MarkPrefillCompleted,

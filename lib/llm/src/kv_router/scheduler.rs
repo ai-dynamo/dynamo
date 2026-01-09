@@ -234,6 +234,7 @@ impl KvScheduler {
                                 request.token_seq,
                                 request.isl_tokens,
                                 selection.overlap_blocks,
+                                None, // expected_output_tokens not available in scheduler loop
                                 selection.worker,
                             )
                             .await
@@ -304,10 +305,18 @@ impl KvScheduler {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.slots
-            .add_request(request_id, token_sequence, isl, overlap, worker)
+            .add_request(
+                request_id,
+                token_sequence,
+                isl,
+                overlap,
+                expected_output_tokens,
+                worker,
+            )
             .await
     }
 

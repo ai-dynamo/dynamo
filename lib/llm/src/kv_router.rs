@@ -483,6 +483,7 @@ impl KvRouter {
         request_id: String,
         tokens: &[u32],
         overlap_blocks: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) {
         let isl_tokens = tokens.len();
@@ -499,6 +500,7 @@ impl KvRouter {
                 maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
+                expected_output_tokens,
                 worker,
             )
             .await
@@ -726,6 +728,12 @@ impl KvPushRouter {
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
+        // Extract expected_output_tokens from routing hints
+        let expected_output_tokens = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.expected_output_tokens);
+
         // Perform add_request if this router handles local updates
         if !is_query_only && handle_local_updates {
             self.chooser
@@ -733,6 +741,7 @@ impl KvPushRouter {
                     context_id.to_string(),
                     &request.token_ids,
                     overlap_blocks,
+                    expected_output_tokens,
                     worker,
                 )
                 .await;
