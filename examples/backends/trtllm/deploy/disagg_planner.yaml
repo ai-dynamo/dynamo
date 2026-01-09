@@ -52,7 +52,6 @@ spec:
             - --backend=trtllm
             - --adjustment-interval=60
             - --profile-results-dir=/workspace/profiling_results
-            - --prometheus-port=9085
           volumeMounts:
             - name: planner-profile-data
               mountPath: /workspace/profiling_results
