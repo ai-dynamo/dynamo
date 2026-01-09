@@ -540,16 +540,13 @@ impl DistributedConfig {
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
 
-        // Check discovery backend to determine the appropriate KV store backend.
-        // When using kubernetes discovery, etcd is not required - use in-memory KV store.
-        // When using kv_store (etcd) discovery, etcd is required for both discovery and KV store.
+        // Check discovery backend to determine the appropriate KV store backend -
+        // kubernetes discovery, or etcd.
         let discovery_backend =
             std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
 
         let store_backend = if discovery_backend == "kubernetes" {
-            tracing::info!(
-                "Using Kubernetes discovery backend - using in-memory KV store (etcd not required)"
-            );
+            tracing::info!("Using Kubernetes discovery backend");
             kv::Selector::Memory
         } else {
             kv::Selector::Etcd(Box::default())
