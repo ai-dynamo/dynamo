@@ -199,6 +199,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   sglang:
     needs: changed-files
@@ -263,6 +264,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   trtllm:
     needs: changed-files
@@ -327,6 +329,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
