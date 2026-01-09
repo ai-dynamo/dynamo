@@ -14,7 +14,7 @@ use crate::discovery::KvWorkerMonitor;
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
-    discovery::{DiscoveryQuery, DiscoverySpec, watch_and_extract_field},
+    discovery::{DiscoveryQuery, DiscoverySpec, ModelCardInstanceId, watch_and_extract_field},
     prelude::DistributedRuntimeProvider,
     protocols::EndpointId,
 };
@@ -70,7 +70,7 @@ pub struct ModelManager {
     prefill_engines: RwLock<ModelEngines<()>>,
 
     // These are Mutex because we read and write rarely and equally
-    cards: Mutex<HashMap<String, ModelDeploymentCard>>,
+    cards: Mutex<HashMap<ModelCardInstanceId, ModelDeploymentCard>>,
     kv_choosers: Mutex<HashMap<EndpointId, Arc<KvRouter>>>,
     prefill_router_activators: Mutex<HashMap<String, PrefillActivationState>>,
 
@@ -320,15 +320,19 @@ impl ModelManager {
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
-    /// Save a ModelDeploymentCard from an instance's ModelDeploymentCard key so we can fetch it later when the key is
+    /// Save a ModelDeploymentCard from an instance's ModelCardInstanceId so we can fetch it later when the key is
     /// deleted.
-    pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
-        self.cards.lock().insert(key.to_string(), card);
+    pub fn save_model_card(
+        &self,
+        key: ModelCardInstanceId,
+        card: ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
+        self.cards.lock().insert(key, card);
         Ok(())
     }
 
-    /// Remove and return model card for this instance's etcd key. We do this when the instance stops.
-    pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
+    /// Remove and return model card for this instance's ModelCardInstanceId. We do this when the instance stops.
+    pub fn remove_model_card(&self, key: &ModelCardInstanceId) -> Option<ModelDeploymentCard> {
         self.cards.lock().remove(key)
     }
 

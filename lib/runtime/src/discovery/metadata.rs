@@ -5,7 +5,9 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EndpointInstanceId, ModelCardInstanceId};
+use super::{
+    DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EndpointInstanceId, ModelCardInstanceId,
+};
 
 /// Metadata stored on each pod and exposed via HTTP endpoint
 /// This struct holds all discovery registrations for this pod instance

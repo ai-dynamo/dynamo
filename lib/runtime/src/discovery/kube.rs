@@ -285,7 +285,10 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id = format!("{:x}", instance.instance_id()),
                     "Emitting initial Added event"
                 );
-                if event_tx.send(Ok(DiscoveryEvent::Added(instance.clone()))).is_err() {
+                if event_tx
+                    .send(Ok(DiscoveryEvent::Added(instance.clone())))
+                    .is_err()
+                {
                     tracing::debug!(
                         stream_id = %stream_id,
                         "Watch receiver dropped during initial sync"
@@ -326,13 +329,15 @@ impl Discovery for KubeDiscoveryClient {
                         let snapshot = watch_rx.borrow_and_update().clone();
 
                         // Build current map: DiscoveryInstanceId -> DiscoveryInstance
-                        let current: std::collections::HashMap<DiscoveryInstanceId, DiscoveryInstance> =
-                            snapshot
-                                .instances
-                                .values()
-                                .flat_map(|metadata| metadata.filter(&query))
-                                .map(|instance| (instance.id(), instance))
-                                .collect();
+                        let current: std::collections::HashMap<
+                            DiscoveryInstanceId,
+                            DiscoveryInstance,
+                        > = snapshot
+                            .instances
+                            .values()
+                            .flat_map(|metadata| metadata.filter(&query))
+                            .map(|instance| (instance.id(), instance))
+                            .collect();
 
                         tracing::debug!(
                             stream_id = %stream_id,
@@ -346,10 +351,8 @@ impl Discovery for KubeDiscoveryClient {
                         let current_keys: HashSet<&DiscoveryInstanceId> = current.keys().collect();
                         let known_keys: HashSet<&DiscoveryInstanceId> = known.iter().collect();
 
-                        let added: Vec<&DiscoveryInstanceId> = current_keys
-                            .difference(&known_keys)
-                            .copied()
-                            .collect();
+                        let added: Vec<&DiscoveryInstanceId> =
+                            current_keys.difference(&known_keys).copied().collect();
 
                         let removed: Vec<DiscoveryInstanceId> = known_keys
                             .difference(&current_keys)
@@ -382,7 +385,10 @@ impl Discovery for KubeDiscoveryClient {
                                     instance_id = format!("{:x}", instance.instance_id()),
                                     "Emitting Added event"
                                 );
-                                if event_tx.send(Ok(DiscoveryEvent::Added(instance.clone()))).is_err() {
+                                if event_tx
+                                    .send(Ok(DiscoveryEvent::Added(instance.clone())))
+                                    .is_err()
+                                {
                                     tracing::debug!(
                                         stream_id = %stream_id,
                                         "Watch receiver dropped"
@@ -399,10 +405,7 @@ impl Discovery for KubeDiscoveryClient {
                                 id = ?id,
                                 "Emitting Removed event"
                             );
-                            if event_tx
-                                .send(Ok(DiscoveryEvent::Removed(id)))
-                                .is_err()
-                            {
+                            if event_tx.send(Ok(DiscoveryEvent::Removed(id))).is_err() {
                                 tracing::debug!(stream_id = %stream_id, "Watch receiver dropped");
                                 return;
                             }
