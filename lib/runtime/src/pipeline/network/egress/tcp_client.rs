@@ -324,7 +324,8 @@ impl TcpConnection {
         // Encode request on caller's thread (hot path optimization)
         // This allows multiple concurrent callers to encode in parallel
         // rather than serializing through the writer task
-        let request_msg = TcpRequestMessage::new(endpoint_path, payload);
+        // Include all headers (especially trace headers) in the message
+        let request_msg = TcpRequestMessage::with_headers(endpoint_path, headers.clone(), payload);
         let encoded_data = request_msg.encode()?;
 
         // Create response channel
@@ -657,7 +658,7 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (mut read_half, mut write_half) = tokio::io::split(stream);
 
-            // Read request
+            // Read path length and path
             let mut len_buf = [0u8; 2];
             read_half.read_exact(&mut len_buf).await.unwrap();
             let path_len = u16::from_be_bytes(len_buf) as usize;
@@ -665,6 +666,15 @@ mod tests {
             let mut path_buf = vec![0u8; path_len];
             read_half.read_exact(&mut path_buf).await.unwrap();
 
+            // Read headers length and headers
+            let mut headers_len_buf = [0u8; 2];
+            read_half.read_exact(&mut headers_len_buf).await.unwrap();
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+            let mut headers_buf = vec![0u8; headers_len];
+            read_half.read_exact(&mut headers_buf).await.unwrap();
+
+            // Read payload length and payload
             let mut len_buf = [0u8; 4];
             read_half.read_exact(&mut len_buf).await.unwrap();
             let payload_len = u32::from_be_bytes(len_buf) as usize;
@@ -725,6 +735,17 @@ mod tests {
 
                 let mut path_buf = vec![0u8; path_len];
                 if read_half.read_exact(&mut path_buf).await.is_err() {
+                    break;
+                }
+
+                let mut headers_len_buf = [0u8; 2];
+                if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                    break;
+                }
+                let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+                let mut headers_buf = vec![0u8; headers_len];
+                if read_half.read_exact(&mut headers_buf).await.is_err() {
                     break;
                 }
 
@@ -823,6 +844,17 @@ mod tests {
 
                         let mut path_buf = vec![0u8; path_len];
                         if read_half.read_exact(&mut path_buf).await.is_err() {
+                            break;
+                        }
+
+                        let mut headers_len_buf = [0u8; 2];
+                        if read_half.read_exact(&mut headers_len_buf).await.is_err() {
+                            break;
+                        }
+                        let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+                        let mut headers_buf = vec![0u8; headers_len];
+                        if read_half.read_exact(&mut headers_buf).await.is_err() {
                             break;
                         }
 
