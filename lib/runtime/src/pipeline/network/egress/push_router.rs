@@ -226,6 +226,36 @@ where
         }
     }
 
+    /// Peek the next worker according to the routing mode without incrementing the counter.
+    /// Useful for checking if a worker is suitable before committing to it.
+    pub fn peek_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                // Just peek at the current counter value without incrementing
+                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                // For random, peeking implies a fresh random selection since it's stateless.
+                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            _ => {
+                panic!(
+                    "peek_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
     /*
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject();

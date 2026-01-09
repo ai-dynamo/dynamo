@@ -26,6 +26,7 @@ spec:
     decode:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
+      subComponentType: decode
       replicas: 1
       resources:
         limits:
@@ -68,6 +69,7 @@ spec:
     prefill:
       dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       resources:
         limits:

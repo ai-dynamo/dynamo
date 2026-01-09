@@ -322,6 +322,190 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 			wantErr: true,
 			errMsg:  "spec.services[main].sharedMemory.size is required when disabled is false",
 		},
+		// Restart validation test cases
+		{
+			name: "restart with nil at",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "",
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.restart.id is required",
+		},
+		{
+			name: "restart with valid id and no strategy",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "restart with parallel strategy and order specified",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main":    {},
+						"prefill": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+						Strategy: &nvidiacomv1alpha1.RestartStrategy{
+							Type:  nvidiacomv1alpha1.RestartStrategyTypeParallel,
+							Order: []string{"main", "prefill"},
+						},
+					},
+				},
+			},
+			wantErr: true,
+			errMsg:  "spec.restart.strategy.order cannot be specified when strategy is parallel",
+		},
+		{
+			name: "restart with sequential strategy and duplicate services in order",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main":    {},
+						"prefill": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+						Strategy: &nvidiacomv1alpha1.RestartStrategy{
+							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
+							Order: []string{"main", "main", "prefill"},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.restart.strategy.order must be unique",
+			errContains: true,
+		},
+		{
+			name: "restart with sequential strategy and unknown service in order",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main":    {},
+						"prefill": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+						Strategy: &nvidiacomv1alpha1.RestartStrategy{
+							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
+							Order: []string{"main", "unknown"},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.restart.strategy.order contains unknown service: unknown",
+			errContains: true,
+		},
+		{
+			name: "restart with sequential strategy and missing service in order",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main":    {},
+						"prefill": {},
+						"decode":  {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+						Strategy: &nvidiacomv1alpha1.RestartStrategy{
+							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
+							Order: []string{"main", "prefill"},
+						},
+					},
+				},
+			},
+			wantErr:     true,
+			errMsg:      "spec.restart.strategy.order must have the same number of unique services as the deployment",
+			errContains: true,
+		},
+		{
+			name: "restart with valid sequential strategy and order",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main":    {},
+						"prefill": {},
+						"decode":  {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+						Strategy: &nvidiacomv1alpha1.RestartStrategy{
+							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
+							Order: []string{"prefill", "decode", "main"},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
+			name: "restart with sequential strategy and empty order is valid",
+			deployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-graph",
+					Namespace: "default",
+				},
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+						"main": {},
+					},
+					Restart: &nvidiacomv1alpha1.Restart{
+						ID: "restart-id",
+						Strategy: &nvidiacomv1alpha1.RestartStrategy{
+							Type:  nvidiacomv1alpha1.RestartStrategyTypeSequential,
+							Order: []string{},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -791,7 +975,7 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 			errMsg:  "spec.services[main] cannot change node topology (between single-node and multi-node) after creation",
 		},
 		{
-			name: "adding new service with multinode is allowed",
+			name: "adding new service with multinode is not allowed", // service topology is immutable
 			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "sglang",
@@ -810,7 +994,6 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 							Multinode: nil,
 						},
 						"decode": {
-							// New service with multinode - should be allowed
 							Multinode: &nvidiacomv1alpha1.MultinodeSpec{
 								NodeCount: 4,
 							},
@@ -818,10 +1001,11 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [decode]",
 		},
 		{
-			name: "adding new service without multinode is allowed",
+			name: "adding new service without multinode is not allowed", // service topology is immutable
 			oldDeployment: &nvidiacomv1alpha1.DynamoGraphDeployment{
 				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentSpec{
 					BackendFramework: "sglang",
@@ -850,7 +1034,8 @@ func TestDynamoGraphDeploymentValidator_ValidateUpdate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: false,
+			wantErr: true,
+			errMsg:  "service topology is immutable and cannot be modified after creation: services added: [gateway]",
 		},
 	}
 
