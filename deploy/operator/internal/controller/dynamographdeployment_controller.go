@@ -1172,7 +1172,18 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		}
 
 		// Build pod template from service spec for checkpoint job
-		podTemplate := r.buildCheckpointJobPodTemplate(component, serviceName)
+		// This uses GenerateBasePodSpec to ensure same config as worker pods (image pull secrets, etc.)
+		// Pass framework from checkpoint identity for accurate backend detection
+		podTemplate, err := r.buildCheckpointJobPodTemplate(
+			component,
+			serviceName,
+			dynamoDeployment.Namespace,
+			dynamoDeployment.Name,
+			identity.Framework, // Use framework from checkpoint identity
+		)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to build checkpoint job pod template: %w", err)
+		}
 
 		ckpt := &nvidiacomv1alpha1.DynamoCheckpoint{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1201,47 +1212,51 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 }
 
 // buildCheckpointJobPodTemplate builds a pod template for the checkpoint job from service spec
+// It reuses GenerateBasePodSpec to ensure checkpoint jobs have the same configuration as regular pods,
+// including auto-discovered image pull secrets, envFromSecret, resources, security context, etc.
 func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	component *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	serviceName string,
-) corev1.PodTemplateSpec {
-	// Build container from service spec
-	container := corev1.Container{
-		Name: consts.MainContainerName,
+	namespace string,
+	dgdName string,
+	framework string, // From checkpoint identity (e.g., "vllm", "sglang", "trtllm")
+) (corev1.PodTemplateSpec, error) {
+	// Parse framework string to BackendFramework type
+	backendFramework, err := dynamo.ParseBackendFramework(framework)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, err
 	}
 
-	// Copy image from ExtraPodSpec if available
-	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
-		container.Image = component.ExtraPodSpec.MainContainer.Image
-		container.Command = component.ExtraPodSpec.MainContainer.Command
-		container.Args = component.ExtraPodSpec.MainContainer.Args
+	// Create a copy of the component spec without checkpoint config
+	// The checkpoint job is CREATING the checkpoint, not restoring from one
+	componentForJob := component.DeepCopy()
+	componentForJob.Checkpoint = nil
+
+	// Generate base PodSpec using the same logic as regular worker pods
+	// This includes: image pull secrets (auto-discovered + explicit), envFromSecret,
+	// resources, security context, tolerations, node selectors, etc.
+	//
+	// Note: For checkpoint jobs, we use Grove deployment type even though it's single-node.
+	// This is because GenerateBasePodSpec requires a valid MultinodeDeployer, and for
+	// single-node cases, the backends simply return early without modifications.
+	podSpec, err := dynamo.GenerateBasePodSpec(
+		componentForJob,
+		backendFramework,
+		r.DockerSecretRetriever,
+		dgdName,
+		namespace,
+		dynamo.RoleCheckpoint, // Use checkpoint role
+		1,                     // Single node for checkpoint job
+		r.Config,
+		consts.MultinodeDeploymentTypeGrove, // Use Grove (single-node backends return early)
+		serviceName,
+	)
+	if err != nil {
+		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)
 	}
 
-	// Copy env vars
-	container.Env = append(container.Env, component.Envs...)
-
-	// Copy resources using the common utility
-	if resourceReqs, err := commoncontroller.GetResourcesConfig(component.Resources); err == nil && resourceReqs != nil {
-		container.Resources = *resourceReqs
-	}
-
-	podSpec := corev1.PodSpec{
-		Containers:    []corev1.Container{container},
-		RestartPolicy: corev1.RestartPolicyNever,
-	}
-
-	// Copy node selector, tolerations from ExtraPodSpec
-	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
-		if component.ExtraPodSpec.PodSpec.NodeSelector != nil {
-			podSpec.NodeSelector = component.ExtraPodSpec.PodSpec.NodeSelector
-		}
-		if component.ExtraPodSpec.PodSpec.Tolerations != nil {
-			podSpec.Tolerations = component.ExtraPodSpec.PodSpec.Tolerations
-		}
-		if component.ExtraPodSpec.PodSpec.ServiceAccountName != "" {
-			podSpec.ServiceAccountName = component.ExtraPodSpec.PodSpec.ServiceAccountName
-		}
-	}
+	// Override RestartPolicy for job (must be Never or OnFailure)
+	podSpec.RestartPolicy = corev1.RestartPolicyNever
 
 	return corev1.PodTemplateSpec{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1249,8 +1264,8 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 				consts.KubeLabelDynamoComponent: serviceName,
 			},
 		},
-		Spec: podSpec,
-	}
+		Spec: *podSpec,
+	}, nil
 }
 
 // reconcileScalingAdapters ensures a DynamoGraphDeploymentScalingAdapter exists for each service in the DGD

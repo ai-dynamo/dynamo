@@ -719,9 +719,10 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment
 type Role string
 
 const (
-	RoleLeader Role = "leader"
-	RoleWorker Role = "worker"
-	RoleMain   Role = "main"
+	RoleLeader     Role = "leader"
+	RoleWorker     Role = "worker"
+	RoleMain       Role = "main"
+	RoleCheckpoint Role = "checkpoint"
 )
 
 // Update ServiceRole struct for expandRolesForService
@@ -752,7 +753,20 @@ const (
 	BackendFrameworkSGLang BackendFramework = "sglang"
 	BackendFrameworkVLLM   BackendFramework = "vllm"
 	BackendFrameworkTRTLLM BackendFramework = "trtllm"
+	BackendFrameworkNoop   BackendFramework = "noop"
 )
+
+// ParseBackendFramework converts a string to BackendFramework type.
+// Returns an error if the framework string is not recognized.
+func ParseBackendFramework(framework string) (BackendFramework, error) {
+	bf := BackendFramework(framework)
+	switch bf {
+	case BackendFrameworkVLLM, BackendFrameworkSGLang, BackendFrameworkTRTLLM, BackendFrameworkNoop:
+		return bf, nil
+	default:
+		return "", fmt.Errorf("unsupported backend framework: %s (valid values: vllm, sglang, trtllm)", framework)
+	}
+}
 
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
@@ -1335,9 +1349,6 @@ func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFra
 
 	return detected[0], nil
 }
-
-// BackendFrameworkNoop represents no backend processing needed
-const BackendFrameworkNoop BackendFramework = "noop"
 
 // determineBackendFramework is the core logic for hybrid backend framework detection
 // Takes extracted parameters and applies the detection logic
