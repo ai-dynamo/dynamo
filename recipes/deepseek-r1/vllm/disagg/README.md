@@ -92,5 +92,6 @@ curl -sS http://localhost:8000/v1/chat/completions \
 - If your cluster/network requires specific interfaces, adjust environment variables (e.g., `NCCL_SOCKET_IFNAME`) in the manifest accordingly.
 - If your storage class differs, update `storageClassName` before applying the PVC.
 - **If you want to run multinode deployments, IBGDA (InfiniBand GPU Direct Async) must be enabled on your nodes.** To enable IBGDA, you can follow this configuration script: [configure_system_drivers.sh](https://github.com/vllm-project/vllm/blob/v0.11.2/tools/ep_kernels/configure_system_drivers.sh). The script configures NVIDIA driver parameters and requires a system reboot to take effect.
+- `VLLM_MOE_DP_CHUNK_SIZE` can be tuned further. The value 384 was chosen to be largest possible that still can be deployed on 16 H200s. This value should be greater than per rank concurrency.
 
 

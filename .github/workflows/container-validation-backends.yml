@@ -191,6 +191,7 @@ jobs:
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   vllm:
     needs: changed-files
@@ -261,6 +262,8 @@ jobs:
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   sglang-cuda-13:
     needs: changed-files
@@ -324,6 +327,7 @@ jobs:
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   sglang:
     needs: changed-files
@@ -389,6 +393,8 @@ jobs:
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   trtllm:
     needs: changed-files
@@ -454,6 +460,8 @@ jobs:
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
