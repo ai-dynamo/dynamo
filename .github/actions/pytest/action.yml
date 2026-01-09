@@ -142,6 +142,7 @@ runs:
         docker run ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
+          --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
