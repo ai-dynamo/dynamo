@@ -13,7 +13,9 @@ Real GPU XID errors appear in `/dev/kmsg` (kernel messages) which NVSentinel's `
 1. `syslog-health-monitor` detects XID in kernel logs
 2. Node is cordoned by `fault-quarantine-module` (marked unschedulable)
 3. `node-drainer` evicts pods after timeout
-4. GPU driver restart for recoverable XIDs
+4. `fault-remediation` creates a `RebootNode` CR for devastating XIDs
+5. `janitor` sends reboot signal to CSP and monitors node recovery
+6. `fault-quarantine` uncordons node once health checks pass
 
 ## NVSentinel Prerequisites
 
@@ -25,6 +27,33 @@ Real GPU XID errors appear in `/dev/kmsg` (kernel messages) which NVSentinel's `
 - `syslog-health-monitor` - Detects XID in kernel logs
 - `fault-quarantine-module` - Cordons nodes with faulty GPUs
 - `node-drainer` - Evicts pods from cordoned nodes
+- `fault-remediation` - Creates remediation CRs (RebootNode) for fault recovery
+- `janitor` - Executes node reboots via CSP API and monitors recovery
+
+### Why Janitor is Required
+
+Without the `janitor` module, cordoned nodes **stay cordoned forever**:
+
+```
+XID detected -> Node cordoned -> Pods evicted -> ??? (node stays cordoned)
+```
+
+The janitor module completes the recovery cycle:
+
+```
+XID detected -> Node cordoned -> Pods evicted -> RebootNode CR created
+    -> Janitor sends reboot signal to CSP -> Node reboots
+    -> Janitor monitors node ready state -> Health checks pass
+    -> fault-quarantine uncordons node -> Node schedulable again
+```
+
+**How it works:**
+1. `fault-remediation` watches for cordon events with `action: FAIL`
+2. Creates a `RebootNode` CR: `maintenance-<node>-<event-id>`
+3. `janitor` controller picks up the CR
+4. Sends reboot signal to CSP (AWS/Azure/GCP/Nebius) via cloud API
+5. Monitors node until Kubernetes reports `NodeReady` condition
+6. Once ready, `fault-quarantine` sees health checks passing and uncordons
 
 **Configuration for testing:**
 ```yaml
@@ -48,9 +77,35 @@ syslog-health-monitor:
 fault-quarantine-module:
   enabled: true
   cordonOnFail: true
+
+fault-remediation:
+  enabled: true
+  # Creates RebootNode CRs for FAIL actions
+
+janitor:
+  enabled: true
+  rebootNode:
+    enabled: true
+    timeout: 30m  # Max time to wait for node to come back
+  # CSP credentials configured via cloud provider (IRSA/Workload Identity/etc.)
 ```
 
 **Important:** Your test namespace must be in `node-drainer.userNamespaces` for pod eviction to work.
+
+### Janitor CSP Support
+
+The janitor supports these cloud providers for node reboot:
+
+| CSP | Method | Auth | Status |
+|-----|--------|------|--------|
+| AWS | EC2 RebootInstances API | IRSA | Supported |
+| Azure | VM Restart API | Workload Identity | Supported |
+| GCP | Compute Engine Reset | Workload Identity | Supported |
+| Nebius | Compute Reset | Service Account | Future release |
+
+**Nebius users:** Nebius support is planned for a future NVSentinel release. If you need janitor functionality on Nebius clusters now, use the custom-built package from [ai-dynamo packages](https://github.com/orgs/ai-dynamo/packages) instead of the upstream NVSentinel v0.6.0.
+
+**Manual mode:** If CSP integration is not available, set `janitor.global.manualMode: true`. The janitor will create CRs with `ManualMode` condition, requiring an operator to manually reboot and uncordon.
 
 ## How It Works
 
