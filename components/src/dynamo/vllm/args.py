@@ -84,6 +84,9 @@ class Config:
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
 
+    # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
+    use_kv_events: bool = False
+
     def has_connector(self, connector_name: str) -> bool:
         """
         Check if a specific connector is enabled.
@@ -394,6 +397,7 @@ def parse_args() -> Config:
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -564,9 +568,13 @@ def overwrite_args(config):
     if kv_transfer_config:
         defaults["kv_transfer_config"] = kv_transfer_config
 
-    defaults["kv_events_config"] = create_kv_events_config(config)
+    kv_cfg = create_kv_events_config(config)
+    defaults["kv_events_config"] = kv_cfg
+    # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
+    config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
     logger.info(
-        f"Using kv_events_config for publishing vLLM kv events over zmq: {defaults['kv_events_config']}"
+        f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
+        f"(use_kv_events={config.use_kv_events})"
     )
 
     logger.debug("Setting Dynamo defaults for vLLM")
