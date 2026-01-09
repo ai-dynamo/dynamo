@@ -58,7 +58,10 @@ class LoadGeneratorJob:
             {"name": "LOAD_GEN_DURATION", "value": str(self.duration_sec)},
             {"name": "LOAD_GEN_QPS_PER_POD", "value": str(qps_per_pod)},
             {"name": "LOAD_GEN_MAX_TOKENS", "value": str(self.max_tokens)},
-            {"name": "LOAD_GEN_NUM_PROCESSES", "value": str(self.num_processes_per_pod)},
+            {
+                "name": "LOAD_GEN_NUM_PROCESSES",
+                "value": str(self.num_processes_per_pod),
+            },
             {"name": "LOAD_GEN_TOTAL_PODS", "value": str(self.num_pods)},
         ]
 
@@ -98,19 +101,38 @@ class LoadGeneratorJob:
                         "volumes": [
                             {
                                 "name": "script-volume",
-                                "configMap": {"name": f"{self.job_name}-script", "defaultMode": 0o755},
+                                "configMap": {
+                                    "name": f"{self.job_name}-script",
+                                    "defaultMode": 0o755,
+                                },
                             }
                         ],
                         "containers": [
                             {
                                 "name": "load-generator",
                                 "image": LOAD_GENERATOR_IMAGE,
-                                "command": ["bash", "-c", "pip install -q openai && python3 /scripts/load_generator.py"],
+                                "command": [
+                                    "bash",
+                                    "-c",
+                                    "pip install -q openai && python3 /scripts/load_generator.py",
+                                ],
                                 "env": self._get_env_vars(),
-                                "volumeMounts": [{"name": "script-volume", "mountPath": "/scripts", "readOnly": True}],
+                                "volumeMounts": [
+                                    {
+                                        "name": "script-volume",
+                                        "mountPath": "/scripts",
+                                        "readOnly": True,
+                                    }
+                                ],
                                 "resources": {
-                                    "requests": {"cpu": cpu_request, "memory": memory_request},
-                                    "limits": {"cpu": cpu_limit, "memory": memory_limit},
+                                    "requests": {
+                                        "cpu": cpu_request,
+                                        "memory": memory_request,
+                                    },
+                                    "limits": {
+                                        "cpu": cpu_limit,
+                                        "memory": memory_limit,
+                                    },
                                 },
                             }
                         ],
@@ -127,7 +149,10 @@ class LoadGeneratorJob:
         return manifest
 
     async def create_and_wait(
-        self, batch_api: client.BatchV1Api, core_api: client.CoreV1Api, timeout: int = 600
+        self,
+        batch_api: client.BatchV1Api,
+        core_api: client.CoreV1Api,
+        timeout: int = 600,
     ) -> bool:
         self._batch_api = batch_api
         self._core_api = core_api
@@ -136,13 +161,17 @@ class LoadGeneratorJob:
         configmap_manifest = self._build_configmap_manifest()
 
         try:
-            await self._core_api.create_namespaced_config_map(namespace=self.namespace, body=configmap_manifest)
+            await self._core_api.create_namespaced_config_map(
+                namespace=self.namespace, body=configmap_manifest
+            )
         except exceptions.ApiException as e:
             if e.status == 409:
                 logger.warning("ConfigMap already exists, recreating...")
                 await self.delete()
                 await asyncio.sleep(2)
-                await self._core_api.create_namespaced_config_map(namespace=self.namespace, body=configmap_manifest)
+                await self._core_api.create_namespaced_config_map(
+                    namespace=self.namespace, body=configmap_manifest
+                )
             else:
                 logger.error(f"Failed to create ConfigMap: {e}")
                 return False
@@ -151,14 +180,20 @@ class LoadGeneratorJob:
         job_manifest = self._build_job_manifest()
 
         try:
-            await self._batch_api.create_namespaced_job(namespace=self.namespace, body=job_manifest)
+            await self._batch_api.create_namespaced_job(
+                namespace=self.namespace, body=job_manifest
+            )
         except exceptions.ApiException as e:
             if e.status == 409:
                 logger.warning("Job already exists, recreating...")
                 await self.delete()
                 await asyncio.sleep(2)
-                await self._core_api.create_namespaced_config_map(namespace=self.namespace, body=configmap_manifest)
-                await self._batch_api.create_namespaced_job(namespace=self.namespace, body=job_manifest)
+                await self._core_api.create_namespaced_config_map(
+                    namespace=self.namespace, body=configmap_manifest
+                )
+                await self._batch_api.create_namespaced_job(
+                    namespace=self.namespace, body=job_manifest
+                )
             else:
                 logger.error(f"Failed to create job: {e}")
                 await self._delete_configmap()
@@ -175,7 +210,9 @@ class LoadGeneratorJob:
 
         while time.time() - start_time < timeout:
             try:
-                job = await self._batch_api.read_namespaced_job_status(name=self.job_name, namespace=self.namespace)
+                job = await self._batch_api.read_namespaced_job_status(
+                    name=self.job_name, namespace=self.namespace
+                )
 
                 pods = await self._core_api.list_namespaced_pod(
                     namespace=self.namespace, label_selector=f"job-name={self.job_name}"
@@ -192,7 +229,9 @@ class LoadGeneratorJob:
 
                 if job.status.succeeded:
                     if job.status.succeeded >= self.num_pods:
-                        logger.info(f"Job completed ({job.status.succeeded}/{self.num_pods} pods)")
+                        logger.info(
+                            f"Job completed ({job.status.succeeded}/{self.num_pods} pods)"
+                        )
                         await self._print_all_logs(pod_names)
                         return True
                 elif job.status.failed:
@@ -221,7 +260,9 @@ class LoadGeneratorJob:
         all_logs = []
         for pod_name in sorted(pod_names):
             try:
-                logs = await self._core_api.read_namespaced_pod_log(name=pod_name, namespace=self.namespace)
+                logs = await self._core_api.read_namespaced_pod_log(
+                    name=pod_name, namespace=self.namespace
+                )
                 all_logs.append((pod_name, logs))
             except exceptions.ApiException as e:
                 logger.error(f"Failed to get logs from {pod_name}: {e}")
@@ -295,7 +336,9 @@ class LoadGeneratorJob:
             return
         try:
             await self._batch_api.delete_namespaced_job(
-                name=self.job_name, namespace=self.namespace, propagation_policy="Background"
+                name=self.job_name,
+                namespace=self.namespace,
+                propagation_policy="Background",
             )
         except exceptions.ApiException as e:
             if e.status != 404:

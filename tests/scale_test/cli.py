@@ -17,7 +17,9 @@ def create_parser() -> argparse.ArgumentParser:
         prog="python -m tests.scale_test",
         description="Scale testing tool for Dynamo DGD deployments on Kubernetes",
     )
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", help="Enable debug logging"
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -34,7 +36,9 @@ def create_parser() -> argparse.ArgumentParser:
     load_parser = subparsers.add_parser("load", help="Load test existing DGDs")
     load_parser.add_argument("--namespace", type=str, default="default")
     load_parser.add_argument("--name-prefix", type=str, default="scale-test")
-    load_parser.add_argument("--model-path", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    load_parser.add_argument(
+        "--model-path", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    )
     _add_load_args(load_parser)
 
     # 'cleanup' command
@@ -46,20 +50,32 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--count", type=int, default=5, help="Number of DGD deployments")
-    parser.add_argument("--model-path", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+    parser.add_argument(
+        "--count", type=int, default=5, help="Number of DGD deployments"
+    )
+    parser.add_argument(
+        "--model-path", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    )
     parser.add_argument("--speedup-ratio", type=float, default=10.0)
     parser.add_argument("--namespace", type=str, default="default")
-    parser.add_argument("--timeout", type=int, default=600, help="DGD ready timeout in seconds")
+    parser.add_argument(
+        "--timeout", type=int, default=600, help="DGD ready timeout in seconds"
+    )
     parser.add_argument("--name-prefix", type=str, default="scale-test")
     parser.add_argument("--no-cleanup", action="store_true", help="Keep DGDs on exit")
 
 
 def _add_load_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--duration", type=int, default=60, help="Load test duration in seconds")
+    parser.add_argument(
+        "--duration", type=int, default=60, help="Load test duration in seconds"
+    )
     parser.add_argument("--qps", type=float, default=1.0, help="Queries per second")
-    parser.add_argument("--load-gen-pods", type=int, default=1, help="Parallel load generator pods")
-    parser.add_argument("--load-gen-processes", type=int, default=1, help="Processes per pod")
+    parser.add_argument(
+        "--load-gen-pods", type=int, default=1, help="Parallel load generator pods"
+    )
+    parser.add_argument(
+        "--load-gen-processes", type=int, default=1, help="Processes per pod"
+    )
 
 
 async def cmd_start_async(args: argparse.Namespace) -> int:
@@ -193,7 +209,9 @@ async def cmd_load_async(args: argparse.Namespace) -> int:
         ]
 
         if not matching_dgds:
-            print(f"ERROR: No DGDs found with prefix '{args.name_prefix}' in namespace '{args.namespace}'")
+            print(
+                f"ERROR: No DGDs found with prefix '{args.name_prefix}' in namespace '{args.namespace}'"
+            )
             return 1
 
         print(f"Found {len(matching_dgds)} DGDs")
@@ -202,7 +220,9 @@ async def cmd_load_async(args: argparse.Namespace) -> int:
         for dgd_name in sorted(matching_dgds):
             service_name = f"{dgd_name}-frontend"
             try:
-                await core_api.read_namespaced_service(name=service_name, namespace=args.namespace)
+                await core_api.read_namespaced_service(
+                    name=service_name, namespace=args.namespace
+                )
                 url = f"http://{service_name}.{args.namespace}.svc.cluster.local:8000"
                 frontend_urls.append(url)
             except exceptions.ApiException as e:
@@ -232,7 +252,9 @@ async def cmd_load_async(args: argparse.Namespace) -> int:
             num_processes_per_pod=num_processes,
         )
 
-        success = await job.create_and_wait(batch_api, core_api, timeout=args.duration + 300)
+        success = await job.create_and_wait(
+            batch_api, core_api, timeout=args.duration + 300
+        )
         await job.delete()
 
         if not success:
@@ -274,7 +296,9 @@ async def cmd_cleanup_async(args: argparse.Namespace) -> int:
         ]
 
         if not matching_dgds:
-            print(f"No DGDs found with prefix '{args.name_prefix}' in namespace '{args.namespace}'")
+            print(
+                f"No DGDs found with prefix '{args.name_prefix}' in namespace '{args.namespace}'"
+            )
             return 0
 
         print(f"Deleting {len(matching_dgds)} DGDs...")

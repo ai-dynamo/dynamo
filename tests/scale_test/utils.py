@@ -23,7 +23,9 @@ def wait_for_url_ready(url: str, timeout: float = 30.0, interval: float = 0.5) -
     return False
 
 
-def wait_for_all_ready(urls: List[str], timeout: float = 120.0, interval: float = 1.0) -> bool:
+def wait_for_all_ready(
+    urls: List[str], timeout: float = 120.0, interval: float = 1.0
+) -> bool:
     start_time = time.time()
     remaining_urls = set(urls)
 
@@ -119,7 +121,9 @@ def wait_for_all_workers_registered(
             remaining_timeout = max(1.0, timeout - elapsed)
             per_url_timeout = min(10.0, remaining_timeout)
 
-            if wait_for_workers_registered(url, model, timeout=per_url_timeout, interval=interval):
+            if wait_for_workers_registered(
+                url, model, timeout=per_url_timeout, interval=interval
+            ):
                 newly_ready.add(url)
 
         remaining_urls -= newly_ready

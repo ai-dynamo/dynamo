@@ -43,7 +43,9 @@ class ScaleManager:
         logger.info(f"Scale test logs: {self._log_dir}")
 
     @classmethod
-    def from_config(cls, config: ScaleTestConfig, num_deployments: int) -> "ScaleManager":
+    def from_config(
+        cls, config: ScaleTestConfig, num_deployments: int
+    ) -> "ScaleManager":
         return cls(
             num_deployments=num_deployments,
             model_path=config.model_path,
@@ -121,7 +123,9 @@ class ScaleManager:
 
         assert self._custom_api is not None
 
-        logger.info(f"Waiting for {len(self._deployment_names)} DGDs to become ready...")
+        logger.info(
+            f"Waiting for {len(self._deployment_names)} DGDs to become ready..."
+        )
         start_time = time.time()
         pending_deployments = set(self._deployment_names)
         log_interval = 30
@@ -157,7 +161,9 @@ class ScaleManager:
             current_time = time.time()
             if current_time - last_log_time >= log_interval:
                 ready_count = len(self._deployment_names) - len(pending_deployments)
-                logger.info(f"Progress: {ready_count}/{len(self._deployment_names)} DGDs ready")
+                logger.info(
+                    f"Progress: {ready_count}/{len(self._deployment_names)} DGDs ready"
+                )
                 last_log_time = current_time
 
             if pending_deployments:
@@ -208,8 +214,12 @@ class ScaleManager:
             logger.error("No frontend URLs found")
             return False
 
-        logger.info(f"Running load generator: {duration_sec}s, {qps} QPS, {len(urls)} frontends")
-        logger.info(f"Parallelism: {num_pods} pod(s) x {num_processes_per_pod} process(es)")
+        logger.info(
+            f"Running load generator: {duration_sec}s, {qps} QPS, {len(urls)} frontends"
+        )
+        logger.info(
+            f"Parallelism: {num_pods} pod(s) x {num_processes_per_pod} process(es)"
+        )
 
         k8s_client = client.ApiClient()
         batch_api = client.BatchV1Api(k8s_client)
