@@ -8,12 +8,16 @@ import subprocess
 
 import pytest
 
+# Mark this with every framework to test every container
 pytestmark = [
     pytest.mark.gpu_0,
     pytest.mark.integration,
     pytest.mark.parallel,
     pytest.mark.post_merge,
     pytest.mark.pre_merge,
+    pytest.mark.sglang,
+    pytest.mark.trtllm,
+    pytest.mark.vllm,
 ]
 
 # Easy to edit later:
