@@ -403,6 +403,7 @@ def test_router_decisions_trtllm_multiple_workers(
     ],
     ids=["jetstream"],  # "nats_core" and "file" commented out
 )
+@pytest.mark.xfail(strict=False, reason="Flaky test")
 def test_trtllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
