@@ -17,7 +17,7 @@ spec:
       # Sweep/profiling configuration
       sweep:
         # Online profiling mode (real deployment testing)
-        use_ai_configurator: false
+        useAiConfigurator: false
 
       # SLA targets for profiling
       sla:

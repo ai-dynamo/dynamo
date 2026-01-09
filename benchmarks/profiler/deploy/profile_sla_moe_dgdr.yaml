@@ -15,16 +15,22 @@ spec:
   profilingConfig:
     profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
     config:
+      # Model cache PVC configuration; profiler will mount this PVC to access model weights
+      deployment:
+        modelCache:
+          pvcName: "model-cache"                      # Name of PVC containing model weights
+          pvcPath: "deepseek-r1"                      # Subpath within PVC where model is stored
+
       # Sweep/profiling configuration
       sweep:
         # Standard online profiling (not using AI Configurator)
-        use_ai_configurator: false
+        useAiConfigurator: false
 
       hardware:
         # for h200, sweep over 8-16 GPUs per engine
-        min_num_gpus_per_engine: 8
-        max_num_gpus_per_engine: 16
-        num_gpus_per_node: 8
+        minNumGpusPerEngine: 8
+        maxNumGpusPerEngine: 16
+        numGpusPerNode: 8
 
       # SLA targets for profiling
       sla:
