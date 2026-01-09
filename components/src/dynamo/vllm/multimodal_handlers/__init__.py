@@ -5,7 +5,7 @@ from dynamo.vllm.multimodal_handlers.encode_worker_handler import (
     EncodeWorkerHandler,
     VLLMEncodeWorkerHandler,
 )
-from dynamo.vllm.multimodal_handlers.processor_handler import (
+from dynamo.vllm.multimodal_handlers.preprocessor_handler import (
     ECProcessorHandler,
     ProcessorHandler,
 )

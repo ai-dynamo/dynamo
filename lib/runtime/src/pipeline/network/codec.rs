@@ -18,16 +18,19 @@ mod two_part;
 
 pub use two_part::{TwoPartCodec, TwoPartMessage, TwoPartMessageType};
 
-/// TCP request plane protocol message with endpoint routing
+/// TCP request plane protocol message with endpoint routing and trace headers
 ///
 /// Wire format:
 /// - endpoint_path_len: u16 (big-endian)
 /// - endpoint_path: UTF-8 string
+/// - headers_len: u16 (big-endian)
+/// - headers: JSON-encoded HashMap<String, String>
 /// - payload_len: u32 (big-endian)
 /// - payload: bytes
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TcpRequestMessage {
     pub endpoint_path: String,
+    pub headers: std::collections::HashMap<String, String>,
     pub payload: Bytes,
 }
 
@@ -35,6 +38,19 @@ impl TcpRequestMessage {
     pub fn new(endpoint_path: String, payload: Bytes) -> Self {
         Self {
             endpoint_path,
+            headers: std::collections::HashMap::new(),
+            payload,
+        }
+    }
+
+    pub fn with_headers(
+        endpoint_path: String,
+        headers: std::collections::HashMap<String, String>,
+        payload: Bytes,
+    ) -> Self {
+        Self {
+            endpoint_path,
+            headers,
             payload,
         }
     }
@@ -51,6 +67,22 @@ impl TcpRequestMessage {
             ));
         }
 
+        // Encode headers as JSON
+        let headers_json = serde_json::to_vec(&self.headers).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Failed to encode headers: {}", e),
+            )
+        })?;
+        let headers_len = headers_json.len();
+
+        if headers_len > u16::MAX as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Headers too large: {} bytes", headers_len),
+            ));
+        }
+
         if self.payload.len() > u32::MAX as usize {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -59,13 +91,20 @@ impl TcpRequestMessage {
         }
 
         // Use BytesMut for efficient buffer building
-        let mut buf = BytesMut::with_capacity(2 + endpoint_len + 4 + self.payload.len());
+        let mut buf =
+            BytesMut::with_capacity(2 + endpoint_len + 2 + headers_len + 4 + self.payload.len());
 
         // Write endpoint path length (2 bytes)
         buf.put_u16(endpoint_len as u16);
 
         // Write endpoint path
         buf.put_slice(endpoint_bytes);
+
+        // Write headers length (2 bytes)
+        buf.put_u16(headers_len as u16);
+
+        // Write headers
+        buf.put_slice(&headers_json);
 
         // Write payload length (4 bytes)
         buf.put_u32(self.payload.len() as u32);
@@ -102,10 +141,38 @@ impl TcpRequestMessage {
             .map_err(|e| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Invalid UTF-8: {}", e),
+                    format!("Invalid UTF-8 in endpoint path: {}", e),
                 )
             })?;
         offset += endpoint_len;
+
+        if bytes.len() < offset + 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for headers length",
+            ));
+        }
+
+        // Read headers length (2 bytes)
+        let headers_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
+        offset += 2;
+
+        if bytes.len() < offset + headers_len {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Not enough bytes for headers",
+            ));
+        }
+
+        // Read and parse headers
+        let headers: std::collections::HashMap<String, String> =
+            serde_json::from_slice(&bytes[offset..offset + headers_len]).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid JSON in headers: {}", e),
+                )
+            })?;
+        offset += headers_len;
 
         if bytes.len() < offset + 4 {
             return Err(std::io::Error::new(
@@ -139,6 +206,7 @@ impl TcpRequestMessage {
 
         Ok(Self {
             endpoint_path,
+            headers,
             payload,
         })
     }
@@ -169,14 +237,25 @@ impl Decoder for TcpRequestCodec {
 
         // Peek at endpoint path length without consuming
         let endpoint_len = u16::from_be_bytes([src[0], src[1]]) as usize;
-        let header_size = 2 + endpoint_len + 4; // path_len + path + payload_len
 
+        // Need path + headers_len
+        if src.len() < 2 + endpoint_len + 2 {
+            return Ok(None);
+        }
+
+        // Peek at headers length
+        let headers_len_offset = 2 + endpoint_len;
+        let headers_len =
+            u16::from_be_bytes([src[headers_len_offset], src[headers_len_offset + 1]]) as usize;
+
+        // Need path + headers + payload_len
+        let header_size = 2 + endpoint_len + 2 + headers_len + 4;
         if src.len() < header_size {
             return Ok(None);
         }
 
         // Peek at payload length
-        let payload_len_offset = 2 + endpoint_len;
+        let payload_len_offset = 2 + endpoint_len + 2 + headers_len;
         let payload_len = u32::from_be_bytes([
             src[payload_len_offset],
             src[payload_len_offset + 1],
@@ -204,7 +283,7 @@ impl Decoder for TcpRequestCodec {
             return Ok(None);
         }
 
-        // We have a complete message, advance past length prefix
+        // We have a complete message, advance past endpoint path length prefix
         src.advance(2);
 
         // Read endpoint path
@@ -216,6 +295,19 @@ impl Decoder for TcpRequestCodec {
             )
         })?;
 
+        // Advance past headers length
+        src.advance(2);
+
+        // Read and parse headers
+        let headers_bytes = src.split_to(headers_len);
+        let headers: std::collections::HashMap<String, String> =
+            serde_json::from_slice(&headers_bytes).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Invalid JSON in headers: {}", e),
+                )
+            })?;
+
         // Advance past payload length
         src.advance(4);
 
@@ -224,6 +316,7 @@ impl Decoder for TcpRequestCodec {
 
         Ok(Some(TcpRequestMessage {
             endpoint_path,
+            headers,
             payload,
         }))
     }
@@ -243,6 +336,22 @@ impl Encoder<TcpRequestMessage> for TcpRequestCodec {
             ));
         }
 
+        // Encode headers as JSON
+        let headers_json = serde_json::to_vec(&item.headers).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Failed to encode headers: {}", e),
+            )
+        })?;
+        let headers_len = headers_json.len();
+
+        if headers_len > u16::MAX as usize {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Headers too large: {} bytes", headers_len),
+            ));
+        }
+
         if item.payload.len() > u32::MAX as usize {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -250,7 +359,7 @@ impl Encoder<TcpRequestMessage> for TcpRequestCodec {
             ));
         }
 
-        let total_len = 2 + endpoint_len + 4 + item.payload.len();
+        let total_len = 2 + endpoint_len + 2 + headers_len + 4 + item.payload.len();
 
         // Check max message size
         if let Some(max_size) = self.max_message_size
@@ -273,6 +382,12 @@ impl Encoder<TcpRequestMessage> for TcpRequestCodec {
 
         // Write endpoint path
         dst.put_slice(endpoint_bytes);
+
+        // Write headers length
+        dst.put_u16(headers_len as u16);
+
+        // Write headers
+        dst.put_slice(&headers_json);
 
         // Write payload length
         dst.put_u32(item.payload.len() as u32);

@@ -58,7 +58,7 @@ spec:
             - name: VLLM_ALL2ALL_BACKEND
               value: deepep_low_latency
             - name: VLLM_MOE_DP_CHUNK_SIZE
-              value: "512"
+              value: "384"
             - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
@@ -67,8 +67,6 @@ spec:
               value: enabled
             - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
               value: "uniform_random"
-            - name: NVSHMEM_QP_DEPTH
-              value: "1512"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
@@ -125,7 +123,7 @@ spec:
             - name: VLLM_ALL2ALL_BACKEND
               value: deepep_high_throughput
             - name: VLLM_MOE_DP_CHUNK_SIZE
-              value: "512"
+              value: "384"
             - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
@@ -134,8 +132,6 @@ spec:
               value: enabled
             - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
               value: "uniform_random"
-            - name: NVSHMEM_QP_DEPTH
-              value: "1512"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:

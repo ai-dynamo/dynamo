@@ -175,6 +175,13 @@ pub struct ModelDeploymentCard {
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
 
+    /// Original HuggingFace repository path for downloading model files.
+    /// When `display_name` is customized (e.g., via `--served-model-name`),
+    /// this field preserves the original repository path needed for downloads.
+    /// Falls back to `display_name` if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_model: Option<String>,
+
     /// Model information
     pub model_info: Option<ModelInfoType>,
 
@@ -367,6 +374,10 @@ impl ModelDeploymentCard {
     /// Allow user to override the name we register this model under.
     /// Corresponds to vllm's `--served-model-name`.
     pub fn set_name(&mut self, name: &str) {
+        // Preserve original model path before overwriting display_name
+        if self.source_model.is_none() && !self.display_name.is_empty() {
+            self.source_model = Some(self.display_name.clone());
+        }
         self.display_name = name.to_string();
         self.slug = Slug::from_string(name);
     }
@@ -402,7 +413,8 @@ impl ModelDeploymentCard {
         }
 
         let ignore_weights = true;
-        let local_path = crate::hub::from_hf(&self.display_name, ignore_weights).await?;
+        let model_name = self.source_model.as_ref().unwrap_or(&self.display_name);
+        let local_path = crate::hub::from_hf(model_name, ignore_weights).await?;
 
         self.update_dir(&local_path);
         Ok(())
@@ -547,6 +559,7 @@ impl ModelDeploymentCard {
         Ok(Self {
             slug: Slug::from_string(&display_name),
             display_name,
+            source_model: None,
             model_info,
             tokenizer,
             gen_config,
