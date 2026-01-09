@@ -722,7 +722,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec)
+			got, err := GenerateDynamoComponentsDeployments(context.Background(), tt.args.parentDynamoGraphDeployment, tt.args.ingressSpec, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -756,7 +756,7 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil)
+	got, err := GenerateDynamoComponentsDeployments(context.Background(), dgd, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -3548,7 +3548,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3600,7 +3600,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -4683,7 +4683,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -5980,6 +5980,555 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 			// Compare the entire SecurityContext using cmp.Diff
 			if diff := cmp.Diff(tt.expectedSecurityContext, podSpec.SecurityContext); diff != "" {
 				t.Errorf("GenerateBasePodSpec() SecurityContext mismatch (-want +got):\n%s\nDescription: %s", diff, tt.description)
+			}
+		})
+	}
+}
+
+func TestDetermineGroveRestartState(t *testing.T) {
+	restartID := "restart-1"
+	oldRestartID := "restart-0"
+
+	tests := []struct {
+		name          string
+		dgd           *v1alpha1.DynamoGraphDeployment
+		restartStatus *v1alpha1.RestartStatus
+		want          *RestartState
+		wantNil       bool
+		wantSvcs      []string // expected services to annotate (sorted)
+		wantTimestamp *string
+	}{
+		{
+			name: "restartStatus nil returns nil",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "spec.restart.at nil and restartStatus.observedAt nil returns nil",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: "",
+			},
+			wantNil: true,
+		},
+		{
+			name: "new parallel restart annotates all services",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+						Strategy: &v1alpha1.RestartStrategy{
+							Type: v1alpha1.RestartStrategyTypeParallel,
+						},
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Frontend", "Worker"},
+			},
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(restartID),
+		},
+		{
+			name: "new sequential restart annotates only first service",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+						Strategy: &v1alpha1.RestartStrategy{
+							Type:  v1alpha1.RestartStrategyTypeSequential,
+							Order: []string{"Worker", "Frontend"},
+						},
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Worker"},
+			},
+			wantSvcs:      []string{"Worker"},
+			wantTimestamp: ptr.To(restartID),
+		},
+		{
+			name: "sequential restart in progress annotates completed + in-progress",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+						"Backend":  {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+						Strategy: &v1alpha1.RestartStrategy{
+							Type:  v1alpha1.RestartStrategyTypeSequential,
+							Order: []string{"Frontend", "Worker", "Backend"},
+						},
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Worker"},
+			},
+			wantSvcs:      []string{"Frontend", "Worker"}, // Frontend completed, Worker in progress
+			wantTimestamp: ptr.To(restartID),
+		},
+		{
+			name: "default restart in progress annotates completed + in-progress",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+						"Backend":  {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"Worker"},
+			},
+			wantSvcs:      []string{"Frontend", "Worker", "Backend"},
+			wantTimestamp: ptr.To(restartID),
+		},
+		{
+			name: "completed restart with empty spec restart preserves all annotations",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: oldRestartID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(oldRestartID),
+		},
+		{
+			name: "completed restart",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID,
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: restartID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(restartID),
+		},
+		{
+			name: "new restart after completed restart",
+			dgd: &v1alpha1.DynamoGraphDeployment{
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+						"Frontend": {},
+						"Worker":   {},
+					},
+					Restart: &v1alpha1.Restart{
+						ID: restartID, // new time
+						Strategy: &v1alpha1.RestartStrategy{
+							Type: v1alpha1.RestartStrategyTypeParallel,
+						},
+					},
+				},
+			},
+			restartStatus: &v1alpha1.RestartStatus{
+				ObservedID: oldRestartID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+			wantSvcs:      []string{"Frontend", "Worker"},
+			wantTimestamp: ptr.To(restartID),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DetermineRestartState(tt.dgd, tt.restartStatus)
+
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("DetermineGroveRestartState() = %v, want nil", got)
+				}
+				return
+			}
+
+			if got == nil {
+				t.Errorf("DetermineGroveRestartState() = nil, want non-nil")
+				return
+			}
+
+			var gotSvcs []string
+			for svc, shouldAnnotate := range got.ServicesToAnnotate {
+				if shouldAnnotate {
+					gotSvcs = append(gotSvcs, svc)
+				}
+			}
+			sort.Strings(gotSvcs)
+			sort.Strings(tt.wantSvcs)
+
+			if !reflect.DeepEqual(gotSvcs, tt.wantSvcs) {
+				t.Errorf("DetermineGroveRestartState() services = %v, want %v", gotSvcs, tt.wantSvcs)
+			}
+			if tt.wantTimestamp != nil && (got.Timestamp != *tt.wantTimestamp) {
+				t.Errorf("DetermineGroveRestartState() timestamp = %v, want %v", got.Timestamp, *tt.wantTimestamp)
+			}
+		})
+	}
+}
+
+func TestGroveRestartStateShouldAnnotateService(t *testing.T) {
+	tests := []struct {
+		name        string
+		state       *RestartState
+		serviceName string
+		want        bool
+	}{
+		{
+			name:        "nil state returns false",
+			state:       nil,
+			serviceName: "Frontend",
+			want:        false,
+		},
+		{
+			name: "nil services map returns false",
+			state: &RestartState{
+				Timestamp:          "2024-01-01T00:00:00Z",
+				ServicesToAnnotate: nil,
+			},
+			serviceName: "Frontend",
+			want:        false,
+		},
+		{
+			name: "service in map returns true",
+			state: &RestartState{
+				Timestamp:          "2024-01-01T00:00:00Z",
+				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
+			},
+			serviceName: "Frontend",
+			want:        true,
+		},
+		{
+			name: "service not in map returns false",
+			state: &RestartState{
+				Timestamp:          "2024-01-01T00:00:00Z",
+				ServicesToAnnotate: map[string]bool{"Frontend": true},
+			},
+			serviceName: "Worker",
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.state.ShouldAnnotateService(tt.serviceName); got != tt.want {
+				t.Errorf("ShouldAnnotateService() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
+	restartTimestamp := "2024-01-05T10:00:00Z"
+
+	tests := []struct {
+		name                     string
+		restartState             *RestartState
+		services                 map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec
+		wantAnnotationsPerClique map[string]bool              // clique name -> should have restart annotation
+		wantPreservedAnnotations map[string]map[string]string // clique name -> preserved annotations to verify
+	}{
+		{
+			name:         "nil restartState - no annotations",
+			restartState: nil,
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": false,
+				"worker":   false,
+			},
+		},
+		{
+			name: "nil ServicesToAnnotate - no annotations",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: nil,
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": false,
+			},
+		},
+		{
+			name: "all services annotated - parallel restart",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": true,
+				"worker":   true,
+			},
+		},
+		{
+			name: "only first service annotated - sequential restart start",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: map[string]bool{"Frontend": true},
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": true,
+				"worker":   false,
+			},
+		},
+		{
+			name: "completed services keep annotation - sequential restart in progress",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: map[string]bool{"Frontend": true, "Worker": true},
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+				"Backend": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": true,
+				"worker":   true,
+				"backend":  false,
+			},
+		},
+		{
+			name: "service not in DGD spec - annotation still applied if in ServicesToAnnotate",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: map[string]bool{"Frontend": true, "NonExistent": true},
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": true,
+			},
+		},
+		{
+			name: "multinode service - all cliques get restart annotation",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: map[string]bool{"Worker": true},
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Worker": {
+					ComponentType: commonconsts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(2)),
+					Multinode: &v1alpha1.MultinodeSpec{
+						NodeCount: 2,
+					},
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"worker-ldr": true,
+				"worker-wkr": true,
+			},
+		},
+		{
+			name: "preserves existing annotations when adding restart annotation",
+			restartState: &RestartState{
+				Timestamp:          restartTimestamp,
+				ServicesToAnnotate: map[string]bool{"Frontend": true},
+			},
+			services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+				"Frontend": {
+					ComponentType: commonconsts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(1)),
+					Annotations: map[string]string{
+						"custom-annotation": "custom-value",
+						"another-key":       "another-value",
+					},
+				},
+			},
+			wantAnnotationsPerClique: map[string]bool{
+				"frontend": true,
+			},
+			wantPreservedAnnotations: map[string]map[string]string{
+				"frontend": {
+					"custom-annotation": "custom-value",
+					"another-key":       "another-value",
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					Services: tt.services,
+				},
+			}
+
+			controllerConfig := controller_common.Config{
+				EtcdAddress: "etcd-address",
+				NatsAddress: "nats-address",
+			}
+
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil)
+			if err != nil {
+				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
+			}
+
+			// Build a map of clique annotations
+			cliqueAnnotations := make(map[string]map[string]string)
+			for _, clique := range got.Spec.Template.Cliques {
+				cliqueAnnotations[clique.Name] = clique.Annotations
+			}
+
+			// Verify restart annotations per clique
+			for cliqueName, shouldHaveAnnotation := range tt.wantAnnotationsPerClique {
+				annotations := cliqueAnnotations[cliqueName]
+
+				if shouldHaveAnnotation {
+					if annotations == nil {
+						t.Errorf("Clique %q: expected restart annotation, but annotations is nil", cliqueName)
+						continue
+					}
+					restartValue, exists := annotations[commonconsts.RestartAnnotation]
+					if !exists {
+						t.Errorf("Clique %q: expected restart annotation %q, but not found. Annotations: %v",
+							cliqueName, commonconsts.RestartAnnotation, annotations)
+						continue
+					}
+					if restartValue != restartTimestamp {
+						t.Errorf("Clique %q: restart annotation value = %q, want %q",
+							cliqueName, restartValue, restartTimestamp)
+					}
+				} else {
+					if annotations != nil {
+						if _, exists := annotations[commonconsts.RestartAnnotation]; exists {
+							t.Errorf("Clique %q: unexpected restart annotation found", cliqueName)
+						}
+					}
+				}
+			}
+
+			// Verify no unexpected restart annotations on cliques not in wantAnnotationsPerClique
+			for cliqueName, annotations := range cliqueAnnotations {
+				if _, specified := tt.wantAnnotationsPerClique[cliqueName]; !specified {
+					if annotations != nil {
+						if _, exists := annotations[commonconsts.RestartAnnotation]; exists {
+							t.Errorf("Clique %q: unexpected restart annotation found (clique not in wantAnnotationsPerClique)", cliqueName)
+						}
+					}
+				}
+			}
+
+			// Verify preserved annotations
+			for cliqueName, expectedAnnotations := range tt.wantPreservedAnnotations {
+				annotations := cliqueAnnotations[cliqueName]
+				if annotations == nil {
+					t.Errorf("Clique %q: expected preserved annotations, but annotations is nil", cliqueName)
+					continue
+				}
+				for key, expectedValue := range expectedAnnotations {
+					if actualValue, exists := annotations[key]; !exists {
+						t.Errorf("Clique %q: expected preserved annotation %q, but not found", cliqueName, key)
+					} else if actualValue != expectedValue {
+						t.Errorf("Clique %q: preserved annotation %q = %q, want %q",
+							cliqueName, key, actualValue, expectedValue)
+					}
+				}
 			}
 		})
 	}
