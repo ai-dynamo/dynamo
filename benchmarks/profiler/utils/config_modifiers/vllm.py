@@ -213,6 +213,11 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = remove_valued_arguments(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", "1")
 
+        # Remove hybrid load balancing flags - not compatible with DP=1
+        args = remove_valued_arguments(args, "--data-parallel-size-local")
+        if "--data-parallel-hybrid-lb" in args:
+            args.remove("--data-parallel-hybrid-lb")
+
         # Enable expert parallel for MoE
         if "--enable-expert-parallel" not in args:
             args = append_argument(args, "--enable-expert-parallel")
@@ -253,6 +258,19 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = set_argument_value(args, "--tensor-parallel-size", "1")
         args = remove_valued_arguments(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", str(dep_size))
+
+        # Handle hybrid load balancing for multinode DEP
+        # If dep_size > num_gpus_per_node, we need multinode and can use hybrid-lb
+        if dep_size > num_gpus_per_node and "--data-parallel-hybrid-lb" in args:
+            # Set local DP size to GPUs per node for hybrid load balancing
+            args = set_argument_value(
+                args, "--data-parallel-size-local", str(num_gpus_per_node)
+            )
+        else:
+            # Remove hybrid-lb flags if not needed or not multinode
+            args = remove_valued_arguments(args, "--data-parallel-size-local")
+            if "--data-parallel-hybrid-lb" in args:
+                args.remove("--data-parallel-hybrid-lb")
 
         # Enable expert parallel for MoE
         if "--enable-expert-parallel" not in args:
