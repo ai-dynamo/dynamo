@@ -927,9 +927,10 @@ fi
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
-else
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
 fi
+
+BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
+
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
