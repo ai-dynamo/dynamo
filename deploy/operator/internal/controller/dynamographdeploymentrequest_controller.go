@@ -806,6 +806,10 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 	}
 
 	if sweep, ok := config["sweep"].(map[string]interface{}); ok {
+		// Check camelCase first (preferred), then snake_case (backwards compat)
+		if useAIC, exists := sweep["useAiConfigurator"].(bool); exists {
+			return !useAIC
+		}
 		if useAIC, exists := sweep["use_ai_configurator"].(bool); exists {
 			return !useAIC
 		}
