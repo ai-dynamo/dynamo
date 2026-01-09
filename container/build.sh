@@ -121,6 +121,10 @@ SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_PYTHON_VERSION="3.10"
 
+# GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
+GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
+GAIE_VERSION="v0.5.1"
+
 PYTHON_VERSION="3.12"
 
 NIXL_REF=0.8.0
@@ -945,6 +949,43 @@ if [ -z "${NO_TAG_LATEST}" ]; then
 fi
 
 show_image_options
+
+# Handle FRONTEND target: build EPP image first
+if [[ ${TARGET^^} == "FRONTEND" ]]; then
+    echo "Building FRONTEND image - requires EPP image"
+
+    # Build base dynamo image first (framework=NONE, target=dev)
+    echo ""
+    echo "Building EPP image for Frontend..."
+    # Set up paths for GAIE
+    GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
+
+    # Clone GAIE repo
+    echo ""
+    echo "Cloning GAIE repository at ${GAIE_VERSION}..."
+    $RUN_PREFIX rm -rf "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+    $RUN_PREFIX git clone ${GAIE_REPO_URL} "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX git checkout ${GAIE_VERSION}
+    $RUN_PREFIX cd "${BUILD_CONTEXT}"
+
+    # Build EPP image
+    echo ""
+    echo "Building EPP image..."
+    export GAIE_DIR="${GAIE_CLONE_DIR}"
+    export DYNAMO_DIR="${BUILD_CONTEXT}"
+
+    $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
+
+    # Set EPP image tag (matches what build-epp-dynamo.sh produces)
+    EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
+
+    echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
+
+    # Add build args for frontend image
+    BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
+fi
 
 # Always build the main image first
 # Create build log directory for BuildKit reports

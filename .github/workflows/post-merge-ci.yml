@@ -1,24 +1,25 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly CI Pipeline
+name: Post-Merge CI Pipeline
 
 on:
-  schedule:
-    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  workflow_dispatch:  # Allow manual triggering for testing
+  push:
+    branches:
+      - main
+      - 'release/*.*.*'
 
 permissions:
   contents: read
 
 jobs:
   ci-pipeline:
-    name: Nightly CI
+    name: Post-Merge CI
     uses: ./.github/workflows/ci-test-suite.yml
     with:
-      pipeline_type: nightly
-      include_nightly_marks: true
-      image_prefix: nightly
+      pipeline_type: post_merge
+      include_nightly_marks: false
+      image_prefix: main
       enable_slack_notification: true
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}

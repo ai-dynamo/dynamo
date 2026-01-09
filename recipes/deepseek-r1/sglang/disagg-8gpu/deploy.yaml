@@ -58,6 +58,8 @@ spec:
             - decode
             - --disaggregation-bootstrap-port
             - "30001"
+            - --mem-fraction-static
+            - "0.75"
             - --host
             - 0.0.0.0
             - --prefill-round-robin-balance
@@ -94,6 +96,8 @@ spec:
             - prefill
             - --disaggregation-bootstrap-port
             - "30001"
+            - --mem-fraction-static
+            - "0.75"
             - --host
             - 0.0.0.0
             - --load-balance-method
