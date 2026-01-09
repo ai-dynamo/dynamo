@@ -172,6 +172,11 @@ func (i *IngressSpec) IsVirtualServiceEnabled() bool {
 type DynamoComponentDeploymentStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// Conditions captures the latest observed state of the component (including
 	// availability and readiness) using standard Kubernetes condition types.
 	Conditions []metav1.Condition `json:"conditions"`

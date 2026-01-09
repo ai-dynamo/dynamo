@@ -26,6 +26,7 @@ spec:
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
+      subComponentType: prefill
       dynamoNamespace: llama3-70b-disagg-sn
       envFromSecret: hf-token-secret
       volumeMounts:
@@ -69,6 +70,7 @@ spec:
           gpu: "2"
     VllmDecodeWorker:
       componentType: worker
+      subComponentType: decode
       dynamoNamespace: llama3-70b-disagg-sn
       envFromSecret: hf-token-secret
       volumeMounts:
