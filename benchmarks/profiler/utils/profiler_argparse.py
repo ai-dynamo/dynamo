@@ -12,6 +12,22 @@ from benchmarks.profiler.utils.planner_utils import add_planner_arguments_to_par
 from benchmarks.profiler.utils.search_space_autogen import auto_generate_search_space
 
 
+def _get(cfg: Dict[str, Any], camel: str, snake: str, default: Any = None) -> Any:
+    """Get config value with camelCase preferred, snake_case fallback."""
+    if camel in cfg:
+        return cfg[camel]
+    return cfg.get(snake, default)
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert camelCase to snake_case."""
+    import re
+
+    # Insert underscore before uppercase letters and lowercase
+    s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
+    return re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1).lower()
+
+
 def parse_config_string(config_str: str) -> Dict[str, Any]:
     """Parse configuration string as Python dict literal, YAML, or JSON.
 
@@ -61,45 +77,48 @@ def create_profiler_parser() -> argparse.Namespace:
     """
     Create argument parser with support for YAML config string.
 
-    Config structure:
-        output_dir: String (path to the output results directory, default: profiling_results)
+    Config structure (camelCase preferred, snake_case supported for backwards compat):
+        outputDir: String (path to the output results directory, default: profiling_results)
         deployment:
             namespace: String (kubernetes namespace, default: dynamo-sla-profiler)
-            service_name: String (service name, default: "")
+            serviceName: String (service name, default: "")
             model: String (served model name)
-            model_cache_pvc_name: String (name of the PVC to mount the model cache,
-                if not provided, model must be HF name and will download from HF, default: "")
-            model_cache_pvc_path: String (path to the model cache in the PVC, default: "")
-            model_cache_pvc_mount_path: String (path to the model cache in the container,
-                note that the PVC must be mounted to the same path for the profiling job,
-                default: "/opt/model-cache")
+            dgdImage: String (container image to use for DGD components (frontend, planner, workers), overrides images in config file)
+            modelCache:
+                pvcName: String (name of the PVC to mount the model cache,
+                    if not provided, model must be HF name and will download from HF, default: "")
+                pvcPath: String (path to the model cache in the PVC, default: "")
+                mountPath: String (path to the model cache in the container,
+                    note that the PVC must be mounted to the same path for the profiling job,
+                    default: "/opt/model-cache")
         engine:
             backend: String (backend type, currently support [vllm, sglang, trtllm], default: vllm)
             config: String (path to the DynamoGraphDeployment config file, default: "")
-            max_context_length: Int (maximum context length supported by the served model, default: 0)
-            is_moe_model: Boolean (enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode, default: False)
+            maxContextLength: Int (maximum context length supported by the served model, default: 0)
+            isMoeModel: Boolean (enable MoE (Mixture of Experts) model support, use TEP for prefill and DEP for decode, default: False)
         hardware:
-            min_num_gpus_per_engine: Int (minimum number of GPUs per engine, default: 0)
-            max_num_gpus_per_engine: Int (maximum number of GPUs per engine, default: 0)
-            num_gpus_per_node: Int (number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size, default: 0)
+            minNumGpusPerEngine: Int (minimum number of GPUs per engine, default: 0)
+            maxNumGpusPerEngine: Int (maximum number of GPUs per engine, default: 0)
+            numGpusPerNode: Int (number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size, default: 0)
+            enableGpuDiscovery: Boolean (enable automatic GPU discovery from Kubernetes cluster nodes, when enabled overrides any manually specified hardware configuration, requires cluster-wide node access permissions, default: False)
         sweep:
-            prefill_interpolation_granularity: Int (how many samples to benchmark to interpolate TTFT under different ISL, default: 16)
-            decode_interpolation_granularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
-            use_ai_configurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
-            aic_system: String (target system for use with aiconfigurator, default: None)
-            aic_hf_id: String (aiconfigurator huggingface id of the target model, default: None)
-            aic_backend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
-            aic_backend_version: String (specify backend version when using aiconfigurator to estimate perf, default: None)
-            dry_run: Boolean (dry run the profile job, default: False)
-            pick_with_webui: Boolean (pick the best parallelization mapping using webUI, default: False)
-            webui_port: Int (webUI port, default: $PROFILER_WEBUI_PORT or 8000)
+            prefillInterpolationGranularity: Int (how many samples to benchmark to interpolate TTFT under different ISL, default: 16)
+            decodeInterpolationGranularity: Int (how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length, default: 6)
+            useAiConfigurator: Boolean (use ai-configurator to estimate benchmarking results instead of running actual deployment, default: False)
+            aicSystem: String (target system for use with aiconfigurator, default: None)
+            aicHfId: String (aiconfigurator huggingface id of the target model, default: None)
+            aicBackend: String (aiconfigurator backend of the target model, if not provided, will use args.backend, default: "")
+            aicBackendVersion: String (specify backend version when using aiconfigurator to estimate perf, default: None)
+            dryRun: Boolean (dry run the profile job, default: False)
+            pickWithWebui: Boolean (pick the best parallelization mapping using webUI, default: False)
+            webuiPort: Int (webUI port, default: $PROFILER_WEBUI_PORT or 8000)
         sla:
             isl: Int (target input sequence length, default: 3000)
             osl: Int (target output sequence length, default: 500)
             ttft: Float (target Time To First Token in milliseconds, default: 50)
             itl: Float (target Inter Token Latency in milliseconds, default: 10)
-        planner: (planner-bypass arguments, use hyphens or underscores)
-            i.e., planner-min-endpoint: 2  # or planner_min_endpoint: 2 (both work)
+        planner: (planner arguments)
+            e.g., plannerMinEndpoint: 2
     """
     # Step 1: Pre-parse to check if --profile-config is provided
     pre_parser = argparse.ArgumentParser(add_help=False)
@@ -130,37 +149,37 @@ def create_profiler_parser() -> argparse.Namespace:
         default=config.get("deployment", {}).get("model", ""),
         help="Served model name",
     )
+    model_cache_config = config.get("deployment", {}).get("modelCache", {})
     parser.add_argument(
         "--model-cache-pvc-name",
         type=str,
-        default=config.get("deployment", {}).get("model_cache_pvc_name", ""),
+        default=model_cache_config.get("pvcName", ""),
         help="Name of the PVC that contains the model weights. If not provided, args.model must be a HF model name and will download from HF",
     )
     parser.add_argument(
         "--model-cache-pvc-path",
         type=str,
-        default=config.get("deployment", {}).get("model_cache_pvc_path", ""),
+        default=model_cache_config.get("pvcPath", ""),
         help="Path to the model cache in the PVC",
     )
     parser.add_argument(
         "--model-cache-pvc-mount-path",
         type=str,
-        default=config.get("deployment", {}).get(
-            "model_cache_pvc_mount_path", "/opt/model-cache"
-        ),
+        default=model_cache_config.get("mountPath", "/opt/model-cache"),
         help="Path to the model cache in the container, note that the PVC must be mounted to the same path for the profiling job",
     )
+    deployment_cfg = config.get("deployment", {})
     parser.add_argument(
         "--dgd-image",
         type=str,
-        default=config.get("deployment", {}).get("dgd_image", ""),
+        default=_get(deployment_cfg, "dgdImage", "dgd_image", ""),
         help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
     )
 
     parser.add_argument(
         "--namespace",
         type=str,
-        default=config.get("deployment", {}).get("namespace", "dynamo-sla-profiler"),
+        default=deployment_cfg.get("namespace", "dynamo-sla-profiler"),
         help="Kubernetes namespace to deploy the DynamoGraphDeployment",
     )
     parser.add_argument(
@@ -180,25 +199,26 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default=config.get("output_dir", "profiling_results"),
+        default=_get(config, "outputDir", "output_dir", "profiling_results"),
         help="Path to the output results directory",
     )
+    hardware_cfg = config.get("hardware", {})
     parser.add_argument(
         "--min-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("min_num_gpus_per_engine", 0),
+        default=_get(hardware_cfg, "minNumGpusPerEngine", "min_num_gpus_per_engine", 0),
         help="minimum number of GPUs per engine",
     )
     parser.add_argument(
         "--max-num-gpus-per-engine",
         type=int,
-        default=config.get("hardware", {}).get("max_num_gpus_per_engine", 0),
+        default=_get(hardware_cfg, "maxNumGpusPerEngine", "max_num_gpus_per_engine", 0),
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
         "--num-gpus-per-node",
         type=int,
-        default=config.get("hardware", {}).get("num_gpus_per_node", 0),
+        default=_get(hardware_cfg, "numGpusPerNode", "num_gpus_per_node", 0),
         help="Number of GPUs per node for MoE models - this will be the granularity when searching for the best TEP/DEP size",
     )
     parser.add_argument(
@@ -227,46 +247,58 @@ def create_profiler_parser() -> argparse.Namespace:
     )
 
     # arguments used for interpolating TTFT and ITL under different ISL/OSL
+    engine_cfg = config.get("engine", {})
     parser.add_argument(
         "--max-context-length",
         type=int,
-        default=config.get("engine", {}).get("max_context_length", 0),
+        default=_get(engine_cfg, "maxContextLength", "max_context_length", 0),
         help="maximum context length supported by the served model",
     )
+    sweep_cfg = config.get("sweep", {})
     parser.add_argument(
         "--prefill-interpolation-granularity",
         type=int,
-        default=config.get("sweep", {}).get("prefill_interpolation_granularity", 16),
+        default=_get(
+            sweep_cfg,
+            "prefillInterpolationGranularity",
+            "prefill_interpolation_granularity",
+            16,
+        ),
         help="how many samples to benchmark to interpolate TTFT under different ISL",
     )
     parser.add_argument(
         "--decode-interpolation-granularity",
         type=int,
-        default=config.get("sweep", {}).get("decode_interpolation_granularity", 6),
+        default=_get(
+            sweep_cfg,
+            "decodeInterpolationGranularity",
+            "decode_interpolation_granularity",
+            6,
+        ),
         help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
     )
     parser.add_argument(
         "--service-name",
         type=str,
-        default=config.get("deployment", {}).get("service_name", ""),
+        default=_get(deployment_cfg, "serviceName", "service_name", ""),
         help="Service name for port forwarding (default: {deployment_name}-frontend)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        default=config.get("sweep", {}).get("dry_run", False),
+        default=_get(sweep_cfg, "dryRun", "dry_run", False),
         help="Dry run the profile job",
     )
     parser.add_argument(
         "--enable-gpu-discovery",
         action="store_true",
-        default=config.get("hardware", {}).get("enable_gpu_discovery", False),
+        default=_get(hardware_cfg, "enableGpuDiscovery", "enable_gpu_discovery", False),
         help="Enable automatic GPU discovery from Kubernetes cluster nodes. When enabled, overrides any manually specified hardware configuration. Requires cluster-wide node access permissions.",
     )
     parser.add_argument(
         "--pick-with-webui",
         action="store_true",
-        default=config.get("sweep", {}).get("pick_with_webui", False),
+        default=_get(sweep_cfg, "pickWithWebui", "pick_with_webui", False),
         help="Pick the best parallelization mapping using webUI",
     )
 
@@ -277,19 +309,19 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--webui-port",
         type=int,
-        default=config.get("sweep", {}).get("webui_port", default_webui_port),
+        default=_get(sweep_cfg, "webuiPort", "webui_port", default_webui_port),
         help="WebUI port",
     )
 
     # Dynamically add all planner arguments from planner_argparse.py
     add_planner_arguments_to_parser(parser, prefix="planner-")
     # Set defaults for any planner arguments found in config.planner
-    # Note: argparse converts hyphens to underscores, so we need to normalize keys
+    # Normalize keys: camelCase -> snake_case, hyphens -> underscores
     planner_config = config.get("planner", {})
     if planner_config:
-        # Convert hyphens to underscores to match argparse's internal naming
         normalized_planner_config = {
-            key.replace("-", "_"): value for key, value in planner_config.items()
+            _camel_to_snake(key).replace("-", "_"): value
+            for key, value in planner_config.items()
         }
         parser.set_defaults(**normalized_planner_config)
 
@@ -297,31 +329,31 @@ def create_profiler_parser() -> argparse.Namespace:
     parser.add_argument(
         "--use-ai-configurator",
         action="store_true",
-        default=config.get("sweep", {}).get("use_ai_configurator", False),
+        default=_get(sweep_cfg, "useAiConfigurator", "use_ai_configurator", False),
         help="Use ai-configurator to estimate benchmarking results instead of running actual deployment.",
     )
     parser.add_argument(
         "--aic-system",
         type=str,
-        default=config.get("sweep", {}).get("aic_system"),
+        default=_get(sweep_cfg, "aicSystem", "aic_system", None),
         help="Target system for use with aiconfigurator (e.g. h100_sxm, h200_sxm)",
     )
     parser.add_argument(
         "--aic-hf-id",
         type=str,
-        default=config.get("sweep", {}).get("aic_hf_id"),
+        default=_get(sweep_cfg, "aicHfId", "aic_hf_id", None),
         help="aiconfigurator name of the target model (e.g. Qwen/Qwen3-32B, meta-llama/Llama-3.1-405B)",
     )
     parser.add_argument(
         "--aic-backend",
         type=str,
-        default=config.get("sweep", {}).get("aic_backend", ""),
+        default=_get(sweep_cfg, "aicBackend", "aic_backend", ""),
         help="aiconfigurator backend of the target model, if not provided, will use args.backend",
     )
     parser.add_argument(
         "--aic-backend-version",
         type=str,
-        default=config.get("sweep", {}).get("aic_backend_version"),
+        default=_get(sweep_cfg, "aicBackendVersion", "aic_backend_version", None),
         help="Specify backend version when using aiconfigurator to estimate perf.",
     )
 
