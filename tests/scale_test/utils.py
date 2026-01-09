@@ -72,7 +72,7 @@ def wait_for_workers_registered(
             if response.status_code == 200:
                 data = response.json()
                 models = data.get("data", [])
-                if model in [m.get("id") for m in models] or len(models) > 0:
+                if model in [m.get("id") for m in models]:
                     logger.info(f"Model(s) registered at {frontend_url}")
                     model_found = True
                     break

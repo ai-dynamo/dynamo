@@ -41,6 +41,10 @@ class LoadGeneratorJob:
         self.job_name = job_name
         self.num_pods = num_pods
         self.num_processes_per_pod = num_processes_per_pod
+        if self.num_pods < 1:
+            raise ValueError("num_pods must be at least 1")
+        if self.num_processes_per_pod < 1:
+            raise ValueError("num_processes_per_pod must be at least 1")
 
         self._batch_api: Optional[client.BatchV1Api] = None
         self._core_api: Optional[client.CoreV1Api] = None
@@ -167,7 +171,7 @@ class LoadGeneratorJob:
         except exceptions.ApiException as e:
             if e.status == 409:
                 logger.warning("ConfigMap already exists, recreating...")
-                await self.delete()
+                await self._delete_configmap()
                 await asyncio.sleep(2)
                 await self._core_api.create_namespaced_config_map(
                     namespace=self.namespace, body=configmap_manifest
@@ -186,7 +190,7 @@ class LoadGeneratorJob:
         except exceptions.ApiException as e:
             if e.status == 409:
                 logger.warning("Job already exists, recreating...")
-                await self.delete()
+                await self._delete_job()
                 await asyncio.sleep(2)
                 await self._core_api.create_namespaced_config_map(
                     namespace=self.namespace, body=configmap_manifest
@@ -320,18 +324,11 @@ class LoadGeneratorJob:
 
         print("=" * 70)
 
-    async def _delete_configmap(self) -> None:
-        if self._core_api is None:
-            return
-        try:
-            await self._core_api.delete_namespaced_config_map(
-                name=f"{self.job_name}-script", namespace=self.namespace
-            )
-        except exceptions.ApiException as e:
-            if e.status != 404:
-                logger.warning(f"Failed to delete ConfigMap: {e}")
-
     async def delete(self) -> None:
+        await self._delete_job()
+        await self._delete_configmap()
+
+    async def _delete_job(self) -> None:
         if self._batch_api is None:
             return
         try:
@@ -344,4 +341,13 @@ class LoadGeneratorJob:
             if e.status != 404:
                 logger.error(f"Failed to delete job: {e}")
 
-        await self._delete_configmap()
+    async def _delete_configmap(self) -> None:
+        if self._core_api is None:
+            return
+        try:
+            await self._core_api.delete_namespaced_config_map(
+                name=f"{self.job_name}-script", namespace=self.namespace
+            )
+        except exceptions.ApiException as e:
+            if e.status != 404:
+                logger.warning(f"Failed to delete ConfigMap: {e}")

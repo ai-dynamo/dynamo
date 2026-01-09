@@ -53,6 +53,8 @@ class ScaleManagerConfig:
         timeout: int = 600,
         load_gen_pods: int = 1,
         load_gen_processes: int = 1,
+        name_prefix: str = "scale-test",
+        cleanup_on_exit: bool = True,
     ) -> "ScaleManagerConfig":
         return cls(
             num_deployments=num_deployments,
@@ -61,6 +63,8 @@ class ScaleManagerConfig:
                 model_path=model_path,
                 speedup_ratio=speedup_ratio,
                 deployment_timeout=timeout,
+                name_prefix=name_prefix,
+                cleanup_on_exit=cleanup_on_exit,
             ),
             load_test=LoadTestConfig(
                 duration_sec=duration,
