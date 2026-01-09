@@ -82,6 +82,32 @@ curl -X POST http://fault-injection-api:8080/api/v1/faults/network/inject \
   }'
 ```
 
+## Response Format
+
+All injection requests (both NetworkPolicy and ChaosMesh modes) return a consistent response:
+
+```json
+{
+  "fault_id": "net-abc123-1234567890",
+  "status": "active",
+  "type": "network_partition",
+  "mode": "networkpolicy",
+  "target_namespace": "dynamo",
+  "target_pod_prefix": "vllm-decode",
+  "created_at": "2025-01-09T12:00:00Z"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `fault_id` | Unique identifier for recovery/tracking. Use this to recover the fault later. |
+| `status` | Current state: `active`, `recovered`, or `failed` |
+| `type` | Always `network_partition` for this endpoint |
+| `mode` | `networkpolicy` or `chaos_mesh` depending on request |
+| `target_namespace` | Namespace where fault is applied |
+| `target_pod_prefix` | Pod prefix being targeted |
+| `created_at` | ISO timestamp of injection |
+
 ## ChaosMesh Mode
 
 Creates ChaosMesh NetworkChaos resource for advanced network faults.
@@ -175,29 +201,6 @@ curl -X POST http://fault-injection-api:8080/api/v1/faults/network/inject \
     }
   }'
 ```
-
-### Response Format
-
-Successful injection returns:
-```json
-{
-  "fault_id": "net-abc123-1234567890",
-  "status": "active",
-  "type": "network_partition",
-  "mode": "chaos_mesh",
-  "target_namespace": "dynamo",
-  "target_pod_prefix": "vllm-decode",
-  "created_at": "2025-01-09T12:00:00Z"
-}
-```
-
-| Field | Description |
-|-------|-------------|
-| `fault_id` | Unique identifier for recovery/tracking |
-| `status` | `active`, `recovered`, or `failed` |
-| `type` | Always `network_partition` for this endpoint |
-| `mode` | `networkpolicy` or `chaos_mesh` |
-| `created_at` | ISO timestamp of injection |
 
 ### Example: High Latency Simulation
 
