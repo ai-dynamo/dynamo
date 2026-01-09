@@ -421,6 +421,8 @@ get_options() {
             BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${SGLANG_BASE_IMAGE_TAG_CU13} "
             SGLANG_CUDA_VERSION="${SGLANG_CUDA_VERSION_CU13}"
             RUNTIME_IMAGE_TAG="${SGLANG_RUNTIME_IMAGE_TAG_CU13}"
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${RUNTIME_IMAGE_TAG} "
+            echo "INFO: Overriding base image tag for SGLang with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
 
 
