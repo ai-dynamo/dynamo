@@ -11,11 +11,10 @@ FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 ARG ARCH
 ARG ARCH_ALT
 ARG CARGO_BUILD_JOBS
-ARG ENABLE_MEDIA_FFMPEG
 
 WORKDIR /workspace
 
-# Copy CUDA from dynamo_base stage
+# Copy CUDA from base stage
 COPY --from=dynamo_base /usr/local/cuda /usr/local/cuda
 COPY --from=dynamo_base /etc/ld.so.conf.d/hpcx.conf /etc/ld.so.conf.d/hpcx.conf
 
@@ -26,7 +25,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
     CARGO_TARGET_DIR=/opt/dynamo/target \
     PATH=/usr/local/cargo/bin:$PATH
 
-# Copy artifacts from dynamo_base stage
+# Copy artifacts from base stage
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
@@ -59,7 +58,11 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel \
+        libcurl-devel \
+        openssl-devel \
+        libuuid-devel \
+        zlib-devel
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -120,12 +123,11 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
 
 # Build FFmpeg from source
 # Do not delete the source tarball for legal reasons
-ARG FFMPEG_VERSION
+ARG FFMPEG_VERSION=7.1
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
 if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
@@ -230,6 +232,28 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
 
+# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    mkdir -p /tmp/aws-sdk-cpp/build && \
+    cd /tmp/aws-sdk-cpp/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DENABLE_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/aws-sdk-cpp && \
+    ldconfig && \
+    /tmp/use-sccache.sh show-stats "AWS SDK C++"
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -305,14 +329,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
-    if [ "$ENABLE_KVBM" = "true" ]; then \
+    if [ "$ENABLE_KVBM" == "true" ]; then \
         cd /opt/dynamo/lib/bindings/kvbm && \
         maturin build --release --out target/wheels && \
         auditwheel repair \
             --exclude libnixl.so \
             --exclude libnixl_build.so \
             --exclude libnixl_common.so \
-            --exclude 'lib*.so*' \
             --plat manylinux_2_28_${ARCH_ALT} \
             --wheel-dir /opt/dynamo/dist \
             target/wheels/*.whl; \

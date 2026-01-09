@@ -1,50 +1,10 @@
 # syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# NOTE FOR dynamo_base AND wheel_builder STAGES:
-#
-# All changes to dynamo_base and wheel_builder stages should be replicated across
-# Dockerfile and Dockerfile.<framework> images.:
-#   - Dockerfile
-#   - Dockerfile.vllm
-#   - Dockerfile.sglang
-#   - Dockerfile.trtllm
-# This duplication was introduced purposely to quickly enable Docker layer caching and
-# deduplication. Please ensure these stages stay in sync until the duplication can be
-# addressed.
-#
-# Throughout this file, we make certain paths group-writable because this allows
-# both the dynamo user (UID 1000) and Dev Container users (UID != 1000) to work
-# properly without needing slow chown -R operations (which can add 2-10 extra
-# minutes).
-#
-# DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
-#   /workspace            - Users create/modify project files
-#   /home/dynamo          - Users create config/cache files
-#   /opt/dynamo/venv      - vLLM uses venv, so entire venv must be writable for pip install
-#
-# HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
-# 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
-# 2. COPY --chmod=775       - Sets permissions on copied children (not destination)
-# 3. chmod g+w (no -R)      - Fixes destination dirs only (milliseconds vs minutes)
 
 ##################################
 ########## Build Arguments ########
 ##################################
-
-# This section contains build arguments that are common and shared across various
-# Dockerfile.<frameworks>, so they should NOT have a default. The source of truth is from build.sh.
-
-ARG BASE_IMAGE
-ARG BASE_IMAGE_TAG
-
-ARG PYTHON_VERSION
-ARG ENABLE_KVBM
-ARG ENABLE_MEDIA_NIXL
-ARG ENABLE_MEDIA_FFMPEG
-ARG CARGO_BUILD_JOBS
-
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
 #   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
@@ -58,29 +18,56 @@ ARG CARGO_BUILD_JOBS
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+# Python/CUDA configuration
+ARG PYTHON_VERSION=3.12
+ARG CUDA_VERSION=12.9
+
+
+# Base image configuration
+ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base
+# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
+# Please check https://github.com/ai-dynamo/dynamo/pull/1065
+# for details and reproducer to manually test if the image
+# can be updated to later versions.
+ARG BASE_IMAGE_TAG=25.06-cuda12.9-devel-ubuntu24.04
+
+
+ARG RUNTIME_IMAGE=nvcr.io/nvidia/cuda
+ARG RUNTIME_IMAGE_TAG=${CUDA_VERSION}.0-runtime-ubuntu24.04
+
+# Build configuration
+ARG ENABLE_KVBM=true
+ARG CARGO_BUILD_JOBS
+
+ARG NATS_VERSION=v2.10.28
+ARG ETCD_VERSION=v3.5.21
+
+ARG ENABLE_MEDIA_NIXL=false
+ARG ENABLE_MEDIA_FFMPEG=true
+ARG FFMPEG_VERSION=7.1
+
 # SCCACHE configuration
 ARG USE_SCCACHE
 ARG SCCACHE_BUCKET=""
 ARG SCCACHE_REGION=""
 
 # NIXL configuration
-ARG NIXL_UCX_REF
-ARG NIXL_REF
-ARG NIXL_GDRCOPY_REF
-ARG NIXL_LIBFABRIC_REF
-
-ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
-ARG CUDA_VERSION="12.9"
+ARG NIXL_UCX_REF=v1.19.0
+ARG NIXL_REF=0.7.1
+ARG NIXL_GDRCOPY_REF=v2.5.1
+ARG NIXL_LIBFABRIC_REF=v2.3.0
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.13.0"
-# FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
-ARG FLASHINF_REF="v0.5.3"
+ARG VLLM_REF=v0.13.0
+ARG MAX_JOBS=10
+# FlashInfer only respected when building vLLM from source, ie when VLLM_REF does not start with 'v' or for arm64 builds
+ARG FLASHINF_REF=v0.5.3
+ARG LMCACHE_REF=0.3.12
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
-ARG LMCACHE_REF="0.3.12"
+
+### Base Image Stages
 
 ##################################
 ########## Base Image ############
@@ -98,13 +85,13 @@ WORKDIR /opt/dynamo
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 # Install NATS server
-ENV NATS_VERSION="v2.10.28"
+ARG NATS_VERSION
 RUN --mount=type=cache,target=/var/cache/apt \
     wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
     dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
 
 # Install etcd
-ENV ETCD_VERSION="v3.5.21"
+ARG ETCD_VERSION
 RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
@@ -127,8 +114,6 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -473,6 +458,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+
+### Framework Stages
+# SGLang is the only framework without a `framework` target currently, needs special treatment
+
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -531,7 +520,6 @@ ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
-ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 ARG LMCACHE_REF
@@ -559,7 +547,6 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
-
 ##################################################
 ########## Runtime Image ########################
 ##################################################
@@ -793,83 +780,6 @@ RUN cd /usr/local/lib && \
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
-
-ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-###########################################################
-########## Development (run.sh, runs as root user) ########
-###########################################################
-#
-# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
-#
-# This stage runs as root and provides:
-# - Development tools and utilities for local debugging
-# - Support for vscode/cursor development outside the Dev Container plug-in
-#
-# Use this stage if you need a full-featured development environment with extra tools,
-# but do not use it with the Dev Container plug-in.
-
-FROM runtime AS dev
-
-# Don't want ubuntu to be editable, just change uid and gid.
-ARG WORKSPACE_DIR=/workspace
-
-USER root
-# Install utilities as root
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-    # Install utilities
-    nvtop \
-    wget \
-    tmux \
-    vim \
-    git \
-    openssh-client \
-    iproute2 \
-    rsync \
-    zip \
-    unzip \
-    htop \
-    # Build Dependencies
-    autoconf \
-    automake \
-    cmake \
-    libtool \
-    meson \
-    net-tools \
-    pybind11-dev \
-    # Rust build dependencies
-    clang \
-    libclang-dev \
-    protobuf-compiler \
-    pkg-config && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set umask for group-writable files in dev stage (runs as root)
-RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/usr/local/cargo/bin:$PATH
-
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
-
-# Install maturin, for maturin develop
-# Editable install of dynamo
-COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
-RUN uv pip install maturin[patchelf] && \
-    uv pip install --no-deps -e .
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

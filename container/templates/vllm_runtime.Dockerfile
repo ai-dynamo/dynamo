@@ -116,6 +116,13 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
+
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 # Copy ffmpeg
@@ -189,6 +196,37 @@ RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} &
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+# Fix library symlinks that Docker COPY dereferenced (COPY always follows symlinks)
+# This recreates proper symlinks to save space and suppress ldconfig warnings
+RUN cd /usr/local/lib && \
+    # libaws-c-common: .so.1 should symlink to .so.1.0.0
+    if [ -f libaws-c-common.so.1.0.0 ] && [ ! -L libaws-c-common.so.1 ]; then \
+        rm -f libaws-c-common.so.1 libaws-c-common.so && \
+        ln -s libaws-c-common.so.1.0.0 libaws-c-common.so.1 && \
+        ln -s libaws-c-common.so.1 libaws-c-common.so; \
+    fi && \
+    # libaws-c-s3: .so.0unstable should symlink to .so.1.0.0
+    if [ -f libaws-c-s3.so.1.0.0 ] && [ ! -L libaws-c-s3.so.0unstable ]; then \
+        rm -f libaws-c-s3.so.0unstable libaws-c-s3.so && \
+        ln -s libaws-c-s3.so.1.0.0 libaws-c-s3.so.0unstable && \
+        ln -s libaws-c-s3.so.0unstable libaws-c-s3.so; \
+    fi && \
+    # libs2n: .so.1 should symlink to .so.1.0.0
+    if [ -f libs2n.so.1.0.0 ] && [ ! -L libs2n.so.1 ]; then \
+        rm -f libs2n.so.1 libs2n.so && \
+        ln -s libs2n.so.1.0.0 libs2n.so.1 && \
+        ln -s libs2n.so.1 libs2n.so; \
+    fi && \
+    # OpenSSL 1.1: check for versioned files (e.g., .so.1.1.1k)
+    for lib in libcrypto libssl; do \
+        versioned=$(ls -1 ${lib}.so.1.1.* 2>/dev/null | head -1); \
+        if [ -n "$versioned" ] && [ ! -L "${lib}.so.1.1" ]; then \
+            rm -f "${lib}.so.1.1" && \
+            ln -s "$(basename "$versioned")" "${lib}.so.1.1"; \
+        fi; \
+    done && \
+    ldconfig
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
