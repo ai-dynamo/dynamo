@@ -122,7 +122,6 @@ SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_CUDA_VERSION_CU13="13.0.1"
 SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.6.post2-cu130-runtime"
-SGLANG_PYTHON_VERSION="3.10"
 
 # GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
 GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
@@ -927,7 +926,6 @@ fi
 
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${SGLANG_PYTHON_VERSION}"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
 else
     BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
