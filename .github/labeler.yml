@@ -60,7 +60,7 @@ frontend:
           - lib/llm/src/preprocessor.rs
           - lib/llm/src/tokenizers.rs
 
-dynamo-planner:
+planner:
   - changed-files:
       - any-glob-to-any-file:
           - components/src/dynamo/planner/**
