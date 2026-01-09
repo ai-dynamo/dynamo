@@ -489,12 +489,15 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --break-system-packages --no-cache . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages that are needed for DeepEP to work properly
-    # This is done in the upstream runtime image too, but we overrode these packages earlier
-    pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
-        nvidia-nccl-cu12==2.28.3 \
-        nvidia-cudnn-cu12==9.16.0.29 \
-        nvidia-cutlass-dsl==4.3.0
+    CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
+    if [ "$CUDA_MAJOR" = "12" ]; then \
+        # Install NVIDIA packages that are needed for DeepEP to work properly
+        # This is done in the upstream runtime image too, but these packages are overridden in earlier commands
+        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+            nvidia-nccl-cu12==2.28.3 \
+            nvidia-cudnn-cu12==9.16.0.29 \
+            nvidia-cutlass-dsl==4.3.0; \
+    fi
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
