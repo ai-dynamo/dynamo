@@ -397,13 +397,18 @@ impl DistributedRuntime {
 
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
     /// Component, to allow it to publish to NATS. KV Router is the only user.
+    ///
+    /// When NATS is not available (e.g., running in approximate mode with --no-kv-events),
+    /// this function returns Ok(()) silently since publishing is optional in that mode.
     pub async fn kv_router_nats_publish(
         &self,
         subject: String,
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
-            anyhow::bail!("KV router's EventPublisher requires NATS");
+            // NATS not available - this is expected in approximate mode (--no-kv-events)
+            tracing::trace!("Skipping NATS publish (NATS not configured): {}", subject);
+            return Ok(());
         };
         Ok(nats_client.client().publish(subject, payload).await?)
     }

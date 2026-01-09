@@ -94,6 +94,26 @@ func TestIsDeploymentReady(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "not ready (surging)",
+			args: args{
+				deployment: &appsv1.Deployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Generation: 1,
+					},
+					Spec: appsv1.DeploymentSpec{
+						Replicas: &[]int32{2}[0],
+					},
+					Status: appsv1.DeploymentStatus{
+						ObservedGeneration: 1,
+						UpdatedReplicas:    1,
+						AvailableReplicas:  1,
+						Replicas:           2,
+					},
+				},
+			},
+			want: false,
+		},
+		{
 			name: "ready",
 			args: args{
 				deployment: &appsv1.Deployment{
@@ -107,6 +127,7 @@ func TestIsDeploymentReady(t *testing.T) {
 						ObservedGeneration: 1,
 						UpdatedReplicas:    1,
 						AvailableReplicas:  1,
+						Replicas:           1,
 						Conditions: []appsv1.DeploymentCondition{
 							{
 								Type:   appsv1.DeploymentAvailable,
@@ -1855,6 +1876,7 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 		wantConditionReason      string
 		wantConditionMessage     string
 		wantServiceReplicaStatus *v1alpha1.ServiceReplicaStatus
+		wantObservedGeneration   int64
 	}{
 		{
 			name: "deployment backed DCD that is unready",
@@ -1976,10 +1998,12 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Create DynamoComponentDeployment
+			generation := int64(5)
 			dcd := &v1alpha1.DynamoComponentDeployment{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-component",
-					Namespace: "default",
+					Name:       "test-component",
+					Namespace:  "default",
+					Generation: generation,
 				},
 				Spec: v1alpha1.DynamoComponentDeploymentSpec{
 					BackendFramework: string(dynamo.BackendFrameworkVLLM),
@@ -2031,6 +2055,9 @@ func Test_setStatusConditionAndServiceReplicaStatus(t *testing.T) {
 
 			// Assert the service replica status
 			g.Expect(updatedDCD.Status.Service).To(gomega.Equal(tt.wantServiceReplicaStatus))
+
+			// Assert the observed generation
+			g.Expect(updatedDCD.Status.ObservedGeneration).To(gomega.Equal(generation))
 		})
 	}
 }

@@ -295,7 +295,7 @@ pub mod kserve_test {
         inference::model_infer_request::InferInputTensor {
             name: "int_input".into(),
             datatype: "UINT32".into(),
-            shape: vec![1],
+            shape: vec![3],
             contents: Some(inference::InferTensorContents {
                 uint_contents: input,
                 ..Default::default()
@@ -1172,7 +1172,7 @@ pub mod kserve_test {
                 inputs: vec![tensor::TensorMetadata {
                     name: "input".to_string(),
                     data_type: tensor::DataType::Int32,
-                    shape: vec![1],
+                    shape: vec![3],
                     parameters: Default::default(),
                 }],
                 outputs: vec![tensor::TensorMetadata {

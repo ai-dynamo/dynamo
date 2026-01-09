@@ -159,6 +159,10 @@ def run_serve_deployment(
                 )
                 server_process.check_response(payload, response)
 
+            # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
+            if hasattr(payload, "final_validation"):
+                payload.final_validation()
+
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):
     """Return pytest params for a config dict, adding a model marker per param.

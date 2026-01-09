@@ -118,8 +118,14 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
-SGLANG_PYTHON_VERSION="3.10"
+SGLANG_CUDA_VERSION_CU13="13.0.1"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
+
+# GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
+GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
+GAIE_VERSION="v0.5.1"
 
 PYTHON_VERSION="3.12"
 
@@ -415,6 +421,17 @@ get_options() {
             BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${VLLM_RUNTIME_IMAGE_TAG_CU13} "
             echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
+
+
+        if [[ $FRAMEWORK == "SGLANG" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$SGLANG_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${SGLANG_BASE_IMAGE_TAG_CU13} "
+            SGLANG_CUDA_VERSION="${SGLANG_CUDA_VERSION_CU13}"
+            RUNTIME_IMAGE_TAG="${SGLANG_RUNTIME_IMAGE_TAG_CU13}"
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${RUNTIME_IMAGE_TAG} "
+            echo "INFO: Overriding base image tag for SGLang with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
+        fi
+
 
         if [ -z "$BASE_IMAGE" ]; then
             error "ERROR: Framework $FRAMEWORK without BASE_IMAGE"
@@ -919,11 +936,11 @@ fi
 
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${SGLANG_PYTHON_VERSION}"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
-else
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
 fi
+
+BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
+
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
@@ -945,6 +962,43 @@ if [ -z "${NO_TAG_LATEST}" ]; then
 fi
 
 show_image_options
+
+# Handle FRONTEND target: build EPP image first
+if [[ ${TARGET^^} == "FRONTEND" ]]; then
+    echo "Building FRONTEND image - requires EPP image"
+
+    # Build base dynamo image first (framework=NONE, target=dev)
+    echo ""
+    echo "Building EPP image for Frontend..."
+    # Set up paths for GAIE
+    GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
+
+    # Clone GAIE repo
+    echo ""
+    echo "Cloning GAIE repository at ${GAIE_VERSION}..."
+    $RUN_PREFIX rm -rf "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+    $RUN_PREFIX git clone ${GAIE_REPO_URL} "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX git checkout ${GAIE_VERSION}
+    $RUN_PREFIX cd "${BUILD_CONTEXT}"
+
+    # Build EPP image
+    echo ""
+    echo "Building EPP image..."
+    export GAIE_DIR="${GAIE_CLONE_DIR}"
+    export DYNAMO_DIR="${BUILD_CONTEXT}"
+
+    $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
+
+    # Set EPP image tag (matches what build-epp-dynamo.sh produces)
+    EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
+
+    echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
+
+    # Add build args for frontend image
+    BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
+fi
 
 # Always build the main image first
 # Create build log directory for BuildKit reports

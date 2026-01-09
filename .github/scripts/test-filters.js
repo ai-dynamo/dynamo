@@ -6,18 +6,24 @@
  * Usage:
  *   cd .github/scripts
  *   npm install
- *   npm test
+ *   npm test                    # Run pattern tests only
+ *   npm run coverage            # Check full repo coverage
+ *   npm test -- --coverage      # Run both
  *
  * This validates that tj-actions/changed-files will correctly:
  * - Match backend-specific files to their respective filters (vllm, sglang, trtllm)
  * - Exclude doc files (*.md, *.rst, *.txt) from core via negation patterns
  * - Match CI/infrastructure changes to core
+ * - (with --coverage) Ensure all files in repo are covered by at least one filter
  */
 
 const fs = require('fs');
 const path = require('path');
+const { execSync } = require('child_process');
 const micromatch = require('micromatch');
 const YAML = require('yaml');
+
+const runCoverage = process.argv.includes('--coverage');
 
 // Find filters.yaml relative to this script
 const scriptDir = path.dirname(__filename);
@@ -154,12 +160,12 @@ const testCases = [
 
   // Operator and deploy
   {
-    file: 'deploy/cloud/operator/main.go',
+    file: 'deploy/operator/cmd/main.go',
     expect: { core: false, operator: true },
     desc: 'operator file triggers operator'
   },
   {
-    file: 'deploy/cloud/helm/values.yaml',
+    file: 'deploy/helm/charts/platform/values.yaml',
     expect: { core: false, deploy: true },
     desc: 'helm file triggers deploy'
   },
@@ -217,3 +223,72 @@ if (failed > 0) {
 }
 
 console.log('\nAll filter tests passed! ✓');
+
+// --- Coverage Check ---
+// Validates that all files in the repo are covered by at least one specific filter
+
+if (runCoverage) {
+  console.log('\n' + '='.repeat(60));
+  console.log('Running full repository coverage check...\n');
+
+  // Get repo root (two levels up from .github/scripts)
+  const repoRoot = path.resolve(scriptDir, '../..');
+
+  // Get all tracked files using git
+  let allFiles;
+  try {
+    const output = execSync('git ls-files', { cwd: repoRoot, encoding: 'utf8' });
+    allFiles = output.trim().split('\n').filter(f => f.length > 0);
+  } catch (err) {
+    console.error('Failed to run git ls-files. Are you in a git repository?');
+    process.exit(1);
+  }
+
+  console.log(`Found ${allFiles.length} tracked files in repository\n`);
+
+  // Specific filters to check (exclude 'all' since it matches everything)
+  const specificFilters = Object.keys(filters).filter(f => f !== 'all');
+
+  // Check each file
+  const uncoveredFiles = [];
+
+  for (const file of allFiles) {
+    let covered = false;
+    for (const filterName of specificFilters) {
+      if (checkFilter(file, filters[filterName])) {
+        covered = true;
+        break;
+      }
+    }
+    if (!covered) {
+      uncoveredFiles.push(file);
+    }
+  }
+
+  if (uncoveredFiles.length > 0) {
+    console.error(`ERROR: ${uncoveredFiles.length} file(s) not covered by any CI filter:\n`);
+
+    // Group by directory for readability
+    const byDir = {};
+    for (const file of uncoveredFiles) {
+      const dir = path.dirname(file) || '.';
+      if (!byDir[dir]) byDir[dir] = [];
+      byDir[dir].push(path.basename(file));
+    }
+
+    for (const [dir, files] of Object.entries(byDir).sort()) {
+      console.log(`  ${dir}/`);
+      for (const file of files.slice(0, 10)) {
+        console.log(`    - ${file}`);
+      }
+      if (files.length > 10) {
+        console.log(`    ... and ${files.length - 10} more`);
+      }
+    }
+
+    console.log('\nPlease add patterns for these files to .github/filters.yaml');
+    process.exit(1);
+  }
+
+  console.log(`All ${allFiles.length} files are covered by CI filters! ✓`);
+}

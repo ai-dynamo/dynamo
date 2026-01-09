@@ -90,6 +90,12 @@ pub struct PreprocessedRequest {
     /// Type of prompt
     pub token_ids: Vec<TokenIdType>,
 
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings
+    /// If provided, this takes precedence over token_ids for inference
+    #[builder(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
+
     // Multimodal data
     #[builder(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]

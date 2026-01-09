@@ -74,13 +74,13 @@ ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.12.0"
+ARG VLLM_REF="v0.13.0"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
 ARG FLASHINF_REF="v0.5.3"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
-ARG LMCACHE_REF="0.3.10"
+ARG LMCACHE_REF="0.3.12"
 
 ##################################
 ########## Base Image ############
