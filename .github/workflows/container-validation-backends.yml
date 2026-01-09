@@ -199,6 +199,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   sglang:
     needs: changed-files
@@ -218,6 +219,8 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -261,6 +264,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   trtllm:
     needs: changed-files
@@ -280,6 +284,8 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -323,6 +329,7 @@ jobs:
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
