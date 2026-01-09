@@ -222,63 +222,7 @@ jobs:
 
 ### Pytest Configuration
 
-The HW fault test options are defined in `tests/fault_tolerance/conftest.py`. If you need to add them to a different conftest or customize:
-
-```python
-# tests/fault_tolerance/conftest.py (already exists)
-# These options are already configured - shown here for reference
-
-def pytest_addoption(parser):
-    parser.addoption(
-        "--enable-hw-faults",
-        action="store_true",
-        default=False,
-        help="Enable hardware fault injection tests"
-    )
-    parser.addoption(
-        "--hw-fault-backend",
-        action="store",
-        default="vllm",
-        choices=["vllm", "sglang", "trtllm"],
-        help="Backend for HW fault tests"
-    )
-    parser.addoption(
-        "--namespace",
-        action="store",
-        default="fault-tolerance",
-        help="Kubernetes namespace for tests"
-    )
-    parser.addoption(
-        "--skip-service-restart",
-        action="store_true",
-        default=False,
-        help="Skip NATS/etcd restart (faster)"
-    )
-
-@pytest.fixture
-def hw_fault_config(request):
-    if not request.config.getoption("--enable-hw-faults"):
-        pytest.skip("HW fault tests disabled")
-    return {
-        "enabled": True,
-        "xid_type": 79,
-        "target_node": None,  # Auto-detect
-    }
-
-@pytest.fixture
-def namespace(request):
-    return request.config.getoption("--namespace")
-
-@pytest.fixture
-def hw_fault_backend(request):
-    return request.config.getoption("--hw-fault-backend")
-
-@pytest.fixture
-def skip_service_restart(request):
-    return request.config.getoption("--skip-service-restart")
-```
-
-**Note:** The conftest.py is not in the root `tests/` directory because these options are specific to fault tolerance tests and would add unnecessary flags to all test runs.
+The HW fault test options (`--enable-hw-faults`, `--hw-fault-backend`, `--namespace`, `--skip-service-restart`) are already configured in [`tests/fault_tolerance/conftest.py`](conftest.py).
 
 ## Test Phases
 
