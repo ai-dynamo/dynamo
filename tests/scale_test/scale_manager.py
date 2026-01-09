@@ -27,11 +27,9 @@ class ScaleManager:
     model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     speedup_ratio: float = 10.0
     kubernetes_namespace: str = "default"
-    image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
     timeout: int = 600
     name_prefix: str = "scale-test"
     cleanup_on_exit: bool = True
-    image_pull_secrets: List[str] = field(default_factory=list)
 
     _deployment_specs: List[DeploymentSpec] = field(default_factory=list)
     _deployment_names: List[str] = field(default_factory=list)
@@ -51,11 +49,9 @@ class ScaleManager:
             model_path=config.model_path,
             speedup_ratio=config.speedup_ratio,
             kubernetes_namespace=config.kubernetes_namespace,
-            image=config.image,
             timeout=config.deployment_timeout,
             name_prefix=config.name_prefix,
             cleanup_on_exit=config.cleanup_on_exit,
-            image_pull_secrets=config.image_pull_secrets,
         )
 
     async def _init_kubernetes(self) -> None:
@@ -75,17 +71,12 @@ class ScaleManager:
         specs = []
         for i in range(1, self.num_deployments + 1):
             builder = ScaleTestDGDBuilder(deployment_id=i, name_prefix=self.name_prefix)
-            builder_chain = (
+            spec = (
                 builder.set_kubernetes_namespace(self.kubernetes_namespace)
                 .set_model(self.model_path)
                 .set_speedup_ratio(self.speedup_ratio)
-                .set_image(self.image)
+                .build()
             )
-
-            if self.image_pull_secrets:
-                builder_chain = builder_chain.set_image_pull_secrets(self.image_pull_secrets)
-
-            spec = builder_chain.build()
             specs.append(spec)
             self._deployment_names.append(spec.name)
         return specs
@@ -230,7 +221,6 @@ class ScaleManager:
             duration_sec=duration_sec,
             qps=qps,
             max_tokens=max_tokens,
-            image=self.image,
             num_pods=num_pods,
             num_processes_per_pod=num_processes_per_pod,
         )

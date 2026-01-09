@@ -14,14 +14,12 @@ def _get_default_template_path() -> str:
 @dataclass
 class ScaleTestConfig:
     kubernetes_namespace: str = "default"
-    image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
     template_path: Optional[str] = None
     model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     speedup_ratio: float = 10.0
     name_prefix: str = "scale-test"
     deployment_timeout: int = 600
     cleanup_on_exit: bool = True
-    image_pull_secrets: list[str] = field(default_factory=list)
 
     def __post_init__(self):
         if self.template_path is None:
@@ -48,13 +46,11 @@ class ScaleManagerConfig:
         cls,
         num_deployments: int,
         namespace: str = "default",
-        image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1",
         model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         speedup_ratio: float = 10.0,
         duration: int = 60,
         qps: float = 1.0,
         timeout: int = 600,
-        image_pull_secrets: Optional[list[str]] = None,
         load_gen_pods: int = 1,
         load_gen_processes: int = 1,
     ) -> "ScaleManagerConfig":
@@ -62,11 +58,9 @@ class ScaleManagerConfig:
             num_deployments=num_deployments,
             scale_test=ScaleTestConfig(
                 kubernetes_namespace=namespace,
-                image=image,
                 model_path=model_path,
                 speedup_ratio=speedup_ratio,
                 deployment_timeout=timeout,
-                image_pull_secrets=image_pull_secrets or [],
             ),
             load_test=LoadTestConfig(
                 duration_sec=duration,

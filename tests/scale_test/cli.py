@@ -6,7 +6,6 @@ import asyncio
 import logging
 import sys
 
-from tests.scale_test.load_generator import LoadGenerator
 from tests.scale_test.scale_manager import ScaleManager
 from tests.scale_test.utils import setup_logging
 
@@ -36,7 +35,6 @@ def create_parser() -> argparse.ArgumentParser:
     load_parser.add_argument("--namespace", type=str, default="default")
     load_parser.add_argument("--name-prefix", type=str, default="scale-test")
     load_parser.add_argument("--model-path", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-    load_parser.add_argument("--image", type=str, default="nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1")
     _add_load_args(load_parser)
 
     # 'cleanup' command
@@ -52,17 +50,14 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model-path", type=str, default="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     parser.add_argument("--speedup-ratio", type=float, default=10.0)
     parser.add_argument("--namespace", type=str, default="default")
-    parser.add_argument("--image", type=str, default="nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1")
     parser.add_argument("--timeout", type=int, default=600, help="DGD ready timeout in seconds")
     parser.add_argument("--name-prefix", type=str, default="scale-test")
     parser.add_argument("--no-cleanup", action="store_true", help="Keep DGDs on exit")
-    parser.add_argument("--image-pull-secrets", type=str, nargs="+", help="K8s secrets for image pulls")
 
 
 def _add_load_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--duration", type=int, default=60, help="Load test duration in seconds")
     parser.add_argument("--qps", type=float, default=1.0, help="Queries per second")
-    parser.add_argument("--in-cluster", action="store_true", help="Run load generator as K8s Job")
     parser.add_argument("--load-gen-pods", type=int, default=1, help="Parallel load generator pods")
     parser.add_argument("--load-gen-processes", type=int, default=1, help="Processes per pod")
 
@@ -73,11 +68,9 @@ async def cmd_start_async(args: argparse.Namespace) -> int:
         model_path=args.model_path,
         speedup_ratio=args.speedup_ratio,
         kubernetes_namespace=args.namespace,
-        image=args.image,
         timeout=args.timeout,
         name_prefix=args.name_prefix,
         cleanup_on_exit=not args.no_cleanup,
-        image_pull_secrets=args.image_pull_secrets or [],
     )
 
     try:
@@ -125,11 +118,9 @@ async def cmd_run_async(args: argparse.Namespace) -> int:
         model_path=args.model_path,
         speedup_ratio=args.speedup_ratio,
         kubernetes_namespace=args.namespace,
-        image=args.image,
         timeout=args.timeout,
         name_prefix=args.name_prefix,
         cleanup_on_exit=True,
-        image_pull_secrets=args.image_pull_secrets or [],
     )
 
     try:
@@ -146,35 +137,23 @@ async def cmd_run_async(args: argparse.Namespace) -> int:
         print("\nAll DGDs ready!")
         print(f"\nGenerating load for {args.duration}s at {args.qps} QPS...")
 
-        if args.in_cluster:
-            num_pods = getattr(args, "load_gen_pods", 1)
-            num_processes = getattr(args, "load_gen_processes", 1)
-            if num_pods > 1 or num_processes > 1:
-                print(f"Parallelism: {num_pods} pod(s) x {num_processes} process(es)")
+        num_pods = getattr(args, "load_gen_pods", 1)
+        num_processes = getattr(args, "load_gen_processes", 1)
+        if num_pods > 1 or num_processes > 1:
+            print(f"Parallelism: {num_pods} pod(s) x {num_processes} process(es)")
 
-            success = await manager.run_load_generator_job(
-                model=args.model_path,
-                duration_sec=args.duration,
-                qps=args.qps,
-                timeout=args.duration + 300,
-                num_pods=num_pods,
-                num_processes_per_pod=num_processes,
-            )
-            if not success:
-                print("ERROR: Load generation failed")
-                await manager.cleanup()
-                return 1
-        else:
-            frontend_urls = await manager.get_frontend_urls()
-            if not frontend_urls:
-                print("ERROR: No frontend URLs found")
-                await manager.cleanup()
-                return 1
-
-            print(f"Targeting {len(frontend_urls)} frontends...")
-            load_generator = LoadGenerator(frontend_urls=frontend_urls, model=args.model_path)
-            await load_generator.generate_load(duration_sec=args.duration, qps=args.qps)
-            load_generator.print_summary()
+        success = await manager.run_load_generator_job(
+            model=args.model_path,
+            duration_sec=args.duration,
+            qps=args.qps,
+            timeout=args.duration + 300,
+            num_pods=num_pods,
+            num_processes_per_pod=num_processes,
+        )
+        if not success:
+            print("ERROR: Load generation failed")
+            await manager.cleanup()
+            return 1
 
         print("\nCleaning up...")
         await manager.cleanup()
@@ -237,34 +216,28 @@ async def cmd_load_async(args: argparse.Namespace) -> int:
         print(f"Targeting {len(frontend_urls)} frontends")
         print(f"Generating load for {args.duration}s at {args.qps} QPS...")
 
-        if args.in_cluster:
-            num_pods = getattr(args, "load_gen_pods", 1)
-            num_processes = getattr(args, "load_gen_processes", 1)
+        num_pods = getattr(args, "load_gen_pods", 1)
+        num_processes = getattr(args, "load_gen_processes", 1)
 
-            from tests.scale_test.load_generator_job import LoadGeneratorJob
+        from tests.scale_test.load_generator_job import LoadGeneratorJob
 
-            batch_api = client.BatchV1Api(k8s_client)
-            job = LoadGeneratorJob(
-                namespace=args.namespace,
-                frontend_urls=frontend_urls,
-                model=args.model_path,
-                duration_sec=args.duration,
-                qps=args.qps,
-                image=args.image,
-                num_pods=num_pods,
-                num_processes_per_pod=num_processes,
-            )
+        batch_api = client.BatchV1Api(k8s_client)
+        job = LoadGeneratorJob(
+            namespace=args.namespace,
+            frontend_urls=frontend_urls,
+            model=args.model_path,
+            duration_sec=args.duration,
+            qps=args.qps,
+            num_pods=num_pods,
+            num_processes_per_pod=num_processes,
+        )
 
-            success = await job.create_and_wait(batch_api, core_api, timeout=args.duration + 300)
-            await job.delete()
+        success = await job.create_and_wait(batch_api, core_api, timeout=args.duration + 300)
+        await job.delete()
 
-            if not success:
-                print("ERROR: Load generation failed")
-                return 1
-        else:
-            load_generator = LoadGenerator(frontend_urls=frontend_urls, model=args.model_path)
-            await load_generator.generate_load(duration_sec=args.duration, qps=args.qps)
-            load_generator.print_summary()
+        if not success:
+            print("ERROR: Load generation failed")
+            return 1
 
         print("\nLoad generation complete.")
         return 0

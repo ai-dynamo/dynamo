@@ -62,10 +62,6 @@ class ScaleTestDGDBuilder:
         self._update_mocker_arg("--num-workers", str(num_workers))
         return self
 
-    def set_image(self, image: str) -> "ScaleTestDGDBuilder":
-        self._spec.set_image(image)
-        return self
-
     def set_frontend_replicas(self, replicas: int) -> "ScaleTestDGDBuilder":
         self._spec.set_service_replicas("Frontend", replicas)
         return self
@@ -80,10 +76,6 @@ class ScaleTestDGDBuilder:
 
     def set_router_mode(self, mode: str) -> "ScaleTestDGDBuilder":
         self._update_frontend_arg("--router-mode", mode)
-        return self
-
-    def set_image_pull_secrets(self, secret_names: list[str]) -> "ScaleTestDGDBuilder":
-        self._spec.set_image_pull_secrets(secret_names)
         return self
 
     def _update_mocker_arg(self, arg_name: str, arg_value: str) -> None:
@@ -104,7 +96,6 @@ def create_scale_test_specs(
     kubernetes_namespace: str = "default",
     model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     speedup_ratio: float = 10.0,
-    image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1",
     name_prefix: str = "scale-test",
     base_template: Optional[str] = None,
 ) -> list[DeploymentSpec]:
@@ -119,7 +110,6 @@ def create_scale_test_specs(
             builder.set_kubernetes_namespace(kubernetes_namespace)
             .set_model(model_path)
             .set_speedup_ratio(speedup_ratio)
-            .set_image(image)
             .build()
         )
         specs.append(spec)

@@ -12,6 +12,7 @@ from kubernetes_asyncio import client
 from kubernetes_asyncio.client import exceptions
 
 SCRIPT_PATH = Path(__file__).parent / "load_generator_script.py"
+LOAD_GENERATOR_IMAGE = "python:3.11-slim"
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,6 @@ class LoadGeneratorJob:
         duration_sec: int,
         qps: float,
         max_tokens: int = 30,
-        image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1",
         job_name: str = "scale-test-load-generator",
         num_pods: int = 1,
         num_processes_per_pod: int = 1,
@@ -38,7 +38,6 @@ class LoadGeneratorJob:
         self.duration_sec = duration_sec
         self.qps = qps
         self.max_tokens = max_tokens
-        self.image = image
         self.job_name = job_name
         self.num_pods = num_pods
         self.num_processes_per_pod = num_processes_per_pod
@@ -105,7 +104,7 @@ class LoadGeneratorJob:
                         "containers": [
                             {
                                 "name": "load-generator",
-                                "image": self.image,
+                                "image": LOAD_GENERATOR_IMAGE,
                                 "command": ["bash", "-c", "pip install -q openai && python3 /scripts/load_generator.py"],
                                 "env": self._get_env_vars(),
                                 "volumeMounts": [{"name": "script-volume", "mountPath": "/scripts", "readOnly": True}],
