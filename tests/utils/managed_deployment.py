@@ -436,6 +436,27 @@ class DeploymentSpec:
         service = self.get_service(service_name)
         service.replicas = replicas
 
+    def set_image_pull_secrets(self, secret_names: List[str], service_name: Optional[str] = None):
+        """
+        Set imagePullSecrets for services.
+
+        Args:
+            secret_names: List of secret names to use for pulling images
+            service_name: Optional service name. If None, applies to all services.
+        """
+        if service_name is None:
+            service_names = list(self._deployment_spec["spec"]["services"].keys())
+        else:
+            service_names = [service_name]
+
+        for svc_name in service_names:
+            service_spec = self._deployment_spec["spec"]["services"][svc_name]
+            if "extraPodSpec" not in service_spec:
+                service_spec["extraPodSpec"] = {}
+            service_spec["extraPodSpec"]["imagePullSecrets"] = [
+                {"name": name} for name in secret_names
+            ]
+
     def save(self, out_file: str):
         """Save updated deployment to file"""
         with open(out_file, "w") as f:

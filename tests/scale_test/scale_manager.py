@@ -21,6 +21,7 @@ from kubernetes_asyncio.client import exceptions
 
 from tests.scale_test.config import ScaleTestConfig
 from tests.scale_test.dgd_builder import ScaleTestDGDBuilder
+from tests.scale_test.load_generator_job import LoadGeneratorJob
 from tests.utils.managed_deployment import DeploymentSpec
 
 logger = logging.getLogger(__name__)
@@ -40,10 +41,11 @@ class ScaleManager:
     model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     speedup_ratio: float = 10.0
     kubernetes_namespace: str = "default"
-    image: str = "nvcr.io/nvidia/ai-dynamo/dynamo-base:latest"
+    image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
     timeout: int = 600
     name_prefix: str = "scale-test"
     cleanup_on_exit: bool = True
+    image_pull_secrets: List[str] = field(default_factory=list)
 
     # Deployment tracking
     _deployment_specs: List[DeploymentSpec] = field(default_factory=list)
@@ -74,6 +76,7 @@ class ScaleManager:
             timeout=config.deployment_timeout,
             name_prefix=config.name_prefix,
             cleanup_on_exit=config.cleanup_on_exit,
+            image_pull_secrets=config.image_pull_secrets,
         )
 
     async def _init_kubernetes(self) -> None:
@@ -100,13 +103,18 @@ class ScaleManager:
                 deployment_id=i,
                 name_prefix=self.name_prefix,
             )
-            spec = (
+            builder_chain = (
                 builder.set_kubernetes_namespace(self.kubernetes_namespace)
                 .set_model(self.model_path)
                 .set_speedup_ratio(self.speedup_ratio)
                 .set_image(self.image)
-                .build()
             )
+            
+            # Add image pull secrets if specified
+            if self.image_pull_secrets:
+                builder_chain = builder_chain.set_image_pull_secrets(self.image_pull_secrets)
+            
+            spec = builder_chain.build()
             specs.append(spec)
             self._deployment_names.append(spec.name)
         return specs
@@ -265,6 +273,72 @@ class ScaleManager:
                     logger.error(f"Error getting service {service_name}: {e}")
 
         return urls
+
+    async def run_load_generator_job(
+        self,
+        model: str,
+        duration_sec: int,
+        qps: float,
+        max_tokens: int = 30,
+        timeout: int = 600,
+        num_pods: int = 1,
+        num_processes_per_pod: int = 1,
+    ) -> bool:
+        """
+        Run the load generator as a Kubernetes Job inside the cluster.
+
+        This allows the load generator to access ClusterIP services that are
+        not reachable from outside the cluster.
+
+        Args:
+            model: Model name for requests
+            duration_sec: Test duration in seconds
+            qps: Queries per second (distributed across all pods/processes)
+            max_tokens: Maximum tokens per request
+            timeout: Timeout for job completion in seconds
+            num_pods: Number of parallel pods to run (for high QPS scaling)
+            num_processes_per_pod: Number of Python processes per pod (to bypass asyncio/GIL limits)
+
+        Returns:
+            True if load generation completed successfully, False otherwise
+        """
+        assert self._core_api is not None, "Kubernetes API not initialized"
+        assert self._custom_api is not None, "Kubernetes API not initialized"
+
+        # Get frontend URLs
+        urls = await self.get_frontend_urls()
+        if not urls:
+            logger.error("No frontend URLs found")
+            return False
+
+        logger.info(f"Running load generator as Kubernetes Job...")
+        logger.info(f"Duration: {duration_sec}s, QPS: {qps}")
+        logger.info(f"Parallelism: {num_pods} pod(s) x {num_processes_per_pod} process(es) = {num_pods * num_processes_per_pod} total workers")
+        logger.info(f"Targeting {len(urls)} frontends")
+
+        # Create batch API client
+        k8s_client = client.ApiClient()
+        batch_api = client.BatchV1Api(k8s_client)
+
+        # Create and run the job
+        job = LoadGeneratorJob(
+            namespace=self.kubernetes_namespace,
+            frontend_urls=urls,
+            model=model,
+            duration_sec=duration_sec,
+            qps=qps,
+            max_tokens=max_tokens,
+            image=self.image,
+            num_pods=num_pods,
+            num_processes_per_pod=num_processes_per_pod,
+        )
+
+        success = await job.create_and_wait(batch_api, self._core_api, timeout)
+
+        # Cleanup job
+        await job.delete()
+
+        return success
 
     async def get_frontend_external_urls(self) -> List[str]:
         """
@@ -437,7 +511,7 @@ async def run_scale_test(
     model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     speedup_ratio: float = 10.0,
     namespace: str = "default",
-    image: str = "nvcr.io/nvidia/ai-dynamo/dynamo-base:latest",
+    image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1",
     timeout: int = 600,
 ) -> ScaleManager:
     """

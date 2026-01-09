@@ -141,7 +141,7 @@ class ScaleTestDGDBuilder:
         Set the container image for all services.
 
         Args:
-            image: Container image (e.g., "nvcr.io/nvidia/ai-dynamo/dynamo-base:latest")
+            image: Container image (e.g., "nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest")
         """
         self._spec.set_image(image)
         return self
@@ -186,6 +186,16 @@ class ScaleTestDGDBuilder:
         self._update_frontend_arg("--router-mode", mode)
         return self
 
+    def set_image_pull_secrets(self, secret_names: list[str]) -> "ScaleTestDGDBuilder":
+        """
+        Set imagePullSecrets for all services in the deployment.
+
+        Args:
+            secret_names: List of Kubernetes secret names for pulling images
+        """
+        self._spec.set_image_pull_secrets(secret_names)
+        return self
+
     def _update_mocker_arg(self, arg_name: str, arg_value: str) -> None:
         """Update an argument in the MockerWorker service."""
         self._spec.add_arg_to_service("MockerWorker", arg_name, arg_value)
@@ -218,7 +228,7 @@ def create_scale_test_specs(
     kubernetes_namespace: str = "default",
     model_path: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     speedup_ratio: float = 10.0,
-    image: str = "nvcr.io/nvidia/ai-dynamo/dynamo-base:latest",
+    image: str = "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1",
     name_prefix: str = "scale-test",
     base_template: Optional[str] = None,
 ) -> list[DeploymentSpec]:

@@ -50,12 +50,14 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-base:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          command:
+            - python
+            - -m
+            - dynamo.frontend
           args:
-            - --http-port
-            - "8000"
             - --router-mode
-            - round-robin
+            - kv
     MockerWorker:
       dynamoNamespace: scale-test-placeholder
       componentType: worker
@@ -86,7 +88,7 @@ spec:
           value: "9090"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/dynamo-base:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
           command:
             - python
             - -m
@@ -96,6 +98,4 @@ spec:
             - TinyLlama/TinyLlama-1.1B-Chat-v1.0
             - --speedup-ratio
             - "10.0"
-            - --num-workers
-            - "1"
 
