@@ -207,9 +207,9 @@ impl ModelWatcher {
                         }
                     }
                 }
-                DiscoveryEvent::Removed(instance_id) => {
+                DiscoveryEvent::Removed(id) => {
                     // Use instance_id hex as the HashMap key (matches what we saved with)
-                    let key = format!("{:x}", instance_id);
+                    let key = format!("{:x}", id.instance_id());
 
                     match self
                         .handle_delete(&key, target_namespace, global_namespace)

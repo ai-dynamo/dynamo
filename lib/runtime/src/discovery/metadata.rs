@@ -5,22 +5,16 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{DiscoveryInstance, DiscoveryQuery};
-
-/// Key for organizing metadata internally
-/// Format: "namespace/component/endpoint"
-fn make_endpoint_key(namespace: &str, component: &str, endpoint: &str) -> String {
-    format!("{namespace}/{component}/{endpoint}")
-}
+use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EndpointInstanceId, ModelCardInstanceId};
 
 /// Metadata stored on each pod and exposed via HTTP endpoint
 /// This struct holds all discovery registrations for this pod instance
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryMetadata {
-    /// Registered endpoint instances (key: "namespace/component/endpoint")
-    endpoints: HashMap<String, DiscoveryInstance>,
-    /// Registered model card instances (key: "namespace/component/endpoint")
-    model_cards: HashMap<String, DiscoveryInstance>,
+    /// Registered endpoint instances (key: EndpointInstanceId for unique identification)
+    endpoints: HashMap<EndpointInstanceId, DiscoveryInstance>,
+    /// Registered model card instances (key: ModelCardInstanceId for unique identification)
+    model_cards: HashMap<ModelCardInstanceId, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -34,57 +28,53 @@ impl DiscoveryMetadata {
 
     /// Register an endpoint instance
     pub fn register_endpoint(&mut self, instance: DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Endpoint(ref inst) = instance {
-            let key = make_endpoint_key(&inst.namespace, &inst.component, &inst.endpoint);
-            self.endpoints.insert(key, instance);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot register non-endpoint instance as endpoint")
+        match instance.id() {
+            DiscoveryInstanceId::Endpoint(key) => {
+                self.endpoints.insert(key, instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot register non-endpoint instance as endpoint")
+            }
         }
     }
 
     /// Register a model card instance
     pub fn register_model_card(&mut self, instance: DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Model {
-            ref namespace,
-            ref component,
-            ref endpoint,
-            ..
-        } = instance
-        {
-            let key = make_endpoint_key(namespace, component, endpoint);
-            self.model_cards.insert(key, instance);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot register non-model-card instance as model card")
+        match instance.id() {
+            DiscoveryInstanceId::Model(key) => {
+                self.model_cards.insert(key, instance);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot register non-model-card instance as model card")
+            }
         }
     }
 
     /// Unregister an endpoint instance
     pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Endpoint(inst) = instance {
-            let key = make_endpoint_key(&inst.namespace, &inst.component, &inst.endpoint);
-            self.endpoints.remove(&key);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
+        match instance.id() {
+            DiscoveryInstanceId::Endpoint(key) => {
+                self.endpoints.remove(&key);
+                Ok(())
+            }
+            DiscoveryInstanceId::Model(_) => {
+                anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
+            }
         }
     }
 
     /// Unregister a model card instance
     pub fn unregister_model_card(&mut self, instance: &DiscoveryInstance) -> Result<()> {
-        if let DiscoveryInstance::Model {
-            namespace,
-            component,
-            endpoint,
-            ..
-        } = instance
-        {
-            let key = make_endpoint_key(namespace, component, endpoint);
-            self.model_cards.remove(&key);
-            Ok(())
-        } else {
-            anyhow::bail!("Cannot unregister non-model-card instance as model card")
+        match instance.id() {
+            DiscoveryInstanceId::Model(key) => {
+                self.model_cards.remove(&key);
+                Ok(())
+            }
+            DiscoveryInstanceId::Endpoint(_) => {
+                anyhow::bail!("Cannot unregister non-model-card instance as model card")
+            }
         }
     }
 
