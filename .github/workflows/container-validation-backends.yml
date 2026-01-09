@@ -458,6 +458,10 @@ jobs:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run tests
+        # TODO: enable testing on ARM when these tests stop failing on collection on machines without GPUs:
+        #  components/src/dynamo/trtllm/tests/test_trtllm_autodeploy.py
+        #  components/src/dynamo/trtllm/tests/test_trtllm_unit.py
+        if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
