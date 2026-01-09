@@ -1,10 +1,10 @@
-# concurrencies: 1126
+# concurrencies: 1, 2, 3, 6, 12
 prefill:
-  num: 8
+  num: 1
   config:
-    max_batch_size: 2
-    max_num_tokens: 16640
-    max_seq_len: 8232
+    max_batch_size: 16
+    max_num_tokens: 16384
+    max_seq_len: 2048
     tensor_parallel_size: 2
     moe_expert_parallel_size: 2
     enable_attention_dp: true
@@ -14,6 +14,12 @@ prefill:
     disable_overlap_scheduler: true
     moe_config:
       backend: TRTLLM
+    nvfp4_gemm_config:
+      allowed_backends:
+      - cutlass
+      - cublaslt
+      - cutedsl
+      - cuda_core
     kv_cache_config:
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.6
@@ -21,6 +27,10 @@ prefill:
     cache_transceiver_config:
       max_tokens_in_buffer: 16384
       backend: UCX
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 3
+
   env:
     TRTLLM_SERVER_DISABLE_GC: 1
     TRTLLM_WORKER_DISABLE_GC: 1
@@ -29,16 +39,16 @@ prefill:
   unset_env:
     - UCX_TLS
 decode:
-  num: 1
+  num: 4
   config:
-    tensor_parallel_size: 16
-    moe_expert_parallel_size: 16
-    enable_attention_dp: true
+    tensor_parallel_size: 8
+    moe_expert_parallel_size: 8
+    enable_attention_dp: false
     enable_lm_head_tp_in_adp: false
     pipeline_parallel_size: 1
-    max_batch_size: 64
-    max_num_tokens: 64
-    max_seq_len: 9256
+    max_batch_size: 8
+    max_num_tokens: 32
+    max_seq_len: 2088
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
@@ -46,26 +56,30 @@ decode:
       - 2
       - 4
       - 8
-      - 16
-      - 24
-      - 32
-      - 40
-      - 48
-      - 56
-      - 64
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.8
+      free_gpu_memory_fraction: 0.9
       dtype: fp8
     moe_config:
-      backend: CUTEDSL
+      backend: TRTLLM
       use_low_precision_moe_combine: true
+    nvfp4_gemm_config:
+      allowed_backends:
+      - cutlass
+      - cublaslt
+      - cutedsl
+      - cuda_core
     cache_transceiver_config:
       max_tokens_in_buffer: 16384
       backend: UCX
     stream_interval: 100
     num_postprocess_workers: 4
+    allreduce_strategy: MNNVL
+    speculative_config:
+      decoding_type: MTP
+      num_nextn_predict_layers: 3
+
   env:
     TRTLLM_SERVER_DISABLE_GC: 1
     TRTLLM_WORKER_DISABLE_GC: 1

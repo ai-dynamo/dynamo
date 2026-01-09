@@ -1,10 +1,10 @@
-# concurrencies: 1126
+# concurrencies: 1229
 prefill:
-  num: 9
+  num: 3
   config:
-    max_batch_size: 2
-    max_num_tokens: 16640
-    max_seq_len: 8232
+    max_batch_size: 16
+    max_num_tokens: 16384
+    max_seq_len: 2048
     tensor_parallel_size: 2
     moe_expert_parallel_size: 2
     enable_attention_dp: true
@@ -14,6 +14,12 @@ prefill:
     disable_overlap_scheduler: true
     moe_config:
       backend: TRTLLM
+    nvfp4_gemm_config:
+      allowed_backends:
+      - cutlass
+      - cublaslt
+      - cutedsl
+      - cuda_core
     kv_cache_config:
       enable_block_reuse: false
       free_gpu_memory_fraction: 0.6
@@ -35,14 +41,14 @@ prefill:
 decode:
   num: 1
   config:
-    tensor_parallel_size: 16
-    moe_expert_parallel_size: 16
+    tensor_parallel_size: 32
+    moe_expert_parallel_size: 32
     enable_attention_dp: true
     enable_lm_head_tp_in_adp: true
     pipeline_parallel_size: 1
     max_batch_size: 32
     max_num_tokens: 128
-    max_seq_len: 9256
+    max_seq_len: 2088
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
@@ -56,11 +62,20 @@ decode:
     print_iter_log: true
     kv_cache_config:
       enable_block_reuse: false
-      free_gpu_memory_fraction: 0.8
+      free_gpu_memory_fraction: 0.6
       dtype: fp8
     moe_config:
       backend: CUTEDSL
       use_low_precision_moe_combine: true
+      load_balancer:
+        num_slots: 288
+        layer_updates_per_iter: 1
+    nvfp4_gemm_config:
+      allowed_backends:
+      - cutlass
+      - cublaslt
+      - cutedsl
+      - cuda_core
     cache_transceiver_config:
       max_tokens_in_buffer: 16384
       backend: UCX
