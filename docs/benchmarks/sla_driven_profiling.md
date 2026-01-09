@@ -409,7 +409,6 @@ profilingConfig:
 **Requirements:**
 - The PVC must exist in the same namespace as the DGDR
 - The model weights must be accessible at `{mountPath}/{pvcPath}`
-- The PVC is mounted as read-only to both the profiler pod and the generated DGD worker pods
 
 ### Engine Configuration (Auto-configured)
 
