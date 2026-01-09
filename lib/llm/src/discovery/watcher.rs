@@ -45,21 +45,6 @@ use crate::{
 use super::ModelManager;
 use crate::namespace::is_global_namespace;
 
-/// Creates a deterministic string key from a ModelCardInstanceId.
-/// Format: {namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]
-fn model_card_key(mcid: &ModelCardInstanceId) -> String {
-    match &mcid.model_suffix {
-        Some(suffix) => format!(
-            "{}/{}/{}/{:x}/{}",
-            mcid.namespace, mcid.component, mcid.endpoint, mcid.instance_id, suffix
-        ),
-        None => format!(
-            "{}/{}/{}/{:x}",
-            mcid.namespace, mcid.component, mcid.endpoint, mcid.instance_id
-        ),
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
     Added(ModelDeploymentCard),
@@ -264,7 +249,7 @@ impl ModelWatcher {
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
-        let key = model_card_key(mcid);
+        let key = mcid.to_path();
         let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
@@ -365,7 +350,7 @@ impl ModelWatcher {
         let client = endpoint.client().await?;
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager
-            .save_model_card(&model_card_key(mcid), card.clone())?;
+            .save_model_card(&mcid.to_path(), card.clone())?;
 
         // Skip duplicate registrations based on model type.
         // Prefill and decode models are tracked separately, so registering one

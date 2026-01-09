@@ -5,18 +5,16 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::{
-    DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery, EndpointInstanceId, ModelCardInstanceId,
-};
+use super::{DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery};
 
 /// Metadata stored on each pod and exposed via HTTP endpoint
 /// This struct holds all discovery registrations for this pod instance
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiscoveryMetadata {
-    /// Registered endpoint instances (key: EndpointInstanceId for unique identification)
-    endpoints: HashMap<EndpointInstanceId, DiscoveryInstance>,
-    /// Registered model card instances (key: ModelCardInstanceId for unique identification)
-    model_cards: HashMap<ModelCardInstanceId, DiscoveryInstance>,
+    /// Registered endpoint instances (key: path string from EndpointInstanceId::to_path())
+    endpoints: HashMap<String, DiscoveryInstance>,
+    /// Registered model card instances (key: path string from ModelCardInstanceId::to_path())
+    model_cards: HashMap<String, DiscoveryInstance>,
 }
 
 impl DiscoveryMetadata {
@@ -32,7 +30,7 @@ impl DiscoveryMetadata {
     pub fn register_endpoint(&mut self, instance: DiscoveryInstance) -> Result<()> {
         match instance.id() {
             DiscoveryInstanceId::Endpoint(key) => {
-                self.endpoints.insert(key, instance);
+                self.endpoints.insert(key.to_path(), instance);
                 Ok(())
             }
             DiscoveryInstanceId::Model(_) => {
@@ -45,7 +43,7 @@ impl DiscoveryMetadata {
     pub fn register_model_card(&mut self, instance: DiscoveryInstance) -> Result<()> {
         match instance.id() {
             DiscoveryInstanceId::Model(key) => {
-                self.model_cards.insert(key, instance);
+                self.model_cards.insert(key.to_path(), instance);
                 Ok(())
             }
             DiscoveryInstanceId::Endpoint(_) => {
@@ -58,7 +56,7 @@ impl DiscoveryMetadata {
     pub fn unregister_endpoint(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {
             DiscoveryInstanceId::Endpoint(key) => {
-                self.endpoints.remove(&key);
+                self.endpoints.remove(&key.to_path());
                 Ok(())
             }
             DiscoveryInstanceId::Model(_) => {
@@ -71,7 +69,7 @@ impl DiscoveryMetadata {
     pub fn unregister_model_card(&mut self, instance: &DiscoveryInstance) -> Result<()> {
         match instance.id() {
             DiscoveryInstanceId::Model(key) => {
-                self.model_cards.remove(&key);
+                self.model_cards.remove(&key.to_path());
                 Ok(())
             }
             DiscoveryInstanceId::Endpoint(_) => {

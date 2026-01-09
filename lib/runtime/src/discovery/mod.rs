@@ -236,6 +236,34 @@ pub struct EndpointInstanceId {
     pub instance_id: u64,
 }
 
+impl EndpointInstanceId {
+    /// Converts to a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}`
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/{}/{}/{:x}",
+            self.namespace, self.component, self.endpoint, self.instance_id
+        )
+    }
+
+    /// Parses from a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}`
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != 4 {
+            anyhow::bail!(
+                "Invalid EndpointInstanceId path: expected 4 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            namespace: parts[0].to_string(),
+            component: parts[1].to_string(),
+            endpoint: parts[2].to_string(),
+            instance_id: u64::from_str_radix(parts[3], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+        })
+    }
+}
+
 /// Unique identifier for a model card instance
 /// The combination of (namespace, component, endpoint, instance_id, model_suffix) uniquely identifies a model card
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -246,6 +274,41 @@ pub struct ModelCardInstanceId {
     pub instance_id: u64,
     /// None for base models, Some(slug) for LoRA adapters
     pub model_suffix: Option<String>,
+}
+
+impl ModelCardInstanceId {
+    /// Converts to a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]`
+    pub fn to_path(&self) -> String {
+        match &self.model_suffix {
+            Some(suffix) => format!(
+                "{}/{}/{}/{:x}/{}",
+                self.namespace, self.component, self.endpoint, self.instance_id, suffix
+            ),
+            None => format!(
+                "{}/{}/{}/{:x}",
+                self.namespace, self.component, self.endpoint, self.instance_id
+            ),
+        }
+    }
+
+    /// Parses from a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]`
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() < 4 || parts.len() > 5 {
+            anyhow::bail!(
+                "Invalid ModelCardInstanceId path: expected 4 or 5 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            namespace: parts[0].to_string(),
+            component: parts[1].to_string(),
+            endpoint: parts[2].to_string(),
+            instance_id: u64::from_str_radix(parts[3], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+            model_suffix: parts.get(4).map(|s| s.to_string()),
+        })
+    }
 }
 
 /// Union of instance identifiers for different discovery object types
