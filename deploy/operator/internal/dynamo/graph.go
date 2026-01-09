@@ -44,6 +44,142 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 )
 
+// RestartState holds the restart state for DGD services.
+type RestartState struct {
+	// Timestamp is the restart timestamp to apply as the annotation value.
+	// Format: RFC3339
+	Timestamp string
+	// ServicesToAnnotate is the set of service names that should have the restart annotation.
+	ServicesToAnnotate map[string]bool
+}
+
+// ShouldAnnotateService returns true if the given service should have a restart annotation.
+func (s *RestartState) ShouldAnnotateService(serviceName string) bool {
+	if s == nil || s.ServicesToAnnotate == nil {
+		return false
+	}
+	return s.ServicesToAnnotate[serviceName]
+}
+
+// DetermineRestartState computes the restart state for DGD services.
+func DetermineRestartState(dgd *v1alpha1.DynamoGraphDeployment, restartStatus *v1alpha1.RestartStatus) *RestartState {
+	if restartStatus == nil {
+		return nil
+	}
+
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.ID == "" {
+		// Check if there's a completed restart we need to preserve
+		if restartStatus.ObservedID != "" {
+			return &RestartState{
+				Timestamp:          restartStatus.ObservedID,
+				ServicesToAnnotate: getAllServiceNames(dgd),
+			}
+		}
+		return nil
+	}
+
+	specID := dgd.Spec.Restart.ID
+
+	isNewRestart := restartStatus.ObservedID == "" ||
+		dgd.Spec.Restart.ID != restartStatus.ObservedID
+
+	if !isNewRestart && restartStatus.Phase == v1alpha1.RestartPhaseCompleted {
+		return &RestartState{
+			Timestamp:          specID,
+			ServicesToAnnotate: getAllServiceNames(dgd),
+		}
+	}
+
+	if IsParallelRestart(dgd) {
+		return &RestartState{
+			Timestamp:          specID,
+			ServicesToAnnotate: getAllServiceNames(dgd),
+		}
+	}
+
+	// Sequential restart (default or specified)
+	return &RestartState{
+		Timestamp:          specID,
+		ServicesToAnnotate: getServicesToAnnotateForSequentialRestart(dgd, restartStatus),
+	}
+}
+
+// getAllServiceNames returns a map of all service names in the DGD.
+func getAllServiceNames(dgd *v1alpha1.DynamoGraphDeployment) map[string]bool {
+	services := make(map[string]bool, len(dgd.Spec.Services))
+	for serviceName := range dgd.Spec.Services {
+		services[serviceName] = true
+	}
+	return services
+}
+
+// IsParallelRestart returns true if the restart strategy is parallel.
+func IsParallelRestart(dgd *v1alpha1.DynamoGraphDeployment) bool {
+	if dgd.Spec.Restart == nil || dgd.Spec.Restart.Strategy == nil {
+		return false // Default is sequential
+	}
+	return dgd.Spec.Restart.Strategy.Type == v1alpha1.RestartStrategyTypeParallel
+}
+
+// getServicesToAnnotateForSequentialRestart determines which services should be annotated
+// for a sequential restart in progress.
+func getServicesToAnnotateForSequentialRestart(dgd *v1alpha1.DynamoGraphDeployment, status *v1alpha1.RestartStatus) map[string]bool {
+	services := make(map[string]bool)
+
+	order := GetRestartOrder(dgd)
+	if len(order) == 0 {
+		return services
+	}
+
+	// New restart or Pending phase - only first service needs to be annotated
+	if status == nil ||
+		status.Phase == v1alpha1.RestartPhasePending ||
+		len(status.InProgress) == 0 {
+		services[order[0]] = true
+		return services
+	}
+
+	// Find the max index among in-progress services
+	inProgress := make(map[string]bool)
+	for _, svc := range status.InProgress {
+		inProgress[svc] = true
+	}
+
+	maxIndex := -1
+	for i, svc := range order {
+		if inProgress[svc] {
+			if i > maxIndex {
+				maxIndex = i
+			}
+		}
+	}
+
+	// Add all services up to and including maxIndex
+	// Services before the in-progress one have completed and need their annotation preserved
+	if maxIndex >= 0 {
+		for i := 0; i <= maxIndex; i++ {
+			services[order[i]] = true
+		}
+	}
+
+	return services
+}
+
+// GetRestartOrder returns the order of services for sequential restart.
+// If not specified, returns a deterministic alphabetical order.
+func GetRestartOrder(dgd *v1alpha1.DynamoGraphDeployment) []string {
+	if dgd.Spec.Restart != nil && dgd.Spec.Restart.Strategy != nil && len(dgd.Spec.Restart.Strategy.Order) > 0 {
+		return dgd.Spec.Restart.Strategy.Order
+	}
+
+	order := make([]string, 0, len(dgd.Spec.Services))
+	for serviceName := range dgd.Spec.Services {
+		order = append(order, serviceName)
+	}
+	sort.Strings(order)
+	return order
+}
+
 // ServiceConfig represents the YAML configuration structure for a service
 type DynamoConfig struct {
 	Enabled       bool   `yaml:"enabled"`
@@ -113,7 +249,7 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
@@ -143,6 +279,23 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
 				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
+			}
+		}
+
+		// Apply restart annotation if this service should be restarted.
+		// For services not in the current restart order, preserve their existing annotation
+		// to avoid triggering unwanted rollouts when a new restart begins.
+		if restartState.ShouldAnnotateService(componentName) {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+		} else if existingRestartAnnotations != nil {
+			if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
+				if deployment.Spec.Annotations == nil {
+					deployment.Spec.Annotations = make(map[string]string)
+				}
+				deployment.Spec.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
 			}
 		}
 
@@ -959,6 +1112,8 @@ func GenerateGrovePodCliqueSet(
 	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
 	controllerConfig controller_common.Config,
 	secretsRetriever SecretsRetriever,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
@@ -1039,6 +1194,23 @@ func GenerateGrovePodCliqueSet(
 			annotations, err := generateAnnotations(component)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate annotations: %w", err)
+			}
+
+			// Apply restart annotation if this service should be restarted.
+			// For services not in the current restart order, preserve their existing annotation
+			// to avoid triggering unwanted rollouts when a new restart begins.
+			if restartState.ShouldAnnotateService(serviceName) {
+				if annotations == nil {
+					annotations = make(map[string]string)
+				}
+				annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+			} else if existingRestartAnnotations != nil {
+				if existingTimestamp, ok := existingRestartAnnotations[serviceName]; ok {
+					if annotations == nil {
+						annotations = make(map[string]string)
+					}
+					annotations[commonconsts.RestartAnnotation] = existingTimestamp
+				}
 			}
 			clique.Annotations = annotations
 
