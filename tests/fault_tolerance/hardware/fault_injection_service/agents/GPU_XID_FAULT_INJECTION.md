@@ -13,9 +13,10 @@ Real GPU XID errors appear in `/dev/kmsg` (kernel messages) which NVSentinel's `
 1. `syslog-health-monitor` detects XID in kernel logs
 2. Node is cordoned by `fault-quarantine-module` (marked unschedulable)
 3. `node-drainer` evicts pods after timeout
-4. `fault-remediation` creates a `RebootNode` CR for devastating XIDs
-5. `janitor` sends reboot signal to CSP and monitors node recovery
-6. `fault-quarantine` uncordons node once health checks pass
+4. GPU driver restart for recoverable XIDs (`fault-remediation` and `janitor` modules)
+5. `fault-remediation` creates a `RebootNode` CR for devastating XIDs
+6. `janitor` sends reboot signal to CSP and monitors node recovery
+7. `fault-quarantine` uncordons node once health checks pass
 
 ## NVSentinel Prerequisites
 
