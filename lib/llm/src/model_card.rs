@@ -99,14 +99,14 @@ impl TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
-    HfChatTemplate(CheckedFile),
+    HfChatTemplate { is_custom: bool, file: CheckedFile },
 }
 
 impl PromptFormatterArtifact {
     pub fn checksum(&self) -> String {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
-            PromptFormatterArtifact::HfChatTemplate(c) => c.checksum().to_string(),
+            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.checksum().to_string(),
         }
     }
 
@@ -114,14 +114,21 @@ impl PromptFormatterArtifact {
     pub fn is_local(&self) -> bool {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.is_local(),
-            PromptFormatterArtifact::HfChatTemplate(c) => c.is_local(),
+            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.is_local(),
         }
     }
 
     pub fn update_dir(&mut self, dir: &Path) {
         match self {
             PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.update_dir(dir),
-            PromptFormatterArtifact::HfChatTemplate(c) => c.update_dir(dir),
+            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.update_dir(dir),
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        match self {
+            PromptFormatterArtifact::HfTokenizerConfigJson(_) => false,
+            PromptFormatterArtifact::HfChatTemplate { is_custom, .. } => *is_custom,
         }
     }
 }
@@ -430,38 +437,60 @@ impl ModelDeploymentCard {
     /// The opposite of `move_to_url` is `update_dir`.
     pub fn move_to_url(&mut self, base_url: &str) -> anyhow::Result<()> {
         macro_rules! change {
-            ($field:expr, $enum_variant:path, $filename:literal) => {
+            ($field:expr, $enum_variant:path) => {
                 if let Some($enum_variant(src_file)) = $field.as_mut()
-                    && src_file.is_local()
+                    && let Some(filename) = src_file
+                        .path()
+                        .and_then(|p| p.file_name())
+                        .and_then(|f| f.to_str())
+                        .map(|f| f.to_string())
                 {
                     let hf_url = url::Url::parse(base_url)
-                        .and_then(|u| u.join($filename))
-                        .context($filename)?;
+                        .and_then(|u| u.join(filename.as_ref()))
+                        .context(filename)?;
                     src_file.move_to_url(hf_url);
                 }
             };
         }
-        change!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
-        change!(
-            self.gen_config,
-            GenerationConfig::HfGenerationConfigJson,
-            "generation_config.json"
-        );
+
+        // config.json
+        change!(self.model_info, ModelInfoType::HfConfigJson);
+
+        // generation_config.json
+        change!(self.gen_config, GenerationConfig::HfGenerationConfigJson);
+
+        // tokenizer_config.json
         change!(
             self.prompt_formatter,
-            PromptFormatterArtifact::HfTokenizerConfigJson,
-            "tokenizer_config.json"
+            PromptFormatterArtifact::HfTokenizerConfigJson
         );
-        change!(
-            self.chat_template_file,
-            PromptFormatterArtifact::HfChatTemplate,
-            "chat_template.jinja"
-        );
-        change!(
-            self.tokenizer,
-            TokenizerKind::HfTokenizerJson,
-            "tokenizer.json"
-        );
+
+        // tokenizer.json
+        change!(self.tokenizer, TokenizerKind::HfTokenizerJson);
+
+        // We only "move" the chat template if it came form the repo. If we have a custom template
+        // file we cannot download that from HF.
+        if let Some(PromptFormatterArtifact::HfChatTemplate {
+            file: src_file,
+            is_custom,
+        }) = self.chat_template_file.as_mut()
+        {
+            if *is_custom {
+                tracing::info!(
+                    "Detected custom chat template. Ensure file exists in the same location on all hosts."
+                );
+            } else if let Some(filename) = src_file
+                .path()
+                .and_then(|p| p.file_name())
+                .and_then(|f| f.to_str())
+                .map(|f| f.to_string())
+            {
+                let hf_url = url::Url::parse(base_url)
+                    .and_then(|u| u.join(filename.as_ref()))
+                    .context(filename)?;
+                src_file.move_to_url(hf_url);
+            }
+        }
         Ok(())
     }
 
@@ -511,11 +540,14 @@ impl ModelDeploymentCard {
         if let Some(pf) = self.prompt_formatter.as_mut() {
             pf.update_dir(dir);
         }
-        if let Some(ct) = self.chat_template_file.as_mut() {
-            ct.update_dir(dir);
-        }
         if let Some(gc) = self.gen_config.as_mut() {
             gc.update_dir(dir);
+        }
+        // If it's a custom chat template we didn't download it, so leave the path untouched
+        if let Some(ct) = self.chat_template_file.as_mut()
+            && !ct.is_custom()
+        {
+            ct.update_dir(dir);
         }
     }
 
@@ -593,9 +625,10 @@ impl ModelDeploymentCard {
                 )
             })?;
 
-            Some(PromptFormatterArtifact::HfChatTemplate(
-                CheckedFile::from_disk(template_path)?,
-            ))
+            Some(PromptFormatterArtifact::HfChatTemplate {
+                is_custom: custom_template_path.is_some(),
+                file: CheckedFile::from_disk(template_path)?,
+            })
         } else {
             PromptFormatterArtifact::chat_template_from_disk(local_path)?
         };
@@ -893,7 +926,10 @@ impl PromptFormatterArtifact {
 
     pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
         match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
-            Ok(f) => Ok(Some(Self::HfChatTemplate(f))),
+            Ok(f) => Ok(Some(Self::HfChatTemplate {
+                file: f,
+                is_custom: false,
+            })),
             Err(_) => Ok(None),
         }
     }
