@@ -70,13 +70,13 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         # will expand it using the multi_modal_data, ensuring the block count
         # matches what prefill computed.
         #
-        # We pass zero embeddings (placeholder) since the actual embeddings are
-        # already in the KV cache from prefill - only the metadata (image_grid_thw)
-        # is needed for mRoPE position calculation.
+        # We pass unique placeholder embeddings (seeded by request_id) since the
+        # actual embeddings are already in the KV cache from prefill. The unique
+        # values prevent incorrect prefix cache matches between different images.
         multi_modal_data = None
         if is_qwen_vl_model(self.config.model):
             multi_modal_data = construct_qwen_decode_mm_data(
-                request.image_grid_thw, request.embeddings_shape
+                request.image_grid_thw, request.embeddings_shape, request.request_id
             )
 
         gen = self.engine_client.generate(
