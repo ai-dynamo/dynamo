@@ -54,6 +54,11 @@ func (v *DynamoGraphDeploymentValidator) Validate() (admission.Warnings, error) 
 		return nil, err
 	}
 
+	// Validate restart
+	if err := v.validateRestart(); err != nil {
+		return nil, err
+	}
+
 	var allWarnings admission.Warnings
 
 	// Validate each service
@@ -261,6 +266,64 @@ func (v *DynamoGraphDeploymentValidator) validatePVC(index int, pvc *nvidiacomv1
 	}
 
 	return err
+}
+
+func (v *DynamoGraphDeploymentValidator) validateRestart() error {
+	if v.deployment.Spec.Restart == nil {
+		return nil
+	}
+
+	restart := v.deployment.Spec.Restart
+
+	var err error
+	if restart.ID == "" {
+		err = errors.Join(err, fmt.Errorf("spec.restart.id is required"))
+	}
+
+	return errors.Join(err, v.validateRestartStrategyOrder())
+}
+
+func (v *DynamoGraphDeploymentValidator) validateRestartStrategyOrder() error {
+	restart := v.deployment.Spec.Restart
+	if restart.Strategy == nil || len(restart.Strategy.Order) == 0 {
+		return nil
+	}
+
+	if restart.Strategy.Type == nvidiacomv1alpha1.RestartStrategyTypeParallel {
+		return errors.New("spec.restart.strategy.order cannot be specified when strategy is parallel")
+	}
+
+	var err error
+
+	uniqueOrder := getUnique(restart.Strategy.Order)
+
+	if len(uniqueOrder) != len(restart.Strategy.Order) {
+		err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order must be unique"))
+	}
+
+	if len(uniqueOrder) != len(v.deployment.Spec.Services) {
+		err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order must have the same number of unique services as the deployment"))
+	}
+
+	for _, serviceName := range uniqueOrder {
+		if _, exists := v.deployment.Spec.Services[serviceName]; !exists {
+			err = errors.Join(err, fmt.Errorf("spec.restart.strategy.order contains unknown service: %s", serviceName))
+		}
+	}
+
+	return err
+}
+
+func getUnique[T comparable](slice []T) []T {
+	seen := make(map[T]struct{}, len(slice))
+	uniqueSlice := make([]T, 0, len(slice))
+	for _, element := range slice {
+		if _, exists := seen[element]; !exists {
+			seen[element] = struct{}{}
+			uniqueSlice = append(uniqueSlice, element)
+		}
+	}
+	return uniqueSlice
 }
 
 // getServiceNames extracts service names from a services map.
