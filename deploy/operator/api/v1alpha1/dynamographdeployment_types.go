@@ -60,7 +60,41 @@ type DynamoGraphDeploymentSpec struct {
 	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm").
 	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
+
+	// Restart specifies the restart policy for the graph deployment.
+	// +kubebuilder:validation:Optional
+	Restart *Restart `json:"restart,omitempty"`
 }
+
+type Restart struct {
+	// ID is an arbitrary string that triggers a restart when changed.
+	// Any modification to this value will initiate a restart of the graph deployment according to the strategy.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	ID string `json:"id"`
+
+	// Strategy specifies the restart strategy for the graph deployment.
+	// +kubebuilder:validation:Optional
+	Strategy *RestartStrategy `json:"strategy,omitempty"`
+}
+
+type RestartStrategy struct {
+	// Type specifies the restart strategy type.
+	// +kubebuilder:validation:Enum=Sequential;Parallel
+	// +kubebuilder:default=Sequential
+	Type RestartStrategyType `json:"type,omitempty"`
+
+	// Order specifies the order in which the services should be restarted.
+	// +kubebuilder:validation:Optional
+	Order []string `json:"order,omitempty"`
+}
+
+type RestartStrategyType string
+
+const (
+	RestartStrategyTypeSequential RestartStrategyType = "Sequential"
+	RestartStrategyTypeParallel   RestartStrategyType = "Parallel"
+)
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
@@ -73,7 +107,32 @@ type DynamoGraphDeploymentStatus struct {
 	// The map key is the service name from spec.services.
 	// +optional
 	Services map[string]ServiceReplicaStatus `json:"services,omitempty"`
+
+	// Restart contains the status of the restart of the graph deployment.
+	// +optional
+	Restart *RestartStatus `json:"restart,omitempty"`
 }
+
+// RestartStatus contains the status of the restart of the graph deployment.
+type RestartStatus struct {
+	// ObservedID is the restart ID that has been observed and is being processed.
+	// Matches the Restart.ID field in the spec.
+	ObservedID string `json:"observedID,omitempty"`
+	// Phase is the phase of the restart.
+	Phase RestartPhase `json:"phase,omitempty"`
+	// InProgress contains the names of the services that are currently being restarted.
+	// +optional
+	InProgress []string `json:"inProgress,omitempty"`
+}
+
+type RestartPhase string
+
+const (
+	RestartPhasePending    RestartPhase = "Pending"
+	RestartPhaseRestarting RestartPhase = "Restarting"
+	RestartPhaseCompleted  RestartPhase = "Completed"
+	RestartPhaseFailed     RestartPhase = "Failed"
+)
 
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {

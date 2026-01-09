@@ -199,9 +199,9 @@ _Appears in:_
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled (default), this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled (default), replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
 
 
 #### DynamoComponentDeploymentSpec
@@ -237,9 +237,9 @@ _Appears in:_
 | `extraPodSpec` _[ExtraPodSpec](#extrapodspec)_ | ExtraPodSpec allows to override the main pod spec configuration.<br />It is a k8s standard PodSpec. It also contains a MainContainer (standard k8s Container) field<br />that allows overriding the main container configuration. |  |  |
 | `livenessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | LivenessProbe to detect and restart unhealthy containers. |  |  |
 | `readinessProbe` _[Probe](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#probe-v1-core)_ | ReadinessProbe to signal when the container is ready to receive traffic. |  |  |
-| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled (default), this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
+| `replicas` _integer_ | Replicas is the desired number of Pods for this component.<br />When scalingAdapter is enabled, this field is managed by the<br />DynamoGraphDeploymentScalingAdapter and should not be modified directly. |  | Minimum: 0 <br /> |
 | `multinode` _[MultinodeSpec](#multinodespec)_ | Multinode is the configuration for multinode components. |  |  |
-| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled (default), replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
+| `scalingAdapter` _[ScalingAdapter](#scalingadapter)_ | ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.<br />When enabled, replicas are managed via DGDSA and external autoscalers can scale<br />the service using the Scale subresource. When disabled, replicas can be modified directly. |  |  |
 
 
 #### DynamoGraphDeployment
@@ -434,6 +434,7 @@ _Appears in:_
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
+| `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -452,6 +453,7 @@ _Appears in:_
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  |  |
+| `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  |  |
 
 
 #### DynamoModel
@@ -742,12 +744,100 @@ _Appears in:_
 | `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  |  |
 
 
+#### Restart
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | ID is an arbitrary string that triggers a restart when changed.<br />Any modification to this value will initiate a restart of the graph deployment according to the strategy. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `strategy` _[RestartStrategy](#restartstrategy)_ | Strategy specifies the restart strategy for the graph deployment. |  | Optional: \{\} <br /> |
+
+
+#### RestartPhase
+
+_Underlying type:_ _string_
+
+
+
+
+
+_Appears in:_
+- [RestartStatus](#restartstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `Restarting` |  |
+| `Completed` |  |
+| `Failed` |  |
+
+
+#### RestartStatus
+
+
+
+RestartStatus contains the status of the restart of the graph deployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  |  |
+| `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  |  |
+| `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  |  |
+
+
+#### RestartStrategy
+
+
+
+
+
+
+
+_Appears in:_
+- [Restart](#restart)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[RestartStrategyType](#restartstrategytype)_ | Type specifies the restart strategy type. | Sequential | Enum: [Sequential Parallel] <br /> |
+| `order` _string array_ | Order specifies the order in which the services should be restarted. |  | Optional: \{\} <br /> |
+
+
+#### RestartStrategyType
+
+_Underlying type:_ _string_
+
+
+
+
+
+_Appears in:_
+- [RestartStrategy](#restartstrategy)
+
+| Field | Description |
+| --- | --- |
+| `Sequential` |  |
+| `Parallel` |  |
+
+
 #### ScalingAdapter
 
 
 
 ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-for replica management. When enabled (default), the DGDSA owns the replicas field and
+for replica management. When enabled, the DGDSA owns the replicas field and
 external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
 
 
@@ -758,7 +848,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `disable` _boolean_ | Disable indicates whether the ScalingAdapter should be disabled for this service.<br />When false (default), a DGDSA is created and owns the replicas field.<br />When true, no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
+| `enabled` _boolean_ | Enabled indicates whether the ScalingAdapter should be enabled for this service.<br />When true, a DGDSA is created and owns the replicas field.<br />When false (default), no DGDSA is created and replicas can be modified directly in the DGD. | false |  |
 
 
 #### ServiceReplicaStatus
