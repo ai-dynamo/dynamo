@@ -259,8 +259,11 @@ sudo apt-get -y install libzmq3-dev
 ### After installing the pre-requisites above, install Dynamo
 
 ```
-uv pip install ai-dynamo[trtllm]
+pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo[trtllm]
 ```
+
+> [!Note]
+> We use `pip` instead of `uv` here because `tensorrt-llm` has a URL-based git dependency (`etcd3`) that `uv` does not currently support.
 
 Run the backend/worker like this:
 

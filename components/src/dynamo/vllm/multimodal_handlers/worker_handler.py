@@ -18,6 +18,7 @@ from ..multimodal_utils import (
     construct_mm_data,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,25 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
-        # Decode worker doesn't process embeddings, so we pass None or empty tensor
+        # For Qwen VL models with mRoPE, we need to pass multi_modal_data containing
+        # image_grid_thw for position embeddings calculation. The decode worker
+        # receives the ORIGINAL unexpanded prompt (with placeholders), and vLLM
+        # will expand it using the multi_modal_data, ensuring the block count
+        # matches what prefill computed.
+        #
+        # We pass unique placeholder embeddings (seeded by request_id) since the
+        # actual embeddings are already in the KV cache from prefill. The unique
+        # values prevent incorrect prefix cache matches between different images.
+        multi_modal_data = None
+        if is_qwen_vl_model(self.config.model):
+            multi_modal_data = construct_qwen_decode_mm_data(
+                request.image_grid_thw, request.embeddings_shape, request.request_id
+            )
+
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
+                multi_modal_data=multi_modal_data,
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
@@ -254,12 +270,17 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         if self.enable_disagg and self.decode_worker_client:
             decode_request = copy.deepcopy(request)
             async for prefill_response in gen:
-                # Update the prompt token id in the decode request to the one
-                # in response, which has image templated filled in. So that
-                # the decode worker will fetch correct amount of KV blocks.
-                decode_request.engine_prompt[
-                    "prompt_token_ids"
-                ] = prefill_response.prompt_token_ids
+                # For Qwen VL models with mRoPE: Keep the ORIGINAL unexpanded prompt.
+                # The decode worker will pass multi_modal_data which causes vLLM to
+                # expand the prompt identically to prefill, ensuring block counts match.
+                #
+                # For other models: Use the expanded prompt from prefill response.
+                # These models don't pass multi_modal_data in decode, so they need
+                # the already-expanded prompt to match the KV cache layout.
+                if not is_qwen_vl_model(self.config.model):
+                    decode_request.engine_prompt[
+                        "prompt_token_ids"
+                    ] = prefill_response.prompt_token_ids
                 logger.debug(
                     f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
                 )
