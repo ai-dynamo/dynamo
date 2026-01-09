@@ -166,6 +166,13 @@ const (
 	BackendVLLM   = "vllm"
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
+
+	// Profiling config field names
+	ConfigKeyDeployment = "deployment"
+	ConfigKeyModelCache = "modelCache"
+	ConfigKeyPVCName    = "pvcName"
+	ConfigKeyPVCPath    = "pvcPath"
+	ConfigKeyMountPath  = "mountPath"
 )
 
 // shell script template for the output copier sidecar
@@ -1249,17 +1256,22 @@ func extractModelCachePVCConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentReq
 		return "", ""
 	}
 
-	deployment, ok := config["deployment"].(map[string]interface{})
+	deployment, ok := config[ConfigKeyDeployment].(map[string]interface{})
 	if !ok {
 		return "", ""
 	}
 
-	pvcName, _ := deployment["model_cache_pvc_name"].(string)
+	modelCache, ok := deployment[ConfigKeyModelCache].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	pvcName, _ := modelCache[ConfigKeyPVCName].(string)
 	if pvcName == "" {
 		return "", ""
 	}
 
-	mountPath, _ := deployment["model_cache_pvc_mount_path"].(string)
+	mountPath, _ := modelCache[ConfigKeyMountPath].(string)
 	if mountPath == "" {
 		mountPath = DefaultModelCacheMountPath
 	}

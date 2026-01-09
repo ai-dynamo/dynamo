@@ -214,14 +214,14 @@ Choose between **online profiling** (real measurements, 2-4 hours) or **offline 
 ```yaml
 # Online Profiling (Default)
 sweep:
-  use_ai_configurator: false
+  useAiConfigurator: false
 
-# Offline Profiling (AI Configurator - TensorRT-LLM only)
+# Offline Profiling (AI Configurator)
 sweep:
-  use_ai_configurator: true
-  aic_system: h200_sxm
-  aic_hf_id: Qwen/Qwen3-32B
-  aic_backend_version: "0.20.0"
+  useAiConfigurator: true
+  aicSystem: h200_sxm
+  aicHfId: Qwen/Qwen3-32B
+  aicBackendVersion: "0.20.0"
 ```
 
 > [!NOTE]
@@ -269,11 +269,10 @@ spec:
         ttft: 300
         itl: 10
       sweep:
-        use_ai_configurator: true
-      aic:
-        system: h200_sxm
-        model_name: DEEPSEEK_V3
-        backend_version: "0.20.0"
+        useAiConfigurator: true
+        aicSystem: h200_sxm
+        aicHfId: deepseek-ai/DeepSeek-V3
+        aicBackendVersion: "0.20.0"
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
@@ -299,26 +298,26 @@ profilingConfig:
 
     # Hardware constraints (optional)
     hardware:
-      min_num_gpus_per_engine: 2
-      max_num_gpus_per_engine: 8
-      gpu_type: h200_sxm
+      minNumGpusPerEngine: 2
+      maxNumGpusPerEngine: 8
+      gpuType: h200_sxm
 
     # Profiling sweep settings (optional)
     sweep:
-      prefill_interpolation_granularity: 16  # Number of samples for prefill ISL sweep
-      decode_interpolation_granularity: 6    # Number of samples for decode sweep
+      prefillInterpolationGranularity: 16  # Number of samples for prefill ISL sweep
+      decodeInterpolationGranularity: 6    # Number of samples for decode sweep
 ```
 
 > **Note**: `engine.config` is a **file path** to a DGD YAML file, not inline configuration. Use ConfigMapRef (recommended) or leave it unset to auto-generate.
 
 #### Planner Configuration Passthrough
-Add planner-specific settings. Planner arguments use a `planner_` prefix:
+Add planner-specific settings:
 
 ```yaml
 profilingConfig:
   config:
     planner:
-      planner_min_endpoint: 2
+      plannerMinEndpoint: 2
 ```
 
 ## Understanding Profiling Results
