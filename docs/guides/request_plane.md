@@ -44,7 +44,7 @@ Dynamo has **two independent communication planes**:
 - **Request plane** (**`DYN_REQUEST_PLANE`**): how **RPC requests** flow between components (frontend → router → worker), via `tcp`, `http`, or `nats`.
 - **KV event plane** (currently only **NATS** is supported): how **KV cache events** (and optional router replica sync) are distributed/persisted for KV-aware routing.
 
-**Note:** if you are using `tcp` or `http` request plane and choose to use NATS for KV events, you must still configure NATS server using `NATS_SERVER` environment variable, e.g. `NATS_SERVER=nats://nats-hostname:port`.
+**Note:** If you are using `tcp` or `http` request plane with KV events enabled (default), NATS is automatically initialized. You can optionally configure `NATS_SERVER` environment variable (e.g., `NATS_SERVER=nats://nats-hostname:port`) to specify a custom NATS server; otherwise, it defaults to `localhost:4222`. To completely disable NATS, use `--no-kv-events` on the frontend.
 
 Because they are independent, you can mix them.
 
@@ -100,7 +100,7 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 **When to use TCP:**
 - Simple deployments with direct service-to-service communication (e.g. frontend to backend)
-- Minimal infrastructure requirements (**no NATS needed unless you enable KV-event-backed routing/replica sync**)
+- Minimal infrastructure requirements (NATS is initialized by default for KV events but can be disabled with `--no-kv-events`)
 - Low-latency requirements
 
 **TCP Configuration Options:**
@@ -172,7 +172,7 @@ DYN_REQUEST_PLANE=nats python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 
 **When to use NATS:**
 - Production deployments with service discovery
-- Currently KV based routing require NATS. If you want to completely disable NATS, KV based routing won't be available
+- KV-aware routing with accurate cache state tracking (requires NATS for event transport). Note: approximate mode (`--no-kv-events`) provides KV routing without NATS but with reduced accuracy.
 - Need for message replay and persistence features
 
 Limitations:
@@ -301,6 +301,6 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Resource Usage
 
-- **TCP**: Minimal infrastructure (no additional services required)
-- **HTTP**: Minimal infrastructure (no additional services required)
+- **TCP**: Minimal infrastructure (NATS required only if using KV events, can disable with `--no-kv-events`)
+- **HTTP**: Minimal infrastructure (NATS required only if using KV events, can disable with `--no-kv-events`)
 - **NATS**: Requires running NATS server (additional memory/CPU)
