@@ -96,12 +96,12 @@ async def run_test():
         kubernetes_namespace="test",
         model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     )
-    
+
     try:
         await manager._init_kubernetes()
         await manager.deploy_dgds()
         await manager.wait_for_dgds_ready()
-        
+
         # Run load generator as Kubernetes Job
         await manager.run_load_generator_job(
             model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
