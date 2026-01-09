@@ -45,6 +45,21 @@ use crate::{
 use super::ModelManager;
 use crate::namespace::is_global_namespace;
 
+/// Creates a deterministic string key from a ModelCardInstanceId.
+/// Format: {namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]
+fn model_card_key(mcid: &ModelCardInstanceId) -> String {
+    match &mcid.model_suffix {
+        Some(suffix) => format!(
+            "{}/{}/{}/{:x}/{}",
+            mcid.namespace, mcid.component, mcid.endpoint, mcid.instance_id, suffix
+        ),
+        None => format!(
+            "{}/{}/{}/{:x}",
+            mcid.namespace, mcid.component, mcid.endpoint, mcid.instance_id
+        ),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ModelUpdate {
     Added(ModelDeploymentCard),
@@ -245,14 +260,15 @@ impl ModelWatcher {
     /// Returns the name of the model we just deleted, if any.
     async fn handle_delete(
         &self,
-        key: &ModelCardInstanceId,
+        mcid: &ModelCardInstanceId,
         target_namespace: Option<&str>,
         is_global_namespace: bool,
     ) -> anyhow::Result<Option<String>> {
-        let card = match self.manager.remove_model_card(key) {
+        let key = model_card_key(mcid);
+        let card = match self.manager.remove_model_card(&key) {
             Some(card) => card,
             None => {
-                anyhow::bail!("Missing ModelDeploymentCard for {:?}", key);
+                anyhow::bail!("Missing ModelDeploymentCard for {}", key);
             }
         };
         let model_name = card.name().to_string();
@@ -336,19 +352,20 @@ impl ModelWatcher {
     // models.
     async fn handle_put(
         &self,
-        key: &ModelCardInstanceId,
+        mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
         card.download_config().await?;
 
         let component = self
             .drt
-            .namespace(&key.namespace)?
-            .component(&key.component)?;
-        let endpoint = component.endpoint(&key.endpoint);
+            .namespace(&mcid.namespace)?
+            .component(&mcid.component)?;
+        let endpoint = component.endpoint(&mcid.endpoint);
         let client = endpoint.client().await?;
         tracing::debug!(model_name = card.name(), "adding model");
-        self.manager.save_model_card(key.clone(), card.clone())?;
+        self.manager
+            .save_model_card(&model_card_key(mcid), card.clone())?;
 
         // Skip duplicate registrations based on model type.
         // Prefill and decode models are tracked separately, so registering one
@@ -362,7 +379,7 @@ impl ModelWatcher {
         if already_registered {
             tracing::debug!(
                 model_name = card.name(),
-                namespace = key.namespace,
+                namespace = mcid.namespace,
                 model_type = %card.model_type,
                 "Model already registered, skipping"
             );
@@ -382,7 +399,7 @@ impl ModelWatcher {
             // A model that expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle whatever the model supports.
 
-            let endpoint = component.endpoint(&key.endpoint);
+            let endpoint = component.endpoint(&mcid.endpoint);
             let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
                 Some(
                     self.manager

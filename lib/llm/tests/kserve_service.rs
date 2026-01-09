@@ -51,22 +51,10 @@ pub mod kserve_test {
     };
     use dynamo_runtime::{
         CancellationToken,
-        discovery::ModelCardInstanceId,
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn, async_trait,
         },
     };
-
-    /// Helper to create a test ModelCardInstanceId
-    fn test_model_card_id(key: &str) -> ModelCardInstanceId {
-        ModelCardInstanceId {
-            namespace: "test".to_string(),
-            component: "test".to_string(),
-            endpoint: "test".to_string(),
-            instance_id: 0,
-            model_suffix: Some(key.to_string()),
-        }
-    }
     use rstest::*;
     use std::sync::Arc;
     use std::time::Duration;
@@ -338,7 +326,7 @@ pub mod kserve_test {
         manager
             .add_completions_model("split", card.mdcsum(), split.clone())
             .unwrap();
-        let _ = manager.save_model_card(test_model_card_id("split"), card.clone());
+        let _ = manager.save_model_card("split", card.clone());
 
         let mut card = ModelDeploymentCard::with_name_only("failure");
         card.model_type = ModelType::Completions | ModelType::Chat;
@@ -349,7 +337,7 @@ pub mod kserve_test {
         manager
             .add_completions_model("failure", card.mdcsum(), failure.clone())
             .unwrap();
-        let _ = manager.save_model_card(test_model_card_id("failure"), card);
+        let _ = manager.save_model_card("failure", card);
 
         let mut card = ModelDeploymentCard::with_name_only("long_running");
         card.model_type = ModelType::Completions;
@@ -357,7 +345,7 @@ pub mod kserve_test {
         manager
             .add_completions_model("long_running", card.mdcsum(), long_running.clone())
             .unwrap();
-        let _ = manager.save_model_card(test_model_card_id("long_running"), card);
+        let _ = manager.save_model_card("long_running", card);
 
         (service, split, failure, long_running)
     }
@@ -1206,7 +1194,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+            .save_model_card("key", card);
 
         let model_name = "tensor";
         let inputs = vec![int_input.clone()];
@@ -1296,7 +1284,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+            .save_model_card("key", card);
 
         // success config
         let request = tonic::Request::new(ModelConfigRequest {
@@ -1323,7 +1311,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .remove_model_card(&test_model_card_id("key"));
+            .remove_model_card("key");
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
@@ -1352,7 +1340,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+            .save_model_card("key", card);
         let request = tonic::Request::new(ModelConfigRequest {
             name: model_name.into(),
             version: "".into(),
@@ -1376,7 +1364,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .remove_model_card(&test_model_card_id("key"));
+            .remove_model_card("key");
         let mut card = ModelDeploymentCard::with_name_only(model_name);
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
@@ -1390,7 +1378,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+            .save_model_card("key", card);
 
         // success config
         let request = tonic::Request::new(ModelConfigRequest {
@@ -1451,7 +1439,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+            .save_model_card("key", card);
 
         let response = client.model_metadata(request).await;
         assert!(response.is_err());
@@ -1492,7 +1480,7 @@ pub mod kserve_test {
         service_with_engines
             .0
             .model_manager()
-            .remove_model_card(&test_model_card_id("key"));
+            .remove_model_card("key");
         let mut card = ModelDeploymentCard::with_name_only("tensor");
         card.model_type = ModelType::TensorBased;
         card.model_input = ModelInput::Tensor;
@@ -1518,7 +1506,7 @@ pub mod kserve_test {
         let _ = service_with_engines
             .0
             .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+            .save_model_card("key", card);
 
         // Success
         let request = tonic::Request::new(ModelMetadataRequest {
@@ -1877,9 +1865,7 @@ pub mod kserve_test {
         manager
             .add_completions_model("test_model", card.mdcsum(), Arc::new(SplitEngine {}))
             .unwrap();
-        manager
-            .save_model_card(test_model_card_id("test_model"), card)
-            .unwrap();
+        manager.save_model_card("test_model", card).unwrap();
 
         // Register tensor model
         let mut tensor_card = ModelDeploymentCard::with_name_only("test_tensor_model");
@@ -1912,7 +1898,7 @@ pub mod kserve_test {
             )
             .unwrap();
         manager
-            .save_model_card(test_model_card_id("test_tensor_model"), tensor_card)
+            .save_model_card("test_tensor_model", tensor_card)
             .unwrap();
 
         // Start services
@@ -2051,9 +2037,7 @@ pub mod kserve_test {
             .model_manager()
             .add_tensor_model("tensor", card.mdcsum(), tensor.clone())
             .unwrap();
-        let _ = service
-            .model_manager()
-            .save_model_card(test_model_card_id("key"), card);
+        let _ = service.model_manager().save_model_card("key", card);
 
         // Re-check readiness
         // Check server readiness
