@@ -5,6 +5,7 @@
 
 import re
 import subprocess
+
 import pytest
 
 pytestmark = [
@@ -38,6 +39,7 @@ def major_from_text(text: str) -> int | None:
     if not text:
         return None
 
+    # fmt: off
     pats = [
         r"\bCUDA_VERSION=(1[23])\.",          # CUDA_VERSION=13.0.2
         r"\bNV_CUDA_.*?_VERSION=(1[23])\.",   # NV_CUDA_CUDART_VERSION=13.0...
@@ -48,6 +50,7 @@ def major_from_text(text: str) -> int | None:
         r"\bcuda(1[23])x\b",                  # cupy-cuda12x (from name)
         r"[-+]cu(1[23])",                     # -cu13 or +cu13 in name
     ]
+    # fmt: on
     for pat in pats:
         m = re.search(pat, text, flags=re.IGNORECASE)
         if m:
@@ -55,6 +58,7 @@ def major_from_text(text: str) -> int | None:
             if maj in (12, 13):
                 return maj
     return None
+
 
 def pip_cuda_major_from_line(line: str) -> int | None:
     """
@@ -87,9 +91,15 @@ def test_cuda_major_consistency() -> None:
         ("env:NVIDIA_REQUIRE_CUDA", "env | grep -i '^NVIDIA_REQUIRE_CUDA='"),
         ("nvcc", "nvcc --version | grep -i 'release' || nvcc --version"),
         ("dpkg:cuda-*", "dpkg -l | grep -E '^(ii|hi)\\s+cuda-.*-(12|13)-'"),
-        ("dpkg:libcublas/libnccl", "dpkg -l | grep -E '^(ii|hi)\\s+lib(cublas|nccl).*-(12|13)-'"),
+        (
+            "dpkg:libcublas/libnccl",
+            "dpkg -l | grep -E '^(ii|hi)\\s+lib(cublas|nccl).*-(12|13)-'",
+        ),
         # pip signal: gather a targeted list, then infer majors per line (excluding ignored prefixes)
-        ("pip:selected", "python -m pip list --format=freeze | grep -Ei '(cuda|cudnn|nccl|nvshmem|\\+cu(12|13)[0-9]{2}|-cu(12|13)|^(torch|torchaudio|torchvision)==)'"),
+        (
+            "pip:selected",
+            "python -m pip list --format=freeze | grep -Ei '(cuda|cudnn|nccl|nvshmem|\\+cu(12|13)[0-9]{2}|-cu(12|13)|^(torch|torchaudio|torchvision)==)'",
+        ),
     ]
 
     rows: list[tuple[str, int | None, list[str]]] = []
@@ -127,7 +137,11 @@ def test_cuda_major_consistency() -> None:
     unique = sorted(set(detected))
 
     # Build a readable multi-line report (no truncation to first line).
-    report = ["CUDA major signals (pip ignores prefixes: " + ", ".join(IGNORE_PIP_PREFIXES) + "):"]
+    report = [
+        "CUDA major signals (pip ignores prefixes: "
+        + ", ".join(IGNORE_PIP_PREFIXES)
+        + "):"
+    ]
     for label, maj, lines in rows:
         maj_s = str(maj) if maj is not None else "-"
         report.append(f"  {maj_s:>2}  {label}")
@@ -136,4 +150,6 @@ def test_cuda_major_consistency() -> None:
         if len(lines) > 50:
             report.append(f"      ... ({len(lines) - 50} more lines)")
 
-    assert len(unique) == 1, "\n".join(report) + f"\n\nInconsistent CUDA majors detected: {unique}"
+    assert len(unique) == 1, (
+        "\n".join(report) + f"\n\nInconsistent CUDA majors detected: {unique}"
+    )
