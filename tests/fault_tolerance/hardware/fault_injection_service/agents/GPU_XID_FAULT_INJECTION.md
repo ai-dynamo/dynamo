@@ -14,47 +14,18 @@ Real GPU XID errors appear in `/dev/kmsg` (kernel messages) which NVSentinel's `
 2. Node is cordoned by `fault-quarantine-module` (marked unschedulable)
 3. `node-drainer` evicts pods after timeout
 4. GPU driver restart for recoverable XIDs (`fault-remediation` and `janitor` modules)
-5. `fault-remediation` creates a `RebootNode` CR for devastating XIDs
-6. `janitor` sends reboot signal to CSP and monitors node recovery
-7. `fault-quarantine` uncordons node once health checks pass
 
 ## NVSentinel Prerequisites
 
 **Project:** [NVSentinel](https://github.com/NVIDIA/nvsentinel) - GPU health monitoring and fault recovery for Kubernetes.
 
-**Minimum version:** v0.5.0 or later (syslog-health-monitor module required)
+**Minimum version:** v0.5.0 or later
 
 **Required modules:**
 - `syslog-health-monitor` - Detects XID in kernel logs
 - `fault-quarantine-module` - Cordons nodes with faulty GPUs
 - `node-drainer` - Evicts pods from cordoned nodes
-- `fault-remediation` - Creates remediation CRs (RebootNode) for fault recovery
-- `janitor` - Executes node reboots via CSP API and monitors recovery
-
-### Why Janitor is Required
-
-Without the `janitor` module, cordoned nodes **stay cordoned forever**:
-
-```
-XID detected -> Node cordoned -> Pods evicted -> ??? (node stays cordoned)
-```
-
-The janitor module completes the recovery cycle:
-
-```
-XID detected -> Node cordoned -> Pods evicted -> RebootNode CR created
-    -> Janitor sends reboot signal to CSP -> Node reboots
-    -> Janitor monitors node ready state -> Health checks pass
-    -> fault-quarantine uncordons node -> Node schedulable again
-```
-
-**How it works:**
-1. `fault-remediation` watches for cordon events with `action: FAIL`
-2. Creates a `RebootNode` CR: `maintenance-<node>-<event-id>`
-3. `janitor` controller picks up the CR
-4. Sends reboot signal to CSP (AWS/Azure/GCP/Nebius) via cloud API
-5. Monitors node until Kubernetes reports `NodeReady` condition
-6. Once ready, `fault-quarantine` sees health checks passing and uncordons
+- `fault-remediation` and `janitor` modules - Reboot unhealthy nodes
 
 **Configuration for testing:**
 ```yaml
@@ -64,8 +35,9 @@ node-drainer:
   userNamespaces:
     - dynamo          # Your test namespace must be listed
     - default
-  evictionTimeout: 120  # Reduce from default 300s for faster tests
-  drainTimeout: 180
+  mode: deleteAfterTimeout  # REQUIRED: Use deleteAfterTimeout, not allowTimeout
+  evictionTimeout: 300      # 5 minutes - pods deleted after this timeout
+  drainTimeout: 300         # 5 minutes - total drain timeout
 
 syslog-health-monitor:
   enabled: true
@@ -78,65 +50,44 @@ syslog-health-monitor:
 fault-quarantine-module:
   enabled: true
   cordonOnFail: true
-
-fault-remediation:
-  enabled: true
-  # Creates RebootNode CRs for FAIL actions
-
-janitor:
-  enabled: true
-  rebootNode:
-    enabled: true
-    timeout: 30m  # Max time to wait for node to come back
-  # CSP credentials configured via cloud provider (IRSA/Workload Identity/etc.)
+  circuitBreakerEnabled: false  # Disable circuit breaker for testing
 ```
 
-**Important:** Your test namespace must be in `node-drainer.userNamespaces` for pod eviction to work.
-
-### Janitor CSP Support
-
-The janitor supports these cloud providers for node reboot:
-
-| CSP | Method | Auth | Status |
-|-----|--------|------|--------|
-| AWS | EC2 RebootInstances API | IRSA | Supported |
-| Azure | VM Restart API | Workload Identity | Supported |
-| GCP | Compute Engine Reset | Workload Identity | Supported |
-| Nebius | Compute Reset | Service Account | Future release |
-
-**Nebius users:** Nebius support is planned for a future NVSentinel release. If you need janitor functionality on Nebius clusters now, use the custom-built package from [ai-dynamo packages](https://github.com/orgs/ai-dynamo/packages) instead of the upstream NVSentinel v0.6.0.
-
-**Manual mode:** If CSP integration is not available, set `janitor.global.manualMode: true`. The janitor will create CRs with `ManualMode` condition, requiring an operator to manually reboot and uncordon.
+**Critical configuration notes:**
+- **`mode: deleteAfterTimeout`** - Pods are forcefully deleted after timeout. Without this, pods with failing GPUs will hang forever waiting for graceful termination.
+- **`evictionTimeout: 300`** - 5 minute timeout before force-deleting pods. Adjust based on your workload shutdown time.
+- **`circuitBreakerEnabled: false`** - Disables the circuit breaker during testing. If tripped, NVSentinel stops processing health events and fault detection won't work.
+- **`userNamespaces`** - Your test namespace must be listed or node-drainer won't evict pods from it.
 
 ## How It Works
 
 ```
-+---------------------------------------------------------------------+
-|                    gpu-fault-injector-kernel Pod                     |
-|                    (Privileged DaemonSet)                            |
-|                                                                      |
-|  +-------------+     +-------------------------------------+         |
-|  |  agent.py   |---->|  gpu_xid_injector.py                |         |
-|  |  FastAPI    |     |                                     |         |
-|  |  :8083      |     |  nsenter --target 1 --mount --uts   |         |
-|  +-------------+     |          --ipc --pid --             |         |
-|                      |  sh -c "echo '<3>NVRM: Xid...'      |         |
-|                      |         > /dev/kmsg"                |         |
-|                      +-------------------------------------+         |
-|                                      |                               |
-|                                      v                               |
-|                      +-------------------------------------+         |
-|                      |  Host /dev/kmsg                     |         |
-|                      |  (via hostPID + nsenter)            |         |
-|                      +-------------------------------------+         |
-+---------------------------------------------------------------------+
-                                       |
-                                       v
-+---------------------------------------------------------------------+
-|                    NVSentinel                                        |
-|  syslog-health-monitor --> Detects XID --> Cordons node             |
-|  node-drainer --> Evicts pods after timeout                         |
-+---------------------------------------------------------------------+
+┌─────────────────────────────────────────────────────────────────┐
+│                    gpu-fault-injector-kernel Pod                 │
+│                    (Privileged DaemonSet)                        │
+│                                                                 │
+│  ┌─────────────┐     ┌─────────────────────────────────────┐   │
+│  │  agent.py   │────▶│  gpu_xid_injector.py                │   │
+│  │  FastAPI    │     │                                     │   │
+│  │  :8083      │     │  nsenter --target 1 --mount --uts   │   │
+│  └─────────────┘     │          --ipc --pid --             │   │
+│                      │  sh -c "echo '<3>NVRM: Xid...'      │   │
+│                      │         > /dev/kmsg"                │   │
+│                      └─────────────────────────────────────┘   │
+│                                      │                         │
+│                                      ▼                         │
+│                      ┌─────────────────────────────────────┐   │
+│                      │  Host /dev/kmsg                     │   │
+│                      │  (via hostPID + nsenter)            │   │
+│                      └─────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    NVSentinel                                    │
+│  syslog-health-monitor ──▶ Detects XID ──▶ Cordons node         │
+│  node-drainer ──▶ Evicts pods after timeout                     │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Supported XIDs
@@ -199,7 +150,7 @@ NVRM: NVRM: Xid (PCI:0001:00:00.0): 79, GPU has fallen off the bus
 
 ## Building the Image
 
-**Dockerfile:** [`gpu_fault_injector/Dockerfile`](gpu_fault_injector/Dockerfile)
+**Dockerfile:** [`Dockerfile`](gpu_fault_injector/Dockerfile)
 
 ```bash
 # Build for AMD64 (GPU nodes are x86_64)
@@ -226,7 +177,7 @@ dynamoci.azurecr.io/gpu-fault-injector:latest
 
 The agent runs as a privileged DaemonSet on GPU nodes.
 
-**Deployment manifest:** [`../deploy/gpu-fault-injector-kernel.yaml`](../deploy/gpu-fault-injector-kernel.yaml)
+**Deployment manifest:** [`deploy/gpu-fault-injector-kernel.yaml`](../deploy/gpu-fault-injector-kernel.yaml)
 
 ```bash
 # Deploy to cluster
@@ -237,9 +188,7 @@ kubectl apply -f tests/fault_tolerance/hardware/fault_injection_service/deploy/g
 kubectl get pods -n fault-injection-system -l app=gpu-fault-injector-kernel -o wide
 ```
 
-### Security Context
-
-Configured in the deployment YAML:
+### Security Context (configured in deployment YAML)
 
 ```yaml
 spec:
@@ -259,9 +208,9 @@ spec:
         - SYS_MODULE
 ```
 
-### Required Host Mounts
+### Required Host Mounts (configured in deployment YAML)
 
-Configured in [`gpu-fault-injector-kernel.yaml`](../deploy/gpu-fault-injector-kernel.yaml):
+These are already configured in [`gpu-fault-injector-kernel.yaml`](../deploy/gpu-fault-injector-kernel.yaml):
 
 | Mount Path | Host Path | Purpose |
 |------------|-----------|---------|
@@ -277,15 +226,15 @@ The agent discovers GPUs by reading `/host/proc/driver/nvidia/gpus/`:
 
 ```
 /host/proc/driver/nvidia/gpus/
-├── 0001:00:00.0/information  -> Device Minor: 0 (GPU 0)
-├── 0002:00:00.0/information  -> Device Minor: 1 (GPU 1)
+├── 0001:00:00.0/information  → Device Minor: 0 (GPU 0)
+├── 0002:00:00.0/information  → Device Minor: 1 (GPU 1)
 ```
 
 This works without `nvidia-smi` and handles extended PCI addresses (Azure VMs).
 
 ## Usage Scenario
 
-Once deployed to the cluster, an operator can issue HTTP requests to the fault-injection-api from a machine with kubectl access. The API routes requests to the appropriate agent on the target node.
+Once deployed to the cluster, an operator can issue HTTP requests to the fault-injection-api from a machine with kubectl access (outside or inside the cluster). The API routes requests to the appropriate agent on the target node.
 
 **From outside the cluster (port-forward):**
 ```bash
@@ -330,21 +279,21 @@ After injection, verify NVSentinel detected it.
 
 **Architecture:**
 ```
-+--------------+     kubectl exec     +-----------------+
-|  Your        |--------------------->|  GPU Node       |
-|  Workstation |                      |  (dmesg)        |
-+--------------+                      +-----------------+
-       |
-       | kubectl logs
-       v
-+---------------------------------------------------------+
-|  NVSentinel Namespace                                    |
-|  +---------------------+  +-------------------------+   |
-|  | syslog-health-      |  | fault-quarantine-       |   |
-|  | monitor             |  | module                  |   |
-|  | (detects XID)       |  | (cordons node)          |   |
-|  +---------------------+  +-------------------------+   |
-+---------------------------------------------------------+
+┌──────────────┐     kubectl exec     ┌─────────────────┐
+│  Your        │─────────────────────▶│  GPU Node       │
+│  Workstation │                      │  (dmesg)        │
+└──────────────┘                      └─────────────────┘
+       │
+       │ kubectl logs
+       ▼
+┌─────────────────────────────────────────────────────────┐
+│  NVSentinel Namespace                                    │
+│  ┌─────────────────────┐  ┌─────────────────────────┐   │
+│  │ syslog-health-      │  │ fault-quarantine-       │   │
+│  │ monitor             │  │ module                  │   │
+│  │ (detects XID)       │  │ (cordons node)          │   │
+│  └─────────────────────┘  └─────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
 ```
 
 **Verification commands:**
