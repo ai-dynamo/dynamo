@@ -289,7 +289,7 @@ impl OpenAIPreprocessor {
         }
     }
 
-    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest>(
+    pub async fn gather_multi_modal_data<R: OAIChatLikeRequest + NvExtProvider>(
         &self,
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
@@ -366,16 +366,30 @@ impl OpenAIPreprocessor {
             }
         }
 
-        if !media_map.is_empty() {
-            builder.multi_modal_data(Some(media_map));
+        // Build extra_args with multimodal messages and/or max_thinking_tokens
+        let has_multimodal = !media_map.is_empty();
+        let max_thinking_tokens = request.nvext().and_then(|ext| ext.max_thinking_tokens);
 
-            // Preserve original messages in extra_args for multimodal workers that need them
-            // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
-            let messages_json = serde_json::to_value(&messages)?;
-            let extra_args = serde_json::json!({
-                "messages": messages_json
-            });
-            builder.extra_args(Some(extra_args));
+        if has_multimodal || max_thinking_tokens.is_some() {
+            let mut extra_args = serde_json::Map::new();
+
+            if has_multimodal {
+                builder.multi_modal_data(Some(media_map));
+                // Preserve original messages in extra_args for multimodal workers that need them
+                // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
+                let messages_json = serde_json::to_value(&messages)?;
+                extra_args.insert("messages".to_string(), messages_json);
+            }
+
+            // Add max_thinking_tokens for backend logits processing
+            if let Some(max_tokens) = max_thinking_tokens {
+                extra_args.insert(
+                    "max_thinking_tokens".to_string(),
+                    serde_json::Value::Number(max_tokens.into()),
+                );
+            }
+
+            builder.extra_args(Some(serde_json::Value::Object(extra_args)));
         }
 
         Ok(())

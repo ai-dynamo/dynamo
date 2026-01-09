@@ -81,8 +81,11 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_data: Option<Vec<u32>>,
 
-    /// Maximum number of thinking tokens allowed
-    /// NOTE: Currently passed through to backends as a no-op for future implementation
+    /// Maximum number of thinking/reasoning tokens before forcing early exit.
+    /// When set, limits the number of tokens generated within thinking blocks
+    /// (e.g., <think>...</think>) and forces the model to emit the closing token
+    /// when the budget is exceeded, with ~10% graceful overflow for sentence completion.
+    /// This is passed to the backend's logits processor for enforcement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub max_thinking_tokens: Option<u32>,

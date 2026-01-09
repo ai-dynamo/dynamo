@@ -31,9 +31,14 @@ from dynamo.llm import (
     register_llm,
     unregister_llm,
 )
+from dynamo.logits_processing import (
+    ThinkingBudgetLogitsProcessor,
+    get_thinking_token_config,
+)
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from .engine_monitor import VllmEngineMonitor
+from .logits_processing.adapter import VllmDynamoLogitsAdapter
 from .multimodal_utils.image_loader import ImageLoader
 
 # Multimodal data dictionary keys
@@ -76,6 +81,8 @@ def build_sampling_params(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
     model_max_len: int | None = None,
+    model_name: str | None = None,
+    tokenizer: Any = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from a PreprocessedRequest (internal protocol format).
@@ -84,6 +91,9 @@ def build_sampling_params(
         request: The PreprocessedRequest dict with 'sampling_options', 'stop_conditions',
                  and 'output_options'
         default_sampling_params: Default sampling parameters to initialize with
+        model_max_len: Maximum model context length
+        model_name: Name of the model (used for thinking token config lookup)
+        tokenizer: Tokenizer for dynamic thinking token lookup
 
     Returns:
         SamplingParams configured from the request
@@ -168,6 +178,44 @@ def build_sampling_params(
         # Ensure at least 1 token generation by default when possible
         dynamic_default = max(1, model_max_len - input_length)
         sampling_params.max_tokens = dynamic_default
+
+    # Handle max_thinking_tokens - create thinking budget processor if specified
+    extra_args = request.get("extra_args") or {}
+    max_thinking_tokens = extra_args.get("max_thinking_tokens")
+
+    if max_thinking_tokens is not None and max_thinking_tokens > 0:
+        try:
+            # Get thinking token configuration for this model
+            token_config = get_thinking_token_config(model_name or "", tokenizer)
+
+            if token_config.start_token_id != 0 and token_config.end_token_id != 0:
+                # Create thinking budget processor
+                # Note: max_tokens is enforced by vLLM engine and supersedes max_thinking_tokens
+                processor = ThinkingBudgetLogitsProcessor(
+                    thinking_start_token_id=token_config.start_token_id,
+                    thinking_end_token_id=token_config.end_token_id,
+                    newline_token_id=token_config.newline_token_id,
+                    max_thinking_tokens=max_thinking_tokens,
+                )
+
+                # Wrap with vLLM adapter
+                adapter = VllmDynamoLogitsAdapter(processor)
+
+                # Set on sampling params - vLLM expects a list of processors
+                sampling_params.logits_processors = [adapter]
+                logger.debug(
+                    f"Enabled thinking budget processor with max_thinking_tokens={max_thinking_tokens}"
+                )
+            else:
+                logger.warning(
+                    f"Could not configure thinking budget processor for model '{model_name}': "
+                    "Invalid token IDs. max_thinking_tokens will be ignored."
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to create thinking budget processor: {e}. "
+                "max_thinking_tokens will be ignored."
+            )
 
     return sampling_params
 
@@ -267,10 +315,11 @@ class BaseWorkerHandler(ABC):
         self.use_vllm_tokenizer = use_vllm_tokenizer
 
         # Initialize InputParamManager for text-in-text-out mode
-        tokenizer = None
+        # Also store tokenizer for thinking budget processor configuration
+        self.tokenizer = None
         if use_vllm_tokenizer and hasattr(engine, "tokenizer"):
-            tokenizer = engine.tokenizer
-        self.input_param_manager = InputParamManager(tokenizer)
+            self.tokenizer = engine.tokenizer
+        self.input_param_manager = InputParamManager(self.tokenizer)
 
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
@@ -1157,9 +1206,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        # Get model name for LoRA and thinking budget processor
+        model_name = request.get("model")
+
         # Build sampling params from request
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            model_name=model_name,
+            tokenizer=self.tokenizer,
         )
 
         prefill_result = request.get("prefill_result")
@@ -1183,8 +1239,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Extract LoRA request if present
         # Check if model name matches a loaded LoRA adapter
+        # Note: model_name was already extracted above for thinking budget processor
         lora_request = None
-        model_name = request.get("model")
 
         if model_name and model_name in self.lora_id_for_name:
             lora_id = self.lora_id_for_name[model_name]
@@ -1358,9 +1414,17 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             yield error
             return
 
+        # Get model name for LoRA lookup
+        model_name = request.get("model")
+
         # Build sampling params from request using shared utility
+        # Note: Thinking budget processor won't be active for prefill (max_tokens=1)
         sampling_params = build_sampling_params(
-            request, self.default_sampling_params, self.model_max_len
+            request,
+            self.default_sampling_params,
+            self.model_max_len,
+            model_name=model_name,
+            tokenizer=self.tokenizer,
         )
 
         # Configure for prefill-only mode with remote decode
@@ -1385,8 +1449,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Extract LoRA request if present
         # Check if model name matches a loaded LoRA adapter
+        # Note: model_name was already extracted above
         lora_request = None
-        model_name = request.get("model")
 
         if model_name and model_name in self.lora_id_for_name:
             lora_id = self.lora_id_for_name[model_name]

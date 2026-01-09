@@ -9,5 +9,17 @@ across different backend adapters (TRT-LLM, vLLM, SGLang).
 """
 
 from .base import BaseLogitsProcessor
+from .thinking_budget import ThinkingBudgetLogitsProcessor
+from .thinking_tokens import (
+    ThinkingTokenConfig,
+    get_thinking_token_config,
+    register_thinking_token_config,
+)
 
-__all__ = ["BaseLogitsProcessor"]
+__all__ = [
+    "BaseLogitsProcessor",
+    "ThinkingBudgetLogitsProcessor",
+    "ThinkingTokenConfig",
+    "get_thinking_token_config",
+    "register_thinking_token_config",
+]
