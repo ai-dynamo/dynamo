@@ -191,6 +191,7 @@ jobs:
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   vllm:
     needs: changed-files
@@ -326,6 +327,7 @@ jobs:
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   sglang:
     needs: changed-files
