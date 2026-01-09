@@ -411,10 +411,11 @@ impl Worker for KvConnectorWorker {
         // Clone channel for async use
         let tx = self.connector.get_scheduler_tx();
 
-        tokio::spawn(async move {
+        // Use std::thread since we may be in a subprocess without tokio runtime
+        std::thread::spawn(move || {
             // Poll with sleep until event completes
             while !event_query(event) {
-                tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+                std::thread::sleep(std::time::Duration::from_micros(25));
             }
 
             // Send operations to scheduler
