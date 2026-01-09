@@ -396,15 +396,145 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    // TEMPORARY: Use legacy TransferResources as main path for debugging
-    // Validate that CUDA memory pool would produce the same addresses
-    let use_legacy_path = true;
+    // DEBUGGING: Run ONLY legacy path with detailed logging
+    tracing::warn!("=== LEGACY PATH ONLY - DETAILED DEBUGGING ===");
+    tracing::warn!("Transfer: {} blocks", sources.len());
+    tracing::warn!("Total address pairs: {}", src_addresses.len());
+    tracing::warn!("Buffer size needed: {} bytes", size);
+    tracing::warn!("Source type: {}", std::any::type_name::<Source::StorageType>());
+    tracing::warn!("Destination type: {}", std::any::type_name::<Destination::StorageType>());
 
-    if !use_legacy_path && ctx.cuda_mem_pool().is_some() {
+    // Log first 10 and last 5 addresses from the collected arrays
+    tracing::warn!("First 10 src addresses collected:");
+    for (i, &addr) in src_addresses.iter().take(10).enumerate() {
+        tracing::warn!("  src[{}] = 0x{:016x}", i, addr);
+    }
+
+    tracing::warn!("First 10 dst addresses collected:");
+    for (i, &addr) in dst_addresses.iter().take(10).enumerate() {
+        tracing::warn!("  dst[{}] = 0x{:016x}", i, addr);
+    }
+
+    if src_addresses.len() > 10 {
+        let start = src_addresses.len().saturating_sub(5);
+        tracing::warn!("Last 5 src addresses collected:");
+        for (i, &addr) in src_addresses.iter().skip(start).enumerate() {
+            tracing::warn!("  src[{}] = 0x{:016x}", start + i, addr);
+        }
+
+        tracing::warn!("Last 5 dst addresses collected:");
+        for (i, &addr) in dst_addresses.iter().skip(start).enumerate() {
+            tracing::warn!("  dst[{}] = 0x{:016x}", start + i, addr);
+        }
+    }
+
+    if true && ctx.cuda_mem_pool().is_some() {
+        tracing::warn!("=== TESTING cuPointerGetAttribute THEORY ===");
+        tracing::warn!("Testing: Can we get CPU-accessible pointer from HOST pool?");
+
+        // Create a HOST memory pool temporarily for this test
+        use dynamo_memory::pool::cuda::CudaMemPool;
+        tracing::info!("STEP 1: Creating HOST memory pool");
+        let host_pool = match CudaMemPool::builder(stream.context().clone(), 0)
+            .use_pinned_memory()  // HOST memory
+            .build()
+        {
+            Ok(pool) => pool,
+            Err(e) => {
+                tracing::error!("Failed to create HOST pool: {}", e);
+                return Err(TransferError::ExecutionError(format!("Host pool creation failed: {}", e)));
+            }
+        };
+
+        tracing::info!("STEP 2: Allocating from HOST pool");
+        let device_ptr = host_pool.alloc_async(size, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("HOST pool allocation failed: {}", e)))?;
+
+        tracing::warn!("Allocated from HOST pool: device_ptr=0x{:x}", device_ptr);
+
+        // STEP 3: Try to get host pointer using cuPointerGetAttribute
+        tracing::info!("STEP 3: Getting CPU-accessible host pointer via cuPointerGetAttribute");
+        use cudarc::driver::sys::{cuPointerGetAttribute, CUpointer_attribute, CUresult};
+
+        let mut host_ptr: u64 = 0;
+        let result = unsafe {
+            cuPointerGetAttribute(
+                &mut host_ptr as *mut u64 as *mut std::ffi::c_void,
+                CUpointer_attribute::CU_POINTER_ATTRIBUTE_HOST_POINTER,
+                device_ptr,
+            )
+        };
+
+        if result != CUresult::CUDA_SUCCESS {
+            tracing::error!("❌ cuPointerGetAttribute FAILED: {:?}", result);
+            tracing::error!("This means HOST pool memory is NOT CPU-accessible via this method");
+
+            // Clean up
+            let _ = host_pool.free_async(device_ptr, stream.cu_stream());
+            return Err(TransferError::ExecutionError(format!("cuPointerGetAttribute failed: {:?}", result)));
+        }
+
+        tracing::warn!("✅ cuPointerGetAttribute SUCCESS!");
+        tracing::warn!("  device_ptr = 0x{:x} (returned by pool)", device_ptr);
+        tracing::warn!("  host_ptr   = 0x{:x} (from cuPointerGetAttribute)", host_ptr);
+
+        if host_ptr == 0 {
+            tracing::error!("❌ host_ptr is NULL! Can't use this for CPU access");
+            let _ = host_pool.free_async(device_ptr, stream.cu_stream());
+            return Err(TransferError::ExecutionError("Host pointer is NULL".to_string()));
+        }
+
+        // STEP 4: Try to write from CPU to the host pointer
+        tracing::info!("STEP 4: Attempting CPU write to host_ptr");
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                src_addresses.as_ptr(),
+                host_ptr as *mut u64,
+                src_addresses.len().min(10),  // Just write first 10 addresses
+            );
+        }
+
+        tracing::warn!("✅ CPU WRITE SUCCEEDED! No crash!");
+
+        // STEP 5: Read back to verify
+        tracing::info!("STEP 5: Reading back from host_ptr to verify");
+        let mut readback = vec![0u64; src_addresses.len().min(10)];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                host_ptr as *const u64,
+                readback.as_mut_ptr(),
+                readback.len(),
+            );
+        }
+
+        // Verify
+        let mut mismatches = 0;
+        for (i, (&original, &read)) in src_addresses.iter().zip(readback.iter()).enumerate() {
+            if original != read {
+                tracing::error!("MISMATCH [{}]: wrote 0x{:x}, read 0x{:x}", i, original, read);
+                mismatches += 1;
+            }
+        }
+
+        if mismatches == 0 {
+            tracing::warn!("🎉🎉🎉 THEORY CONFIRMED! 🎉🎉🎉");
+            tracing::warn!("HOST pool + cuPointerGetAttribute WORKS for CPU access!");
+            tracing::warn!("We CAN use HOST memory pools with direct CPU writes!");
+        } else {
+            tracing::error!("❌ Data verification failed: {} mismatches", mismatches);
+        }
+
+        // Clean up
+        let _ = host_pool.free_async(device_ptr, stream.cu_stream());
+
+        // Test complete - now continue with normal path selection below
+        tracing::info!("Test complete - continuing with normal CUDA pool or legacy path");
+    }
+    if ctx.cuda_mem_pool().is_some() {  // CUDA pool path (no guards, stream-ordered cleanup)
         let pool = ctx.cuda_mem_pool().unwrap();
-        tracing::debug!("Using CUDA memory pool for stream-ordered allocation");
+        tracing::debug!("Using CUDA memory pool (device memory with H2D memcpy)");
 
-        // Allocate pinned host memory from CUDA pool (stream-ordered)
+        // Allocate device memory from CUDA pool (stream-ordered)
         let src_buffer = pool.alloc_async(size, stream.cu_stream())
             .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
         let dst_buffer = pool.alloc_async(size, stream.cu_stream())
@@ -417,28 +547,31 @@ where
             size
         );
 
-        // CRITICAL: Synchronize stream before CPU accesses the memory!
-        // Stream-ordered allocations require the stream to complete before CPU can safely access.
-        stream.synchronize().map_err(|e|
-            TransferError::ExecutionError(format!("Stream sync after allocation failed: {}", e)))?;
+        // CUDA pool allocates DEVICE memory - must use H2D memcpy
+        tracing::debug!("CUDA pool: Using H2D memcpy to transfer addresses to device");
 
-        tracing::debug!("Stream synchronized - buffers are now safe for CPU access");
-
-        // Copy addresses directly to pinned host memory
+        // Copy address arrays from host to device using async memcpy
+        use cudarc::driver::result::memcpy_htod_async;
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                src_addresses.as_ptr(),
-                src_buffer as *mut u64,
-                src_addresses.len(),
-            );
-            std::ptr::copy_nonoverlapping(
-                dst_addresses.as_ptr(),
-                dst_buffer as *mut u64,
-                dst_addresses.len(),
-            );
+            // H2D transfer for src addresses
+            memcpy_htod_async(
+                src_buffer as cudarc::driver::sys::CUdeviceptr,
+                src_addresses.as_slice(),
+                stream.cu_stream(),
+            ).map_err(|e| TransferError::ExecutionError(format!("H2D memcpy (src) failed: {}", e)))?;
+
+            // H2D transfer for dst addresses
+            memcpy_htod_async(
+                dst_buffer as cudarc::driver::sys::CUdeviceptr,
+                dst_addresses.as_slice(),
+                stream.cu_stream(),
+            ).map_err(|e| TransferError::ExecutionError(format!("H2D memcpy (dst) failed: {}", e)))?;
         }
 
-        tracing::debug!("Copied {} address pairs to pinned buffers", src_addresses.len());
+        tracing::debug!(
+            "H2D memcpy completed: {} bytes × 2 transfers, addresses now in device memory",
+            size
+        );
 
         // Validate addresses before launching kernel
         validate_transfer_addresses(
@@ -447,7 +580,7 @@ where
             dims.layer_size,
         )?;
 
-        // Launch kernel (reads from pinned host memory)
+        // Launch kernel
         unsafe {
             launch_copy_kernel_direct(
                 src_buffer,
@@ -458,20 +591,16 @@ where
             )?;
         }
 
-        // Return buffer guard - it will be freed after event synchronization
-        use crate::block_manager::block::transfer::context::CudaPoolBufferGuard;
-        let guard = CudaPoolBufferGuard::new(
-            src_buffer,
-            dst_buffer,
-            stream.cu_stream(),
-            pool.clone(),
-        );
+        tracing::debug!("Kernel launched successfully");
 
-        tracing::debug!(
-            "Kernel launched - buffers will be freed after event sync (deferred cleanup)"
-        );
+        // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
+        pool.free_async(src_buffer, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
+        pool.free_async(dst_buffer, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
 
-        Ok(Some(guard))
+        tracing::debug!("✅ Buffers freed (queued on stream - will execute after kernel)");
+        Ok(None)  // No guard needed - stream ordering handles cleanup
     } else {
         // PRIMARY PATH: Use legacy TransferResources pool
         tracing::info!("Using LEGACY TransferResources pool (PRIMARY PATH)");
@@ -483,12 +612,66 @@ where
 
         resources.copy_addresses_to_buffers(&src_addresses, &dst_addresses)?;
 
-        tracing::info!(
-            "Legacy pool: Using pooled buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
+        tracing::warn!(
+            "Legacy pool: Addresses copied to buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
             resources.src_ptr(),
             resources.dst_ptr(),
             src_addresses.len()
         );
+
+        // Read back addresses from legacy buffers to verify what was written
+        tracing::warn!("Reading back addresses from LEGACY buffers to verify...");
+        let mut readback_src = vec![0u64; src_addresses.len()];
+        let mut readback_dst = vec![0u64; dst_addresses.len()];
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                resources.src_ptr() as *const u64,
+                readback_src.as_mut_ptr(),
+                src_addresses.len(),
+            );
+            std::ptr::copy_nonoverlapping(
+                resources.dst_ptr() as *const u64,
+                readback_dst.as_mut_ptr(),
+                dst_addresses.len(),
+            );
+        }
+
+        tracing::warn!("First 10 src addresses READ BACK from buffer:");
+        for (i, &addr) in readback_src.iter().take(10).enumerate() {
+            tracing::warn!("  buffer_src[{}] = 0x{:016x} (expected: 0x{:016x}) {}",
+                i, addr, src_addresses[i],
+                if addr == src_addresses[i] { "✅" } else { "❌ MISMATCH!" }
+            );
+        }
+
+        tracing::warn!("First 10 dst addresses READ BACK from buffer:");
+        for (i, &addr) in readback_dst.iter().take(10).enumerate() {
+            tracing::warn!("  buffer_dst[{}] = 0x{:016x} (expected: 0x{:016x}) {}",
+                i, addr, dst_addresses[i],
+                if addr == dst_addresses[i] { "✅" } else { "❌ MISMATCH!" }
+            );
+        }
+
+        // Check for mismatches
+        let src_mismatches: usize = src_addresses.iter().zip(readback_src.iter())
+            .filter(|(orig, readback)| *orig != *readback)
+            .count();
+        let dst_mismatches: usize = dst_addresses.iter().zip(readback_dst.iter())
+            .filter(|(orig, readback)| *orig != *readback)
+            .count();
+
+        if src_mismatches > 0 || dst_mismatches > 0 {
+            tracing::error!(
+                "❌ BUFFER VERIFICATION FAILED: {} src mismatches, {} dst mismatches",
+                src_mismatches, dst_mismatches
+            );
+            return Err(TransferError::ExecutionError(
+                format!("Buffer verification failed: {} src, {} dst mismatches", src_mismatches, dst_mismatches)
+            ));
+        } else {
+            tracing::warn!("✅ Buffer verification PASSED: all {} addresses match!", src_addresses.len());
+        }
 
         // Validate addresses before launching kernel (same validation as CUDA pool path)
         validate_transfer_addresses(
@@ -497,40 +680,15 @@ where
             dims.layer_size,
         )?;
 
-        // If CUDA mem pool is available, validate that it would produce same addresses
-        if let Some(pool) = ctx.cuda_mem_pool() {
-            tracing::info!("VALIDATION: Comparing with CUDA memory pool addresses");
-
-            // Allocate from CUDA pool to compare
-            match pool.alloc_async(size, stream.cu_stream()) {
-                Ok(cuda_src_buffer) => {
-                    match pool.alloc_async(size, stream.cu_stream()) {
-                        Ok(cuda_dst_buffer) => {
-                            tracing::info!(
-                                "CUDA pool would allocate: src=0x{:x}, dst=0x{:x}",
-                                cuda_src_buffer,
-                                cuda_dst_buffer
-                            );
-
-                            // Free immediately - we're just validating
-                            let _ = pool.free_async(cuda_src_buffer, stream.cu_stream());
-                            let _ = pool.free_async(cuda_dst_buffer, stream.cu_stream());
-
-                            tracing::info!("Address validation: Both paths would use different buffer addresses (expected)");
-                            tracing::info!("Note: Block addresses being transferred are identical in both paths");
-                        }
-                        Err(e) => {
-                            tracing::warn!("CUDA pool validation failed (dst alloc): {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("CUDA pool validation failed (src alloc): {}", e);
-                }
-            }
-        } else {
-            tracing::info!("CUDA memory pool not available - skipping validation");
-        }
+        // Kernel launch with detailed logging
+        tracing::warn!("=== LEGACY PATH: LAUNCHING KERNEL ===");
+        tracing::warn!("LAUNCHING KERNEL: {} pairs, src=0x{:x}, dst=0x{:x} (LEGACY - pinned host memory)",
+            src_addresses.len(),
+            resources.src_ptr(),
+            resources.dst_ptr()
+        );
+        tracing::warn!("  layer_size      = {} bytes", dims.layer_size);
+        tracing::warn!("  stream          = 0x{:x}", stream.cu_stream() as usize);
 
         unsafe {
             launch_copy_kernel_direct(
@@ -542,7 +700,7 @@ where
             )?;
         }
 
-        tracing::info!("Legacy pool: Kernel launched successfully");
+        tracing::warn!("✅ LEGACY: Kernel launched successfully - waiting for completion in event worker");
         Ok(None)
     }
 }
