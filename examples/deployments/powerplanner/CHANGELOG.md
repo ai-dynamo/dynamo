@@ -2,7 +2,7 @@
 
 ## Version 1.0.0 (January 9, 2026)
 
-**Status**: ✅ Implementation Complete | Production Ready | All Tests Passing  
+**Status**: ✅ Implementation Complete | Production Ready | All Tests Passing
 **Based on**: Dynamo main branch (commit c29f78c19)
 
 ---
@@ -70,6 +70,27 @@ This section answers key technical questions about the power-aware autoscaling i
 
 ### Question 1: How Workers are Scaled Based on Incoming Queries
 
+**Static vs Dynamic Parameters:**
+
+Before explaining the algorithm, it's important to understand what the planner decides vs what is pre-configured:
+
+| Parameter | Type | Determined By | When Set |
+|-----------|------|---------------|----------|
+| **Replica count** | 🔄 Dynamic | Planner calculates from metrics | Every adjustment interval |
+| **Per-GPU power limit** | 🔒 Static | User configuration | Deployment time (command-line args) |
+| **TP size** | 🔒 Static | Pre-deployment profiling | Deployment time (YAML + args) |
+
+**What the planner DECIDES (dynamic):**
+- Number of prefill replicas
+- Number of decode replicas
+
+**What the planner USES (static inputs):**
+- Per-GPU power limits (--prefill-engine-gpu-power-limit, --decode-engine-gpu-power-limit)
+- TP configuration (--prefill-engine-num-gpu, --decode-engine-num-gpu)
+- Total power budget (--total-gpu-power-limit)
+
+---
+
 **Algorithm Overview:**
 
 The planner uses a **metrics-driven, SLA-aware scaling algorithm** with **power budget constraints**:
@@ -87,15 +108,17 @@ The planner uses a **metrics-driven, SLA-aware scaling algorithm** with **power 
       - Compare observed ITL vs target ITL
       - Use profiling data to determine capacity
       - Calculate: required_prefill_replicas, required_decode_replicas
-   
+
    b) Apply power budget constraint:
-      - Calculate: required_power = (prefill_replicas × prefill_limit) + 
-                                     (decode_replicas × decode_limit)
+      - Note: prefill_limit and decode_limit are STATIC configuration parameters
+              (--prefill-engine-gpu-power-limit, --decode-engine-gpu-power-limit)
+      - Calculate: required_power = (prefill_replicas × prefill_limit × TP) +
+                                     (decode_replicas × decode_limit × TP)
       - If required_power > total_budget:
           Scale down proportionally: scale_factor = total_budget / required_power
           scaled_prefill = int(required_replicas × scale_factor)
           scaled_decode = int(required_replicas × scale_factor)
-   
+
    c) Make decision:
       - Deploy scaled_prefill prefill workers
       - Deploy scaled_decode decode workers
@@ -103,11 +126,14 @@ The planner uses a **metrics-driven, SLA-aware scaling algorithm** with **power 
 
 3. **Decision Output**:
    - **Replica count**: Number of prefill/decode workers to deploy
-   - **Power annotations**: `dynamo.nvidia.com/gpu-power-limit` value for each pod
+     - `next_num_p` = prefill replicas (dynamically calculated)
+     - `next_num_d` = decode replicas (dynamically calculated)
 
 4. **Enforcement Mechanism**:
-   - **Planner**: Updates DynamoGraphDeployment replica counts
-   - **Planner**: Annotates pods with power limits
+   - **Planner**: Updates DynamoGraphDeployment replica counts (uses decision output)
+   - **Planner**: Annotates pods with power limits (copies static configured values to pods)
+     - Annotation: `dynamo.nvidia.com/gpu-power-limit` = `--prefill-engine-gpu-power-limit` (static config)
+     - Not calculated - just applied from command-line arguments
    - **Operator**: Creates/scales pods based on DGD spec
    - **Power Agent**: Reads annotations and enforces GPU power limits via NVML
 
@@ -241,7 +267,7 @@ Function: PlannerCore.run_iteration()
         Function: annotate_pod(pod_name, power_limit)
         └─> k8s_api.patch_namespaced_pod(
               name=pod_name,
-              body={"metadata": {"annotations": 
+              body={"metadata": {"annotations":
                     {"dynamo.nvidia.com/gpu-power-limit": str(power_limit)}}}
             )
 
@@ -266,7 +292,7 @@ Function: PowerAgent.main_loop()
 │       └─> pynvml.nvmlInit()
 │           └─> handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_index)
 │               └─> pynvml.nvmlDeviceSetPowerManagementLimit(
-│                     handle, 
+│                     handle,
 │                     power_limit_watts × 1000  # Convert to milliwatts
 │                   )
 │
@@ -436,8 +462,8 @@ The codebase now consistently requires `HF_TOKEN` for model downloads across all
 
 ## Development Timeline
 
-**Total Development Time**: Multiple iterations over several sessions  
-**Final Result**: Fully functional, production-ready feature  
+**Total Development Time**: Multiple iterations over several sessions
+**Final Result**: Fully functional, production-ready feature
 **Test Coverage**: 100% (all critical paths verified)
 
 ---

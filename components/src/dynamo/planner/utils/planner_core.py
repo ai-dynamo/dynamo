@@ -226,21 +226,15 @@ def _apply_global_power_budget(
             current_power = prometheus_api_client.get_total_cluster_power()
             logger.debug(f"Current cluster power consumption: {current_power:.1f}W")
         except Exception as e:
-            logger.warning(
-                f"Failed to query current power, skipping enforcement: {e}"
-            )
+            logger.warning(f"Failed to query current power, skipping enforcement: {e}")
             return next_num_p, next_num_d
 
     # Calculate projected power for the NEW configuration
     requested_prefill_power = (
-        next_num_p
-        * args.prefill_engine_num_gpu
-        * args.prefill_engine_gpu_power_limit
+        next_num_p * args.prefill_engine_num_gpu * args.prefill_engine_gpu_power_limit
     )
     requested_decode_power = (
-        next_num_d
-        * args.decode_engine_num_gpu
-        * args.decode_engine_gpu_power_limit
+        next_num_d * args.decode_engine_num_gpu * args.decode_engine_gpu_power_limit
     )
     requested_total_power = requested_prefill_power + requested_decode_power
 
@@ -255,12 +249,8 @@ def _apply_global_power_budget(
         reduction_factor = args.total_gpu_power_limit / requested_total_power
 
         # Apply reduction proportionally
-        next_num_p_capped = max(
-            args.min_endpoint, int(next_num_p * reduction_factor)
-        )
-        next_num_d_capped = max(
-            args.min_endpoint, int(next_num_d * reduction_factor)
-        )
+        next_num_p_capped = max(args.min_endpoint, int(next_num_p * reduction_factor))
+        next_num_d_capped = max(args.min_endpoint, int(next_num_d * reduction_factor))
 
         # Re-check to handle rounding errors
         actual_prefill_power = (
@@ -282,10 +272,7 @@ def _apply_global_power_budget(
                 args.min_endpoint,
                 int(
                     remaining_budget
-                    / (
-                        args.decode_engine_num_gpu
-                        * args.decode_engine_gpu_power_limit
-                    )
+                    / (args.decode_engine_num_gpu * args.decode_engine_gpu_power_limit)
                 ),
             )
             actual_decode_power = (
