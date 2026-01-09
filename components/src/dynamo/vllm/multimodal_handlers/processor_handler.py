@@ -22,6 +22,7 @@ from ..multimodal_utils import (
     MultiModalRequest,
     MyRequestOutput,
     ProcessMixIn,
+    extract_user_text,
     vLLMMultimodalRequest,
 )
 
@@ -156,10 +157,7 @@ class ProcessorHandler(ProcessMixIn):
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
         # Safely extract user text
-        try:
-            user_text = raw_request.messages[0].content[0].text
-        except (IndexError, AttributeError) as e:
-            raise ValueError(f"Invalid message structure: {e}")
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 

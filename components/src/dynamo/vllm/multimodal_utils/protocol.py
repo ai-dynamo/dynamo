@@ -18,7 +18,7 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
@@ -89,9 +89,13 @@ class vLLMGenerateRequest(BaseModel):
             return SamplingParams(**v)
         return v
 
+    @field_serializer("sampling_params")
+    def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
+        """Serialize SamplingParams using msgspec and return as dict."""
+        return json.loads(msgspec.json.encode(value))
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        json_encoders={SamplingParams: lambda v: json.loads(msgspec.json.encode(v))},
     )
 
 

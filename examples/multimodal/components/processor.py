@@ -27,6 +27,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.chat_message_utils import extract_user_text
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import (
     MultiModalInput,
@@ -204,30 +205,7 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text
-        # Find all text content items from "user" role messages, and concatenate them.
-        # For multi-turn conversation, add a newline between each turn.
-        # This is not perfect solution as we encode multi-turn conversation as a single turn.
-        # However, as multi-turn conversation in a single request is not well defined in the spec (purposefully)
-        # this is the best we can do for now.
-        # TODO: Revisit this later when adding multi-turn conversation support.
-        user_texts = []
-        for message in raw_request.messages:
-            if message.role == "user":
-                # Collect all text content items from this user message
-                text_parts = []
-                for item in message.content:
-                    if item.type == "text" and item.text:
-                        text_parts.append(item.text)
-                # If this user message has text content, join it and add to user_texts
-                if text_parts:
-                    user_texts.append("".join(text_parts))
-
-        if not user_texts:
-            raise ValueError("No text content found in user messages")
-
-        # Join all user turns with newline separator
-        user_text = "\n".join(user_texts)
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 

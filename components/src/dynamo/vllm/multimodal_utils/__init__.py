@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dynamo.vllm.multimodal_utils.chat_message_utils import extract_user_text
 from dynamo.vllm.multimodal_utils.chat_processor import (
     ChatProcessor,
     CompletionsProcessor,
@@ -29,6 +30,7 @@ __all__ = [
     "CompletionsProcessor",
     "ProcessMixIn",
     "encode_image_embeddings",
+    "extract_user_text",
     "get_encoder_components",
     "get_http_client",
     "ImageLoader",
