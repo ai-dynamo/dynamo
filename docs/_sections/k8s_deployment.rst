@@ -10,5 +10,5 @@ Deployment Guide
    Service Discovery <../kubernetes/service_discovery>
    Webhooks <../kubernetes/webhooks>
    Minikube Setup <../kubernetes/deployment/minikube>
-   Managing Models with DynamoModel <../kubernetes/deployment/dynamomodel-guide>
+   Managing Models and LoRAs <../kubernetes/deployment/dynamomodel-guide>
    Autoscaling <../kubernetes/autoscaling>
