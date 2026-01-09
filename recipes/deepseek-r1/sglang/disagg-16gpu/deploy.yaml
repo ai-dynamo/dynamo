@@ -24,6 +24,7 @@ spec:
           image: my-registry/sglang-runtime:my-tag
     decode:
       componentType: worker
+      subComponentType: decode
       replicas: 1
       multinode:
         nodeCount: 2
@@ -68,6 +69,7 @@ spec:
             - --prefill-round-robin-balance
     prefill:
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       multinode:
         nodeCount: 2

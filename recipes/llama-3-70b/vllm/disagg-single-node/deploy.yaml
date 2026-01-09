@@ -25,6 +25,7 @@ spec:
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
+      subComponentType: prefill
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
@@ -67,6 +68,7 @@ spec:
           gpu: "2"
     VllmDecodeWorker:
       componentType: worker
+      subComponentType: decode
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
