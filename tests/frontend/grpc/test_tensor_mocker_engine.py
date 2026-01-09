@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import shutil
+from functools import partial
 
+import numpy as np
 import pytest
 import triton_echo_client
+import tritonclient.grpc as grpcclient
 
 from tests.utils.constants import QWEN
 from tests.utils.managed_process import ManagedProcess
@@ -105,4 +109,111 @@ def test_echo(start_services_with_echo_worker) -> None:
     client = triton_echo_client.TritonEchoClient(grpc_port=frontend_port)
     client.check_health()
     client.run_infer()
+    client.run_stream_infer()
     client.get_config()
+
+
+@pytest.mark.e2e
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
+@pytest.mark.parallel
+@pytest.mark.parametrize(
+    "request_params",
+    [
+        {"malformed_response": True},
+        {"raise_exception": True},
+    ],
+    ids=["malformed_response", "raise_exception"],
+)
+def test_model_infer_failure(start_services_with_echo_worker, request_params):
+    """Test gRPC request-level parameters are echoed through tensor models.
+
+    The worker acts as an identity function: echoes input tensors unchanged and
+    returns all request parameters plus a "processed" flag to verify the complete
+    parameter flow through the gRPC frontend.
+    """
+    frontend_port = start_services_with_echo_worker
+    client = grpcclient.InferenceServerClient(f"localhost:{frontend_port}")
+
+    input_data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    inputs = [grpcclient.InferInput("INPUT", input_data.shape, "FP32")]
+    inputs[0].set_data_from_numpy(input_data)
+
+    # expect exception during inference
+    with pytest.raises(Exception) as excinfo:
+        client.infer("echo", inputs=inputs, parameters=request_params)
+    if "malformed_response" in request_params:
+        assert "missing field `data_type`" in str(excinfo.value).lower()
+    elif "raise_exception" in request_params:
+        assert "intentional exception" in str(excinfo.value).lower()
+
+
+@pytest.mark.e2e
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0  # Echo tensor worker is CPU-only (no GPU required)
+@pytest.mark.parallel
+@pytest.mark.parametrize(
+    "request_params",
+    [
+        {"malformed_response": True},
+        {"raise_exception": True},
+        {"data_mismatch": True},
+    ],
+    ids=["malformed_response", "raise_exception", "data_mismatch"],
+)
+def test_model_stream_infer_failure(start_services_with_echo_worker, request_params):
+    """Test gRPC request-level parameters are echoed through tensor models.
+
+    The worker acts as an identity function: echoes input tensors unchanged and
+    returns all request parameters plus a "processed" flag to verify the complete
+    parameter flow through the gRPC frontend.
+    """
+    frontend_port = start_services_with_echo_worker
+    client = grpcclient.InferenceServerClient(f"localhost:{frontend_port}")
+
+    input_data = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+    inputs = [grpcclient.InferInput("INPUT", input_data.shape, "FP32")]
+    inputs[0].set_data_from_numpy(input_data)
+
+    class UserData:
+        def __init__(self):
+            self._completed_requests: queue.Queue[
+                grpcclient.InferResult | Exception
+            ] = queue.Queue()
+
+    # Define the callback function. Note the last two parameters should be
+    # result and error. InferenceServerClient would povide the results of an
+    # inference as grpcclient.InferResult in result. For successful
+    # inference, error will be None, otherwise it will be an object of
+    # tritonclientutils.InferenceServerException holding the error details
+    def callback(user_data, result, error):
+        print("Received callback")
+        if error:
+            user_data._completed_requests.put(error)
+        else:
+            user_data._completed_requests.put(result)
+
+    user_data = UserData()
+    client.start_stream(
+        callback=partial(callback, user_data),
+    )
+
+    client.async_stream_infer(
+        model_name="echo",
+        inputs=inputs,
+        parameters=request_params,
+    )
+
+    # For stream infer, the exception and error will pass to the callback but not
+    # raised
+    with pytest.raises(Exception) as excinfo:
+        data_item = user_data._completed_requests.get(timeout=5)
+        if isinstance(data_item, Exception):
+            print("Raising exception received from stream infer callback")
+            raise data_item
+    if "malformed_response" in request_params:
+        assert "missing field `data_type`" in str(excinfo.value).lower()
+    elif "data_mismatch" in request_params:
+        assert "shape implies" in str(excinfo.value).lower()
+    elif "raise_exception" in request_params:
+        assert "intentional exception" in str(excinfo.value).lower()

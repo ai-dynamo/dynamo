@@ -102,7 +102,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
-          go-version: '1.24'
+          go-version: '1.25'
       - name: Check for uncommitted changes
         shell: bash
         env:
@@ -198,6 +198,8 @@ jobs:
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   sglang:
     needs: changed-files
@@ -217,6 +219,8 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -259,6 +263,8 @@ jobs:
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   trtllm:
     needs: changed-files
@@ -278,6 +284,8 @@ jobs:
           echo ${K8S_NODE_NAME}
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -320,6 +328,8 @@ jobs:
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
   deploy-operator:
     runs-on: cpu-amd-m5-2xlarge
