@@ -14,7 +14,6 @@ members = [
     "lib/bindings/c",
     "lib/bindings/python/codegen",
     "lib/engines/*",
-    "lib/discovery",
     "lib/config",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship

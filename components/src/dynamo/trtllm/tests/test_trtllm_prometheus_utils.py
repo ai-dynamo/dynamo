@@ -3,7 +3,7 @@
 
 """Unit tests for Prometheus utilities."""
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -21,12 +21,7 @@ pytestmark = [
 class TestGetPrometheusExpfmt:
     """Test class for get_prometheus_expfmt function."""
 
-    @pytest.fixture
-    def trtllm_registry(self):
-        """Create a mock registry with TensorRT-LLM-style metrics (no existing prefixes)."""
-        registry = Mock()
-
-        sample_metrics = """# HELP python_gc_objects_collected_total Objects collected during gc
+    TRTLLM_SAMPLE_METRICS = """# HELP python_gc_objects_collected_total Objects collected during gc
 # TYPE python_gc_objects_collected_total counter
 python_gc_objects_collected_total{generation="0"} 123.0
 # HELP process_cpu_seconds_total Total user and system CPU time spent in seconds
@@ -44,25 +39,19 @@ num_requests_running 3.0
 tokens_per_second 245.7
 """
 
-        def mock_generate_latest(reg):
-            return sample_metrics.encode("utf-8")
-
-        import dynamo.common.utils.prometheus
-
-        original_generate_latest = dynamo.common.utils.prometheus.generate_latest
-        dynamo.common.utils.prometheus.generate_latest = mock_generate_latest
-
-        yield registry
-
-        dynamo.common.utils.prometheus.generate_latest = original_generate_latest
-
-    def test_trtllm_use_case(self, trtllm_registry):
+    def test_trtllm_use_case(self):
         """Test TensorRT-LLM use case: exclude python_/process_ and add trtllm_ prefix."""
-        result = get_prometheus_expfmt(
-            trtllm_registry,
-            exclude_prefixes=["python_", "process_"],
-            add_prefix="trtllm_",
-        )
+        registry = Mock()
+
+        with patch(
+            "prometheus_client.generate_latest",
+            return_value=self.TRTLLM_SAMPLE_METRICS.encode("utf-8"),
+        ):
+            result = get_prometheus_expfmt(
+                registry,
+                exclude_prefixes=["python_", "process_"],
+                add_prefix="trtllm_",
+            )
 
         # Should not contain excluded metrics
         assert "python_gc_objects_collected_total" not in result
@@ -82,9 +71,15 @@ tokens_per_second 245.7
         assert "trtllm_tokens_per_second 245.7" in result
         assert result.endswith("\n")
 
-    def test_no_filtering_all_frameworks(self, trtllm_registry):
+    def test_no_filtering_all_frameworks(self):
         """Test that without any filters, all metrics are returned."""
-        result = get_prometheus_expfmt(trtllm_registry)
+        registry = Mock()
+
+        with patch(
+            "prometheus_client.generate_latest",
+            return_value=self.TRTLLM_SAMPLE_METRICS.encode("utf-8"),
+        ):
+            result = get_prometheus_expfmt(registry)
 
         # Should contain all metrics including excluded ones
         assert "python_gc_objects_collected_total" in result
@@ -93,12 +88,18 @@ tokens_per_second 245.7
         assert "num_requests_running" in result
         assert result.endswith("\n")
 
-    def test_empty_result_handling(self, trtllm_registry):
+    def test_empty_result_handling(self):
         """Test handling when all metrics are filtered out."""
-        result = get_prometheus_expfmt(
-            trtllm_registry,
-            exclude_prefixes=["python_", "process_", "request_", "num_", "tokens_"],
-        )
+        registry = Mock()
+
+        with patch(
+            "prometheus_client.generate_latest",
+            return_value=self.TRTLLM_SAMPLE_METRICS.encode("utf-8"),
+        ):
+            result = get_prometheus_expfmt(
+                registry,
+                exclude_prefixes=["python_", "process_", "request_", "num_", "tokens_"],
+            )
 
         # Should return empty string with newline or just newline
         assert result == "\n" or result == ""
@@ -116,36 +117,31 @@ trtllm_request_success_total{model_name="test",finished_reason="stop"} 10.0
 trtllm_time_to_first_token_seconds_count 5.0
 """
 
-        def mock_generate_latest(reg):
-            return sample_metrics.encode("utf-8")
-
-        import dynamo.common.utils.prometheus
-
-        original_generate_latest = dynamo.common.utils.prometheus.generate_latest
-        dynamo.common.utils.prometheus.generate_latest = mock_generate_latest
-
-        try:
+        with patch(
+            "prometheus_client.generate_latest",
+            return_value=sample_metrics.encode("utf-8"),
+        ):
             result = get_prometheus_expfmt(
                 registry,
                 exclude_prefixes=["python_", "process_"],
                 add_prefix="trtllm_",
             )
 
-            # Should not double-add prefix
-            assert "trtllm_trtllm_request_success_total" not in result
-            assert "trtllm_request_success_total" in result
-            assert "trtllm_time_to_first_token_seconds" in result
-            assert result.endswith("\n")
-        finally:
-            dynamo.common.utils.prometheus.generate_latest = original_generate_latest
+        # Should not double-add prefix
+        assert "trtllm_trtllm_request_success_total" not in result
+        assert "trtllm_request_success_total" in result
+        assert "trtllm_time_to_first_token_seconds" in result
+        assert result.endswith("\n")
 
     def test_error_handling(self):
         """Test error handling when registry fails."""
-        # Create a registry that raises an exception
         bad_registry = Mock()
-        bad_registry.side_effect = Exception("Registry error")
 
-        result = get_prometheus_expfmt(bad_registry)
+        with patch(
+            "prometheus_client.generate_latest",
+            side_effect=Exception("Registry error"),
+        ):
+            result = get_prometheus_expfmt(bad_registry)
 
         # Should return empty string on error
         assert result == ""

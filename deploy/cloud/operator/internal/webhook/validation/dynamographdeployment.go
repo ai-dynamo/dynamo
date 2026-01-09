@@ -110,14 +110,11 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 	var errs []error
 
 	for serviceName, newService := range v.deployment.Spec.Services {
-		// Check if scaling adapter is enabled for this service (enabled by default)
-		scalingAdapterEnabled := true
-		if newService.ScalingAdapter != nil && newService.ScalingAdapter.Disable {
-			scalingAdapterEnabled = false
-		}
+		// Check if scaling adapter is enabled for this service (disabled by default)
+		scalingAdapterEnabled := newService.ScalingAdapter != nil && newService.ScalingAdapter.Enabled
 
 		if !scalingAdapterEnabled {
-			// Scaling adapter is disabled, users can modify replicas directly
+			// Scaling adapter is not enabled, users can modify replicas directly
 			continue
 		}
 
