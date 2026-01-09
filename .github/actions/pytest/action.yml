@@ -36,6 +36,8 @@ inputs:
     description: 'Enable mypy type checking during test run (true/false)'
     required: false
     default: 'false'
+  hf_token:
+    required: false
 
 
 runs:
@@ -103,6 +105,7 @@ runs:
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
+        HF_TOKEN: ${{ inputs.hf_token }}
       run: |
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
