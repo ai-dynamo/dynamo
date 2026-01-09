@@ -397,9 +397,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueStatus{
-						Replicas:        2,
-						UpdatedReplicas: 2,
-						ReadyReplicas:   2,
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						ReadyReplicas:      2,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -443,9 +444,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueStatus{
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   1,
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodClique{
@@ -457,9 +459,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueStatus{
-						Replicas:        2,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   1, // Only 1 ready, but 2 desired
+						Replicas:           2,
+						UpdatedReplicas:    1,
+						ReadyReplicas:      1, // Only 1 ready, but 2 desired
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -516,9 +519,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          1,
-						UpdatedReplicas:   1,
-						AvailableReplicas: 1,
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						AvailableReplicas:  1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -530,9 +534,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          1,
-						UpdatedReplicas:   1,
-						AvailableReplicas: 1,
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						AvailableReplicas:  1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -586,9 +591,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 1,
 					},
 					Status: grovev1alpha1.PodCliqueStatus{
-						Replicas:        1,
-						UpdatedReplicas: 1,
-						ReadyReplicas:   1,
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 				&grovev1alpha1.PodCliqueScalingGroup{
@@ -600,9 +606,10 @@ func Test_reconcileGroveResources(t *testing.T) {
 						Replicas: 2,
 					},
 					Status: grovev1alpha1.PodCliqueScalingGroupStatus{
-						Replicas:          2,
-						UpdatedReplicas:   2,
-						AvailableReplicas: 1, // Only 1 available, but 2 desired
+						Replicas:           2,
+						UpdatedReplicas:    2,
+						AvailableReplicas:  1, // Only 1 available, but 2 desired
+						ObservedGeneration: ptr.To(int64(1)),
 					},
 				},
 			},
@@ -671,10 +678,672 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.reconcileGroveResources(ctx, dgd)
+			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
+		})
+	}
+}
+
+func Test_computeRestartStatus(t *testing.T) {
+	ctx := context.Background()
+	newID := "restart-1"
+	oldID := "restart-0"
+
+	tests := []struct {
+		name              string
+		dgdSpec           v1alpha1.DynamoGraphDeploymentSpec
+		dgdStatus         v1alpha1.DynamoGraphDeploymentStatus
+		existingResources []client.Object
+		groveEnabled      bool
+		wantRestartStatus *v1alpha1.RestartStatus
+	}{
+		{
+			name: "no restart requested - returns nil",
+		},
+		{
+			name: "no restart at time - returns nil",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{},
+			},
+		},
+		{
+			name: "no restart requested but has completed status - preserves status",
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseCompleted,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: oldID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "no restart requested but has restarting status - returns nil",
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+				},
+			},
+		},
+		{
+			name: "restart already processed (completed) - returns existing status",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseCompleted,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "restart already processed (failed) - returns existing status",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseFailed,
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseFailed,
+			},
+		},
+		{
+			name: "parallel restart - all services complete (DCD pathway)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+			},
+			existingResources: []client.Object{
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "parallel restart - services still restarting (DCD pathway)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				BackendFramework: "vllm",
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						ServiceName:   "frontend",
+						ComponentType: string(commonconsts.ComponentTypeFrontend),
+						Replicas:      ptr.To(int32(1)),
+					},
+					"decode": {
+						ServiceName:   "decode",
+						ComponentType: string(commonconsts.ComponentTypeDecode),
+						Replicas:      ptr.To(int32(2)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend", "decode"},
+				},
+			},
+			existingResources: []client.Object{
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-decode",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1, // Not yet caught up
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionFalse,
+							},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"decode"},
+			},
+		},
+		{
+			name: "sequential restart - first service starting",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(2)),
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "sequential restart - first service done, moving to second",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(2)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+			},
+			existingResources: []client.Object{
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"decode"},
+			},
+		},
+		{
+			name: "sequential restart - all services complete",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeSequential,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+			},
+			existingResources: []client.Object{
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 1,
+						Conditions: []metav1.Condition{
+							{
+								Type:   v1alpha1.DynamoGraphDeploymentConditionTypeAvailable,
+								Status: metav1.ConditionTrue,
+							},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "default strategy (sequential) - no strategy specified",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "parallel restart with empty services - returns completed",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "Grove pathway - parallel restart complete",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+			},
+			existingResources: []client.Object{
+				&grovev1alpha1.PodCliqueSet{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Status: grovev1alpha1.PodCliqueSetStatus{
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
+				&grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-0-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{
+						Replicas: 1,
+					},
+					Status: grovev1alpha1.PodCliqueStatus{
+						Replicas:           1,
+						UpdatedReplicas:    1,
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
+			},
+			groveEnabled: true,
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseCompleted,
+			},
+		},
+		{
+			name: "Grove pathway - sequential restart in progress",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID,
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(2)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: newID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend"},
+				},
+			},
+			existingResources: []client.Object{
+				&grovev1alpha1.PodClique{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-0-frontend",
+						Namespace:  "default",
+						Generation: 1,
+					},
+					Spec: grovev1alpha1.PodCliqueSpec{
+						Replicas: 2,
+					},
+					Status: grovev1alpha1.PodCliqueStatus{
+						Replicas:           2,
+						UpdatedReplicas:    1, // Not fully updated
+						ReadyReplicas:      1,
+						ObservedGeneration: ptr.To(int64(1)),
+					},
+				},
+			},
+			groveEnabled: true,
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"},
+			},
+		},
+		{
+			name: "parallel restart - new restart request during ongoing restart resets to all services (DCD pathway)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID, // NEW timestamp
+					Strategy: &v1alpha1.RestartStrategy{
+						Type: v1alpha1.RestartStrategyTypeParallel,
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"completed": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"frontend", "decode"}, // completed service already done
+				},
+			},
+			existingResources: []client.Object{
+				// All services are now ready (simulating state after new restart timestamp is applied)
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-decode",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-completed",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionFalse},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"completed", "decode", "frontend"}, // ALL services, sorted
+			},
+		},
+		{
+			name: "sequential restart - new restart request during ongoing restart resets to first service (DCD pathway)",
+			dgdSpec: v1alpha1.DynamoGraphDeploymentSpec{
+				Restart: &v1alpha1.Restart{
+					ID: newID, // NEW timestamp
+					Strategy: &v1alpha1.RestartStrategy{
+						Type:  v1alpha1.RestartStrategyTypeSequential,
+						Order: []string{"frontend", "decode", "worker"},
+					},
+				},
+				Services: map[string]*v1alpha1.DynamoComponentDeploymentSharedSpec{
+					"frontend": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"decode": {
+						Replicas: ptr.To(int32(1)),
+					},
+					"worker": {
+						Replicas: ptr.To(int32(1)),
+					},
+				},
+			},
+			dgdStatus: v1alpha1.DynamoGraphDeploymentStatus{
+				Restart: &v1alpha1.RestartStatus{
+					ObservedID: oldID,
+					Phase:      v1alpha1.RestartPhaseRestarting,
+					InProgress: []string{"decode"},
+				},
+			},
+			existingResources: []client.Object{
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-frontend",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-decode",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				},
+				&v1alpha1.DynamoComponentDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       "test-dgd-worker",
+						Namespace:  "default",
+						Generation: 2,
+					},
+					Status: v1alpha1.DynamoComponentDeploymentStatus{
+						ObservedGeneration: 2,
+						Conditions: []metav1.Condition{
+							{Type: v1alpha1.DynamoGraphDeploymentConditionTypeAvailable, Status: metav1.ConditionTrue},
+						},
+					},
+				},
+			},
+			wantRestartStatus: &v1alpha1.RestartStatus{
+				ObservedID: newID,
+				Phase:      v1alpha1.RestartPhaseRestarting,
+				InProgress: []string{"frontend"}, // Reset to FIRST service
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			g := gomega.NewGomegaWithT(t)
+
+			s := scheme.Scheme
+			err := v1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+			err = grovev1alpha1.AddToScheme(s)
+			g.Expect(err).NotTo(gomega.HaveOccurred())
+
+			dgd := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dgd",
+					Namespace: "default",
+				},
+				Spec:   tt.dgdSpec,
+				Status: tt.dgdStatus,
+			}
+
+			var objects []client.Object
+			objects = append(objects, dgd)
+			objects = append(objects, tt.existingResources...)
+
+			fakeKubeClient := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(objects...).
+				WithStatusSubresource(objects...).
+				Build()
+
+			recorder := record.NewFakeRecorder(100)
+			reconciler := &DynamoGraphDeploymentReconciler{
+				Client:   fakeKubeClient,
+				Recorder: recorder,
+				Config: controller_common.Config{
+					Grove: controller_common.GroveConfig{
+						Enabled: tt.groveEnabled,
+					},
+				},
+			}
+
+			result := reconciler.computeRestartStatus(ctx, dgd)
+
+			if tt.wantRestartStatus == nil {
+				g.Expect(result).To(gomega.BeNil())
+				return
+			}
+
+			g.Expect(result).NotTo(gomega.BeNil())
+			g.Expect(result).To(gomega.Equal(tt.wantRestartStatus))
 		})
 	}
 }
@@ -1238,7 +1907,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				Config:   controller_common.Config{},
 			}
 
-			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd)
+			result, err := reconciler.reconcileDynamoComponentsDeployments(ctx, dgd, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
