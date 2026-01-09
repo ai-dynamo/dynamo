@@ -354,9 +354,7 @@ use std::pin::Pin;
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
-use dynamo_runtime::{
-    Runtime, distributed::DistributedConfig, storage::kv, traits::DistributedRuntimeProvider,
-};
+use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;
@@ -1356,32 +1354,7 @@ pub async fn create_worker_selection_pipeline_chat(
     use dynamo_llm::kv_router::PrefillRouter;
 
     let runtime = Runtime::from_settings()?;
-
-    // Check discovery backend to determine the appropriate configuration
-    // When using kubernetes discovery, etcd is not required - use in-memory KV store
-    // When using kv_store (etcd) discovery, etcd is required for both discovery and KV store
-    let discovery_backend =
-        std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
-
-    let dst_config = if discovery_backend == "kubernetes" {
-        tracing::info!(
-            "Using Kubernetes discovery backend - etcd not required for worker selection pipeline"
-        );
-        // Kubernetes discovery doesn't need etcd - use in-memory KV store
-        // Discovery happens via Kubernetes API (EndpointSlices)
-        DistributedConfig {
-            store_backend: kv::Selector::Memory,
-            nats_config: None,
-            request_plane: dynamo_runtime::distributed::RequestPlaneMode::default(),
-        }
-    } else {
-        tracing::info!(
-            "Using KV store (etcd) discovery backend for worker selection pipeline"
-        );
-        // Use default settings which connect to etcd
-        DistributedConfig::from_settings()
-    };
-
+    let dst_config = DistributedConfig::from_settings();
     let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
     let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
 
