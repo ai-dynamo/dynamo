@@ -78,6 +78,14 @@ impl InnerPrefillRouter {
             InnerPrefillRouter::KvRouter(_) => None,
         }
     }
+
+    /// Peek next worker without incrementing state (for non-KV modes only)
+    fn peek_next_worker(&self) -> Option<u64> {
+        match self {
+            InnerPrefillRouter::SimpleRouter(router) => router.peek_next_worker(),
+            InnerPrefillRouter::KvRouter(_) => None,
+        }
+    }
 }
 
 /// PrefillRouter is a forward-only operator that sits between Migration and the decode router.
@@ -267,7 +275,9 @@ impl PrefillRouter {
             }
         } else {
             // Non-KV mode: use PushRouter's stateful selection
-            let worker_id = prefill_router.select_next_worker()?;
+            // We use peek_next_worker instead of select_next_worker to avoid double-incrementing the counter
+            // if we fall back to the original path.
+            let worker_id = prefill_router.peek_next_worker()?;
             (worker_id, 0)
         };
 
@@ -486,6 +496,14 @@ impl
             .await
         {
             // Bootstrap optimization path: spawn prefill in background
+            // We successfully used the peeked worker, so we must now advance the router state
+            // to ensure the next request gets a different worker.
+            if !self.router_mode.is_kv_routing()
+                && let Some(router) = self.prefill_router.get()
+            {
+                router.select_next_worker();
+            }
+
             let routing = prefill_req.routing_mut();
             routing.prefill_worker_id = Some(worker_id);
             routing.dp_rank = Some(dp_rank);
