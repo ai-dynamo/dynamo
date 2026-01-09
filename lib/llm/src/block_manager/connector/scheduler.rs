@@ -238,10 +238,7 @@ impl WorkerSchedulerClient {
     /// Record operation in slot (bookkeeping only, no send).
     /// This updates the slot's expected operation count so is_complete() works correctly.
     pub fn record_operation(&mut self, request_id: &str, uuid: uuid::Uuid) {
-        let slot = self
-            .slots
-            .get_mut(request_id)
-            .expect("slot does not exist");
+        let slot = self.slots.get_mut(request_id).expect("slot does not exist");
         slot.operations.push(uuid);
     }
 }
