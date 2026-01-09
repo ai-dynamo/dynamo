@@ -146,7 +146,7 @@ jobs:
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
+          local_image: dev-${{ matrix.framework }}-amd64:${{ github.run_id }}
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
@@ -256,7 +256,7 @@ jobs:
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
-          local_image: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
+          local_image: dev-${{ matrix.framework }}-arm64:${{ github.run_id }}
           push_tags: |
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
             ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
