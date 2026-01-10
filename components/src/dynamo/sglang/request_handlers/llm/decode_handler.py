@@ -64,6 +64,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
+            output_options = request.get("output_options", {})
 
             param_mapping = {
                 "temperature": sampling_opts.get("temperature"),
@@ -72,6 +73,23 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "max_new_tokens": stop_conditions.get("max_tokens"),
                 "ignore_eos": stop_conditions.get("ignore_eos"),
             }
+
+            # Handle logprobs from output_options
+            logprobs_value = output_options.get("logprobs")
+            if logprobs_value is not None and logprobs_value != "":
+                try:
+                    parsed_logprobs = int(logprobs_value)
+                    if parsed_logprobs < 0:
+                        logging.warning(
+                            f"Invalid logprobs value: {logprobs_value} (must be non-negative), ignoring"
+                        )
+                    else:
+                        param_mapping["return_logprob"] = True
+                        param_mapping["top_logprobs_num"] = parsed_logprobs
+                except (ValueError, TypeError):
+                    logging.warning(
+                        f"Invalid logprobs value: {logprobs_value} (must be integer), ignoring"
+                    )
         else:
             # OpenAI request format
             param_mapping = {
@@ -80,6 +98,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 "top_k": request.get("top_k"),
                 "max_new_tokens": request.get("max_tokens"),
             }
+
+            # Handle logprobs from OpenAI format
+            logprobs = request.get("logprobs")
+            top_logprobs = request.get("top_logprobs")
+            if logprobs:
+                param_mapping["return_logprob"] = True
+                if top_logprobs is not None:
+                    param_mapping["top_logprobs_num"] = top_logprobs
 
         return {k: v for k, v in param_mapping.items() if v is not None}
 
@@ -102,6 +128,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+
+        # Extract logprobs params (they go to async_generate, not SamplingParams)
+        return_logprob = sampling_params.pop("return_logprob", False)
+        top_logprobs_num = sampling_params.pop("top_logprobs_num", None)
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -128,6 +158,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                return_logprob=return_logprob,
+                top_logprobs_num=top_logprobs_num,
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
@@ -148,6 +180,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                return_logprob=return_logprob,
+                top_logprobs_num=top_logprobs_num,
                 rid=trace_id,
             )
             if self.skip_tokenizer_init:
@@ -156,6 +190,94 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             else:
                 async for out in self._process_text_stream(agg, context):
                     yield out
+
+    @staticmethod
+    def _extract_logprobs(
+        res: Dict[str, Any], num_output_tokens_so_far: int
+    ) -> tuple[list[float] | None, list[list[dict]] | None]:
+        """
+        Extract logprobs from SGLang response for new tokens.
+
+        Args:
+            res: SGLang response dict
+            num_output_tokens_so_far: Number of tokens already processed
+
+        Returns:
+            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
+            - log_probs: List of log probabilities for each new token
+            - top_logprobs: List of top logprobs dicts for each new token
+        """
+        meta_info = res.get("meta_info", {})
+
+        # SGLang uses "output_token_logprobs" for selected token logprobs
+        # Format: [(logprob, token_id, decoded_text), ...] - one tuple per token
+        output_token_logprobs = meta_info.get("output_token_logprobs")
+
+        # SGLang uses "output_top_logprobs" for top-k alternatives
+        # Format: [[(logprob, token_id, text), ...], ...] - list of lists
+        output_top_logprobs = meta_info.get("output_top_logprobs")
+
+        if not output_token_logprobs:
+            return None, None
+
+        # Get logprobs for new tokens only
+        new_token_logprobs = output_token_logprobs[num_output_tokens_so_far:]
+        if not new_token_logprobs:
+            return None, None
+
+        log_probs = []
+        top_logprobs = []
+
+        # Get top logprobs slice if available
+        new_top_logprobs = None
+        if output_top_logprobs:
+            new_top_logprobs = output_top_logprobs[num_output_tokens_so_far:]
+
+        # Extract logprobs for each token, maintaining 1:1 alignment
+        for idx, token_data in enumerate(new_token_logprobs):
+            # Skip if token_data is None or logprob_val is None
+            if token_data is None:
+                continue
+            # SGLang format: (logprob, token_id, decoded_text)
+            logprob_val = token_data[0]
+            if logprob_val is None:
+                continue
+
+            log_probs.append(float(logprob_val))
+
+            # Extract corresponding top logprobs for this token position
+            if new_top_logprobs and idx < len(new_top_logprobs):
+                token_top_list = new_top_logprobs[idx]
+                if not token_top_list:
+                    top_logprobs.append([])
+                else:
+                    # Filter out None entries and sort by logprob descending
+                    # SGLang doesn't guarantee order, so we sort to assign proper ranks
+                    valid_entries = [
+                        alt_data
+                        for alt_data in token_top_list
+                        if alt_data is not None and alt_data[0] is not None
+                    ]
+                    # Sort by logprob descending (highest probability first)
+                    valid_entries.sort(key=lambda x: x[0], reverse=True)
+
+                    token_top_logprobs = []
+                    for rank, alt_data in enumerate(valid_entries):
+                        # SGLang format: (logprob, token_id, decoded_text)
+                        alt_logprob_val = alt_data[0]
+                        token_id = alt_data[1]
+                        decoded_text = alt_data[2] if len(alt_data) > 2 else None
+                        token_top_logprobs.append(
+                            {
+                                "rank": rank,
+                                "token_id": token_id,
+                                "token": decoded_text,
+                                "logprob": float(alt_logprob_val),
+                            }
+                        )
+                    top_logprobs.append(token_top_logprobs)
+
+        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _process_token_stream(
         self,
@@ -203,6 +325,16 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
                 next_total_toks = len(output_ids)
                 out["token_ids"] = output_ids[num_output_tokens_so_far:]
+
+                # Extract logprobs for new tokens
+                log_probs, top_logprobs = self._extract_logprobs(
+                    res, num_output_tokens_so_far
+                )
+                if log_probs is not None:
+                    out["log_probs"] = log_probs
+                if top_logprobs is not None:
+                    out["top_logprobs"] = top_logprobs
+
                 num_output_tokens_so_far = next_total_toks
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
