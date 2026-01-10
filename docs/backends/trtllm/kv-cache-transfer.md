@@ -34,9 +34,10 @@ TODO: Add instructions for how to specify different backends for NIXL.
 
 ## Alternative Method: UCX
 
-TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. There are two ways to enable UCX as the KV cache transfer backend:
+TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. To enable UCX as the KV cache transfer backend:
 
 1. **Recommended:** Set `cache_transceiver_config.backend: UCX` in your engine configuration YAML file.
-2. Alternatively, set the environment variable `TRTLLM_USE_UCX_KV_CACHE=1` and configure `cache_transceiver_config.backend: DEFAULT` in the engine configuration YAML.
 
-This flexibility allows users to choose the most suitable method for their deployment and compatibility requirements.
+> Notes:
+> - UCX remains opt-in. The `DEFAULT` backend continues to use the existing NIXL path.
+> - If you set `TRTLLM_USE_UCX_KV_CACHE=1` while leaving `cache_transceiver_config.backend` as `DEFAULT` (or empty), Dynamo will auto-switch it to `UCX` at runtime. If you explicitly set a different backend, Dynamo will not override it.

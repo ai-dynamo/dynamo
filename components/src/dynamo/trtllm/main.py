@@ -209,6 +209,21 @@ async def init(runtime: DistributedRuntime, config: Config):
             logging.error(f"Failed to parse override_engine_args as JSON: {e}")
             sys.exit(1)
 
+    if os.getenv("TRTLLM_USE_UCX_KV_CACHE", "").lower() in {"1", "true", "yes"}:
+        kv_cfg = arg_map.get("kv_cache_config")
+        if isinstance(kv_cfg, KvCacheConfig):
+            kv_cfg = kv_cfg.model_dump(exclude_none=True)
+            arg_map["kv_cache_config"] = kv_cfg
+        if isinstance(kv_cfg, dict):
+            transceiver_cfg = kv_cfg.setdefault("cache_transceiver_config", {})
+            backend = str(transceiver_cfg.get("backend", "")).strip().lower()
+            if backend in {"", "default"}:
+                transceiver_cfg["backend"] = "UCX"
+                logging.info(
+                    "TRTLLM_USE_UCX_KV_CACHE=1 set: forcing "
+                    "cache_transceiver_config.backend to UCX"
+                )
+
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         # Add it to kv_cache_config while preserving all settings from YAML
