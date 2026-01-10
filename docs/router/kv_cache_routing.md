@@ -79,7 +79,7 @@ For basic model registration without KV routing, you can use `--router-mode roun
 
 ## Disaggregated Serving (Prefill and Decode)
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md#model-types)), the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
 
 ### Automatic Prefill Router Activation
 
