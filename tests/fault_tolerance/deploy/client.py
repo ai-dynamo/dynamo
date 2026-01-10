@@ -408,7 +408,7 @@ def run_aiperf(
                 )
                 if success:
                     break  # Success - exit the retry loop
-            ## TODO: bug with aiperf git+https://github.com/ai-dynamo/aiperf.git@9c91158fdc2839a139595649809017ea14efe43d
+            ## TODO: bug with aiperf git+https://github.com/ai-dynamo/aiperf.git@8c51b4381304a63965abbc6f8272cf4e964d0869
             ## where sending a SIGINT on Mac can sometimes have an error code of -9 (SIGABRT) which results in profile_export_aiperf.json not being created
             elif result.returncode == -9 and continuous_load:
                 logger.warning(
