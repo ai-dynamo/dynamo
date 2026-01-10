@@ -87,10 +87,14 @@ class DynamoWorkerProcess(ManagedProcess):
             "--model",
             FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
-            "--gpu-memory-utilization",
-            "0.3",  # Reduced to support up to 3 workers concurrently
             "--max-model-len",
-            "8192",
+            "8192",  # input + output tokens
+            "--max-num-seqs",
+            "1",  # number of requests at a time
+            "--num-gpu-blocks-override",  # limit total KV cache allocation
+            "512",  # 8192 tokens x 1 context / 16 tokens per block = 512 blocks
+            "--gpu-memory-utilization",
+            "0.15",  # avoid assertion error on vLLM available memory checks
             "--migration-limit",
             str(migration_limit),
         ]
