@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::*;
 use crate::block_manager::distributed::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
-use crate::block_manager::vllm::connector::worker::{event_query, event_sync_blocking};
+use crate::block_manager::vllm::connector::worker::event_sync_blocking;
 use crate::{block_manager::distributed::VllmTensor, to_pyerr};
 use dynamo_runtime::DistributedRuntime;
 
@@ -413,10 +413,8 @@ impl Worker for KvConnectorWorker {
 
         // Use std::thread since we may be in a subprocess without tokio runtime
         std::thread::spawn(move || {
-            // Poll with sleep until event completes
-            while !event_query(event) {
-                std::thread::sleep(std::time::Duration::from_micros(25));
-            }
+            // Block this thread until event completes (doesn't block main thread)
+            event_sync_blocking(event);
 
             // Send operations to scheduler
             for op in operations {
