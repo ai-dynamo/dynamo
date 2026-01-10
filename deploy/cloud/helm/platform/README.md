@@ -104,7 +104,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace). |
 | dynamo-operator.namespaceRestriction.targetNamespace | string | `nil` | Target namespace for operator deployment (leave empty for current namespace) |
 | dynamo-operator.controllerManager.tolerations | list | `[]` | Node tolerations for controller manager pods |
-| dynamo-operator.controllerManager.affinity | list | `[]` | Affinity for controller manager pods |
+| dynamo-operator.controllerManager.affinity | object | `{}` | Affinity for controller manager pods |
 | dynamo-operator.controllerManager.leaderElection.id | string | `""` | Leader election ID for cluster-wide coordination. WARNING: All cluster-wide operators must use the SAME ID to prevent split-brain. Different IDs would allow multiple leaders simultaneously. |
 | dynamo-operator.controllerManager.leaderElection.namespace | string | `""` | Namespace for leader election leases (only used in cluster-wide mode). If empty, defaults to kube-system for cluster-wide coordination. All cluster-wide operators should use the SAME namespace for proper leader election. |
 | dynamo-operator.controllerManager.manager.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/kubernetes-operator"` | Official NVIDIA Dynamo operator image repository |
@@ -149,10 +149,19 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
+| grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
+| kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods (applies to all components including crd-upgrader) |
+| kai-scheduler.global.affinity | object | `{}` | Affinity for kai-scheduler pods |
 | etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
+| etcd.tolerations | list | `[]` | Node tolerations for etcd pods |
+| etcd.affinity | object | `{}` | Affinity for etcd pods |
 | nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats." |
+| nats.podTemplate.merge.spec.tolerations | list | `[]` | Node tolerations for NATS pods |
+| nats.podTemplate.merge.spec.affinity | object | `{}` | Affinity for NATS pods |
+| nats.natsBox.podTemplate.merge.spec.tolerations | list | `[]` | Node tolerations for NATS Box pods |
+| nats.natsBox.podTemplate.merge.spec.affinity | object | `{}` | Affinity for NATS Box pods |
 
 ### NATS Configuration
 
