@@ -59,10 +59,16 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--speedup-ratio", type=float, default=10.0)
     parser.add_argument("--namespace", type=str, default="default")
     parser.add_argument(
-        "--timeout", type=int, default=600, help="DGD ready timeout in seconds"
+        "--timeout", type=int, default=1200, help="DGD ready timeout in seconds"
     )
     parser.add_argument("--name-prefix", type=str, default="scale-test")
     parser.add_argument("--no-cleanup", action="store_true", help="Keep DGDs on exit")
+    parser.add_argument(
+        "--worker-replicas",
+        type=int,
+        default=1,
+        help="Number of mocker worker replicas per deployment",
+    )
 
 
 def _add_load_args(parser: argparse.ArgumentParser) -> None:
@@ -87,6 +93,7 @@ async def cmd_start_async(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         name_prefix=args.name_prefix,
         cleanup_on_exit=not args.no_cleanup,
+        worker_replicas=args.worker_replicas,
     )
 
     try:
@@ -137,6 +144,7 @@ async def cmd_run_async(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         name_prefix=args.name_prefix,
         cleanup_on_exit=True,
+        worker_replicas=args.worker_replicas,
     )
 
     try:

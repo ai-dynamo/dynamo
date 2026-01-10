@@ -56,6 +56,7 @@ python -m tests.scale_test cleanup --namespace my-ns
 | `--namespace` | default | Kubernetes namespace |
 | `--model-path` | TinyLlama/TinyLlama-1.1B-Chat-v1.0 | Model path |
 | `--speedup-ratio` | 10.0 | Mocker speedup |
+| `--worker-replicas` | 1 | Number of mocker worker replicas per deployment |
 | `--timeout` | 600 | Ready timeout (seconds) |
 | `--duration` | 60 | Load test duration (seconds) |
 | `--qps` | 1.0 | Queries per second |
@@ -63,6 +64,18 @@ python -m tests.scale_test cleanup --namespace my-ns
 | `--load-gen-processes` | 1 | Processes per pod |
 | `--no-cleanup` | false | Keep DGDs after exit |
 | `-v` | false | Debug logging |
+
+## Multiple Backend Workers
+
+Deploy multiple mocker worker replicas per DGD to simulate distributed backends:
+
+```bash
+# 5 DGDs, each with 4 mocker worker replicas (20 workers total)
+python -m tests.scale_test run --count 5 --worker-replicas 4
+
+# 10 DGDs with 8 workers each, high QPS load test
+python -m tests.scale_test run --count 10 --worker-replicas 8 --qps 100
+```
 
 ## High QPS Scaling
 
@@ -95,6 +108,7 @@ async def run_test():
         num_deployments=5,
         kubernetes_namespace="test",
         model_path="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        worker_replicas=4,  # 4 mocker workers per deployment
     )
 
     try:

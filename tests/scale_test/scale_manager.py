@@ -30,6 +30,7 @@ class ScaleManager:
     timeout: int = 600
     name_prefix: str = "scale-test"
     cleanup_on_exit: bool = True
+    worker_replicas: int = 1
 
     _deployment_specs: List[DeploymentSpec] = field(default_factory=list)
     _deployment_names: List[str] = field(default_factory=list)
@@ -54,6 +55,7 @@ class ScaleManager:
             timeout=config.deployment_timeout,
             name_prefix=config.name_prefix,
             cleanup_on_exit=config.cleanup_on_exit,
+            worker_replicas=config.worker_replicas,
         )
 
     async def _init_kubernetes(self) -> None:
@@ -77,6 +79,7 @@ class ScaleManager:
                 builder.set_kubernetes_namespace(self.kubernetes_namespace)
                 .set_model(self.model_path)
                 .set_speedup_ratio(self.speedup_ratio)
+                .set_worker_replicas(self.worker_replicas)
                 .build()
             )
             specs.append(spec)
@@ -90,7 +93,11 @@ class ScaleManager:
         logger.info(f"Building {self.num_deployments} DGD specifications...")
         self._deployment_specs = self._build_deployment_specs()
 
-        logger.info(f"Creating {self.num_deployments} DGD deployments...")
+        total_mockers = self.num_deployments * self.worker_replicas
+        logger.info(
+            f"Creating {self.num_deployments} DGD deployments "
+            f"({total_mockers} mockers total)..."
+        )
 
         for i, spec in enumerate(self._deployment_specs, 1):
             deployment_name = spec.name

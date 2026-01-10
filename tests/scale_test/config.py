@@ -20,6 +20,7 @@ class ScaleTestConfig:
     name_prefix: str = "scale-test"
     deployment_timeout: int = 600
     cleanup_on_exit: bool = True
+    worker_replicas: int = 1
 
     def __post_init__(self):
         if self.template_path is None:
@@ -55,6 +56,7 @@ class ScaleManagerConfig:
         load_gen_processes: int = 1,
         name_prefix: str = "scale-test",
         cleanup_on_exit: bool = True,
+        worker_replicas: int = 1,
     ) -> "ScaleManagerConfig":
         return cls(
             num_deployments=num_deployments,
@@ -65,6 +67,7 @@ class ScaleManagerConfig:
                 deployment_timeout=timeout,
                 name_prefix=name_prefix,
                 cleanup_on_exit=cleanup_on_exit,
+                worker_replicas=worker_replicas,
             ),
             load_test=LoadTestConfig(
                 duration_sec=duration,
