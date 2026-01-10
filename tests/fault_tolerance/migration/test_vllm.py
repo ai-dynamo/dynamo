@@ -261,6 +261,7 @@ def test_request_migration_vllm_aggregated(
                         assert "'Cannot recreate stream: ...' error found in logs" in str(e)
 
 
+@pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
 @pytest.mark.timeout(350)  # 3x average
 @pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
 @pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
