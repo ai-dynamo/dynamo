@@ -1,4 +1,4 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 # Usage: `python -m dynamo.frontend [args]`
@@ -30,12 +30,15 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
+    ModelDeploymentCard,
+    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
 
@@ -45,7 +48,23 @@ CUSTOM_BACKEND_METRICS_POLLING_INTERVAL_ENV_VAR = (
 )
 CUSTOM_BACKEND_ENDPOINT_ENV_VAR = "CUSTOM_BACKEND_ENDPOINT"
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+async def _dummy_generator(request):
+    """Minimal generator that yields nothing. Work in progress."""
+    return
+    yield  # Makes this an async generator
+
+
+async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+    """
+    Called by Rust when a model is discovered.
+    """
+    loop = asyncio.get_running_loop()
+    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
+    return PythonAsyncEngine(_dummy_generator, loop)
 
 
 def validate_model_name(value):
@@ -127,11 +146,13 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--no-kv-events",
-        action="store_false",
+        "--kv-events",
+        action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
-        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+        default=(
+            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
+        ),  # default is true
+        help="KV Router: Enable/disable KV events. Use --kv-events to enable (default, router receives cache state events from workers) or --no-kv-events to disable (router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
         "--router-ttl",
@@ -142,8 +163,8 @@ def parse_args():
     parser.add_argument(
         "--router-max-tree-size",
         type=int,
-        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**10))),
-        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1024).",
+        default=int(os.environ.get("DYN_ROUTER_MAX_TREE_SIZE", str(2**20))),
+        help="KV Router: Maximum tree size before pruning when KV events are disabled. Only used when --no-kv-events is set. Can be set via DYN_ROUTER_MAX_TREE_SIZE env var (default: 1048576, which is 2^20).",
     )
     parser.add_argument(
         "--router-prune-target-ratio",
@@ -223,6 +244,12 @@ def parse_args():
         default=False,
         help="Start KServe gRPC server.",
     )
+    parser.add_argument(
+        "--grpc-metrics-port",
+        type=int,
+        default=8788,
+        help="HTTP metrics port for gRPC service (u16). Only used with --kserve-grpc-server. Defaults to 8788.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-backend-metrics-endpoint",
@@ -251,8 +278,14 @@ def parse_args():
         "--request-plane",
         type=str,
         choices=["nats", "http", "tcp"],
-        default=os.environ.get("DYN_REQUEST_PLANE", "nats"),
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
         help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--exp-python-factory",
+        action="store_true",
+        default=False,
+        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
     )
 
     flags = parser.parse_args()
@@ -294,8 +327,11 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
+    # Enable NATS for KV router mode when kv_events are used (when --no-kv-events is not set)
+    enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
+
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
@@ -347,6 +383,8 @@ async def async_main():
         kwargs["tls_key_path"] = flags.tls_key_path
     if flags.namespace:
         kwargs["namespace"] = flags.namespace
+    if flags.kserve_grpc_server and flags.grpc_metrics_port:
+        kwargs["http_metrics_port"] = flags.grpc_metrics_port
     if flags.custom_backend_metrics_endpoint:
         kwargs[
             "custom_backend_metrics_endpoint"
@@ -355,6 +393,9 @@ async def async_main():
         kwargs[
             "custom_backend_metrics_polling_interval"
         ] = flags.custom_backend_metrics_polling_interval
+
+    if flags.exp_python_factory:
+        kwargs["engine_factory"] = engine_factory
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

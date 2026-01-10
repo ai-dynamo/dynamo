@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import base64
@@ -21,6 +21,7 @@ from tests.serve.lora_utils import MinioLoraConfig
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
+    cached_tokens_chat_payload,
     chat_payload,
     chat_payload_default,
     chat_payload_with_logprobs,
@@ -31,6 +32,12 @@ from tests.utils.payload_builder import (
 from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 
 logger = logging.getLogger(__name__)
+
+
+def _is_cuda13() -> bool:
+    v = os.environ.get("CUDA_VERSION", "")
+    # handles "13", "13.0", "13.0.1", etc.
+    return v.startswith("13")
 
 
 @dataclass
@@ -83,7 +90,7 @@ vllm_configs = {
         name="aggregated_logprobs",
         directory=vllm_dir,
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
+        marks=[pytest.mark.gpu_1, pytest.mark.post_merge],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
             chat_payload_with_logprobs(
@@ -110,6 +117,11 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+            pytest.mark.xfail(
+                _is_cuda13(),
+                reason="lmcache does not support CUDA 13 as of v0.3.11",
+                strict=False,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -125,7 +137,13 @@ vllm_configs = {
         script_name="agg_lmcache_multiproc.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+            pytest.mark.xfail(
+                _is_cuda13(),
+                reason="lmcache does not support CUDA 13 as of v0.3.11",
+                strict=False,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
@@ -187,6 +205,37 @@ vllm_configs = {
         ],
         env={
             "DYN_LOG": "dynamo_llm::kv_router::publisher=trace,dynamo_llm::kv_router::scheduler=info",
+        },
+    ),
+    "agg-router-approx": VLLMConfig(
+        name="agg-router-approx",
+        directory=vllm_dir,
+        script_name="agg_router_approx.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.post_merge],
+        model="Qwen/Qwen3-0.6B",
+        request_payloads=[
+            # Test approximate KV routing (--no-kv-events mode)
+            # Repeated requests should show cache-aware routing in logs
+            chat_payload_default(
+                repeat_count=3,
+                expected_log=[
+                    # Verify scheduler is selecting workers with cache awareness
+                    r"Selected worker: worker_id=\d+ dp_rank=.*?, logit: ",
+                    # After first request, should see cached blocks being tracked
+                    r"with \d+ cached blocks",
+                ],
+            ),
+            # Also test with cached tokens payload to verify usage field
+            cached_tokens_chat_payload(
+                repeat_count=3,
+                expected_log=[
+                    # Verify routing decision shows cache hits
+                    r"with \d+ cached blocks",
+                ],
+            ),
+        ],
+        env={
+            "DYN_LOG": "dynamo_llm::kv_router::scheduler=info",
         },
     ),
     "disaggregated": VLLMConfig(
@@ -339,6 +388,7 @@ vllm_configs = {
         script_name="agg_multimodal.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.nightly,
             # https://github.com/ai-dynamo/dynamo/issues/4501
             pytest.mark.xfail(strict=False),
         ],
@@ -428,7 +478,7 @@ vllm_configs = {
         name="aggregated_toolcalling",
         directory=vllm_dir,
         script_name="agg_multimodal.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.multimodal],
+        marks=[pytest.mark.gpu_2, pytest.mark.multimodal, pytest.mark.nightly],
         model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         script_args=[
             "--model",
@@ -508,6 +558,7 @@ vllm_configs = {
         script_name="agg.sh",
         marks=[
             pytest.mark.gpu_1,
+            pytest.mark.post_merge,
             pytest.mark.timeout(
                 420
             ),  # 3x estimated time (60s) + download time (240s) for 7B model
@@ -594,7 +645,6 @@ def vllm_config_test(request):
 
 @pytest.mark.vllm
 @pytest.mark.e2e
-@pytest.mark.nightly
 def test_serve_deployment(
     vllm_config_test,
     request,
@@ -615,9 +665,13 @@ def test_serve_deployment(
 @pytest.mark.vllm
 @pytest.mark.e2e
 @pytest.mark.gpu_2
+@pytest.mark.nightly
 @pytest.mark.timeout(360)  # Match VLLMConfig.timeout for this multimodal deployment
 def test_multimodal_b64(
-    request, runtime_services_dynamic_ports, dynamo_dynamic_ports, predownload_models
+    request,
+    runtime_services_dynamic_ports,
+    dynamo_dynamic_ports,
+    predownload_models,
 ):
     """
     Test multimodal inference with base64 url passthrough.
@@ -708,7 +762,7 @@ def lora_chat_payload(
 @pytest.mark.gpu_1
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.nightly
+@pytest.mark.post_merge
 def test_lora_aggregated(
     request,
     runtime_services_dynamic_ports,
@@ -763,13 +817,15 @@ def test_lora_aggregated(
 @pytest.mark.gpu_2
 @pytest.mark.model("Qwen/Qwen3-0.6B")
 @pytest.mark.timeout(600)
-@pytest.mark.nightly
+@pytest.mark.post_merge
+@pytest.mark.parametrize("num_system_ports", [2], indirect=True)
 def test_lora_aggregated_router(
     request,
     runtime_services_dynamic_ports,
     predownload_models,
     minio_lora_service,
     dynamo_dynamic_ports,
+    num_system_ports,
 ):
     """
     Test LoRA inference with aggregated vLLM deployment using KV router.
@@ -780,6 +836,9 @@ def test_lora_aggregated_router(
     3. Loads the LoRA adapter on both workers via system API
     4. Runs inference with the LoRA model, verifying KV cache routing
     """
+    assert (
+        num_system_ports >= 2
+    ), "serve tests require at least SYSTEM_PORT1 + SYSTEM_PORT2"
     minio_config: MinioLoraConfig = minio_lora_service
 
     # Create payloads that load LoRA on both workers and test inference

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -6,14 +6,15 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Generator, Optional
 
 import pytest
 from filelock import FileLock
 
-from tests.utils.constants import TEST_MODELS
+from tests.utils.constants import TEST_MODELS, DefaultPort
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.port_utils import (
+    ServicePorts,
     allocate_port,
     allocate_ports,
     deallocate_port,
@@ -556,15 +557,22 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     It also sets the NATS_SERVER and ETCD_ENDPOINTS environment variables so that
     Dynamo processes can find the services on the dynamic ports.
 
+    xdist/parallel safety:
+    - Function-scoped: each test gets its own NATS/etcd instances and ports.
+    - Each pytest-xdist worker runs tests in a separate process, so env vars do not
+      leak across workers.
+
     - If store_kv != "etcd", etcd is not started (returns None)
-    - If request_plane != "nats", NATS is not started (returns None)
+    - NATS is always started when etcd is used, because KV events require NATS
+      regardless of the request_plane (tcp/nats only affects request transport)
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
     import os
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
-    if request_plane == "nats" and store_kv == "etcd":
+    # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
+    if store_kv == "etcd":
         with NatsServer(request, port=0) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
@@ -582,11 +590,6 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None
             os.environ.pop("NATS_SERVER", None)
-    elif store_kv == "etcd":
-        with EtcdServer(request, port=0) as etcd_process:
-            os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
-            yield None, etcd_process
-            os.environ.pop("ETCD_ENDPOINTS", None)
     else:
         yield None, None
 
@@ -598,7 +601,14 @@ def runtime_services_session(request, tmp_path_factory):
     Uses file-based reference counting to coordinate between pytest-xdist worker processes.
     Only the first worker starts services, and only the last worker tears them down.
 
-    Test isolation is achieved through unique namespaces (test-namespace-{random-suffix}).
+    WARNING: may not be parallel/xdist safe.
+    - This fixture shares one NATS + one etcd across many tests (and across xdist workers).
+    - It is only safe if tests fully isolate state (e.g. unique namespaces) and do not
+      assume exclusive access to global streams/keys/ports.
+    - Prefer `runtime_services_dynamic_ports` for true per-test isolation in parallel runs.
+
+    TODO: once nothing uses `runtime_services_session`, make the per-test dynamic ports
+    behavior the default for router/frontend integration tests.
     """
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:
@@ -622,3 +632,37 @@ def file_storage_backend():
             os.environ["DYN_FILE_KV"] = old_env
         else:
             os.environ.pop("DYN_FILE_KV", None)
+
+
+########################################################
+# Shared Port Allocation (Dynamo deployments)
+########################################################
+
+
+@pytest.fixture(scope="function")
+def num_system_ports(request) -> int:
+    """Number of system ports to allocate for this test.
+
+    Default: 1 port.
+
+    Tests that need multiple system ports (e.g. SYSTEM_PORT1 + SYSTEM_PORT2) must
+    explicitly request them via indirect parametrization:
+      @pytest.mark.parametrize("num_system_ports", [2], indirect=True)
+    """
+    return getattr(request, "param", 1)
+
+
+@pytest.fixture(scope="function")
+def dynamo_dynamic_ports(num_system_ports) -> Generator[ServicePorts, None, None]:
+    """Allocate per-test ports for Dynamo deployments.
+
+    - frontend_port: OpenAI-compatible HTTP/gRPC ingress (dynamo.frontend)
+    - system_ports: List of worker metrics/system ports (configurable count via num_system_ports)
+    """
+    frontend_port = allocate_port(DefaultPort.FRONTEND.value)
+    system_port_list = allocate_ports(num_system_ports, DefaultPort.SYSTEM1.value)
+    all_ports = [frontend_port, *system_port_list]
+    try:
+        yield ServicePorts(frontend_port=frontend_port, system_ports=system_port_list)
+    finally:
+        deallocate_ports(all_ports)

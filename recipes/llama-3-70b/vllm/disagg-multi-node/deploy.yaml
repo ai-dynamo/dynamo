@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -26,6 +26,7 @@ spec:
       replicas: 1
     VllmPrefillWorker:
       componentType: worker
+      subComponentType: prefill
       dynamoNamespace: llama3-70b-disagg-mn
       envFromSecret: hf-token-secret
       volumeMounts:
@@ -57,6 +58,7 @@ spec:
           gpu: "8"
     VllmDecodeWorker:
       componentType: worker
+      subComponentType: decode
       dynamoNamespace: llama3-70b-disagg-mn
       envFromSecret: hf-token-secret
       volumeMounts:

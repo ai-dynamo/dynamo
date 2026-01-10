@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -283,6 +283,10 @@ class HandlerBase:
         if "prefill_result" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
+            request["prefill_result"].get("disaggregated_params", {}).pop(
+                "worker_id", None
+            )
+
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(
                     **request["prefill_result"].get("disaggregated_params")

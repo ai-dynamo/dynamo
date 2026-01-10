@@ -1,4 +1,4 @@
-<!-- # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+<!-- # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0 -->
 
 # Router Benchmarking Guide
@@ -107,6 +107,9 @@ We also supports running lightweight mock engines that simulate vLLM behavior wi
 In a **new terminal**, launch the Dynamo router using the Python CLI:
 
 ```bash
+# Explicitly set NATS server for KV event publishing
+export NATS_SERVER="${NATS_SERVER:-nats://localhost:4222}"
+
 python -m dynamo.frontend \
     --router-mode kv \
     --router-reset-states \

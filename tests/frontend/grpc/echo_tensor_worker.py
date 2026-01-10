@@ -1,4 +1,4 @@
-#  SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#  SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #  SPDX-License-Identifier: Apache-2.0
 
 # Usage: `TEST_END_TO_END=1 python test_tensor.py` to run this worker as tensor based echo worker.
@@ -75,6 +75,25 @@ async def generate(request, context):
     params = {}
     if "parameters" in request:
         params.update(request["parameters"])
+        if "malformed_response" in request["parameters"]:
+            request["tensors"][0]["data"] = {"values": [0, 1, 2]}
+            yield {
+                "model": request["model"],
+                "tensors": request["tensors"],
+                "parameters": params,
+            }
+            return
+        elif "data_mismatch" in request["parameters"]:
+            # Modify the data type to trigger data mismatch error
+            request["tensors"][0]["data"]["values"] = []
+            yield {
+                "model": request["model"],
+                "tensors": request["tensors"],
+                "parameters": params,
+            }
+            return
+        elif "raise_exception" in request["parameters"]:
+            raise ValueError("Intentional exception raised by echo_tensor_worker.")
 
     params["processed"] = {"bool": True}
 

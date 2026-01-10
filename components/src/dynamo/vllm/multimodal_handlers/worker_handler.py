@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
@@ -18,6 +18,7 @@ from ..multimodal_utils import (
     construct_mm_data,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,25 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
-        # Decode worker doesn't process embeddings, so we pass None or empty tensor
+        # For Qwen VL models with mRoPE, we need to pass multi_modal_data containing
+        # image_grid_thw for position embeddings calculation. The decode worker
+        # receives the ORIGINAL unexpanded prompt (with placeholders), and vLLM
+        # will expand it using the multi_modal_data, ensuring the block count
+        # matches what prefill computed.
+        #
+        # We pass unique placeholder embeddings (seeded by request_id) since the
+        # actual embeddings are already in the KV cache from prefill. The unique
+        # values prevent incorrect prefix cache matches between different images.
+        multi_modal_data = None
+        if is_qwen_vl_model(self.config.model):
+            multi_modal_data = construct_qwen_decode_mm_data(
+                request.image_grid_thw, request.embeddings_shape, request.request_id
+            )
+
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
+                multi_modal_data=multi_modal_data,
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
@@ -148,11 +164,38 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        if (
-            request.multimodal_input.image_url is None
+        # ECConnector consumer mode: vLLM loads embeddings automatically from disk
+        # We need to pass multimodal_input so vLLM can generate mm_hash and look up cache
+        if self.config.ec_consumer_mode:
+            logger.debug(
+                f"[{request.request_id}] ECConnector consumer mode: "
+                f"vLLM will load embeddings from cache using mm_hash"
+            )
+            # Use PIL image loading - vLLM will detect it's already in EC cache
+            # and load from disk instead of reprocessing
+            if request.multimodal_input and request.multimodal_input.image_url:
+                multi_modal_data = {
+                    "image": await self.image_loader.load_image(
+                        request.multimodal_input.image_url
+                    )
+                }
+            elif request.multimodal_input and request.multimodal_input.video_url:
+                # For video, load as image placeholder (vLLM will use EC cache)
+                multi_modal_data = {
+                    "image": await self.image_loader.load_image(
+                        request.multimodal_input.video_url
+                    )
+                }
+            else:
+                raise ValueError(
+                    "ECConnector mode requires multimodal_input with image/video URL"
+                )
+        elif (
+            request.multimodal_input is not None
+            and request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
         ):
-            # Process embeddings using the connector
+            # Network transfer mode: receive embeddings via connector from encoder worker
             # Create a descriptor based on the embedding shape.
             embeddings = torch.empty(
                 request.embeddings_shape,
@@ -184,17 +227,22 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     image_embeds=embeddings,
                     image_grid_thw=request.image_grid_thw,
                 )
-        else:
-            # Use PIL image instead of image embeddings
+        elif request.multimodal_input is not None:
+            # Native mode: Use PIL image instead of image embeddings
             multi_modal_data = {
                 "image": await self.image_loader.load_image(
                     request.multimodal_input.image_url
                 )
             }
+        else:
+            raise ValueError(
+                "Invalid request: multimodal_input is None but not in ec_consumer_mode"
+            )
 
-        # Remove the image features from the request as they are not required
-        request.multimodal_input.image_url = None
-        request.multimodal_input.video_url = None
+        # Clear multimodal_input fields if present (not needed for engine)
+        if request.multimodal_input is not None:
+            request.multimodal_input.image_url = None
+            request.multimodal_input.video_url = None
         request.serialized_request = None
 
         pd_request = copy.deepcopy(request)
@@ -222,12 +270,17 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
         if self.enable_disagg and self.decode_worker_client:
             decode_request = copy.deepcopy(request)
             async for prefill_response in gen:
-                # Update the prompt token id in the decode request to the one
-                # in response, which has image templated filled in. So that
-                # the decode worker will fetch correct amount of KV blocks.
-                decode_request.engine_prompt[
-                    "prompt_token_ids"
-                ] = prefill_response.prompt_token_ids
+                # For Qwen VL models with mRoPE: Keep the ORIGINAL unexpanded prompt.
+                # The decode worker will pass multi_modal_data which causes vLLM to
+                # expand the prompt identically to prefill, ensuring block counts match.
+                #
+                # For other models: Use the expanded prompt from prefill response.
+                # These models don't pass multi_modal_data in decode, so they need
+                # the already-expanded prompt to match the KV cache layout.
+                if not is_qwen_vl_model(self.config.model):
+                    decode_request.engine_prompt[
+                        "prompt_token_ids"
+                    ] = prefill_response.prompt_token_ids
                 logger.debug(
                     f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
                 )

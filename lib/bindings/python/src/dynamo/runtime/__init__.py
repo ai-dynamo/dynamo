@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -21,13 +21,22 @@ from dynamo._core import Namespace as Namespace
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker():
+def dynamo_worker(enable_nats: bool = True):
+    """
+    Decorator that creates a DistributedRuntime and passes it to the worker function.
+
+    Args:
+        enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                    If request_plane is "nats", NATS is always enabled.
+                    Pass False (via --no-kv-events flag) to disable NATS initialization.
+    """
+
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            request_plane = os.environ.get("DYN_REQUEST_PLANE", "nats")
-            runtime = DistributedRuntime(loop, "etcd", request_plane)
+            request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
+            runtime = DistributedRuntime(loop, "etcd", request_plane, enable_nats)
 
             await func(runtime, *args, **kwargs)
 

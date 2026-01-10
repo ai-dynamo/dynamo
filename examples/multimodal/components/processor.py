@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -134,7 +134,6 @@ class Processor(ProcessMixIn):
         (
             request,
             conversation,
-            prompt,
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
@@ -204,11 +203,15 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text
-        try:
-            user_text = raw_request.messages[0].content[0].text
-        except (IndexError, AttributeError) as e:
-            raise ValueError(f"Invalid message structure: {e}")
+        # Safely extract user text - find the text content item
+        user_text = None
+        for message in raw_request.messages:
+            for item in message.content:
+                if item.type == "text":
+                    user_text = item.text
+                    break
+        if user_text is None:
+            raise ValueError("No text content found in the request messages")
 
         prompt = template.replace("<prompt>", user_text)
 

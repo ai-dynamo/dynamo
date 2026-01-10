@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Shared TCP Server with Endpoint Multiplexing
@@ -266,6 +266,15 @@ impl SharedTcpServer {
             let mut path_buf = vec![0u8; path_len];
             read_half.read_exact(&mut path_buf).await?;
 
+            // Read headers length (2 bytes)
+            let mut headers_len_buf = [0u8; 2];
+            read_half.read_exact(&mut headers_len_buf).await?;
+            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
+
+            // Read headers
+            let mut headers_buf = vec![0u8; headers_len];
+            read_half.read_exact(&mut headers_buf).await?;
+
             // Read payload length (4 bytes)
             let mut len_buf = [0u8; 4];
             read_half.read_exact(&mut len_buf).await?;
@@ -293,9 +302,12 @@ impl SharedTcpServer {
             read_half.read_exact(&mut payload_buf).await?;
 
             // Reconstruct the full message buffer for decoding using BytesMut
-            let mut full_msg = BytesMut::with_capacity(2 + path_len + 4 + payload_len);
+            let mut full_msg =
+                BytesMut::with_capacity(2 + path_len + 2 + headers_len + 4 + payload_len);
             full_msg.extend_from_slice(&path_len_buf);
             full_msg.extend_from_slice(&path_buf);
+            full_msg.extend_from_slice(&headers_len_buf);
+            full_msg.extend_from_slice(&headers_buf);
             full_msg.extend_from_slice(&len_buf);
             full_msg.extend_from_slice(&payload_buf);
 
@@ -316,6 +328,7 @@ impl SharedTcpServer {
             };
 
             let endpoint_path = request_msg.endpoint_path;
+            let headers = request_msg.headers;
             let payload = request_msg.payload;
 
             // Look up handler (lock-free read with DashMap)
@@ -361,15 +374,18 @@ impl SharedTcpServer {
             tokio::spawn(async move {
                 tracing::trace!(instance_id, "handling TCP request");
 
+                // Create span with trace context from headers
+                let span = crate::logging::make_handle_payload_span_from_tcp_headers(
+                    &headers,
+                    &component_name,
+                    &endpoint_name,
+                    &namespace,
+                    instance_id,
+                );
+
                 let result = service_handler
                     .handle_payload(payload)
-                    .instrument(tracing::info_span!(
-                        "handle_payload",
-                        component = component_name.as_str(),
-                        endpoint = endpoint_name.as_str(),
-                        namespace = namespace.as_str(),
-                        instance_id = instance_id,
-                    ))
+                    .instrument(span)
                     .await;
 
                 match result {
@@ -413,9 +429,11 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
         component_name: String,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
-        // For TCP, we use endpoint_name as both the endpoint_path (routing key) and endpoint_name
+        // Include instance_id in the routing key to avoid collisions when multiple workers
+        // share the same TCP server (e.g., --num-workers > 1 in tests)
+        let endpoint_path = format!("{instance_id:x}/{endpoint_name}");
         self.register_endpoint(
-            endpoint_name.clone(),
+            endpoint_path,
             service_handler,
             instance_id,
             namespace,
@@ -427,7 +445,19 @@ impl super::unified_server::RequestPlaneServer for SharedTcpServer {
     }
 
     async fn unregister_endpoint(&self, endpoint_name: &str) -> Result<()> {
-        self.unregister_endpoint(endpoint_name, endpoint_name).await;
+        // With multiple workers per process, each registers with a unique key
+        // "{instance_id}/{endpoint_name}". Find and remove all matching entries.
+        let suffix = format!("/{endpoint_name}");
+        let keys_to_remove: Vec<String> = self
+            .handlers
+            .iter()
+            .filter(|entry| entry.key().ends_with(&suffix))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            self.unregister_endpoint(&key, endpoint_name).await;
+        }
         Ok(())
     }
 
