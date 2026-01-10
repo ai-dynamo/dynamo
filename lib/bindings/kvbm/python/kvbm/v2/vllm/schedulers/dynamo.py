@@ -116,16 +116,20 @@ class DynamoScheduler(SchedulerInterface):
                 )
 
                 # Create Rust scheduler config from vLLM config
+                # Required fields (from vLLM framework) must be provided explicitly
+                # Optional fields use None to get Rust defaults
                 rust_config = RustSchedulerConfig(
+                    max_seq_len=max_seq_len,
                     max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
                     max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
                     block_size=block_size,
                     enable_prefix_caching=vllm_config.cache_config.enable_prefix_caching,
                     enable_chunked_prefill=vllm_config.scheduler_config.enable_chunked_prefill,
                     max_prefill_chunk_size=max_prefill_chunk_size,
-                    max_seq_len=max_seq_len,
-                    enable_projection=False,  # Projection system disabled by default
-                    projection_lookahead=0,  # 0 = use 2 * block_size
+                    # Optional fields - use None to get Rust defaults
+                    enable_projection=None,  # Default: False
+                    projection_lookahead=None,  # Default: 2 * block_size
+                    min_guaranteed_blocks=None,  # Default: 3
                     total_blocks=total_blocks,
                 )
                 self._rust_scheduler = RustScheduler(rust_config)

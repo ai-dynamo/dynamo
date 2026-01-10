@@ -2392,6 +2392,8 @@ dependencies = [
  "lru 0.16.2",
  "oneshot",
  "parking_lot",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "rayon",
  "serde",
  "serde_json",

@@ -11,11 +11,30 @@ use pyo3::prelude::*;
 /// This wraps the real `SchedulerConfig` from `dynamo_kvbm::v2::integrations::scheduler`
 /// and adds a `total_blocks` field for KVCacheManager creation.
 ///
+/// # Required Arguments (from vLLM framework)
+/// - `max_seq_len`: Maximum sequence length supported by the model
+/// - `max_num_batched_tokens`: Maximum tokens per iteration
+/// - `max_num_seqs`: Maximum sequences per iteration
+/// - `block_size`: Block size in tokens
+/// - `enable_prefix_caching`: Whether to enable prefix caching
+/// - `enable_chunked_prefill`: Whether to enable chunked prefill
+/// - `max_prefill_chunk_size`: Max prefill chunk size (can be None)
+///
+/// # Optional Arguments (have defaults)
+/// - `enable_projection`: Enable projection-based scheduling (default: True)
+/// - `projection_lookahead`: Iterations to look ahead (default: None -> 2*block_size)
+/// - `min_guaranteed_blocks`: Minimum blocks before eviction eligible (default: None -> 3)
+/// - `total_blocks`: Total KV cache blocks available (default: None, auto-calculated)
+///
 /// Example:
 ///     config = SchedulerConfig(
+///         max_seq_len=8192,
 ///         max_num_batched_tokens=8192,
 ///         max_num_seqs=256,
 ///         block_size=16,
+///         enable_prefix_caching=True,
+///         enable_chunked_prefill=False,
+///         max_prefill_chunk_size=None,
 ///         total_blocks=10132
 ///     )
 #[pyclass(name = "SchedulerConfig")]
@@ -34,54 +53,70 @@ pub struct PySchedulerConfig {
 impl PySchedulerConfig {
     /// Create a new SchedulerConfig.
     ///
-    /// Args:
-    ///     max_num_batched_tokens: Maximum tokens per iteration (default: 8192)
-    ///     max_num_seqs: Maximum sequences per iteration (default: 256)
-    ///     block_size: Block size in tokens (default: 16)
-    ///     enable_prefix_caching: Enable prefix caching (default: False)
-    ///     enable_chunked_prefill: Enable chunked prefill (default: False)
-    ///     max_prefill_chunk_size: Max prefill chunk size (default: None)
-    ///     max_seq_len: Maximum sequence length (default: 8192)
-    ///     enable_projection: Enable projection-based proactive scheduling (default: False)
-    ///     projection_lookahead: Iterations to look ahead for choke points (default: 0 = 2*block_size)
+    /// # Required Args (from vLLM framework):
+    ///     max_seq_len: Maximum sequence length supported by the model
+    ///     max_num_batched_tokens: Maximum tokens per iteration
+    ///     max_num_seqs: Maximum sequences per iteration
+    ///     block_size: Block size in tokens
+    ///     enable_prefix_caching: Enable prefix caching
+    ///     enable_chunked_prefill: Enable chunked prefill
+    ///     max_prefill_chunk_size: Max prefill chunk size (can be None)
+    ///
+    /// # Optional Args (have defaults):
+    ///     enable_projection: Enable projection-based proactive scheduling (default: None -> True)
+    ///     projection_lookahead: Iterations to look ahead for choke points (default: None -> 2*block_size)
+    ///     min_guaranteed_blocks: Minimum guaranteed blocks before eviction-eligible (default: None -> 3)
     ///     total_blocks: Total KV cache blocks available (default: None, auto-calculated)
     #[new]
-    #[pyo3(signature = (
-        max_num_batched_tokens = 8192,
-        max_num_seqs = 256,
-        block_size = 16,
-        enable_prefix_caching = false,
-        enable_chunked_prefill = false,
-        max_prefill_chunk_size = None,
-        max_seq_len = 8192,
-        enable_projection = false,
-        projection_lookahead = 0,
+    #[pyo3(signature = (*,
+        max_seq_len,
+        max_num_batched_tokens,
+        max_num_seqs,
+        block_size,
+        enable_prefix_caching,
+        enable_chunked_prefill,
+        max_prefill_chunk_size,
+        enable_projection = None,
+        projection_lookahead = None,
+        min_guaranteed_blocks = None,
         total_blocks = None
     ))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        max_seq_len: usize,
         max_num_batched_tokens: usize,
         max_num_seqs: usize,
         block_size: usize,
         enable_prefix_caching: bool,
         enable_chunked_prefill: bool,
         max_prefill_chunk_size: Option<usize>,
-        max_seq_len: usize,
-        enable_projection: bool,
-        projection_lookahead: usize,
+        enable_projection: Option<bool>,
+        projection_lookahead: Option<usize>,
+        min_guaranteed_blocks: Option<usize>,
         total_blocks: Option<usize>,
     ) -> Self {
-        let inner = SchedulerConfig {
-            max_num_batched_tokens,
-            max_num_seqs,
-            block_size,
-            enable_prefix_caching,
-            enable_chunked_prefill,
-            max_prefill_chunk_size,
-            max_seq_len,
-            enable_projection,
-            projection_lookahead,
-        };
+        // Build the config using the builder pattern
+        let mut builder = SchedulerConfig::builder()
+            .max_seq_len(max_seq_len)
+            .max_num_batched_tokens(max_num_batched_tokens)
+            .max_num_seqs(max_num_seqs)
+            .block_size(block_size)
+            .enable_prefix_caching(enable_prefix_caching)
+            .enable_chunked_prefill(enable_chunked_prefill)
+            .max_prefill_chunk_size(max_prefill_chunk_size);
+
+        // Apply optional fields only if provided
+        if let Some(v) = enable_projection {
+            builder = builder.enable_projection(v);
+        }
+        if let Some(v) = projection_lookahead {
+            builder = builder.projection_lookahead(v);
+        }
+        if let Some(v) = min_guaranteed_blocks {
+            builder = builder.min_guaranteed_blocks(v);
+        }
+
+        let inner = builder.build().expect("All required fields provided");
 
         Self {
             inner,
@@ -143,6 +178,12 @@ impl PySchedulerConfig {
         self.inner.projection_lookahead
     }
 
+    /// Get min_guaranteed_blocks.
+    #[getter]
+    pub fn min_guaranteed_blocks(&self) -> usize {
+        self.inner.min_guaranteed_blocks
+    }
+
     /// Get total_blocks.
     #[getter]
     pub fn total_blocks(&self) -> Option<usize> {
@@ -151,19 +192,20 @@ impl PySchedulerConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "SchedulerConfig(max_num_batched_tokens={}, max_num_seqs={}, block_size={}, \
-             enable_prefix_caching={}, enable_chunked_prefill={}, max_prefill_chunk_size={:?}, \
-             max_seq_len={}, enable_projection={}, projection_lookahead={}, \
-             total_blocks={:?})",
+            "SchedulerConfig(max_seq_len={}, max_num_batched_tokens={}, max_num_seqs={}, \
+             block_size={}, enable_prefix_caching={}, enable_chunked_prefill={}, \
+             max_prefill_chunk_size={:?}, enable_projection={}, projection_lookahead={}, \
+             min_guaranteed_blocks={}, total_blocks={:?})",
+            self.inner.max_seq_len,
             self.inner.max_num_batched_tokens,
             self.inner.max_num_seqs,
             self.inner.block_size,
             self.inner.enable_prefix_caching,
             self.inner.enable_chunked_prefill,
             self.inner.max_prefill_chunk_size,
-            self.inner.max_seq_len,
             self.inner.enable_projection,
             self.inner.projection_lookahead,
+            self.inner.min_guaranteed_blocks,
             self.total_blocks
         )
     }

@@ -6,7 +6,7 @@
 use super::config::SchedulerConfig;
 use super::kv_cache::KVCacheManager;
 use super::policy::{FCFSPolicy, SchedulingPolicy};
-use super::projection::{BlockBudgetProjector, PlannedEvictionTracker};
+use super::projection::{GlobalProjectionState, PlannedEvictionTracker};
 use super::queues::{PausedRequests, RunningRequests, WaitingQueue};
 use super::request::{RequestStatus, SchedulerRequest};
 use crate::v2::KvbmSequenceHashProvider;
@@ -143,12 +143,13 @@ pub struct Scheduler {
     // =========================================================================
     // Projection System Fields
     // =========================================================================
-    /// Block budget projector for predicting future block usage.
+    /// Global projection state with schedule-based block budgeting.
     ///
     /// Created when `config.enable_projection` is true.
-    /// Updated each iteration to detect choke points and select eviction candidates.
+    /// Maintains per-request block schedules and provides incremental updates
+    /// instead of full recomputation each iteration.
     #[builder(setter(skip), default)]
-    projector: Option<BlockBudgetProjector>,
+    projector: Option<GlobalProjectionState>,
 
     /// Tracker for requests planned for eviction with priority G2 offload.
     ///
@@ -174,13 +175,12 @@ impl SchedulerBuilder {
         // Initialize projector if projection is enabled
         if scheduler.config.enable_projection {
             let total_blocks = scheduler.kv_cache.total_blocks();
-            let effective_lookahead = scheduler.config.effective_lookahead();
-            scheduler.projector = Some(BlockBudgetProjector::with_prefill_chunk_size(
+            scheduler.projector = Some(GlobalProjectionState::with_config(
                 scheduler.config.block_size,
                 scheduler.config.max_seq_len,
                 total_blocks,
-                effective_lookahead,
                 scheduler.config.max_prefill_chunk_size,
+                scheduler.config.min_guaranteed_blocks,
             ));
         }
 
@@ -200,13 +200,12 @@ impl Scheduler {
         // Initialize projector if projection is enabled
         let projector = if config.enable_projection {
             let total_blocks = kv_cache.total_blocks();
-            let effective_lookahead = config.effective_lookahead();
-            Some(BlockBudgetProjector::with_prefill_chunk_size(
+            Some(GlobalProjectionState::with_config(
                 config.block_size,
                 config.max_seq_len,
                 total_blocks,
-                effective_lookahead,
                 config.max_prefill_chunk_size,
+                config.min_guaranteed_blocks,
             ))
         } else {
             None
@@ -298,6 +297,14 @@ impl Scheduler {
         self.kv_cache.usage()
     }
 
+    /// Get a reference to the global projection state.
+    ///
+    /// Returns `Some` if projection is enabled, `None` otherwise.
+    /// Useful for testing and debugging projection behavior.
+    pub fn projection_state(&self) -> Option<&GlobalProjectionState> {
+        self.projector.as_ref()
+    }
+
     /// Add a new request to the scheduler.
     ///
     /// The request's TokenBlockSequence is initialized with the prompt tokens
@@ -349,6 +356,10 @@ impl Scheduler {
         // Try to remove from running.
         // WARNING: Running requests may have blocks that the connector is actively using.
         // Currently we free immediately, but should check connector.request_finished() first.
+        //
+        // NOTE: We do NOT update projector here. Projection state is updated via
+        // the normal scheduling cycle (finish_requests, update_from_output, etc.) which
+        // handles block cleanup atomically with projection updates.
         if let Some(mut request) = self.running.remove(request_id) {
             // TODO: Check connector.request_finished() and potentially delay block freeing
             request.finish(RequestStatus::FinishedAborted);
@@ -379,6 +390,10 @@ impl Scheduler {
     pub fn finish_requests(&mut self, request_ids: &[String], status: RequestStatus) {
         for request_id in request_ids {
             if let Some(mut request) = self.running.remove(request_id) {
+                // Remove from global projection state if enabled
+                if let Some(proj) = &mut self.projector {
+                    proj.remove_request(request_id);
+                }
                 // TODO: Check connector.request_finished() before freeing blocks
                 // The connector may need to hold blocks for active offload operations
                 request.finish(status);
@@ -451,17 +466,20 @@ impl Scheduler {
         // only for newly generated tokens (typically 1 token per decode step).
         self.allocate_for_running(&mut output, &mut num_scheduled_tokens);
 
-        // Phase 2: Resume paused requests first
+        // Phase 2: Resume paused requests first (if projection allows)
         // Paused requests already made progress and hold blocks; resuming them
-        // is more efficient than starting new requests. We should always try to
-        // resume paused requests before scheduling new ones.
-        self.try_resume_paused(&mut output, &mut num_scheduled_tokens);
+        // is more efficient than starting new requests. Skip if resuming would
+        // create or worsen a choke point.
+        if self.should_evaluate_paused() {
+            self.try_resume_paused(&mut output, &mut num_scheduled_tokens);
+        }
 
         // Phase 3: Schedule new requests from waiting queue (prefill phase)
-        // Only schedule new requests if no more paused requests can be resumed.
-        // New requests need blocks for their entire prompt. This may trigger
-        // preemption if memory is insufficient.
-        self.schedule_waiting(&mut output, &mut num_scheduled_tokens);
+        // Only schedule if backfilling is possible (no active multi-chunk prefill
+        // or current prefill is on final chunk).
+        if self.should_evaluate_waiting() {
+            self.schedule_waiting(&mut output, &mut num_scheduled_tokens);
+        }
 
         // Update totals
         output.set_num_scheduled_tokens(num_scheduled_tokens);
@@ -493,7 +511,109 @@ impl Scheduler {
         // }
         // -------------------------------------------------------------------------
 
+        // Validate block allocations match projections (debug/development check)
+        self.validate_allocation_vs_projection();
+
         output
+    }
+
+    /// Validate that actual block allocations match projections.
+    ///
+    /// This is a debugging/validation check that compares:
+    /// - Actual blocks held by each scheduled request
+    /// - Projected blocks for that request at the current iteration
+    ///
+    /// Emits `tracing::warn!` if they differ, which helps identify:
+    /// - Bugs in the projection system
+    /// - Edge cases where projection model doesn't match reality
+    fn validate_allocation_vs_projection(&self) {
+        let Some(projector) = &self.projector else {
+            return;
+        };
+
+        let mut total_projected = 0usize;
+        let mut total_actual = 0usize;
+        let mut mismatches = Vec::new();
+
+        // Check running requests
+        for (request_id, request) in self.running.iter() {
+            let actual_blocks = request.block_state.total_blocks();
+            total_actual += actual_blocks;
+
+            if let Some(schedule) = projector.get_schedule(request_id) {
+                let projected_blocks = schedule.blocks_at_iteration(self.iteration);
+                total_projected += projected_blocks;
+
+                if actual_blocks != projected_blocks {
+                    mismatches.push((
+                        request_id.clone(),
+                        actual_blocks,
+                        projected_blocks,
+                        "running",
+                    ));
+                }
+            }
+        }
+
+        // Check paused requests (they shouldn't grow, but verify)
+        for (request_id, request) in self.paused.iter() {
+            let actual_blocks = request.block_state.total_blocks();
+            total_actual += actual_blocks;
+            // Paused requests are removed from projection, so we just count actuals
+        }
+
+        // Emit warnings for mismatches with detailed schedule info
+        if !mismatches.is_empty() {
+            for (request_id, actual, projected, state) in &mismatches {
+                // Get schedule details for debugging
+                let schedule_info = projector.get_schedule(request_id).map(|s| {
+                    format!(
+                        "base={}, starting={}, offset={}, events={:?}",
+                        s.base_iteration,
+                        s.starting_blocks,
+                        self.iteration.saturating_sub(s.base_iteration),
+                        s.block_events
+                            .iter()
+                            .take(5) // Limit to first 5 events
+                            .map(|e| (e.iteration_offset, e.delta))
+                            .collect::<Vec<_>>()
+                    )
+                });
+
+                // Get request details
+                let request_info = self.running.get(request_id).map(|r| {
+                    format!(
+                        "computed={}, pending={}, registered={}",
+                        r.num_computed_tokens,
+                        r.block_state.num_pending(),
+                        r.block_state.num_registered()
+                    )
+                });
+
+                tracing::warn!(
+                    iteration = self.iteration,
+                    request_id = %request_id,
+                    actual_blocks = actual,
+                    projected_blocks = projected,
+                    state = state,
+                    schedule = ?schedule_info,
+                    request = ?request_info,
+                    "Block allocation mismatch: actual != projected"
+                );
+            }
+        }
+
+        // Also log aggregate mismatch if significant
+        // Use total_projected (sum of blocks_at_iteration) for consistency with individual checks
+        if total_actual != total_projected && !mismatches.is_empty() {
+            tracing::warn!(
+                iteration = self.iteration,
+                total_actual_blocks = total_actual,
+                projected_demand = total_projected,
+                mismatch_count = mismatches.len(),
+                "Aggregate block allocation mismatch"
+            );
+        }
     }
 
     /// Allocate blocks for running requests (decode phase).
@@ -790,6 +910,10 @@ impl Scheduler {
             //     self.waiting.push_front(request);
             //     break;
             // }
+            //
+            // TODO: I want to improve on the reference. I want to have a separate queue for requests
+            // that are actively async onboarding.
+
             let _ = load_kv_async; // Suppress unused warning until connector integration
             // -------------------------------------------------------------------------
 
@@ -934,6 +1058,12 @@ impl Scheduler {
                 "Scheduled new request"
             );
 
+            // Add to global projection state if enabled
+            // Use resumed_from_preemption to detect restored requests (full block guarantee)
+            if let Some(proj) = &mut self.projector {
+                proj.add_request(&request, request.resumed_from_preemption);
+            }
+
             // Move to running
             self.running.insert(request);
         }
@@ -1062,6 +1192,11 @@ impl Scheduler {
             // NOTE: Blocks are freed immediately via RAII. The connector is NOT notified.
             // This is safe because we've already checked can_evict() above.
             if let Some(mut victim) = self.running.remove(&victim_id) {
+                // Remove from global projection state if enabled
+                if let Some(proj) = &mut self.projector {
+                    proj.remove_request(&victim_id);
+                }
+
                 // Count blocks before clearing (RAII will return them to pools)
                 let victim_blocks = victim.block_state.total_blocks();
                 freed_blocks += victim_blocks;
@@ -1253,7 +1388,7 @@ impl Scheduler {
                     .iter()
                     .map(|tb| tb.kvbm_sequence_hash())
                     .collect();
-                tracing::info!(
+                tracing::debug!(
                     request_id = %request_id,
                     blocks_to_register,
                     seq_hashes = ?seq_hashes_for_registration,
@@ -1280,7 +1415,7 @@ impl Scheduler {
 
                 match result {
                     Ok(num_registered) => {
-                        tracing::info!(
+                        tracing::debug!(
                             request_id = %request_id,
                             registered = num_registered,
                             total_registered = request.block_state.num_assigned(),
@@ -1307,6 +1442,10 @@ impl Scheduler {
         // TODO: Track requests with delay_free_blocks for later processing
         for request_id in finished_ids {
             if let Some(mut request) = self.running.remove(request_id) {
+                // Remove from global projection state if enabled
+                if let Some(proj) = &mut self.projector {
+                    proj.remove_request(request_id);
+                }
                 request.finish(RequestStatus::FinishedStopped);
             }
         }
@@ -1373,6 +1512,11 @@ impl Scheduler {
         //
         //     // Process finished sends - requests whose offload completed
         //     // Now safe to free blocks that were held during offload
+
+        //     // TODO: I want to improve on the reference. I want to have a separate queue for requests
+               // we might want to let the connector clean up first, then clean up the scheduler.
+               // this woudl allow us, if we decide to have shared state between the connector and the scheduler,
+               // to always drive teh connector to completion first, then clean up the scheduler.
         //     //
         //     // vLLM reference: scheduler.py lines 1475-1478
         //     //
@@ -1412,18 +1556,16 @@ impl Scheduler {
         // -------------------------------------------------------------------------
 
         // -------------------------------------------------------------------------
-        // Incremental Projection Updates
+        // Projection Cleanup for Finished Requests
         // -------------------------------------------------------------------------
-        // Update projections incrementally rather than full recomputation.
-        // This is more efficient as we only update what changed.
+        // Note: GlobalProjectionState maintains schedules based on worst-case bounds,
+        // not actual tokens generated. We only need to clean up finished requests.
+        // The `output_tokens` are not used for projection updates since schedules
+        // are deterministic based on configuration, not actual generation.
+        let _ = output_tokens; // Acknowledge unused parameter
         if let Some(projector) = &mut self.projector {
-            // Update projections for requests that received new tokens
-            for (request_id, tokens) in output_tokens {
-                projector.update_single_projection(request_id, tokens.len(), self.iteration);
-            }
-            // Remove projections for finished requests
             for request_id in finished_ids {
-                projector.remove_projection(request_id);
+                projector.remove_request(request_id);
             }
         }
     }
@@ -1432,20 +1574,35 @@ impl Scheduler {
     // Projection System Methods
     // =========================================================================
 
-    /// Update projections for all running and paused requests.
+    /// Update projections at the start of each scheduling iteration.
     ///
     /// Called at the start of each scheduling iteration when projection is enabled.
+    /// This advances the iteration counter and recomputes choke points.
     fn update_projections(&mut self) {
         if let Some(projector) = &mut self.projector {
-            // Collect all requests (running + paused) for projection
-            let running_iter = self.running.iter();
-            let paused_iter = self.paused.iter();
+            projector.advance_iteration();
+        }
+    }
 
-            // Update projections
-            projector.update_projections(running_iter.chain(paused_iter), self.iteration);
+    /// Check if we should evaluate waiting requests this iteration.
+    ///
+    /// Returns false when backfilling isn't possible (active multi-chunk prefill
+    /// that hasn't reached its final chunk yet).
+    fn should_evaluate_waiting(&mut self) -> bool {
+        match &mut self.projector {
+            Some(proj) => self.iteration >= proj.next_iteration_for_new_requests(),
+            None => true,
+        }
+    }
 
-            // Compute choke points for lookahead window
-            projector.compute_choke_points(self.iteration);
+    /// Check if we should evaluate paused requests for resume this iteration.
+    ///
+    /// Returns false when there's no headroom to resume any paused request
+    /// without creating or worsening a choke point.
+    fn should_evaluate_paused(&self) -> bool {
+        match &self.projector {
+            Some(proj) => proj.has_headroom_for_resume(),
+            None => true,
         }
     }
 
@@ -1460,7 +1617,7 @@ impl Scheduler {
         };
 
         // Check if we have any choke points
-        let Some(choke_point) = projector.nearest_choke_point().cloned() else {
+        let Some(choke_point) = projector.next_choke_point().cloned() else {
             return;
         };
 
@@ -1475,6 +1632,12 @@ impl Scheduler {
         // Future: Could plan for eviction instead if connector supports priority offload
         for request_id in candidates {
             if let Some(request) = self.running.remove(&request_id) {
+                // Remove from global projection state if enabled
+                // Paused requests don't grow, so they shouldn't be in projection
+                if let Some(proj) = &mut self.projector {
+                    proj.remove_request(&request_id);
+                }
+
                 tracing::debug!(
                     request_id = %request_id,
                     iteration = self.iteration,
@@ -1586,6 +1749,12 @@ impl Scheduler {
                 "Resumed paused request"
             );
 
+            // Add to global projection state if enabled
+            // Paused requests are NOT restored (they never lost their blocks)
+            if let Some(proj) = &mut self.projector {
+                proj.add_request(&request, false);
+            }
+
             self.running.insert(request);
         }
     }
@@ -1610,9 +1779,7 @@ impl Scheduler {
 
     /// Get the nearest choke point if any.
     pub fn nearest_choke_point(&self) -> Option<&super::projection::ChokePoint> {
-        self.projector
-            .as_ref()
-            .and_then(|p| p.nearest_choke_point())
+        self.projector.as_ref().and_then(|p| p.next_choke_point())
     }
 
     // =========================================================================

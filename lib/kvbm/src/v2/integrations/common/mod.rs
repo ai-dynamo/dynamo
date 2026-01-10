@@ -16,5 +16,5 @@ pub use block_assignments::{
     KvbmSequenceHashProvider, UnassignedBlock,
 };
 pub use output::{CachedRequestData, NewRequestData, SchedulerOutput};
-pub use request::{Request, RequestMetadata};
+pub use request::{Request, RequestBuilder, RequestBuilderError, RequestMetadata};
 pub use shared_state::SchedulerConnectorState;

@@ -452,54 +452,105 @@ mod tests {
         use super::*;
 
         #[test]
-        fn test_scheduler_config_default() {
-            let config = SchedulerConfig::default();
+        fn test_scheduler_config_test_default() {
+            // test_default() provides sensible defaults for all required fields
+            let config = SchedulerConfig::test_default();
 
-            assert_eq!(config.max_num_batched_tokens, 8192);
-            assert_eq!(config.max_num_seqs, 256);
-            assert_eq!(config.block_size, 16);
-            assert!(!config.enable_prefix_caching);
-            assert!(!config.enable_chunked_prefill);
-        }
-
-        #[test]
-        fn test_scheduler_config_custom() {
-            let config = SchedulerConfig::new(4096, 128, 32);
-
-            assert_eq!(config.max_num_batched_tokens, 4096);
-            assert_eq!(config.max_num_seqs, 128);
-            assert_eq!(config.block_size, 32);
-        }
-
-        #[test]
-        fn test_scheduler_config_builder() {
-            let config = SchedulerConfig::builder()
-                .max_num_batched_tokens(8192)
-                .max_num_seqs(256)
-                .block_size(16)
-                .enable_prefix_caching(true)
-                .enable_chunked_prefill(true)
-                .max_prefill_chunk_size(512)
-                .build()
-                .expect("Should build config");
-
-            assert!(config.enable_prefix_caching);
-            assert!(config.enable_chunked_prefill);
-            assert_eq!(config.max_prefill_chunk_size, Some(512));
-        }
-
-        #[test]
-        fn test_scheduler_config_builder_defaults() {
-            let config = SchedulerConfig::builder()
-                .build()
-                .expect("Should build with defaults");
-
+            assert_eq!(config.max_seq_len, 8192);
             assert_eq!(config.max_num_batched_tokens, 8192);
             assert_eq!(config.max_num_seqs, 256);
             assert_eq!(config.block_size, 16);
             assert!(!config.enable_prefix_caching);
             assert!(!config.enable_chunked_prefill);
             assert_eq!(config.max_prefill_chunk_size, None);
+            // Optional fields should have their defaults
+            assert!(!config.enable_projection);
+            assert_eq!(config.projection_lookahead, 0);
+            assert_eq!(config.min_guaranteed_blocks, 3);
+        }
+
+        #[test]
+        fn test_scheduler_config_builder_requires_fields() {
+            // Builder should fail without required fields
+            let result = SchedulerConfig::builder().build();
+            assert!(result.is_err());
+        }
+
+        #[test]
+        fn test_scheduler_config_builder_with_required_fields() {
+            let config = SchedulerConfig::builder()
+                .max_seq_len(4096)
+                .max_num_batched_tokens(8192)
+                .max_num_seqs(256)
+                .block_size(16)
+                .enable_prefix_caching(true)
+                .enable_chunked_prefill(true)
+                .max_prefill_chunk_size(Some(512))
+                .build()
+                .expect("Should build config with required fields");
+
+            assert_eq!(config.max_seq_len, 4096);
+            assert!(config.enable_prefix_caching);
+            assert!(config.enable_chunked_prefill);
+            assert_eq!(config.max_prefill_chunk_size, Some(512));
+            // Optional fields should have defaults (projection enabled by default)
+            assert!(config.enable_projection);
+            assert_eq!(config.projection_lookahead, 0);
+            assert_eq!(config.min_guaranteed_blocks, 3);
+        }
+
+        #[test]
+        fn test_scheduler_config_builder_optional_fields() {
+            let config = SchedulerConfig::builder()
+                .max_seq_len(8192)
+                .max_num_batched_tokens(8192)
+                .max_num_seqs(256)
+                .block_size(16)
+                .enable_prefix_caching(false)
+                .enable_chunked_prefill(false)
+                .max_prefill_chunk_size(None)
+                // Override optional fields
+                .enable_projection(true)
+                .projection_lookahead(64)
+                .min_guaranteed_blocks(5)
+                .build()
+                .expect("Should build config");
+
+            assert!(config.enable_projection);
+            assert_eq!(config.projection_lookahead, 64);
+            assert_eq!(config.min_guaranteed_blocks, 5);
+        }
+
+        #[test]
+        fn test_scheduler_config_effective_lookahead() {
+            // When projection_lookahead is 0, use 2 * block_size
+            let config = SchedulerConfig::builder()
+                .max_seq_len(8192)
+                .max_num_batched_tokens(8192)
+                .max_num_seqs(256)
+                .block_size(16)
+                .enable_prefix_caching(false)
+                .enable_chunked_prefill(false)
+                .max_prefill_chunk_size(None)
+                .build()
+                .unwrap();
+
+            assert_eq!(config.effective_lookahead(), 32); // 2 * 16
+
+            // When projection_lookahead is non-zero, use it directly
+            let config = SchedulerConfig::builder()
+                .max_seq_len(8192)
+                .max_num_batched_tokens(8192)
+                .max_num_seqs(256)
+                .block_size(16)
+                .enable_prefix_caching(false)
+                .enable_chunked_prefill(false)
+                .max_prefill_chunk_size(None)
+                .projection_lookahead(100)
+                .build()
+                .unwrap();
+
+            assert_eq!(config.effective_lookahead(), 100);
         }
     }
 

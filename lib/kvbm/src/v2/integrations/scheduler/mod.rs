@@ -143,12 +143,14 @@ mod tests;
 #[cfg(test)]
 mod trace_tests;
 
+
 pub use config::{SchedulerConfig, SchedulerConfigBuilder, SchedulerConfigBuilderError};
 pub use core::{Scheduler, SchedulerBuilder, SchedulerBuilderError};
 pub use kv_cache::{AllocatedBlocks, KVCacheManager, RequestBlockState};
 pub use policy::{FCFSPolicy, SchedulingPolicy};
 pub use projection::{
-    BlockBudgetProjector, ChokePoint, PlannedEviction, PlannedEvictionTracker, ProjectionState,
+    AggregateDemandEvent, BlockEvent, ChokePoint, FinishEntry, GlobalProjectionState, NextFinish,
+    PlannedEviction, PlannedEvictionTracker, ProjectionState, RequestBlockSchedule, RequestPhase,
 };
 pub use queues::{PausedRequests, RunningRequests, WaitingQueue};
 pub use request::{RequestStatus, SchedulerRequest};

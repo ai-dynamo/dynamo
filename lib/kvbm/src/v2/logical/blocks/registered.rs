@@ -37,14 +37,6 @@ impl<T: BlockMetadata> PrimaryBlock<T> {
             return_fn,
         }
     }
-
-    /// Wrap this PrimaryBlock in an Arc and return as RegisteredBlock trait object.
-    ///
-    /// Note: This does NOT register in weak_blocks - caller must do that separately
-    /// via InactivePool::register_active() if needed.
-    pub(crate) fn register(self) -> Arc<dyn RegisteredBlock<T>> {
-        Arc::new(self)
-    }
 }
 
 impl<T: BlockMetadata> DuplicateBlock<T> {

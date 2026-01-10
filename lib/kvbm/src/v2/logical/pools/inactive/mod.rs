@@ -122,7 +122,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                     let block_id = block.block_id();
                     inner.weak_blocks.remove(&seq_hash);
                     inner.backend.insert(block);
-                    tracing::info!(?seq_hash, block_id, "Block stored in inactive pool");
+                    tracing::debug!(?seq_hash, block_id, "Block stored in inactive pool");
                 }
                 Err(_block) => {
                     // Refcount > 1 - another thread grabbed it via find_or_promote
@@ -422,7 +422,12 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     /// (via return_fn), unless another thread resurrects it first.
     pub fn register_active(&self, primary: &Arc<PrimaryBlock<T>>) {
         let hash = primary.sequence_hash();
-        let raw_block = Arc::downgrade(primary.block.as_ref().expect("PrimaryBlock should have block"));
+        let raw_block = Arc::downgrade(
+            primary
+                .block
+                .as_ref()
+                .expect("PrimaryBlock should have block"),
+        );
         let primary_weak = Arc::downgrade(primary);
 
         let mut inner = self.inner.write();

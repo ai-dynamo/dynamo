@@ -31,7 +31,7 @@ pub use request::Request;
 pub use scheduler::{CachedRequestData, NewRequestData, SchedulerOutput};
 pub use slot::FinishedStatus;
 
-pub trait ConnectorLeaderInterface: Send + Sync {}
+pub trait ConnectorSchedulerInterface: Send + Sync {}
 
 pub struct ConnectorLeader {
     pub(crate) runtime: Arc<KvbmRuntime>,

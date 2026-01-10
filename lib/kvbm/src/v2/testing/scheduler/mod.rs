@@ -8,6 +8,9 @@
 //! - Generating test requests with specified tokens
 //! - Populating prefix cache with known sequences
 //! - Integration tests for prefix caching behavior
+//! - Mock engine for CPU-only scheduler testing
+
+pub mod mock;
 
 use crate::v2::integrations::common::Request;
 use crate::v2::integrations::scheduler::{
@@ -49,10 +52,13 @@ pub fn create_test_scheduler(
         .expect("Should create KVCacheManager");
 
     let config = SchedulerConfig::builder()
+        .max_seq_len(8192)
         .max_num_batched_tokens(8192)
         .max_num_seqs(256)
         .block_size(block_size)
         .enable_prefix_caching(enable_prefix_caching)
+        .enable_chunked_prefill(false)
+        .max_prefill_chunk_size(None)
         .build()
         .expect("Should build config");
 
@@ -237,10 +243,13 @@ mod tests {
             .expect("Should create KVCacheManager");
 
         let config = SchedulerConfig::builder()
+            .max_seq_len(8192)
             .max_num_batched_tokens(8192)
             .max_num_seqs(256)
             .block_size(block_size)
             .enable_prefix_caching(true)
+            .enable_chunked_prefill(false)
+            .max_prefill_chunk_size(None)
             .build()
             .expect("Should build config");
 
@@ -315,10 +324,13 @@ mod tests {
             .expect("Should create KVCacheManager");
 
         let config = SchedulerConfig::builder()
+            .max_seq_len(8192)
             .max_num_batched_tokens(8192)
             .max_num_seqs(256)
             .block_size(block_size)
             .enable_prefix_caching(true)
+            .enable_chunked_prefill(false)
+            .max_prefill_chunk_size(None)
             .build()
             .expect("Should build config");
 
@@ -358,10 +370,13 @@ mod tests {
             .expect("Should create KVCacheManager");
 
         let config = SchedulerConfig::builder()
+            .max_seq_len(8192)
             .max_num_batched_tokens(8192)
             .max_num_seqs(256)
             .block_size(block_size)
             .enable_prefix_caching(true)
+            .enable_chunked_prefill(false)
+            .max_prefill_chunk_size(None)
             .build()
             .expect("Should build config");
 
