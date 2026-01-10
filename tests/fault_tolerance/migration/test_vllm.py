@@ -37,6 +37,12 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.parametrize(
+        "migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"]
+    ),
+    pytest.mark.parametrize(
+        "immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"]
+    ),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
@@ -64,12 +70,7 @@ class DynamoWorkerProcess(ManagedProcess):
         is_prefill: bool | None = None,
     ):
         self.worker_id = worker_id
-        self.frontend_port = frontend_port
-        self.is_prefill = is_prefill
-
-        # Allocate system port for this worker
-        system_port = allocate_port(9100)
-        self.system_port = system_port
+        self.system_port = allocate_port(9100)
 
         command = [
             "python3",
@@ -89,8 +90,6 @@ class DynamoWorkerProcess(ManagedProcess):
             "--migration-limit",
             str(migration_limit),
         ]
-
-        # Add worker role flags for disaggregated mode
         if is_prefill is True:
             command.append("--is-prefill-worker")
         elif is_prefill is False:
@@ -122,27 +121,18 @@ class DynamoWorkerProcess(ManagedProcess):
         # intermittent failures
         env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = str(system_port)
+        env["DYN_SYSTEM_PORT"] = str(self.system_port)
         env["DYN_HTTP_PORT"] = str(frontend_port)
 
         # Configure health check based on worker type
-        if is_prefill is True:
-            # Prefill workers only check their own status endpoint
-            health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready)
-            ]
-        elif is_prefill is False:
-            # Decode workers check their own status, then frontend
-            health_check_urls = [
-                (f"http://localhost:{system_port}/health", self.is_ready),
-                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-            ]
-        else:
-            # Aggregated mode: check frontend models API and worker health
-            health_check_urls = [
-                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
-                (f"http://localhost:{system_port}/health", self.is_ready),
-            ]
+        health_check_urls = [
+            (f"http://localhost:{self.system_port}/health", self.is_ready)
+        ]
+        if is_prefill is None or is_prefill is False:
+            # aggregated or decode
+            health_check_urls.append(
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api)
+            )
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
@@ -194,11 +184,13 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(290)  # 3x average
-@pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
-@pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
 def test_request_migration_vllm_aggregated(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models,
-    migration_limit, immediate_kill
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    migration_limit,
+    immediate_kill,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -219,7 +211,10 @@ def test_request_migration_vllm_aggregated(
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
-                request, "worker2", frontend.frontend_port, migration_limit=migration_limit
+                request,
+                "worker2",
+                frontend.frontend_port,
+                migration_limit=migration_limit,
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -236,10 +231,16 @@ def test_request_migration_vllm_aggregated(
                 # Step 5: Stop the worker (kill or graceful shutdown)
                 if immediate_kill:
                     logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
-                    terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                    terminate_process_tree(
+                        worker.get_pid(), immediate_kill=True, timeout=0
+                    )
                 else:
-                    logger.info(f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}")
-                    terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
+                    logger.info(
+                        f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
+                    )
+                    terminate_process_tree(
+                        worker.get_pid(), immediate_kill=False, timeout=10
+                    )
 
                 # Step 6: Validate response based on migration setting
                 if migration_limit > 0:
@@ -251,23 +252,33 @@ def test_request_migration_vllm_aggregated(
                 else:
                     try:
                         validate_completion_response(request_thread, response_list)
-                        pytest.fail("Request succeeded unexpectedly when migration was disabled")
+                        pytest.fail(
+                            "Request succeeded unexpectedly when migration was disabled"
+                        )
                     except AssertionError as e:
-                        assert "Request failed with status 500: " in str(e), f"Unexpected error: {e}"
+                        assert "Request failed with status 500: " in str(
+                            e
+                        ), f"Unexpected error: {e}"
+
                     try:
                         verify_migration_occurred(frontend)
                         pytest.fail("Migration unexpectedly occurred when disabled")
                     except AssertionError as e:
-                        assert "'Cannot recreate stream: ...' error found in logs" in str(e)
+                        assert (
+                            "'Cannot recreate stream: ...' error found in logs"
+                            in str(e)
+                        )
 
 
 @pytest.mark.xfail(strict=False, reason="Prefill migration not yet supported")
 @pytest.mark.timeout(350)  # 3x average
-@pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
-@pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
 def test_request_migration_vllm_prefill(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models,
-    migration_limit, immediate_kill
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    migration_limit,
+    immediate_kill,
 ):
     """
     End-to-end test for prefill worker request migration in disaggregated mode.
@@ -285,18 +296,30 @@ def test_request_migration_vllm_prefill(
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
         with DynamoWorkerProcess(
-            request, "worker0", frontend.frontend_port, migration_limit=migration_limit, is_prefill=False
+            request,
+            "worker0",
+            frontend.frontend_port,
+            migration_limit=migration_limit,
+            is_prefill=False,
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
             # Step 3: Start 2 prefill workers
             with DynamoWorkerProcess(
-                request, "worker1", frontend.frontend_port, migration_limit=migration_limit, is_prefill=True
+                request,
+                "worker1",
+                frontend.frontend_port,
+                migration_limit=migration_limit,
+                is_prefill=True,
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
 
                 with DynamoWorkerProcess(
-                    request, "worker2", frontend.frontend_port, migration_limit=migration_limit, is_prefill=True
+                    request,
+                    "worker2",
+                    frontend.frontend_port,
+                    migration_limit=migration_limit,
+                    is_prefill=True,
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
@@ -312,11 +335,19 @@ def test_request_migration_vllm_prefill(
 
                     # Step 6: Stop the worker (kill or graceful shutdown)
                     if immediate_kill:
-                        logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
-                        terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                        logger.info(
+                            f"Killing {worker_name} with PID {worker.get_pid()}"
+                        )
+                        terminate_process_tree(
+                            worker.get_pid(), immediate_kill=True, timeout=0
+                        )
                     else:
-                        logger.info(f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}")
-                        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
+                        logger.info(
+                            f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
+                        )
+                        terminate_process_tree(
+                            worker.get_pid(), immediate_kill=False, timeout=10
+                        )
 
                     # Step 7: Validate response based on migration setting
                     if migration_limit > 0:
@@ -328,23 +359,32 @@ def test_request_migration_vllm_prefill(
                     else:
                         try:
                             validate_completion_response(request_thread, response_list)
-                            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+                            pytest.fail(
+                                "Request succeeded unexpectedly when migration was disabled"
+                            )
                         except AssertionError as e:
-                            assert "Request failed with status 500: " in str(e), f"Unexpected error: {e}"
+                            assert "Request failed with status 500: " in str(
+                                e
+                            ), f"Unexpected error: {e}"
 
                         try:
                             verify_migration_occurred(frontend)
                             pytest.fail("Migration unexpectedly occurred when disabled")
                         except AssertionError as e:
-                            assert "'Cannot recreate stream: ...' error found in logs" in str(e)
+                            assert (
+                                "'Cannot recreate stream: ...' error found in logs"
+                                in str(e)
+                            )
 
 
 @pytest.mark.timeout(350)  # 3x average
-@pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
-@pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
 def test_request_migration_vllm_decode(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models,
-    migration_limit, immediate_kill
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    migration_limit,
+    immediate_kill,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
@@ -362,18 +402,30 @@ def test_request_migration_vllm_decode(
 
         # Step 2: Start prefill worker first
         with DynamoWorkerProcess(
-            request, "worker0", frontend.frontend_port, migration_limit=migration_limit, is_prefill=True
+            request,
+            "worker0",
+            frontend.frontend_port,
+            migration_limit=migration_limit,
+            is_prefill=True,
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
             # Step 3: Start 2 decode workers
             with DynamoWorkerProcess(
-                request, "worker1", frontend.frontend_port, migration_limit=migration_limit, is_prefill=False
+                request,
+                "worker1",
+                frontend.frontend_port,
+                migration_limit=migration_limit,
+                is_prefill=False,
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
 
                 with DynamoWorkerProcess(
-                    request, "worker2", frontend.frontend_port, migration_limit=migration_limit, is_prefill=False
+                    request,
+                    "worker2",
+                    frontend.frontend_port,
+                    migration_limit=migration_limit,
+                    is_prefill=False,
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
@@ -389,11 +441,19 @@ def test_request_migration_vllm_decode(
 
                     # Step 6: Stop the worker (kill or graceful shutdown)
                     if immediate_kill:
-                        logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
-                        terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                        logger.info(
+                            f"Killing {worker_name} with PID {worker.get_pid()}"
+                        )
+                        terminate_process_tree(
+                            worker.get_pid(), immediate_kill=True, timeout=0
+                        )
                     else:
-                        logger.info(f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}")
-                        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
+                        logger.info(
+                            f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
+                        )
+                        terminate_process_tree(
+                            worker.get_pid(), immediate_kill=False, timeout=10
+                        )
 
                     # Step 7: Validate response based on migration setting
                     if migration_limit > 0:
@@ -405,12 +465,19 @@ def test_request_migration_vllm_decode(
                     else:
                         try:
                             validate_completion_response(request_thread, response_list)
-                            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+                            pytest.fail(
+                                "Request succeeded unexpectedly when migration was disabled"
+                            )
                         except AssertionError as e:
-                            assert "Request failed with status 500: " in str(e), f"Unexpected error: {e}"
+                            assert "Request failed with status 500: " in str(
+                                e
+                            ), f"Unexpected error: {e}"
 
                         try:
                             verify_migration_occurred(frontend)
                             pytest.fail("Migration unexpectedly occurred when disabled")
                         except AssertionError as e:
-                            assert "'Cannot recreate stream: ...' error found in logs" in str(e)
+                            assert (
+                                "'Cannot recreate stream: ...' error found in logs"
+                                in str(e)
+                            )

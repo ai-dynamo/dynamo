@@ -40,6 +40,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         )
 
 
+# TODO: Validate TTFT/TPOT never exceeded a certain threshold
 def start_completion_request(frontend_port: int) -> tuple:
     """
     Start a long-running completion request in a separate thread.
