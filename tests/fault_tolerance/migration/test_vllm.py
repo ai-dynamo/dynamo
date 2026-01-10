@@ -2,19 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Test Execution Times (Last Run: 2025-12-09):
-
-Aggregated Mode Tests:
-- test_request_migration_vllm_worker_failure: ~90s
-- test_request_migration_vllm_graceful_shutdown: ~80s
-- test_no_request_migration_vllm_worker_failure: ~75s
-- test_no_request_migration_vllm_graceful_shutdown: ~75s
-
-Disaggregated Mode Tests:
-- test_request_migration_vllm_prefill_failure: ~120s
-- test_request_migration_vllm_decode_failure: ~120s
-- test_request_migration_vllm_prefill_graceful_shutdown: ~120s
-- test_request_migration_vllm_decode_graceful_shutdown: ~120s
+Test Execution Times (Last Run: 2026-01-09):
+- test_request_migration_vllm_aggregated: ~95s
+- test_request_migration_vllm_prefill: N/A
+- test_request_migration_vllm_decode: ~115s
 """
 
 import logging
@@ -202,12 +193,7 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-# =============================================================================
-# Aggregated Migration Tests
-# =============================================================================
-
-
-@pytest.mark.timeout(290)
+@pytest.mark.timeout(290)  # 3x average
 @pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
 @pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
 def test_request_migration_vllm_aggregated(
@@ -275,12 +261,7 @@ def test_request_migration_vllm_aggregated(
                         assert "'Cannot recreate stream: ...' error found in logs" in str(e)
 
 
-# =============================================================================
-# Disaggregated Migration Tests (Prefill/Decode Workers)
-# =============================================================================
-
-
-@pytest.mark.timeout(350)
+@pytest.mark.timeout(350)  # 3x average
 @pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
 @pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
 def test_request_migration_vllm_prefill(
@@ -357,7 +338,7 @@ def test_request_migration_vllm_prefill(
                             assert "'Cannot recreate stream: ...' error found in logs" in str(e)
 
 
-@pytest.mark.timeout(350)
+@pytest.mark.timeout(350)  # 3x average
 @pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
 @pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
 def test_request_migration_vllm_decode(
