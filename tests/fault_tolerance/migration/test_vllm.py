@@ -4,13 +4,13 @@
 """
 Test Execution Times (Last Run: 2025-12-09):
 
-Aggregated Mode Tests (gpu_1):
+Aggregated Mode Tests:
 - test_request_migration_vllm_worker_failure: ~90s
 - test_request_migration_vllm_graceful_shutdown: ~80s
 - test_no_request_migration_vllm_worker_failure: ~75s
 - test_no_request_migration_vllm_graceful_shutdown: ~75s
 
-Disaggregated Mode Tests (gpu_2):
+Disaggregated Mode Tests:
 - test_request_migration_vllm_prefill_failure: ~120s
 - test_request_migration_vllm_decode_failure: ~120s
 - test_request_migration_vllm_prefill_graceful_shutdown: ~120s
@@ -207,155 +207,33 @@ class DynamoWorkerProcess(ManagedProcess):
 # =============================================================================
 
 
-@pytest.mark.timeout(290)  # 3x average
-def test_request_migration_vllm_worker_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
+@pytest.mark.timeout(290)
+@pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
+@pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
+def test_request_migration_vllm_aggregated(
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models,
+    migration_limit, immediate_kill
 ):
     """
-    End-to-end test for worker fault tolerance with migration support.
+    End-to-end test for aggregated worker request migration.
 
-    This test verifies that when a worker is killed during request processing,
-    the system can handle the failure gracefully and migrate the request to
-    another worker.
-
-    Timing (Last Run: 2025-12-09): ~90s total
-    - Engine initialization: ~40s (Worker1: 20s, Worker2: 20s)
-    - Test execution (request + migration): ~48s
-    - Teardown: ~2s
+    Parameters:
+        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
+        migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
     """
 
-    # Step 1: Start the frontend (allocates its own frontend_port)
+    # Step 1: Start the frontend
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start 2 workers sequentially (each allocates its own system_port)
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
-            logger.info(f"Worker 1 PID: {worker1.get_pid()}")
-
-            with DynamoWorkerProcess(
-                request, "worker2", frontend.frontend_port
-            ) as worker2:
-                logger.info(f"Worker 2 PID: {worker2.get_pid()}")
-
-                # Step 3: Send the request
-                request_thread, response_list = start_completion_request(
-                    frontend.frontend_port
-                )
-
-                # Step 4: Use polling to determine which worker received the request
-                worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
-                )
-
-                # Step 5: Kill the worker that has the request
-                logger.info(
-                    f"Killing {worker_name} with PID {worker.get_pid()} processing the request"
-                )
-                terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
-
-                # Step 6: Validate the completion response
-                validate_completion_response(request_thread, response_list)
-
-                # Step 7: Verify migration occurred
-                verify_migration_occurred(frontend)
-
-                # Step 8: Verify migration metrics
-                verify_migration_metrics(
-                    frontend.frontend_port, expected_ongoing_request_count=1
-                )
-
-
-@pytest.mark.timeout(280)  # 3x average
-def test_request_migration_vllm_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
-):
-    """
-    End-to-end test for worker fault tolerance with graceful shutdown and migration support.
-
-    This test verifies that when a worker receives a graceful shutdown signal (SIGTERM)
-    during request processing, the system can handle the shutdown gracefully and migrate
-    the request to another worker. Unlike the abrupt kill test, this simulates a more
-    controlled shutdown scenario where the worker has time to clean up and notify the
-    system about its shutdown.
-
-    Timing (Last Run: 2025-12-09): ~80s total
-    - Engine initialization: ~40s (Worker1: 20s, Worker2: 20s)
-    - Test execution (graceful shutdown + migration): ~38s
-    - Teardown: ~2s
-    """
-
-    # Step 1: Start the frontend (allocates its own frontend_port)
-    with DynamoFrontendProcess(request) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start 2 workers sequentially (each allocates its own system_port)
-        with DynamoWorkerProcess(request, "worker1", frontend.frontend_port) as worker1:
-            logger.info(f"Worker 1 PID: {worker1.get_pid()}")
-
-            with DynamoWorkerProcess(
-                request, "worker2", frontend.frontend_port
-            ) as worker2:
-                logger.info(f"Worker 2 PID: {worker2.get_pid()}")
-
-                # Step 3: Send the request
-                request_thread, response_list = start_completion_request(
-                    frontend.frontend_port
-                )
-
-                # Step 4: Use polling to determine which worker received the request
-                worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
-                )
-
-                # Step 5: Gracefully shutdown the worker that has the request
-                logger.info(
-                    f"Gracefully shutting down {worker_name} with PID {worker.get_pid()} processing the request"
-                )
-                terminate_process_tree(
-                    worker.get_pid(), immediate_kill=False, timeout=10
-                )
-
-                # Step 6: Validate the completion response
-                validate_completion_response(request_thread, response_list)
-
-                # Step 7: Verify migration occurred during graceful shutdown
-                verify_migration_occurred(frontend)
-
-                # Step 8: Verify migration metrics
-                verify_migration_metrics(
-                    frontend.frontend_port, expected_ongoing_request_count=1
-                )
-
-
-@pytest.mark.timeout(150)  # 3x average
-def test_no_request_migration_vllm_worker_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
-):
-    """
-    End-to-end test for worker fault tolerance with migration disabled.
-
-    This test verifies that when migration is disabled (migration_limit=0) and a worker
-    is killed during request processing, the request fails as expected without migration.
-    This is the opposite behavior of test_request_migration_vllm_worker_failure.
-
-    Timing (Last Run: 2025-12-09): ~75s total
-    - Engine initialization: ~40s (Worker1: 20s, Worker2: 20s)
-    - Test execution (failure validation): ~33s
-    - Teardown: ~2s
-    """
-
-    # Step 1: Start the frontend (allocates its own frontend_port)
-    with DynamoFrontendProcess(request) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start 2 workers sequentially with migration disabled (each allocates its own system_port)
+        # Step 2: Start 2 workers
         with DynamoWorkerProcess(
-            request, "worker1", frontend.frontend_port, migration_limit=0
+            request, "worker1", frontend.frontend_port, migration_limit=migration_limit
         ) as worker1:
             logger.info(f"Worker 1 PID: {worker1.get_pid()}")
 
             with DynamoWorkerProcess(
-                request, "worker2", frontend.frontend_port, migration_limit=0
+                request, "worker2", frontend.frontend_port, migration_limit=migration_limit
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
@@ -364,112 +242,37 @@ def test_no_request_migration_vllm_worker_failure(
                     frontend.frontend_port
                 )
 
-                # Step 4: Use polling to determine which worker received the request
+                # Step 4: Determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
                     worker1, worker2, receiving_pattern="Decode Request ID: "
                 )
 
-                # Step 5: Kill the worker that has the request
-                logger.info(
-                    f"Killing {worker_name} with PID {worker.get_pid()} processing the request"
-                )
-                terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                # Step 5: Stop the worker (kill or graceful shutdown)
+                if immediate_kill:
+                    logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
+                    terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                else:
+                    logger.info(f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}")
+                    terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-                # Step 6: Validate the completion response - should fail without migration
-                try:
+                # Step 6: Validate response based on migration setting
+                if migration_limit > 0:
                     validate_completion_response(request_thread, response_list)
-                    pytest.fail(
-                        "Request succeeded unexpectedly when migration was disabled"
-                    )
-                except AssertionError as e:
-                    assert "Request failed with status 500: " in str(
-                        e
-                    ), f"Unexpected request error message: {e}"
-
-                # Step 7: Verify migration did NOT occur - should fail
-                try:
                     verify_migration_occurred(frontend)
-                    pytest.fail(
-                        "Migration verification unexpectedly passed when migration was disabled"
+                    verify_migration_metrics(
+                        frontend.frontend_port, expected_ongoing_request_count=1
                     )
-                except AssertionError as e:
-                    assert "'Cannot recreate stream: ...' error found in logs" in str(
-                        e
-                    ), f"Unexpected migration message: {e}"
-
-
-@pytest.mark.timeout(140)  # 3x average
-def test_no_request_migration_vllm_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
-):
-    """
-    End-to-end test for worker fault tolerance with graceful shutdown and migration disabled.
-
-    This test verifies that when migration is disabled (migration_limit=0) and a worker
-    receives a graceful shutdown signal (SIGTERM) during request processing, the request
-    fails as expected without migration. This is the opposite behavior of
-    test_request_migration_vllm_graceful_shutdown.
-
-    Timing (Last Run: 2025-12-09): ~75s total
-    - Engine initialization: ~40s (Worker1: 20s, Worker2: 20s)
-    - Test execution (graceful shutdown validation): ~33s
-    - Teardown: ~2s
-    """
-
-    # Step 1: Start the frontend (allocates its own frontend_port)
-    with DynamoFrontendProcess(request) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start 2 workers sequentially with migration disabled (each allocates its own system_port)
-        with DynamoWorkerProcess(
-            request, "worker1", frontend.frontend_port, migration_limit=0
-        ) as worker1:
-            logger.info(f"Worker 1 PID: {worker1.get_pid()}")
-
-            with DynamoWorkerProcess(
-                request, "worker2", frontend.frontend_port, migration_limit=0
-            ) as worker2:
-                logger.info(f"Worker 2 PID: {worker2.get_pid()}")
-
-                # Step 3: Send the request
-                request_thread, response_list = start_completion_request(
-                    frontend.frontend_port
-                )
-
-                # Step 4: Use polling to determine which worker received the request
-                worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="Decode Request ID: "
-                )
-
-                # Step 5: Gracefully shutdown the worker that has the request
-                logger.info(
-                    f"Gracefully shutting down {worker_name} with PID {worker.get_pid()} processing the request"
-                )
-                terminate_process_tree(
-                    worker.get_pid(), immediate_kill=False, timeout=10
-                )
-
-                # Step 6: Validate the completion response - should fail without migration
-                try:
-                    validate_completion_response(request_thread, response_list)
-                    pytest.fail(
-                        "Request succeeded unexpectedly when migration was disabled"
-                    )
-                except AssertionError as e:
-                    assert "Request failed with status 500: " in str(
-                        e
-                    ), f"Unexpected request error message: {e}"
-
-                # Step 7: Verify migration did NOT occur - should fail
-                try:
-                    verify_migration_occurred(frontend)
-                    pytest.fail(
-                        "Migration verification unexpectedly passed when migration was disabled"
-                    )
-                except AssertionError as e:
-                    assert "'Cannot recreate stream: ...' error found in logs" in str(
-                        e
-                    ), f"Unexpected migration message: {e}"
+                else:
+                    try:
+                        validate_completion_response(request_thread, response_list)
+                        pytest.fail("Request succeeded unexpectedly when migration was disabled")
+                    except AssertionError as e:
+                        assert "Request failed with status 500: " in str(e), f"Unexpected error: {e}"
+                    try:
+                        verify_migration_occurred(frontend)
+                        pytest.fail("Migration unexpectedly occurred when disabled")
+                    except AssertionError as e:
+                        assert "'Cannot recreate stream: ...' error found in logs" in str(e)
 
 
 # =============================================================================
@@ -477,38 +280,41 @@ def test_no_request_migration_vllm_graceful_shutdown(
 # =============================================================================
 
 
-@pytest.mark.timeout(350)  # Higher timeout for 3 workers
-def test_request_migration_vllm_prefill_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
+@pytest.mark.timeout(350)
+@pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
+@pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
+def test_request_migration_vllm_prefill(
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models,
+    migration_limit, immediate_kill
 ):
     """
-    End-to-end test for prefill worker fault tolerance with migration support.
-
-    This test verifies that when a prefill worker is killed during request processing
-    in a disaggregated setup (1 decode + 2 prefill workers), the system can handle
-    the failure gracefully and migrate the request to another prefill worker.
+    End-to-end test for prefill worker request migration in disaggregated mode.
 
     Setup: 1 decode worker + 2 prefill workers
+
+    Parameters:
+        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
+        migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
     """
 
-    # Step 1: Start the frontend (allocates its own frontend_port)
+    # Step 1: Start the frontend
     with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start decode worker first (required for prefill workers to connect)
         with DynamoWorkerProcess(
-            request, "worker0", frontend.frontend_port, is_prefill=False
+            request, "worker0", frontend.frontend_port, migration_limit=migration_limit, is_prefill=False
         ) as decode_worker:
             logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
             # Step 3: Start 2 prefill workers
             with DynamoWorkerProcess(
-                request, "worker1", frontend.frontend_port, is_prefill=True
+                request, "worker1", frontend.frontend_port, migration_limit=migration_limit, is_prefill=True
             ) as prefill1:
                 logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
 
                 with DynamoWorkerProcess(
-                    request, "worker2", frontend.frontend_port, is_prefill=True
+                    request, "worker2", frontend.frontend_port, migration_limit=migration_limit, is_prefill=True
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
@@ -517,63 +323,75 @@ def test_request_migration_vllm_prefill_failure(
                         frontend.frontend_port
                     )
 
-                    # Step 5: Use polling to determine which prefill worker received the request
+                    # Step 5: Determine which prefill worker received the request
                     worker, worker_name = determine_request_receiving_worker(
                         prefill1, prefill2, receiving_pattern="Prefill Request ID: "
                     )
 
-                    # Step 6: Kill the prefill worker that has the request
-                    logger.info(
-                        f"Killing {worker_name} with PID {worker.get_pid()} processing the request"
-                    )
-                    terminate_process_tree(
-                        worker.get_pid(), immediate_kill=True, timeout=0
-                    )
+                    # Step 6: Stop the worker (kill or graceful shutdown)
+                    if immediate_kill:
+                        logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
+                        terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                    else:
+                        logger.info(f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}")
+                        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-                    # Step 7: Validate the completion response
-                    validate_completion_response(request_thread, response_list)
+                    # Step 7: Validate response based on migration setting
+                    if migration_limit > 0:
+                        validate_completion_response(request_thread, response_list)
+                        verify_migration_occurred(frontend)
+                        verify_migration_metrics(
+                            frontend.frontend_port, expected_ongoing_request_count=1
+                        )
+                    else:
+                        try:
+                            validate_completion_response(request_thread, response_list)
+                            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+                        except AssertionError as e:
+                            assert "Request failed with status 500: " in str(e), f"Unexpected error: {e}"
 
-                    # Step 8: Verify migration occurred
-                    verify_migration_occurred(frontend)
-
-                    # Step 9: Verify migration metrics
-                    verify_migration_metrics(
-                        frontend.frontend_port, expected_ongoing_request_count=1
-                    )
+                        try:
+                            verify_migration_occurred(frontend)
+                            pytest.fail("Migration unexpectedly occurred when disabled")
+                        except AssertionError as e:
+                            assert "'Cannot recreate stream: ...' error found in logs" in str(e)
 
 
-@pytest.mark.timeout(350)  # Higher timeout for 3 workers
-def test_request_migration_vllm_decode_failure(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
+@pytest.mark.timeout(350)
+@pytest.mark.parametrize("migration_limit", [3, 0], ids=["migration_enabled", "migration_disabled"])
+@pytest.mark.parametrize("immediate_kill", [True, False], ids=["worker_failure", "graceful_shutdown"])
+def test_request_migration_vllm_decode(
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models,
+    migration_limit, immediate_kill
 ):
     """
-    End-to-end test for decode worker fault tolerance with migration support.
-
-    This test verifies that when a decode worker is killed during request processing
-    in a disaggregated setup (1 prefill + 2 decode workers), the system can handle
-    the failure gracefully and migrate the request to another decode worker.
+    End-to-end test for decode worker request migration in disaggregated mode.
 
     Setup: 1 prefill worker + 2 decode workers
+
+    Parameters:
+        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
+        migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
     """
 
-    # Step 1: Start the frontend (allocates its own frontend_port)
+    # Step 1: Start the frontend
     with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
         logger.info("Frontend started successfully")
 
         # Step 2: Start prefill worker first
         with DynamoWorkerProcess(
-            request, "worker0", frontend.frontend_port, is_prefill=True
+            request, "worker0", frontend.frontend_port, migration_limit=migration_limit, is_prefill=True
         ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
             # Step 3: Start 2 decode workers
             with DynamoWorkerProcess(
-                request, "worker1", frontend.frontend_port, is_prefill=False
+                request, "worker1", frontend.frontend_port, migration_limit=migration_limit, is_prefill=False
             ) as decode1:
                 logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
 
                 with DynamoWorkerProcess(
-                    request, "worker2", frontend.frontend_port, is_prefill=False
+                    request, "worker2", frontend.frontend_port, migration_limit=migration_limit, is_prefill=False
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
@@ -582,158 +400,35 @@ def test_request_migration_vllm_decode_failure(
                         frontend.frontend_port
                     )
 
-                    # Step 5: Use polling to determine which decode worker received the request
+                    # Step 5: Determine which decode worker received the request
                     worker, worker_name = determine_request_receiving_worker(
                         decode1, decode2, receiving_pattern="Decode Request ID: "
                     )
 
-                    # Step 6: Kill the decode worker that has the request
-                    logger.info(
-                        f"Killing {worker_name} with PID {worker.get_pid()} processing the request"
-                    )
-                    terminate_process_tree(
-                        worker.get_pid(), immediate_kill=True, timeout=0
-                    )
+                    # Step 6: Stop the worker (kill or graceful shutdown)
+                    if immediate_kill:
+                        logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
+                        terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+                    else:
+                        logger.info(f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}")
+                        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
 
-                    # Step 7: Validate the completion response
-                    validate_completion_response(request_thread, response_list)
+                    # Step 7: Validate response based on migration setting
+                    if migration_limit > 0:
+                        validate_completion_response(request_thread, response_list)
+                        verify_migration_occurred(frontend)
+                        verify_migration_metrics(
+                            frontend.frontend_port, expected_ongoing_request_count=1
+                        )
+                    else:
+                        try:
+                            validate_completion_response(request_thread, response_list)
+                            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+                        except AssertionError as e:
+                            assert "Request failed with status 500: " in str(e), f"Unexpected error: {e}"
 
-                    # Step 8: Verify migration occurred
-                    verify_migration_occurred(frontend)
-
-                    # Step 9: Verify migration metrics
-                    verify_migration_metrics(
-                        frontend.frontend_port, expected_ongoing_request_count=1
-                    )
-
-
-@pytest.mark.timeout(350)  # Higher timeout for 3 workers
-def test_request_migration_vllm_prefill_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
-):
-    """
-    End-to-end test for prefill worker graceful shutdown with migration support.
-
-    This test verifies that when a prefill worker receives a graceful shutdown signal
-    (SIGTERM) during request processing in a disaggregated setup (1 decode + 2 prefill
-    workers), the system can handle the shutdown gracefully and migrate the request
-    to another prefill worker.
-
-    Setup: 1 decode worker + 2 prefill workers
-    """
-
-    # Step 1: Start the frontend (allocates its own frontend_port)
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start decode worker first (required for prefill workers to connect)
-        with DynamoWorkerProcess(
-            request, "worker0", frontend.frontend_port, is_prefill=False
-        ) as decode_worker:
-            logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
-
-            # Step 3: Start 2 prefill workers
-            with DynamoWorkerProcess(
-                request, "worker1", frontend.frontend_port, is_prefill=True
-            ) as prefill1:
-                logger.info(f"Prefill Worker 1 PID: {prefill1.get_pid()}")
-
-                with DynamoWorkerProcess(
-                    request, "worker2", frontend.frontend_port, is_prefill=True
-                ) as prefill2:
-                    logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
-
-                    # Step 4: Send the request
-                    request_thread, response_list = start_completion_request(
-                        frontend.frontend_port
-                    )
-
-                    # Step 5: Use polling to determine which prefill worker received the request
-                    worker, worker_name = determine_request_receiving_worker(
-                        prefill1, prefill2, receiving_pattern="Prefill Request ID: "
-                    )
-
-                    # Step 6: Gracefully shutdown the prefill worker that has the request
-                    logger.info(
-                        f"Gracefully shutting down {worker_name} with PID {worker.get_pid()} processing the request"
-                    )
-                    terminate_process_tree(
-                        worker.get_pid(), immediate_kill=False, timeout=10
-                    )
-
-                    # Step 7: Validate the completion response
-                    validate_completion_response(request_thread, response_list)
-
-                    # Step 8: Verify migration occurred during graceful shutdown
-                    verify_migration_occurred(frontend)
-
-                    # Step 9: Verify migration metrics
-                    verify_migration_metrics(
-                        frontend.frontend_port, expected_ongoing_request_count=1
-                    )
-
-
-@pytest.mark.timeout(350)  # Higher timeout for 3 workers
-def test_request_migration_vllm_decode_graceful_shutdown(
-    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
-):
-    """
-    End-to-end test for decode worker graceful shutdown with migration support.
-
-    This test verifies that when a decode worker receives a graceful shutdown signal
-    (SIGTERM) during request processing in a disaggregated setup (1 prefill + 2 decode
-    workers), the system can handle the shutdown gracefully and migrate the request
-    to another decode worker.
-
-    Setup: 1 prefill worker + 2 decode workers
-    """
-
-    # Step 1: Start the frontend (allocates its own frontend_port)
-    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
-        logger.info("Frontend started successfully")
-
-        # Step 2: Start prefill worker first
-        with DynamoWorkerProcess(
-            request, "worker0", frontend.frontend_port, is_prefill=True
-        ) as prefill_worker:
-            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
-
-            # Step 3: Start 2 decode workers
-            with DynamoWorkerProcess(
-                request, "worker1", frontend.frontend_port, is_prefill=False
-            ) as decode1:
-                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
-
-                with DynamoWorkerProcess(
-                    request, "worker2", frontend.frontend_port, is_prefill=False
-                ) as decode2:
-                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
-
-                    # Step 4: Send the request
-                    request_thread, response_list = start_completion_request(
-                        frontend.frontend_port
-                    )
-
-                    # Step 5: Use polling to determine which decode worker received the request
-                    worker, worker_name = determine_request_receiving_worker(
-                        decode1, decode2, receiving_pattern="Decode Request ID: "
-                    )
-
-                    # Step 6: Gracefully shutdown the decode worker that has the request
-                    logger.info(
-                        f"Gracefully shutting down {worker_name} with PID {worker.get_pid()} processing the request"
-                    )
-                    terminate_process_tree(
-                        worker.get_pid(), immediate_kill=False, timeout=10
-                    )
-
-                    # Step 7: Validate the completion response
-                    validate_completion_response(request_thread, response_list)
-
-                    # Step 8: Verify migration occurred during graceful shutdown
-                    verify_migration_occurred(frontend)
-
-                    # Step 9: Verify migration metrics
-                    verify_migration_metrics(
-                        frontend.frontend_port, expected_ongoing_request_count=1
-                    )
+                        try:
+                            verify_migration_occurred(frontend)
+                            pytest.fail("Migration unexpectedly occurred when disabled")
+                        except AssertionError as e:
+                            assert "'Cannot recreate stream: ...' error found in logs" in str(e)
