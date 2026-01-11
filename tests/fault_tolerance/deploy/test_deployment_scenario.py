@@ -18,6 +18,7 @@ from tests.utils.managed_deployment import DeploymentSpec, ManagedDeployment
 @pytest.mark.fault_tolerance
 @pytest.mark.e2e
 @pytest.mark.slow
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_rolling_restart(
     request,
@@ -125,6 +126,7 @@ async def test_rolling_restart(
 
 @pytest.mark.k8s
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_1000_requests_success(
     request,
@@ -224,6 +226,7 @@ async def test_1000_requests_success(
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 @pytest.mark.parametrize(
     "upgrade_order",

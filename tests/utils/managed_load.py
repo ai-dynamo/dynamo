@@ -107,7 +107,9 @@ class ManagedLoad:
         if self.log_dir:
             self.local_output_dir = os.path.join(self.log_dir, "load_results")
             os.makedirs(self.local_output_dir, exist_ok=True)
-            self._logger.info(f"Load test results will be saved to: {self.local_output_dir}")
+            self._logger.info(
+                f"Load test results will be saved to: {self.local_output_dir}"
+            )
         else:
             self.local_output_dir = None
 
@@ -132,25 +134,44 @@ class ManagedLoad:
         cfg = self.load_config
 
         args = [
-            "aiperf", "profile",
-            "--artifact-dir", self.container_results_dir,
-            "--model", cfg.model_name,
-            "--tokenizer", cfg.tokenizer,
-            "--endpoint-type", "chat",
-            "--endpoint", "/v1/chat/completions",
-            "--url", cfg.endpoint_url,
-            "--synthetic-input-tokens-mean", str(cfg.input_tokens_mean),
-            "--synthetic-input-tokens-stddev", str(cfg.input_tokens_stddev),
-            "--output-tokens-mean", str(cfg.output_tokens_mean),
-            "--output-tokens-stddev", str(cfg.output_tokens_stddev),
-            "--concurrency", str(cfg.concurrency),
-            "--warmup-request-count", str(cfg.warmup_requests),
-            "--request-timeout-seconds", str(cfg.request_timeout_seconds),
-            "--num-dataset-entries", "12800",
-            "--random-seed", "100",
-            "--workers-max", "252",
-            "--record-processors", "32",
-            "--ui", "simple",
+            "aiperf",
+            "profile",
+            "--artifact-dir",
+            self.container_results_dir,
+            "--model",
+            cfg.model_name,
+            "--tokenizer",
+            cfg.tokenizer,
+            "--endpoint-type",
+            "chat",
+            "--endpoint",
+            "/v1/chat/completions",
+            "--url",
+            cfg.endpoint_url,
+            "--synthetic-input-tokens-mean",
+            str(cfg.input_tokens_mean),
+            "--synthetic-input-tokens-stddev",
+            str(cfg.input_tokens_stddev),
+            "--output-tokens-mean",
+            str(cfg.output_tokens_mean),
+            "--output-tokens-stddev",
+            str(cfg.output_tokens_stddev),
+            "--concurrency",
+            str(cfg.concurrency),
+            "--warmup-request-count",
+            str(cfg.warmup_requests),
+            "--request-timeout-seconds",
+            str(cfg.request_timeout_seconds),
+            "--num-dataset-entries",
+            "12800",
+            "--random-seed",
+            "100",
+            "--workers-max",
+            "252",
+            "--record-processors",
+            "32",
+            "--ui",
+            "simple",
             "--verbose",
         ]
 
@@ -341,7 +362,9 @@ class ManagedLoad:
         """Wait for the load test to complete."""
         if timeout is None:
             if self.load_config.duration_minutes:
-                timeout = int(self.load_config.duration_minutes * 60) + 300  # 5 min buffer
+                timeout = (
+                    int(self.load_config.duration_minutes * 60) + 300
+                )  # 5 min buffer
             elif self.load_config.request_count:
                 timeout = max(self.load_config.request_count * 2 + 60, 300)
             else:
@@ -573,7 +596,8 @@ done
                         result = await asyncio.wait_for(
                             asyncio.create_task(
                                 asyncio.to_thread(
-                                    pod.exec, ["test", "-f", "/tmp/download/job_ready.txt"]
+                                    pod.exec,
+                                    ["test", "-f", "/tmp/download/job_ready.txt"],
                                 )
                             ),
                             timeout=5.0,
@@ -583,7 +607,9 @@ done
                 except Exception:
                     pass
 
-                self._logger.info(f"Waiting for download job... (attempt {attempt + 1}/60)")
+                self._logger.info(
+                    f"Waiting for download job... (attempt {attempt + 1}/60)"
+                )
                 await asyncio.sleep(1)
             else:
                 self._logger.warning("Download job did not become ready in time")
@@ -599,7 +625,9 @@ done
                 pods.append(pod)
 
             if not pods:
-                raise Exception(f"No pods found for download job {self._download_job_name}")
+                raise Exception(
+                    f"No pods found for download job {self._download_job_name}"
+                )
 
             pod = pods[0]
 
@@ -633,7 +661,9 @@ fi
                 elif line.startswith("TAR_CREATED:"):
                     tar_created = line.split(":")[1] == "true"
 
-            self._logger.info(f"Found {file_count} result files, tar_created={tar_created}")
+            self._logger.info(
+                f"Found {file_count} result files, tar_created={tar_created}"
+            )
 
             extracted_files = []
 
@@ -642,7 +672,9 @@ fi
                 self._logger.info("Extracting results archive...")
                 cat_result = await asyncio.wait_for(
                     asyncio.create_task(
-                        asyncio.to_thread(pod.exec, ["cat", "/tmp/download/results.tar.gz"])
+                        asyncio.to_thread(
+                            pod.exec, ["cat", "/tmp/download/results.tar.gz"]
+                        )
                     ),
                     timeout=60.0,
                 )
@@ -662,7 +694,9 @@ fi
 
                 local_archive.unlink()
 
-                self._logger.info(f"Extracted {len(extracted_files)} files to {output_dir}")
+                self._logger.info(
+                    f"Extracted {len(extracted_files)} files to {output_dir}"
+                )
             else:
                 self._logger.info("No result files were available for download")
 
@@ -703,7 +737,10 @@ fi
                     asyncio.create_task(
                         asyncio.to_thread(
                             pod.exec,
-                            ["cat", f"{self.container_results_dir}/profile_export_aiperf.json"],
+                            [
+                                "cat",
+                                f"{self.container_results_dir}/profile_export_aiperf.json",
+                            ],
                         )
                     ),
                     timeout=30.0,

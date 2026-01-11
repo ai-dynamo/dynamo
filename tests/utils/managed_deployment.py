@@ -2,14 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import logging
 import os
 import re
 import secrets
 import shlex
 import time
-from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
 
 import kr8s
 import requests
@@ -36,6 +37,38 @@ def _get_workspace_dir() -> str:
 
     # Fallback: assume workspace is 3 levels up from tests/utils/
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+@dataclass
+class ResourceSnapshot:
+    """Single resource usage snapshot for a pod."""
+
+    timestamp: float
+    pod_name: str
+    service_name: str
+
+    # Memory (bytes)
+    memory_used_bytes: int
+    memory_total_bytes: int
+    memory_available_bytes: int
+
+    # CPU (percentage, calculated from /proc/stat delta)
+    cpu_usage_percent: float
+
+    # GPU (optional, per-GPU list)
+    # Each dict: {index, memory_used_mb, memory_total_mb, utilization_percent}
+    gpu_metrics: Optional[List[dict]] = None
+
+
+@dataclass
+class ResourceMonitorConfig:
+    """Configuration for resource monitoring."""
+
+    enabled: bool = False
+    interval_seconds: float = 10.0
+    include_gpu: bool = True
+    write_to_pvc: bool = True
+    pvc_output_path: str = "/tmp/service_logs/resource_metrics.jsonl"
 
 
 class ServiceSpec:
@@ -869,6 +902,14 @@ class ManagedDeployment:
         default=False, init=False
     )  # Track if we created a PVC
 
+    # Resource monitoring
+    _resource_config: Optional[ResourceMonitorConfig] = field(default=None, init=False)
+    _resource_history: List[ResourceSnapshot] = field(default_factory=list, init=False)
+    _monitoring_task: Optional[asyncio.Task] = field(default=None, init=False)
+    _prev_cpu_stats: Dict[str, dict] = field(
+        default_factory=dict, init=False
+    )  # Per-pod CPU stats for delta calculation
+
     @property
     def frontend_service_name(self):
         return self.deployment_spec.frontend_service.name
@@ -1304,6 +1345,346 @@ class ManagedDeployment:
                 os.path.join(directory, f"{pod.name}.metrics{suffix}.log"), "w"
             ) as f:
                 f.write(content)
+
+    # =========================================================================
+    # Resource Monitoring Methods
+    # =========================================================================
+
+    async def _exec_in_pod(
+        self, pod: Pod, command: List[str], timeout: float = 10.0
+    ) -> Any:
+        """Execute command in pod with timeout.
+
+        Args:
+            pod: The pod to execute the command in
+            command: Command as a list of strings
+            timeout: Timeout in seconds
+
+        Returns:
+            The exec result with stdout, stderr, and returncode
+        """
+        return await asyncio.wait_for(
+            asyncio.create_task(asyncio.to_thread(pod.exec, command)),
+            timeout=timeout,
+        )
+
+    def _parse_meminfo(self, meminfo_output: str) -> dict:
+        """Parse /proc/meminfo output.
+
+        Args:
+            meminfo_output: Raw output from cat /proc/meminfo
+
+        Returns:
+            dict with 'total', 'available', 'used' keys (all in bytes)
+        """
+        values = {}
+        for line in meminfo_output.strip().split("\n"):
+            parts = line.split()
+            if len(parts) >= 2:
+                key = parts[0].rstrip(":")
+                # Values are in kB, convert to bytes
+                value = int(parts[1]) * 1024
+                values[key] = value
+
+        return {
+            "total": values.get("MemTotal", 0),
+            "available": values.get("MemAvailable", 0),
+            "used": values.get("MemTotal", 0) - values.get("MemAvailable", 0),
+        }
+
+    def _parse_nvidia_smi(self, output: str) -> List[dict]:
+        """Parse nvidia-smi CSV output.
+
+        Args:
+            output: Output from nvidia-smi --query-gpu=... --format=csv,noheader,nounits
+
+        Returns:
+            List of dicts with GPU metrics
+        """
+        gpus = []
+        for line in output.strip().split("\n"):
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 4:
+                try:
+                    gpus.append(
+                        {
+                            "index": int(parts[0]),
+                            "memory_used_mb": int(parts[1]),
+                            "memory_total_mb": int(parts[2]),
+                            "utilization_percent": int(parts[3]),
+                        }
+                    )
+                except ValueError:
+                    # Skip lines that can't be parsed
+                    continue
+        return gpus
+
+    def _calculate_cpu_usage(self, pod_name: str, proc_stat: str) -> float:
+        """Calculate CPU usage from /proc/stat (requires previous sample for delta).
+
+        Args:
+            pod_name: Pod name for tracking previous stats
+            proc_stat: Raw output from cat /proc/stat
+
+        Returns:
+            CPU usage percentage (0-100)
+        """
+        # Parse first line: cpu user nice system idle iowait irq softirq
+        first_line = proc_stat.strip().split("\n")[0]
+        parts = first_line.split()[1:]  # Skip "cpu" label
+        values = [int(p) for p in parts[:7]]
+
+        idle = values[3] + values[4]  # idle + iowait
+        total = sum(values)
+
+        # Calculate delta from previous sample
+        prev = self._prev_cpu_stats.get(pod_name, {"total": total, "idle": idle})
+        prev_total = prev.get("total", total)
+        prev_idle = prev.get("idle", idle)
+
+        # Store current values for next calculation
+        self._prev_cpu_stats[pod_name] = {"total": total, "idle": idle}
+
+        total_delta = total - prev_total
+        idle_delta = idle - prev_idle
+
+        if total_delta == 0:
+            return 0.0
+
+        return 100.0 * (1.0 - idle_delta / total_delta)
+
+    def _get_service_for_pod(self, pod: Pod) -> str:
+        """Get service name for a pod from its labels.
+
+        Args:
+            pod: The pod object
+
+        Returns:
+            Service name or 'unknown'
+        """
+        # Try to get service name from labels
+        labels = pod.labels or {}
+
+        # Check for nvidia.com/selector label (format: deployment-servicename)
+        selector = labels.get("nvidia.com/selector", "")
+        if selector and self._deployment_name:
+            # Extract service name from selector (e.g., "my-deploy-frontend" -> "frontend")
+            prefix = f"{self._deployment_name}-"
+            if selector.startswith(prefix):
+                return selector[len(prefix) :]
+
+        return "unknown"
+
+    async def get_pod_resource_usage(
+        self, pod: Pod, service_name: str, include_gpu: bool = True
+    ) -> Optional[ResourceSnapshot]:
+        """Get current resource usage for a single pod via exec.
+
+        Args:
+            pod: The pod to query
+            service_name: Name of the service this pod belongs to
+            include_gpu: Whether to include GPU metrics (default True)
+
+        Returns:
+            ResourceSnapshot with current metrics, or None if failed
+        """
+        try:
+            # Memory via /proc/meminfo
+            mem_result = await self._exec_in_pod(pod, ["cat", "/proc/meminfo"])
+            memory = self._parse_meminfo(mem_result.stdout.decode())
+
+            # CPU via /proc/stat
+            cpu_result = await self._exec_in_pod(pod, ["cat", "/proc/stat"])
+            cpu_usage = self._calculate_cpu_usage(pod.name, cpu_result.stdout.decode())
+
+            # Determine if GPU metrics should be collected
+            # Use config if monitoring is active, otherwise use the include_gpu parameter
+            should_include_gpu = include_gpu
+            if self._resource_config is not None:
+                should_include_gpu = self._resource_config.include_gpu
+
+            # GPU via nvidia-smi (if enabled and available)
+            gpu_metrics = None
+            if should_include_gpu:
+                try:
+                    gpu_result = await self._exec_in_pod(
+                        pod,
+                        [
+                            "nvidia-smi",
+                            "--query-gpu=index,memory.used,memory.total,utilization.gpu",
+                            "--format=csv,noheader,nounits",
+                        ],
+                        timeout=5.0,
+                    )
+                    if gpu_result.returncode == 0:
+                        gpu_metrics = self._parse_nvidia_smi(gpu_result.stdout.decode())
+                except Exception:
+                    # nvidia-smi not available, that's okay
+                    pass
+
+            return ResourceSnapshot(
+                timestamp=time.time(),
+                pod_name=pod.name,
+                service_name=service_name,
+                memory_used_bytes=memory["used"],
+                memory_total_bytes=memory["total"],
+                memory_available_bytes=memory["available"],
+                cpu_usage_percent=cpu_usage,
+                gpu_metrics=gpu_metrics,
+            )
+
+        except Exception as e:
+            self._logger.warning(f"Failed to get resource usage for {pod.name}: {e}")
+            return None
+
+    async def get_all_resource_usage(
+        self, include_gpu: bool = True
+    ) -> Dict[str, List[ResourceSnapshot]]:
+        """Get resource usage for all pods in all services.
+
+        Args:
+            include_gpu: Whether to include GPU metrics (default True)
+
+        Returns:
+            Dict mapping service name to list of ResourceSnapshots
+        """
+        results: Dict[str, List[ResourceSnapshot]] = {}
+
+        service_pods = self.get_pods()
+
+        for service_name, pods in service_pods.items():
+            results[service_name] = []
+            for pod in pods:
+                # Only query running pods
+                if pod.status.phase != "Running":
+                    continue
+                try:
+                    snapshot = await self.get_pod_resource_usage(
+                        pod, service_name, include_gpu=include_gpu
+                    )
+                    if snapshot:
+                        results[service_name].append(snapshot)
+                except Exception as e:
+                    self._logger.warning(f"Failed to get resources for {pod.name}: {e}")
+
+        return results
+
+    async def start_resource_monitoring(
+        self, config: Optional[ResourceMonitorConfig] = None
+    ):
+        """Start background resource monitoring task.
+
+        Args:
+            config: Monitoring configuration (uses defaults if not provided)
+        """
+        self._resource_config = config or ResourceMonitorConfig(enabled=True)
+        self._resource_history = []
+        self._prev_cpu_stats = {}
+
+        self._monitoring_task = asyncio.create_task(self._resource_monitoring_loop())
+        self._logger.info(
+            f"Started resource monitoring (interval={self._resource_config.interval_seconds}s, "
+            f"gpu={self._resource_config.include_gpu}, write_to_pvc={self._resource_config.write_to_pvc})"
+        )
+
+    async def stop_resource_monitoring(self) -> List[ResourceSnapshot]:
+        """Stop background monitoring and return collected history.
+
+        Returns:
+            List of all collected ResourceSnapshots
+        """
+        if self._monitoring_task:
+            self._monitoring_task.cancel()
+            try:
+                await self._monitoring_task
+            except asyncio.CancelledError:
+                pass
+            self._monitoring_task = None
+
+        self._logger.info(
+            f"Stopped resource monitoring, collected {len(self._resource_history)} snapshots"
+        )
+        return self._resource_history
+
+    async def _resource_monitoring_loop(self):
+        """Background loop that collects resource metrics periodically."""
+        while True:
+            try:
+                snapshots = await self.get_all_resource_usage()
+
+                # Flatten and store snapshots
+                for service_snapshots in snapshots.values():
+                    self._resource_history.extend(service_snapshots)
+
+                    # Write to PVC if enabled
+                    if (
+                        self._resource_config
+                        and self._resource_config.write_to_pvc
+                        and service_snapshots
+                    ):
+                        await self._write_metrics_to_pvc(service_snapshots)
+
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                self._logger.warning(f"Resource monitoring error: {e}")
+
+            await asyncio.sleep(self._resource_config.interval_seconds)
+
+    async def _write_metrics_to_pvc(self, snapshots: List[ResourceSnapshot]):
+        """Write metrics to PVC via exec into a pod.
+
+        Args:
+            snapshots: List of snapshots to write as JSONL
+        """
+        if not self._resource_config:
+            return
+
+        # Find any running pod to write metrics
+        service_pods = self.get_pods()
+        for service_name, pods in service_pods.items():
+            for pod in pods:
+                if pod.status.phase != "Running":
+                    continue
+                try:
+                    for snapshot in snapshots:
+                        json_line = json.dumps(asdict(snapshot))
+                        # Escape single quotes for shell safety
+                        escaped_json = json_line.replace("'", "'\\''")
+                        await self._exec_in_pod(
+                            pod,
+                            [
+                                "sh",
+                                "-c",
+                                f"echo '{escaped_json}' >> {self._resource_config.pvc_output_path}",
+                            ],
+                            timeout=5.0,
+                        )
+                    return  # Successfully wrote to one pod
+                except Exception as e:
+                    self._logger.debug(
+                        f"Failed to write metrics via {pod.name}: {e}, trying next pod"
+                    )
+                    continue
+
+        self._logger.warning("No available pod to write resource metrics to PVC")
+
+    async def _save_resource_history_locally(self):
+        """Save resource monitoring history to local log directory."""
+        if not self._resource_history:
+            return
+
+        try:
+            metrics_file = os.path.join(self.log_dir, "resource_metrics.json")
+            with open(metrics_file, "w") as f:
+                json.dump([asdict(s) for s in self._resource_history], f, indent=2)
+            self._logger.info(
+                f"Saved {len(self._resource_history)} resource snapshots to {metrics_file}"
+            )
+        except Exception as e:
+            self._logger.warning(f"Failed to save resource history: {e}")
 
     async def _delete_deployment(self):
         """
@@ -2120,14 +2501,21 @@ fi
         Comprehensive cleanup of all resources created by this deployment.
 
         Order for volume log collection:
-        1. Delete deployment (pods exit gracefully, write final logs to PVC)
-        2. Wait for pods to terminate
-        3. Create download job to extract logs from PVC
-        4. Extract logs
-        5. Delete download job
-        6. Delete PVC
+        1. Stop resource monitoring (if running) and save history
+        2. Delete deployment (pods exit gracefully, write final logs to PVC)
+        3. Wait for pods to terminate
+        4. Create download job to extract logs from PVC
+        5. Extract logs
+        6. Delete download job
+        7. Delete PVC
         """
         try:
+            # Stop resource monitoring and save history BEFORE deleting deployment
+            if self._monitoring_task:
+                self._logger.info("Stopping resource monitoring...")
+                await self.stop_resource_monitoring()
+                await self._save_resource_history_locally()
+
             # Delete the main deployment first (pods write final logs to PVC on exit)
             self._logger.info("Deleting deployment...")
             await self._delete_deployment()

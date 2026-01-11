@@ -557,6 +557,7 @@ async def run_scenario(
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_rolling_restart_decode_then_prefill(
     request,
@@ -619,6 +620,7 @@ async def test_rolling_restart_decode_then_prefill(
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_delete_frontend_pod_recovery(
     request,
@@ -677,6 +679,7 @@ async def test_delete_frontend_pod_recovery(
 
 @pytest.mark.k8s
 @pytest.mark.e2e
+@pytest.mark.weekly
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_basic_smoke_1000_requests(
     request,
