@@ -80,7 +80,6 @@ def keep_pip_line(line: str) -> bool:
     return not name.startswith(IGNORE_PIP_PREFIXES)
 
 
-@pytest.mark.cuda
 def test_cuda_major_consistency() -> None:
     """
     Collect CUDA major versions (12/13) from predefined signals and assert consistency.
