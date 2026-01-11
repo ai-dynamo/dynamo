@@ -309,16 +309,20 @@ impl LocalModelBuilder {
         }
         let model_path = fs::canonicalize(model_path)?;
 
-        let mut card =
-            ModelDeploymentCard::load_from_disk(&model_path, self.custom_template_path.as_deref())?;
-        // The served model name defaults to the full model path.
-        // This matches what vllm and sglang do.
-        card.set_name(
-            &self
-                .model_name
-                .clone()
-                .unwrap_or_else(|| model_path.display().to_string()),
-        );
+        // The model_name is used for:
+        // 1. display_name: what the model is registered as (served-model-name)
+        // 2. source_model: the HuggingFace repo ID for frontend config downloads
+        // Defaults to the full model path if not specified (matches vllm/sglang behavior).
+        let model_name = self
+            .model_name
+            .clone()
+            .unwrap_or_else(|| model_path.display().to_string());
+
+        let mut card = ModelDeploymentCard::load_from_disk(
+            &model_path,
+            self.custom_template_path.as_deref(),
+            Some(&model_name),
+        )?;
 
         card.kv_cache_block_size = self.kv_cache_block_size;
 
