@@ -373,11 +373,11 @@ impl ModelDeploymentCard {
 
     /// Allow user to override the name we register this model under.
     /// Corresponds to vllm's `--served-model-name`.
+    ///
+    /// Note: This only updates `display_name` and `slug`. The `source_model` field
+    /// should be set via `load_from_disk()` with the `model_name` parameter for
+    /// proper frontend config downloads.
     pub fn set_name(&mut self, name: &str) {
-        // Preserve original model path before overwriting display_name
-        if self.source_model.is_none() && !self.display_name.is_empty() {
-            self.source_model = Some(self.display_name.clone());
-        }
         self.display_name = name.to_string();
         self.slug = Slug::from_string(name);
     }
@@ -385,11 +385,27 @@ impl ModelDeploymentCard {
     /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
     /// tokenizer.json and tokenizer_config.json (i.e. a huggingface repo checkout).
     /// Optional custom template.
+    ///
+    /// # Arguments
+    /// * `config_path` - Path to the model config directory (e.g., HF cache path)
+    /// * `custom_template_path` - Optional path to a custom chat template
+    /// * `model_name` - The HuggingFace model ID (e.g., "Qwen/Qwen3-0.6B"). If provided,
+    ///   this is stored in `source_model` for frontend config downloads and used as the
+    ///   `display_name`. If None, the config_path is used as the display_name.
     pub fn load_from_disk(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
+        model_name: Option<&str>,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        Self::from_local_path(config_path.as_ref(), custom_template_path)
+        let mut card = Self::from_local_path(config_path.as_ref(), custom_template_path)?;
+
+        if let Some(name) = model_name {
+            card.display_name = name.to_string();
+            card.source_model = Some(name.to_string());
+            card.slug = Slug::from_string(name);
+        }
+
+        Ok(card)
     }
 
     pub fn requires_preprocessing(&self) -> bool {

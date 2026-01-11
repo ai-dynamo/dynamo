@@ -1452,9 +1452,12 @@ pub async fn create_worker_selection_pipeline_chat(
         })?;
 
     // Load a fresh card from local files, then copy runtime config from original card
+    // Use source_model (HF repo ID) or display_name for proper frontend config downloads
     tracing::debug!("Loading ModelDeploymentCard from local path...");
-    let mut card_with_local_files = ModelDeploymentCard::load_from_disk(&local_path, None)
-        .with_context(|| format!("Failed to load card from disk: {:?}", local_path))?;
+    let model_name = card.source_model.as_ref().unwrap_or(&card.display_name);
+    let mut card_with_local_files =
+        ModelDeploymentCard::load_from_disk(&local_path, None, Some(model_name))
+            .with_context(|| format!("Failed to load card from disk: {:?}", local_path))?;
 
     // Copy runtime settings from the backend's card
     tracing::debug!("Copying runtime config from backend card...");
