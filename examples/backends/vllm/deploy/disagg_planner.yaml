@@ -13,14 +13,14 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
     Planner:
       dynamoNamespace: vllm-disagg-planner
       componentType: planner
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
           workingDir: /workspace/components/src/dynamo/planner
           command:
           - python3
@@ -52,7 +52,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -72,7 +72,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${RELEASE_VERSION}
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
