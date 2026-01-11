@@ -45,11 +45,11 @@ In this section, we explain what happens under the hood when `DistributedRuntime
 The hierarchy and naming in etcd and NATS may change over time, and this document might not reflect the latest changes. Regardless of such changes, the main concepts would remain the same.
 ```
 
-- `DistributedRuntime`: When a `DistributedRuntime` object is created, it establishes connections to the following two services:
+- `DistributedRuntime`: When a `DistributedRuntime` object is created, it establishes connections to the following services:
     - etcd (dynamic mode only): for service discovery. In static mode, `DistributedRuntime` can operate without etcd.
-    - NATS (both static and dynamic mode): for messaging.
+    - NATS (optional): for KV event messaging and router replica sync. NATS is enabled by default but can be disabled via the `enable_nats` parameter (e.g., using `--no-kv-events` flag). When NATS is disabled, the system operates in approximate mode without KV event persistence. Also legacy nats based request_plane is supported.
 
-  where etcd and NATS are two global services (there could be multiple etcd and NATS services for high availability).
+  etcd and NATS are global services (there could be multiple instances for high availability).
 
   For etcd, it also creates a primary lease and spin up a background task to keep the lease alive. All objects registered under this `DistributedRuntime` use this lease_id to maintain their life cycle. There is also a cancellation token that is tied to the primary lease. When the cancellation token is triggered or the background task failed, the primary lease is revoked or expired and the kv pairs stored with this lease_id is removed.
 - `Namespace`: `Namespace`s are primarily a logical grouping mechanism and is not registered in etcd. It provides the root path for all components under this `Namespace`.
