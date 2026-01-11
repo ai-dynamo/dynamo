@@ -897,6 +897,7 @@ func GenerateBasePodSpec(
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by ResolveCheckpointForService)
 ) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes, controllerConfig.GetDiscoveryBackend(component.Annotations))
@@ -1073,14 +1074,13 @@ func GenerateBasePodSpec(
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 
 	// Inject checkpoint configuration if enabled
-	// This is done after all other pod spec modifications to ensure checkpoint env vars
-	// and volumes are added to the final container
+	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
 	// Storage config comes from the operator's controller config (Helm values)
-	var storageConfig *v1alpha1.DynamoCheckpointStorageConfig
+	var storageConfig *controller_common.CheckpointStorageConfig
 	if controllerConfig.Checkpoint.Enabled {
-		storageConfig = checkpoint.StorageConfigFromControllerConfig(controllerConfig.Checkpoint.Storage)
+		storageConfig = &controllerConfig.Checkpoint.Storage
 	}
-	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, component.Checkpoint, commonconsts.MainContainerName, storageConfig); err != nil {
+	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, storageConfig); err != nil {
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 
@@ -1123,11 +1123,12 @@ func GeneratePodSpecForComponent(
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info
 ) (*corev1.PodSpec, error) {
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName, checkpointInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -1142,6 +1143,7 @@ func GenerateGrovePodCliqueSet(
 	secretsRetriever SecretsRetriever,
 	restartState *RestartState,
 	existingRestartAnnotations map[string]string,
+	checkpointInfoByService map[string]*checkpoint.CheckpointInfo, // Optional checkpoint info per service
 ) (*grovev1alpha1.PodCliqueSet, error) {
 	gangSet := &grovev1alpha1.PodCliqueSet{}
 	gangSet.Name = dynamoDeployment.Name
@@ -1184,6 +1186,12 @@ func GenerateGrovePodCliqueSet(
 			component.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = discoveryBackend
 		}
 
+		// Get checkpoint info for this service if available
+		var checkpointInfo *checkpoint.CheckpointInfo
+		if checkpointInfoByService != nil {
+			checkpointInfo = checkpointInfoByService[serviceName]
+		}
+
 		numberOfNodes := component.GetNumberOfNodes()
 		isMultinode := numberOfNodes > 1
 		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
@@ -1200,6 +1208,7 @@ func GenerateGrovePodCliqueSet(
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				serviceName,
+				checkpointInfo,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
@@ -1285,16 +1294,20 @@ func generateLabels(component *v1alpha1.DynamoComponentDeploymentSharedSpec, dyn
 	// Add base model label if modelRef is specified
 	AddBaseModelLabel(labels, component.ModelRef)
 	// Add checkpoint labels if checkpointing is enabled
-	labels = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
+	var err error
+	labels, err = checkpoint.InjectCheckpointLabelsFromConfig(labels, component.Checkpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inject checkpoint labels: %w", err)
+	}
 	setMetricsLabels(labels, dynamoDeployment)
 	if component.Labels != nil {
-		err := mergo.Merge(&labels, component.Labels, mergo.WithOverride)
+		err = mergo.Merge(&labels, component.Labels, mergo.WithOverride)
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge labels: %w", err)
 		}
 	}
 	if component.ExtraPodMetadata != nil {
-		err := mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
+		err = mergo.Merge(&labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
 		if err != nil {
 			return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
 		}
@@ -1468,6 +1481,7 @@ func GenerateBasePodSpecForController(
 	controllerConfig controller_common.Config,
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	checkpointInfo *checkpoint.CheckpointInfo, // Optional checkpoint info (resolved by caller)
 ) (*corev1.PodSpec, error) {
 	// Convert to our interface
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
@@ -1494,6 +1508,7 @@ func GenerateBasePodSpecForController(
 		controllerConfig,
 		multinodeDeploymentType,
 		serviceName,
+		checkpointInfo,
 	)
 	if err != nil {
 		return nil, err

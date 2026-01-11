@@ -29,49 +29,68 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// getCheckpointInfoFromCheckpoint extracts CheckpointInfo from a DynamoCheckpoint CR
+func getCheckpointInfoFromCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *CheckpointInfo {
+	info := &CheckpointInfo{
+		Enabled:        true,
+		CheckpointName: ckpt.Name,
+		Hash:           ckpt.Status.IdentityHash,
+		TarPath:        ckpt.Status.TarPath,
+		Location:       ckpt.Status.Location,
+		StorageType:    ckpt.Status.StorageType,
+		Ready:          ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
+		Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
+			Model:                ckpt.Spec.Identity.Model,
+			Framework:            ckpt.Spec.Identity.Framework,
+			FrameworkVersion:     ckpt.Spec.Identity.FrameworkVersion,
+			TensorParallelSize:   ckpt.Spec.Identity.TensorParallelSize,
+			PipelineParallelSize: ckpt.Spec.Identity.PipelineParallelSize,
+			Dtype:                ckpt.Spec.Identity.Dtype,
+			MaxModelLen:          ckpt.Spec.Identity.MaxModelLen,
+			ExtraParameters:      ckpt.Spec.Identity.ExtraParameters,
+		},
+	}
+
+	// PVCName only relevant for PVC storage type
+	if string(info.StorageType) == controller_common.CheckpointStorageTypePVC || info.StorageType == "" {
+		info.PVCName = DefaultCheckpointPVCName
+	}
+
+	return info
+}
+
 // DefaultCheckpointPVCName is the default PVC name for checkpoint storage
 const DefaultCheckpointPVCName = "checkpoint-storage"
 
-// StorageConfigFromControllerConfig converts controller_common.CheckpointStorageConfig
-// to the API type nvidiacomv1alpha1.DynamoCheckpointStorageConfig
-func StorageConfigFromControllerConfig(cfg controller_common.CheckpointStorageConfig) *nvidiacomv1alpha1.DynamoCheckpointStorageConfig {
-	storageType := nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC
-	switch cfg.Type {
-	case "s3":
-		storageType = nvidiacomv1alpha1.DynamoCheckpointStorageTypeS3
-	case "oci":
-		storageType = nvidiacomv1alpha1.DynamoCheckpointStorageTypeOCI
+// getBasePathFromStorage returns the base path from storage config, or the default
+func getBasePathFromStorage(storageConfig *controller_common.CheckpointStorageConfig) string {
+	if storageConfig != nil && storageConfig.PVC.BasePath != "" {
+		return storageConfig.PVC.BasePath
 	}
+	return consts.CheckpointBasePath
+}
 
-	result := &nvidiacomv1alpha1.DynamoCheckpointStorageConfig{
-		Type: storageType,
+// GetCheckpointBasePath returns the configured checkpoint base path from controller config,
+// or the default if not set. This is used by both CheckpointReconciler and DynamoGraphDeploymentReconciler.
+func GetCheckpointBasePath(config *controller_common.CheckpointConfig) string {
+	if config != nil && config.Enabled {
+		return getBasePathFromStorage(&config.Storage)
 	}
+	return consts.CheckpointBasePath
+}
 
-	switch storageType {
-	case nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC:
-		result.PVC = &nvidiacomv1alpha1.DynamoCheckpointPVCConfig{
-			PVCName:  cfg.PVC.PVCName,
-			BasePath: cfg.PVC.BasePath,
-		}
-	case nvidiacomv1alpha1.DynamoCheckpointStorageTypeS3:
-		result.S3 = &nvidiacomv1alpha1.DynamoCheckpointS3Config{
-			URI:                  cfg.S3.URI,
-			CredentialsSecretRef: cfg.S3.CredentialsSecretRef,
-		}
-	case nvidiacomv1alpha1.DynamoCheckpointStorageTypeOCI:
-		result.OCI = &nvidiacomv1alpha1.DynamoCheckpointOCIConfig{
-			URI:                  cfg.OCI.URI,
-			CredentialsSecretRef: cfg.OCI.CredentialsSecretRef,
-		}
-	}
-
-	return result
+// storageTypeToAPI converts controller_common storage type string to API enum
+func storageTypeToAPI(storageType string) nvidiacomv1alpha1.DynamoCheckpointStorageType {
+	// Simply cast - the values match between controller constants and API enum
+	return nvidiacomv1alpha1.DynamoCheckpointStorageType(storageType)
 }
 
 // CheckpointInfo contains resolved checkpoint information for a DGD service
 type CheckpointInfo struct {
 	// Enabled indicates if checkpointing is enabled
 	Enabled bool
+	// Identity is the resolved checkpoint identity (model, framework, etc.)
+	Identity *nvidiacomv1alpha1.DynamoCheckpointIdentity
 	// Hash is the computed identity hash
 	Hash string
 	// TarPath is the local path to the checkpoint tar file
@@ -88,10 +107,9 @@ type CheckpointInfo struct {
 	Ready bool
 }
 
-// ResolveCheckpointForService resolves checkpoint information for a DGD service
+// ResolveCheckpointForService resolves checkpoint information for a DGD service.
 // It handles both checkpointRef (direct reference) and identity-based lookup.
-// For checkpointRef mode, it also populates config.Identity from the Checkpoint CR
-// (in-memory only) so that downstream pod spec generation can compute the checkpoint path.
+// Returns CheckpointInfo with the resolved identity populated.
 func ResolveCheckpointForService(
 	ctx context.Context,
 	c client.Client,
@@ -101,8 +119,6 @@ func ResolveCheckpointForService(
 	if config == nil || !config.Enabled {
 		return &CheckpointInfo{Enabled: false}, nil
 	}
-
-	info := &CheckpointInfo{Enabled: true}
 
 	// If a direct checkpoint reference is provided, use it
 	if config.CheckpointRef != nil && *config.CheckpointRef != "" {
@@ -115,34 +131,8 @@ func ResolveCheckpointForService(
 			return nil, fmt.Errorf("failed to get referenced checkpoint %s: %w", *config.CheckpointRef, err)
 		}
 
-		info.CheckpointName = ckpt.Name
-		info.Hash = ckpt.Status.IdentityHash
-		info.TarPath = ckpt.Status.TarPath
-		info.Location = ckpt.Status.Location
-		info.StorageType = ckpt.Status.StorageType
-		// PVCName only relevant for PVC storage type
-		if info.StorageType == nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC || info.StorageType == "" {
-			info.PVCName = DefaultCheckpointPVCName
-		}
-		info.Ready = ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady
-
-		// Populate config.Identity from the Checkpoint CR (in-memory only)
-		// This allows InjectCheckpointIntoPodSpec to compute the checkpoint path
-		// without needing K8s client access
-		if config.Identity == nil {
-			config.Identity = &nvidiacomv1alpha1.ServiceCheckpointIdentity{
-				Model:                ckpt.Spec.Identity.Model,
-				Framework:            ckpt.Spec.Identity.Framework,
-				FrameworkVersion:     ckpt.Spec.Identity.FrameworkVersion,
-				TensorParallelSize:   ckpt.Spec.Identity.TensorParallelSize,
-				PipelineParallelSize: ckpt.Spec.Identity.PipelineParallelSize,
-				Dtype:                ckpt.Spec.Identity.Dtype,
-				MaxModelLen:          ckpt.Spec.Identity.MaxModelLen,
-				ExtraParameters:      ckpt.Spec.Identity.ExtraParameters,
-			}
-		}
-
-		return info, nil
+		// Extract all checkpoint info including identity from the CR
+		return getCheckpointInfoFromCheckpoint(ckpt), nil
 	}
 
 	// Otherwise, compute hash from identity and look up checkpoint
@@ -150,31 +140,35 @@ func ResolveCheckpointForService(
 		return nil, fmt.Errorf("checkpoint enabled but no checkpointRef or identity provided")
 	}
 
-	info.Hash = ComputeServiceIdentityHash(*config.Identity)
+	hash, err := ComputeIdentityHash(*config.Identity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+	}
+
+	info := &CheckpointInfo{
+		Enabled:  true,
+		Identity: config.Identity,
+		Hash:     hash,
+	}
 
 	// Look for existing checkpoint with matching hash using label selector
 	checkpointList := &nvidiacomv1alpha1.DynamoCheckpointList{}
-	err := c.List(ctx, checkpointList,
+	if err = c.List(ctx, checkpointList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{consts.KubeLabelCheckpointHash: info.Hash},
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("failed to list checkpoints: %w", err)
 	}
 
 	// Return the first matching checkpoint (there should be at most one per hash)
 	if len(checkpointList.Items) > 0 {
 		ckpt := &checkpointList.Items[0]
-		info.CheckpointName = ckpt.Name
-		info.TarPath = ckpt.Status.TarPath
-		info.Location = ckpt.Status.Location
-		info.StorageType = ckpt.Status.StorageType
-		// PVCName only relevant for PVC storage type
-		if info.StorageType == nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC || info.StorageType == "" {
-			info.PVCName = DefaultCheckpointPVCName
-		}
-		info.Ready = ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady
-		return info, nil
+		// Merge checkpoint info from the CR (overrides the computed values)
+		foundInfo := getCheckpointInfoFromCheckpoint(ckpt)
+		// Keep the hash and identity we computed from the config
+		foundInfo.Hash = info.Hash
+		foundInfo.Identity = info.Identity
+		return foundInfo, nil
 	}
 
 	// No existing checkpoint found
@@ -192,7 +186,7 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo) 
 	// Determine storage type (default to PVC if not set)
 	storageType := info.StorageType
 	if storageType == "" {
-		storageType = nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC
+		storageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(controller_common.CheckpointStorageTypePVC)
 	}
 
 	envVars := []corev1.EnvVar{
@@ -270,88 +264,39 @@ func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	})
 }
 
-// InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec
-// This is the centralized function for checkpoint injection that can be called
-// from GenerateBasePodSpec without needing K8s client access.
-// It computes the checkpoint hash and path from the identity if provided.
+// InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec.
+// Takes CheckpointInfo (resolved by ResolveCheckpointForService) and adds checkpoint-related
+// environment variables and volumes to the pod spec.
 // Storage configuration is optional - if not provided, defaults to PVC.
 func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
-	config *nvidiacomv1alpha1.ServiceCheckpointConfig,
-	mainContainerName string,
-	storageConfig *nvidiacomv1alpha1.DynamoCheckpointStorageConfig,
+	checkpointInfo *CheckpointInfo,
+	storageConfig *controller_common.CheckpointStorageConfig,
 ) error {
-	if config == nil || !config.Enabled {
+	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
 	}
 
-	// Build checkpoint info from config
-	info := &CheckpointInfo{Enabled: true}
-
-	// Identity is required to compute the checkpoint path.
-	// This should always be set at this point because:
-	// - User provided identity directly, OR
-	// - ResolveCheckpointForService populated it from the Checkpoint CR (for checkpointRef mode)
-	// This check is a safety net - if triggered, it indicates a bug in the calling code.
-	if config.Identity == nil {
-		// This shouldn't happen in normal operation - log would be useful here
-		return nil
+	// Identity is required to compute the checkpoint path
+	if checkpointInfo.Identity == nil {
+		return fmt.Errorf("checkpoint enabled but identity is nil")
 	}
 
-	// Compute hash from identity
-	info.Hash = ComputeServiceIdentityHash(*config.Identity)
-
-	// Determine storage type and compute location/path
-	storageType := nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC
-	if storageConfig != nil && storageConfig.Type != "" {
-		storageType = storageConfig.Type
-	}
-	info.StorageType = storageType
-
-	switch storageType {
-	case nvidiacomv1alpha1.DynamoCheckpointStorageTypeS3:
-		// S3 storage: location is s3:// URI, path is local temp
-		// URI format: s3://[endpoint/]bucket/prefix
-		s3URI := "s3://checkpoint-storage/checkpoints" // default
-		if storageConfig != nil && storageConfig.S3 != nil && storageConfig.S3.URI != "" {
-			s3URI = storageConfig.S3.URI
+	// Use the checkpoint info as-is (already computed by ResolveCheckpointForService)
+	// We only need to compute hash if it's not already set
+	info := checkpointInfo
+	if info.Hash == "" {
+		hash, err := ComputeIdentityHash(*info.Identity)
+		if err != nil {
+			return fmt.Errorf("failed to compute identity hash: %w", err)
 		}
-		// Append hash to the URI
-		info.Location = fmt.Sprintf("%s/%s.tar", s3URI, info.Hash)
-		info.TarPath = fmt.Sprintf("/tmp/%s.tar", info.Hash)
-
-	case nvidiacomv1alpha1.DynamoCheckpointStorageTypeOCI:
-		// OCI storage: location is oci:// URI, path is local temp
-		// URI format: oci://registry/repository
-		ociURI := "oci://localhost/checkpoints" // default
-		if storageConfig != nil && storageConfig.OCI != nil && storageConfig.OCI.URI != "" {
-			ociURI = storageConfig.OCI.URI
-		}
-		// Append hash as tag
-		info.Location = fmt.Sprintf("%s:%s", ociURI, info.Hash)
-		info.TarPath = fmt.Sprintf("/tmp/%s.tar", info.Hash)
-
-	default: // PVC (default)
-		// PVC storage: location and path are the same
-		basePath := consts.CheckpointBasePath
-		pvcName := DefaultCheckpointPVCName
-		if storageConfig != nil && storageConfig.PVC != nil {
-			if storageConfig.PVC.BasePath != "" {
-				basePath = storageConfig.PVC.BasePath
-			}
-			if storageConfig.PVC.PVCName != "" {
-				pvcName = storageConfig.PVC.PVCName
-			}
-		}
-		info.TarPath = GetTarPath(basePath, info.Hash)
-		info.Location = info.TarPath // Same for PVC
-		info.PVCName = pvcName
+		info.Hash = hash
 	}
 
-	// Find the main container
+	// Find the main container first (needed for all storage types)
 	var mainContainer *corev1.Container
 	for i := range podSpec.Containers {
-		if podSpec.Containers[i].Name == mainContainerName {
+		if podSpec.Containers[i].Name == consts.MainContainerName {
 			mainContainer = &podSpec.Containers[i]
 			break
 		}
@@ -364,22 +309,64 @@ func InjectCheckpointIntoPodSpec(
 		return fmt.Errorf("no container found to inject checkpoint config")
 	}
 
-	// Inject checkpoint environment variables
-	InjectCheckpointEnvVars(mainContainer, info)
-
-	// Inject checkpoint volume and mount (only for PVC storage)
-	if info.StorageType == nvidiacomv1alpha1.DynamoCheckpointStorageTypePVC && info.PVCName != "" {
-		InjectCheckpointVolume(podSpec, info.PVCName)
-		InjectCheckpointVolumeMount(mainContainer, consts.CheckpointBasePath)
+	// Determine storage type and compute location/path
+	storageType := controller_common.CheckpointStorageTypePVC // default
+	if storageConfig != nil && storageConfig.Type != "" {
+		storageType = storageConfig.Type
 	}
+
+	switch storageType {
+	case controller_common.CheckpointStorageTypeS3:
+		// S3 storage: location is s3:// URI, path is local temp
+		// URI format: s3://[endpoint/]bucket/prefix
+		info.StorageType = storageTypeToAPI(storageType)
+		s3URI := "s3://checkpoint-storage/checkpoints" // default
+		if storageConfig != nil && storageConfig.S3.URI != "" {
+			s3URI = storageConfig.S3.URI
+		}
+		// Append hash to the URI
+		info.Location = fmt.Sprintf("%s/%s.tar", s3URI, info.Hash)
+		info.TarPath = fmt.Sprintf("/tmp/%s.tar", info.Hash)
+
+	case controller_common.CheckpointStorageTypeOCI:
+		// OCI storage: location is oci:// URI, path is local temp
+		// URI format: oci://registry/repository
+		info.StorageType = storageTypeToAPI(storageType)
+		ociURI := "oci://localhost/checkpoints" // default
+		if storageConfig != nil && storageConfig.OCI.URI != "" {
+			ociURI = storageConfig.OCI.URI
+		}
+		// Append hash as tag
+		info.Location = fmt.Sprintf("%s:%s", ociURI, info.Hash)
+		info.TarPath = fmt.Sprintf("/tmp/%s.tar", info.Hash)
+
+	default: // controller_common.CheckpointStorageTypePVC
+		// PVC storage: location and path are the same
+		info.StorageType = storageTypeToAPI(storageType)
+		basePath := getBasePathFromStorage(storageConfig)
+		pvcName := DefaultCheckpointPVCName
+		if storageConfig != nil && storageConfig.PVC.PVCName != "" {
+			pvcName = storageConfig.PVC.PVCName
+		}
+		info.TarPath = GetTarPath(basePath, info.Hash)
+		info.Location = info.TarPath // Same for PVC
+		info.PVCName = pvcName
+
+		// Inject PVC volume and mount (only for PVC storage)
+		InjectCheckpointVolume(podSpec, pvcName)
+		InjectCheckpointVolumeMount(mainContainer, basePath)
+	}
+
+	// Inject checkpoint environment variables (for all storage types)
+	InjectCheckpointEnvVars(mainContainer, info)
 
 	return nil
 }
 
 // InjectCheckpointLabelsFromConfig adds checkpoint labels to a label map based on config
-func InjectCheckpointLabelsFromConfig(labels map[string]string, config *nvidiacomv1alpha1.ServiceCheckpointConfig) map[string]string {
+func InjectCheckpointLabelsFromConfig(labels map[string]string, config *nvidiacomv1alpha1.ServiceCheckpointConfig) (map[string]string, error) {
 	if config == nil || !config.Enabled {
-		return labels
+		return labels, nil
 	}
 
 	if labels == nil {
@@ -388,9 +375,12 @@ func InjectCheckpointLabelsFromConfig(labels map[string]string, config *nvidiaco
 
 	// Compute hash from identity if provided
 	if config.Identity != nil {
-		hash := ComputeServiceIdentityHash(*config.Identity)
+		hash, err := ComputeIdentityHash(*config.Identity)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute identity hash for labels: %w", err)
+		}
 		labels[consts.KubeLabelCheckpointHash] = hash
 	}
 
-	return labels
+	return labels, nil
 }

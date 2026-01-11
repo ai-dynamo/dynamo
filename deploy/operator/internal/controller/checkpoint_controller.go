@@ -52,6 +52,22 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
 }
 
+// getCheckpointPVCName returns the configured PVC name, or the default if not set
+func (r *CheckpointReconciler) getCheckpointPVCName() string {
+	if r.Config.Checkpoint.Enabled && r.Config.Checkpoint.Storage.PVC.PVCName != "" {
+		return r.Config.Checkpoint.Storage.PVC.PVCName
+	}
+	return checkpoint.DefaultCheckpointPVCName
+}
+
+// getSignalHostPath returns the configured signal host path, or the default if not set
+func (r *CheckpointReconciler) getSignalHostPath() string {
+	if r.Config.Checkpoint.Enabled && r.Config.Checkpoint.Storage.SignalHostPath != "" {
+		return r.Config.Checkpoint.Storage.SignalHostPath
+	}
+	return consts.CheckpointSignalHostPath
+}
+
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
@@ -73,9 +89,14 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	// Compute identity hash if not already set
 	if ckpt.Status.IdentityHash == "" {
-		hash := checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		hash, err := checkpoint.ComputeIdentityHash(ckpt.Spec.Identity)
+		if err != nil {
+			logger.Error(err, "Failed to compute identity hash")
+			return ctrl.Result{}, fmt.Errorf("failed to compute identity hash: %w", err)
+		}
+
 		ckpt.Status.IdentityHash = hash
-		ckpt.Status.TarPath = checkpoint.GetTarPath(consts.CheckpointBasePath, hash)
+		ckpt.Status.TarPath = checkpoint.GetTarPath(checkpoint.GetCheckpointBasePath(&r.Config.Checkpoint), hash)
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 
 		if err := r.Status().Update(ctx, ckpt); err != nil {
@@ -156,6 +177,13 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			// Job was deleted, go back to Pending
 			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 			ckpt.Status.JobName = ""
+			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+				Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCreated),
+				Status:             metav1.ConditionFalse,
+				Reason:             "JobDeleted",
+				Message:            "Checkpoint job was deleted",
+				LastTransitionTime: metav1.Now(),
+			})
 			if err := r.Status().Update(ctx, ckpt); err != nil {
 				return ctrl.Result{}, err
 			}
@@ -235,7 +263,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		Name: consts.CheckpointVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: checkpoint.DefaultCheckpointPVCName,
+				ClaimName: r.getCheckpointPVCName(),
 			},
 		},
 	})
@@ -247,7 +275,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		Name: consts.CheckpointSignalVolumeName,
 		VolumeSource: corev1.VolumeSource{
 			HostPath: &corev1.HostPathVolumeSource{
-				Path: consts.CheckpointSignalHostPath,
+				Path: r.getSignalHostPath(),
 				Type: &hostPathType,
 			},
 		},
@@ -283,7 +311,7 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts,
 			corev1.VolumeMount{
 				Name:      consts.CheckpointVolumeName,
-				MountPath: consts.CheckpointBasePath,
+				MountPath: checkpoint.GetCheckpointBasePath(&r.Config.Checkpoint),
 			},
 			corev1.VolumeMount{
 				Name:      consts.CheckpointSignalVolumeName,

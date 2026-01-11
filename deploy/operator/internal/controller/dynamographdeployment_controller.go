@@ -246,7 +246,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	}
 
 	// Reconcile checkpoints for services with checkpointing enabled
-	checkpointStatuses, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
+	checkpointStatuses, checkpointInfos, err := r.reconcileCheckpoints(ctx, dynamoDeployment)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile checkpoints")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile checkpoints: %w", err)
@@ -292,7 +292,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	var result ReconcileResult
 	if r.isGrovePathway(dynamoDeployment) {
 		logger.Info("Reconciling Grove resources", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
-		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState)
+		result, err = r.reconcileGroveResources(ctx, dynamoDeployment, restartState, checkpointInfos)
 	} else {
 		logger.Info("Reconciling Dynamo components deployments", "hasMultinode", hasMultinode, "lwsEnabled", r.Config.LWS.Enabled)
 		result, err = r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment, restartState)
@@ -411,7 +411,7 @@ func (r *DynamoGraphDeploymentReconciler) scaleGroveResource(ctx context.Context
 	return err
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState) (*commoncontroller.Resource, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (*commoncontroller.Resource, error) {
 	logger := log.FromContext(ctx)
 
 	existingRestartAnnotations, err := r.getExistingRestartAnnotationsPCS(ctx, dynamoDeployment)
@@ -421,7 +421,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGrovePodCliqueSet(ctx context
 	}
 
 	// generate the dynamoComponentsDeployments from the config
-	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever, restartState, existingRestartAnnotations)
+	grovePodCliqueSet, err := dynamo.GenerateGrovePodCliqueSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever, restartState, existingRestartAnnotations, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, fmt.Errorf("failed to generate the Grove GangSet: %w", err)
@@ -521,10 +521,10 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveScaling(ctx context.Cont
 	return nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState) (ReconcileResult, error) {
+func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment, restartState *dynamo.RestartState, checkpointInfos map[string]*checkpoint.CheckpointInfo) (ReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState)
+	grovePodCliqueSetAsResource, err := r.reconcileGrovePodCliqueSet(ctx, dynamoDeployment, restartState, checkpointInfos)
 	if err != nil {
 		logger.Error(err, "failed to reconcile the Grove PodClique Set")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile the Grove PodClique Set: %w", err)
@@ -1088,10 +1088,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcilePVCs(ctx context.Context, dyn
 
 // reconcileCheckpoints reconciles Checkpoint CRs for services with checkpointing enabled
 // For Auto mode, it creates Checkpoint CRs if they don't exist
-// Returns a map of service names to checkpoint status
-func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]nvidiacomv1alpha1.ServiceCheckpointStatus, error) {
+// Returns a map of service names to checkpoint status and a map of service names to checkpoint info
+func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]nvidiacomv1alpha1.ServiceCheckpointStatus, map[string]*checkpoint.CheckpointInfo, error) {
 	logger := log.FromContext(ctx)
 	statuses := make(map[string]nvidiacomv1alpha1.ServiceCheckpointStatus)
+	checkpointInfos := make(map[string]*checkpoint.CheckpointInfo)
 
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		if component.Checkpoint == nil || !component.Checkpoint.Enabled {
@@ -1104,8 +1105,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, dynamoDeployment.Namespace, component.Checkpoint)
 		if err != nil {
 			logger.Error(err, "Failed to resolve checkpoint for service", "service", serviceName)
-			return nil, fmt.Errorf("failed to resolve checkpoint for service %s: %w", serviceName, err)
+			return nil, nil, fmt.Errorf("failed to resolve checkpoint for service %s: %w", serviceName, err)
 		}
+
+		// Store checkpoint info for later use in pod spec generation
+		checkpointInfos[serviceName] = info
 
 		// If no checkpoint found and mode is Auto, create one
 		if info.CheckpointName == "" && component.Checkpoint.Mode == nvidiacomv1alpha1.CheckpointModeAuto {
@@ -1114,14 +1118,19 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 			ckpt, err := r.createCheckpointCR(ctx, dynamoDeployment, serviceName, component)
 			if err != nil {
 				logger.Error(err, "Failed to create DynamoCheckpoint CR", "service", serviceName)
-				return nil, fmt.Errorf("failed to create checkpoint for service %s: %w", serviceName, err)
+				return nil, nil, fmt.Errorf("failed to create checkpoint for service %s: %w", serviceName, err)
 			}
 
 			info.CheckpointName = ckpt.Name
 			// Compute hash and tarPath locally since status may not be populated yet
 			// (checkpoint controller reconciles asynchronously)
-			info.Hash = checkpoint.ComputeServiceIdentityHash(*component.Checkpoint.Identity)
-			info.TarPath = checkpoint.GetTarPath(consts.CheckpointBasePath, info.Hash)
+			hash, err := checkpoint.ComputeIdentityHash(*component.Checkpoint.Identity)
+			if err != nil {
+				logger.Error(err, "Failed to compute checkpoint identity hash", "service", serviceName)
+				return nil, nil, fmt.Errorf("failed to compute checkpoint hash for service %s: %w", serviceName, err)
+			}
+			info.Hash = hash
+			info.TarPath = checkpoint.GetTarPath(checkpoint.GetCheckpointBasePath(&r.Config.Checkpoint), info.Hash)
 			info.PVCName = checkpoint.DefaultCheckpointPVCName
 			info.Ready = false // Newly created checkpoint is not ready yet
 		}
@@ -1135,7 +1144,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 		}
 	}
 
-	return statuses, nil
+	return statuses, checkpointInfos, nil
 }
 
 // createCheckpointCR creates a DynamoCheckpoint CR for a service in Auto mode
@@ -1152,7 +1161,10 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 	identity := component.Checkpoint.Identity
 
 	// Compute hash for naming
-	hash := checkpoint.ComputeServiceIdentityHash(*identity)
+	hash, err := checkpoint.ComputeIdentityHash(*identity)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
+	}
 
 	// Generate checkpoint name: {dgd-name}-{service}-{hash-prefix}
 	ckptName := fmt.Sprintf("%s-%s-%s", dynamoDeployment.Name, strings.ToLower(serviceName), hash[:8])
@@ -1250,6 +1262,7 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		r.Config,
 		consts.MultinodeDeploymentTypeGrove, // Use Grove (single-node backends return early)
 		serviceName,
+		nil, // No checkpoint info for checkpoint creation jobs
 	)
 	if err != nil {
 		return corev1.PodTemplateSpec{}, fmt.Errorf("failed to generate base pod spec: %w", err)

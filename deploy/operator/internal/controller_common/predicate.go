@@ -105,10 +105,19 @@ type CheckpointConfig struct {
 	Storage CheckpointStorageConfig
 }
 
+// Checkpoint storage type constants
+const (
+	CheckpointStorageTypePVC = "pvc"
+	CheckpointStorageTypeS3  = "s3"
+	CheckpointStorageTypeOCI = "oci"
+)
+
 // CheckpointStorageConfig holds storage backend configuration for checkpoints
 type CheckpointStorageConfig struct {
 	// Type is the storage backend type: pvc, s3, or oci
 	Type string
+	// SignalHostPath is the host path for signal files (used for checkpoint job coordination)
+	SignalHostPath string
 	// PVC configuration (used when Type=pvc)
 	PVC CheckpointPVCConfig
 	// S3 configuration (used when Type=s3)

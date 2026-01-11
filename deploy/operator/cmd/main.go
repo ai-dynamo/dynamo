@@ -153,6 +153,7 @@ func main() {
 	// Checkpoint configuration
 	var checkpointEnabled bool
 	var checkpointStorageType string
+	var checkpointSignalHostPath string
 	var checkpointPVCName string
 	var checkpointPVCBasePath string
 	var checkpointS3URI string
@@ -215,8 +216,10 @@ func main() {
 	// Checkpoint flags
 	flag.BoolVar(&checkpointEnabled, "checkpoint-enabled", false,
 		"Enable checkpoint/restore functionality")
-	flag.StringVar(&checkpointStorageType, "checkpoint-storage-type", "pvc",
+	flag.StringVar(&checkpointStorageType, "checkpoint-storage-type", commonController.CheckpointStorageTypePVC,
 		"Checkpoint storage backend type: pvc, s3, or oci")
+	flag.StringVar(&checkpointSignalHostPath, "checkpoint-signal-host-path", "",
+		"Host path for signal files used for checkpoint job coordination")
 	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "checkpoint-storage",
 		"Name of the PVC for checkpoint storage (used when storage-type=pvc)")
 	flag.StringVar(&checkpointPVCBasePath, "checkpoint-pvc-base-path", "/checkpoints",
@@ -300,7 +303,8 @@ func main() {
 		Checkpoint: commonController.CheckpointConfig{
 			Enabled: checkpointEnabled,
 			Storage: commonController.CheckpointStorageConfig{
-				Type: checkpointStorageType,
+				Type:           checkpointStorageType,
+				SignalHostPath: checkpointSignalHostPath,
 				PVC: commonController.CheckpointPVCConfig{
 					PVCName:  checkpointPVCName,
 					BasePath: checkpointPVCBasePath,

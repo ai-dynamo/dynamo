@@ -1193,15 +1193,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
 
-	// Resolve checkpoint for this component (populates config.Identity for checkpointRef mode)
+	// Resolve checkpoint for this component
+	var checkpointInfo *checkpoint.CheckpointInfo
 	if opt.dynamoComponentDeployment.Spec.Checkpoint != nil && opt.dynamoComponentDeployment.Spec.Checkpoint.Enabled {
-		_, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
+		info, err := checkpoint.ResolveCheckpointForService(ctx, r.Client, opt.dynamoComponentDeployment.Namespace, opt.dynamoComponentDeployment.Spec.Checkpoint)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to resolve checkpoint")
 		}
+		checkpointInfo = info
 	}
 
-	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS)
+	podSpec, err := dynamo.GenerateBasePodSpecForController(opt.dynamoComponentDeployment, r.DockerSecretRetriever, r.Config, role, commonconsts.MultinodeDeploymentTypeLWS, checkpointInfo)
 	if err != nil {
 		err = errors.Wrap(err, "failed to generate base pod spec")
 		return nil, err

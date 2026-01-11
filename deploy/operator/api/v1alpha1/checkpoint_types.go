@@ -41,78 +41,6 @@ const (
 // +kubebuilder:validation:Enum=pvc;s3;oci
 type DynamoCheckpointStorageType string
 
-const (
-	// DynamoCheckpointStorageTypePVC uses a PersistentVolumeClaim for storage
-	DynamoCheckpointStorageTypePVC DynamoCheckpointStorageType = "pvc"
-	// DynamoCheckpointStorageTypeS3 uses S3-compatible object storage
-	DynamoCheckpointStorageTypeS3 DynamoCheckpointStorageType = "s3"
-	// DynamoCheckpointStorageTypeOCI uses an OCI registry for storage
-	DynamoCheckpointStorageTypeOCI DynamoCheckpointStorageType = "oci"
-)
-
-// DynamoCheckpointStorageConfig defines the storage backend configuration
-type DynamoCheckpointStorageConfig struct {
-	// Type is the storage backend type (pvc, s3, oci)
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default=pvc
-	Type DynamoCheckpointStorageType `json:"type"`
-
-	// PVC configuration (used when type=pvc)
-	// +optional
-	PVC *DynamoCheckpointPVCConfig `json:"pvc,omitempty"`
-
-	// S3 configuration (used when type=s3)
-	// +optional
-	S3 *DynamoCheckpointS3Config `json:"s3,omitempty"`
-
-	// OCI configuration (used when type=oci)
-	// +optional
-	OCI *DynamoCheckpointOCIConfig `json:"oci,omitempty"`
-}
-
-// DynamoCheckpointPVCConfig defines PVC storage configuration
-type DynamoCheckpointPVCConfig struct {
-	// PVCName is the name of the PersistentVolumeClaim to use
-	// +kubebuilder:validation:Required
-	// +kubebuilder:default="checkpoint-storage"
-	PVCName string `json:"pvcName"`
-
-	// BasePath is the base directory within the PVC for storing checkpoints
-	// +optional
-	// +kubebuilder:default="/checkpoints"
-	BasePath string `json:"basePath,omitempty"`
-}
-
-// DynamoCheckpointS3Config defines S3 storage configuration
-type DynamoCheckpointS3Config struct {
-	// URI is the S3 location in format: s3://[endpoint/]bucket/prefix
-	// Examples:
-	//   - s3://my-bucket/checkpoints (AWS S3)
-	//   - s3://minio.example.com/my-bucket/checkpoints (MinIO/custom endpoint)
-	// +kubebuilder:validation:Required
-	URI string `json:"uri"`
-
-	// CredentialsSecretRef is a reference to a secret containing S3 credentials
-	// The secret should contain AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION
-	// If not provided, uses IRSA/Workload Identity
-	// +optional
-	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
-}
-
-// DynamoCheckpointOCIConfig defines OCI registry storage configuration
-type DynamoCheckpointOCIConfig struct {
-	// URI is the OCI location in format: oci://registry/repository
-	// Examples:
-	//   - oci://myregistry.io/checkpoints
-	//   - oci://ghcr.io/myorg/checkpoints
-	// +kubebuilder:validation:Required
-	URI string `json:"uri"`
-
-	// CredentialsSecretRef is a reference to a docker config secret for registry auth
-	// +optional
-	CredentialsSecretRef string `json:"credentialsSecretRef,omitempty"`
-}
-
 // DynamoCheckpointIdentity defines the inputs that determine checkpoint equivalence
 // Two checkpoints with the same identity hash are considered equivalent
 type DynamoCheckpointIdentity struct {
@@ -254,6 +182,7 @@ type DynamoCheckpointStatus struct {
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase",description="Current phase of the checkpoint"
 // +kubebuilder:printcolumn:name="Hash",type="string",JSONPath=".status.identityHash",description="Identity hash of the checkpoint"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity",message="spec.identity is immutable after creation"
 
 // DynamoCheckpoint is the Schema for the dynamocheckpoints API
 // It represents a container checkpoint that can be used to restore pods to a warm state

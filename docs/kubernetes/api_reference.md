@@ -200,6 +200,7 @@ Two checkpoints with the same identity hash are considered equivalent
 
 _Appears in:_
 - [DynamoCheckpointSpec](#dynamocheckpointspec)
+- [ServiceCheckpointConfig](#servicecheckpointconfig)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -232,40 +233,6 @@ _Appears in:_
 | `ttlSecondsAfterFinished` _integer_ | TTLSecondsAfterFinished specifies how long to keep the Job after completion | 300 |  |
 
 
-#### DynamoCheckpointOCIConfig
-
-
-
-DynamoCheckpointOCIConfig defines OCI registry storage configuration
-
-
-
-_Appears in:_
-- [DynamoCheckpointStorageConfig](#dynamocheckpointstorageconfig)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the OCI location in format: oci://registry/repository<br />Examples:<br />  - oci://myregistry.io/checkpoints<br />  - oci://ghcr.io/myorg/checkpoints |  | Required: \{\} <br /> |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is a reference to a docker config secret for registry auth |  |  |
-
-
-#### DynamoCheckpointPVCConfig
-
-
-
-DynamoCheckpointPVCConfig defines PVC storage configuration
-
-
-
-_Appears in:_
-- [DynamoCheckpointStorageConfig](#dynamocheckpointstorageconfig)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `pvcName` _string_ | PVCName is the name of the PersistentVolumeClaim to use | checkpoint-storage | Required: \{\} <br /> |
-| `basePath` _string_ | BasePath is the base directory within the PVC for storing checkpoints | /checkpoints |  |
-
-
 #### DynamoCheckpointPhase
 
 _Underlying type:_ _string_
@@ -284,23 +251,6 @@ _Appears in:_
 | `Creating` | DynamoCheckpointPhaseCreating indicates the checkpoint Job is running<br /> |
 | `Ready` | DynamoCheckpointPhaseReady indicates the checkpoint tar file is available on the PVC<br /> |
 | `Failed` | DynamoCheckpointPhaseFailed indicates the checkpoint creation failed<br /> |
-
-
-#### DynamoCheckpointS3Config
-
-
-
-DynamoCheckpointS3Config defines S3 storage configuration
-
-
-
-_Appears in:_
-- [DynamoCheckpointStorageConfig](#dynamocheckpointstorageconfig)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `uri` _string_ | URI is the S3 location in format: s3://[endpoint/]bucket/prefix<br />Examples:<br />  - s3://my-bucket/checkpoints (AWS S3)<br />  - s3://minio.example.com/my-bucket/checkpoints (MinIO/custom endpoint) |  | Required: \{\} <br /> |
-| `credentialsSecretRef` _string_ | CredentialsSecretRef is a reference to a secret containing S3 credentials<br />The secret should contain AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION<br />If not provided, uses IRSA/Workload Identity |  |  |
 
 
 #### DynamoCheckpointSpec
@@ -344,8 +294,6 @@ _Appears in:_
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions represent the latest available observations of the checkpoint's state |  |  |
 
 
-
-
 #### DynamoCheckpointStorageType
 
 _Underlying type:_ _string_
@@ -357,13 +305,7 @@ _Validation:_
 
 _Appears in:_
 - [DynamoCheckpointStatus](#dynamocheckpointstatus)
-- [DynamoCheckpointStorageConfig](#dynamocheckpointstorageconfig)
 
-| Field | Description |
-| --- | --- |
-| `pvc` | DynamoCheckpointStorageTypePVC uses a PersistentVolumeClaim for storage<br /> |
-| `s3` | DynamoCheckpointStorageTypeS3 uses S3-compatible object storage<br /> |
-| `oci` | DynamoCheckpointStorageTypeOCI uses an OCI registry for storage<br /> |
 
 
 #### DynamoComponentDeployment
@@ -1089,31 +1031,7 @@ _Appears in:_
 | `enabled` _boolean_ | Enabled indicates whether checkpointing is enabled for this service | false |  |
 | `mode` _[CheckpointMode](#checkpointmode)_ | Mode defines how checkpoint creation is handled<br />- Auto: DGD controller creates Checkpoint CR automatically<br />- Manual: User must create Checkpoint CR | Auto | Enum: [Auto Manual] <br /> |
 | `checkpointRef` _string_ | CheckpointRef references an existing Checkpoint CR to use<br />If specified, Identity is ignored and this checkpoint is used directly |  |  |
-| `identity` _[ServiceCheckpointIdentity](#servicecheckpointidentity)_ | Identity defines the checkpoint identity for hash computation<br />Used when Mode is Auto or when looking up existing checkpoints<br />Required when checkpointRef is not specified |  |  |
-
-
-#### ServiceCheckpointIdentity
-
-
-
-ServiceCheckpointIdentity defines the checkpoint identity for DGD service configuration
-This mirrors CheckpointIdentity and is used to compute checkpoint hash
-
-
-
-_Appears in:_
-- [ServiceCheckpointConfig](#servicecheckpointconfig)
-
-| Field | Description | Default | Validation |
-| --- | --- | --- | --- |
-| `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B") |  | Required: \{\} <br /> |
-| `framework` _string_ | Framework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
-| `frameworkVersion` _string_ | FrameworkVersion is the version of the framework (optional)<br />If not specified, version is not included in identity hash |  |  |
-| `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br /> |
-| `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br /> |
-| `dtype` _string_ | Dtype is the data type (fp16, bf16, fp8, etc.) |  |  |
-| `maxModelLen` _integer_ | MaxModelLen is the maximum sequence length |  | Minimum: 1 <br /> |
-| `extraParameters` _object (keys:string, values:string)_ | ExtraParameters are additional parameters that affect the checkpoint hash<br />Use for any framework-specific or custom parameters not covered above |  |  |
+| `identity` _[DynamoCheckpointIdentity](#dynamocheckpointidentity)_ | Identity defines the checkpoint identity for hash computation<br />Used when Mode is Auto or when looking up existing checkpoints<br />Required when checkpointRef is not specified |  |  |
 
 
 #### ServiceCheckpointStatus

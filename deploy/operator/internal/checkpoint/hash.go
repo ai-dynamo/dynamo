@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 )
@@ -44,27 +45,21 @@ type normalizedIdentity struct {
 // 2. Serializing to JSON (with sorted keys)
 // 3. Computing SHA256 hash
 // 4. Returning first 12 characters of hex encoding
-func ComputeIdentityHash(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) string {
+func ComputeIdentityHash(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) (string, error) {
 	normalized := normalizeIdentity(identity)
 
 	// Serialize to JSON (Go's json.Marshal sorts map keys)
 	data, err := json.Marshal(normalized)
 	if err != nil {
-		// This should never happen with our controlled types
-		return ""
+		// This should never happen with our controlled types, but bubble up error if it does
+		return "", fmt.Errorf("failed to marshal identity for hashing: %w", err)
 	}
 
 	// Compute SHA256 hash
 	hash := sha256.Sum256(data)
 
 	// Return first 12 characters of hex encoding
-	return hex.EncodeToString(hash[:])[:12]
-}
-
-// ComputeServiceIdentityHash computes a hash from a ServiceCheckpointIdentity
-func ComputeServiceIdentityHash(identity nvidiacomv1alpha1.ServiceCheckpointIdentity) string {
-	// Convert ServiceCheckpointIdentity to DynamoCheckpointIdentity (same fields)
-	return ComputeIdentityHash(nvidiacomv1alpha1.DynamoCheckpointIdentity(identity))
+	return hex.EncodeToString(hash[:])[:12], nil
 }
 
 func normalizeIdentity(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) normalizedIdentity {
@@ -99,9 +94,4 @@ func normalizeIdentity(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) norm
 // GetTarPath returns the full path to the checkpoint tar file
 func GetTarPath(basePath, hash string) string {
 	return basePath + "/" + hash + ".tar"
-}
-
-// IdentitiesMatch checks if two checkpoint identities would produce the same hash
-func IdentitiesMatch(a, b nvidiacomv1alpha1.DynamoCheckpointIdentity) bool {
-	return ComputeIdentityHash(a) == ComputeIdentityHash(b)
 }

@@ -7895,6 +7895,9 @@ spec:
                   type: string
               type: object
           type: object
+          x-kubernetes-validations:
+            - message: spec.identity is immutable after creation
+              rule: '!has(oldSelf.spec.identity) || self.spec.identity == oldSelf.spec.identity'
       served: true
       storage: true
       subresources:

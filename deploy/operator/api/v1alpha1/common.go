@@ -171,49 +171,5 @@ type ServiceCheckpointConfig struct {
 	// Used when Mode is Auto or when looking up existing checkpoints
 	// Required when checkpointRef is not specified
 	// +optional
-	Identity *ServiceCheckpointIdentity `json:"identity,omitempty"`
-}
-
-// ServiceCheckpointIdentity defines the checkpoint identity for DGD service configuration
-// This mirrors CheckpointIdentity and is used to compute checkpoint hash
-type ServiceCheckpointIdentity struct {
-	// Model is the model identifier (e.g., "meta-llama/Llama-3-70B")
-	// +kubebuilder:validation:Required
-	Model string `json:"model"`
-
-	// Framework is the runtime framework (vllm, sglang, trtllm)
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
-	Framework string `json:"framework"`
-
-	// FrameworkVersion is the version of the framework (optional)
-	// If not specified, version is not included in identity hash
-	// +optional
-	FrameworkVersion string `json:"frameworkVersion,omitempty"`
-
-	// TensorParallelSize is the tensor parallel configuration
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=1
-	TensorParallelSize int32 `json:"tensorParallelSize,omitempty"`
-
-	// PipelineParallelSize is the pipeline parallel configuration
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:default=1
-	PipelineParallelSize int32 `json:"pipelineParallelSize,omitempty"`
-
-	// Dtype is the data type (fp16, bf16, fp8, etc.)
-	// +optional
-	Dtype string `json:"dtype,omitempty"`
-
-	// MaxModelLen is the maximum sequence length
-	// +optional
-	// +kubebuilder:validation:Minimum=1
-	MaxModelLen int32 `json:"maxModelLen,omitempty"`
-
-	// ExtraParameters are additional parameters that affect the checkpoint hash
-	// Use for any framework-specific or custom parameters not covered above
-	// +optional
-	ExtraParameters map[string]string `json:"extraParameters,omitempty"`
+	Identity *DynamoCheckpointIdentity `json:"identity,omitempty"`
 }

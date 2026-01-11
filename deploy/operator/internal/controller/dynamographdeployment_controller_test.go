@@ -678,7 +678,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			}
 
-			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil)
+			result, err := reconciler.reconcileGroveResources(ctx, dgd, nil, nil)
 			g.Expect(err).NotTo(gomega.HaveOccurred())
 
 			g.Expect(result).To(gomega.Equal(tt.wantReconcileResult))
