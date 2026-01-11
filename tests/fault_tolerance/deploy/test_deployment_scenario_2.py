@@ -471,12 +471,13 @@ async def run_scenario(
         pvc_size="500Mi", container_log_dir="/tmp/service_logs"
     )
 
-    # Compute endpoint URL
+    # Compute endpoint URL and assign to load config
     endpoint_url = (
         f"http://{deployment_spec.name.lower()}-"
         f"{deployment_spec.frontend_service.name.lower()}."
         f"{namespace.lower()}.svc.cluster.local:{deployment_spec.port}"
     )
+    load_config.endpoint_url = endpoint_url
 
     async with ManagedDeployment(
         namespace=namespace,

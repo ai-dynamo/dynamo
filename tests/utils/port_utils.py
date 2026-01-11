@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 """
 Port allocation utilities for tests.
 
 Port allocation with flock-based locking to prevent race conditions in parallel tests.
 """
+
+from __future__ import annotations
 
 import fcntl
 import inspect

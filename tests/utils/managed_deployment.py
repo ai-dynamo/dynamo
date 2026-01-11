@@ -1898,7 +1898,16 @@ class ManagedDeployment:
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self._cleanup()
+        # Log if we're exiting due to an exception (Ctrl-C, etc.)
+        if exc_type is not None:
+            self._logger.warning(
+                f"Exiting due to exception ({exc_type.__name__}), running cleanup"
+            )
+        # Always run cleanup, catching any cleanup errors to ensure we don't mask original exception
+        try:
+            await self._cleanup()
+        except Exception as cleanup_error:
+            self._logger.error(f"Error during cleanup: {cleanup_error}")
 
     async def create_log_download_job(
         self,

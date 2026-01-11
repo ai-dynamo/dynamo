@@ -817,14 +817,26 @@ fi
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Cleanup job resources."""
-        # Try to extract results before cleanup
-        if self._job_created and self.local_output_dir:
-            try:
-                await self.extract_results()
-            except Exception as e:
-                self._logger.warning(f"Failed to extract results during cleanup: {e}")
+        # Log if we're exiting due to an exception (Ctrl-C, etc.)
+        if exc_type is not None:
+            self._logger.warning(
+                f"Exiting due to exception ({exc_type.__name__}), running cleanup"
+            )
+        else:
+            # Only try to extract results if we're not exiting due to an exception
+            if self._job_created and self.local_output_dir:
+                try:
+                    await self.extract_results()
+                except Exception as e:
+                    self._logger.warning(
+                        f"Failed to extract results during cleanup: {e}"
+                    )
 
-        await self._cleanup()
+        # Always run cleanup, catching any cleanup errors
+        try:
+            await self._cleanup()
+        except Exception as cleanup_error:
+            self._logger.error(f"Error during cleanup: {cleanup_error}")
 
 
 async def main():

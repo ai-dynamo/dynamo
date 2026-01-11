@@ -1032,8 +1032,13 @@ done
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        # Always wait for completion before cleanup, regardless of run() parameter
-        if self._job_created:
+        # If we're exiting due to an exception (Ctrl-C, CancelledError, etc.),
+        # skip waiting for completion and go straight to cleanup
+        if exc_type is not None:
+            self._logger.warning(
+                f"Exiting due to exception ({exc_type.__name__}), skipping completion wait"
+            )
+        elif self._job_created:
             try:
                 self._logger.info(
                     "Waiting for AI Perf test completion before cleanup..."
@@ -1043,11 +1048,16 @@ done
                     self._logger.info("AI Perf test completed successfully")
                 else:
                     self._logger.warning("AI Perf test failed or was terminated")
+            except asyncio.CancelledError:
+                self._logger.warning("Completion wait cancelled, proceeding to cleanup")
             except Exception as e:
                 self._logger.error(f"Error during completion wait: {e}")
 
-        # _cleanup() will now handle extracting logs and results automatically
-        await self._cleanup()
+        # Always cleanup, even if there was an exception
+        try:
+            await self._cleanup()
+        except Exception as cleanup_error:
+            self._logger.error(f"Error during cleanup: {cleanup_error}")
 
     async def terminate(self):
         """Gracefully terminate the running AI Perf test (similar to test_deployment terminate clients)"""
