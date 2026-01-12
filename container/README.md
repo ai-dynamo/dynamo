@@ -15,7 +15,6 @@ The NVIDIA Dynamo project uses containerized development and deployment to maint
   - `Dockerfile.trtllm` - For TensorRT-LLM inference backend
   - `Dockerfile.sglang` - For SGLang inference backend
   - `Dockerfile` - Base/standalone configuration
-  - `Dockerfile.frontend` - For Kubernetes Gateway API Inference Extension integration with EPP
   - `Dockerfile.epp` - For building the Endpoint Picker (EPP) image
 
 ### Stage Summary for Frameworks
@@ -165,39 +164,22 @@ The `build.sh` script is responsible for building Docker images for different AI
 
 ### Building the Frontend Image
 
-The frontend image is a specialized container that includes the Dynamo components (NATS, etcd, dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
-
-**Step 1: Build the Custom Dynamo EPP Image**
-
-Follow the instructions in [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md) under "Build the custom EPP image" section. This process:
-- Clones the Gateway API Inference Extension repository
-- Applies Dynamo-specific patches for custom routing
-- Builds the Dynamo router as a static library
-- Creates a custom EPP image with integrated Dynamo routing capabilities
-
-**Step 2: Build the Dynamo Base Image**
-
-The base image contains the core Dynamo runtime components, NATS server, etcd, and Python dependencies:
-```bash
-# Build the base dev image (framework=none for frontend-only deployment)
-# Note: --framework none defaults ENABLE_MEDIA_NIXL=false
-./build.sh --framework none --target dev
-```
-
-**Step 3: Build the Frontend Image**
-
-Now build the frontend image that combines the Dynamo base with the EPP:
+The frontend image is a specialized container that includes the Dynamo components (Dynamo, NIXL, etc) along with the Endpoint Picker (EPP) for Kubernetes Gateway API Inference Extension integration. This image is primarily used for inference gateway deployments.
 
 ```bash
-# 2. Build the frontend image using the pre-built EPP
-docker buildx build --load --platform linux/amd64 \
-  --build-arg DYNAMO_BASE_IMAGE=dynamo:latest-none-dev \
-  --build-arg EPP_IMAGE={EPP_IMAGE_TAG} \
-  --build-arg PYTHON_VERSION=3.12 \
-  -f container/Dockerfile.frontend \
-  -t dynamo:latest-none-frontend \
-  .
+# Build the frontend image (automatically builds EPP image as a dependency)
+./build.sh --framework none --target frontend
 ```
+
+The build process automatically:
+1. Clones the Gateway API Inference Extension (GAIE) repository
+2. Builds the custom EPP image with Dynamo routing capabilities
+3. Builds the frontend image with the EPP binary and Dynamo runtime components
+
+For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).
+
+**Note:** `--framework none` defaults `ENABLE_MEDIA_NIXL=false`.
+
 #### Frontend Image Contents
 
 The frontend image includes:
@@ -206,8 +188,6 @@ The frontend image includes:
 - **NIXL**: NVIDIA InfiniBand Library for high-performance network communication
 - **Benchmarking Tools**: Performance testing utilities (aiperf, aiconfigurator, etc)
 - **Python Environment**: Virtual environment with all required dependencies
-- **NATS Server**: Message broker for Dynamo's distributed communication
-- **etcd**: Distributed key-value store for configuration and coordination
 
 #### Deployment
 

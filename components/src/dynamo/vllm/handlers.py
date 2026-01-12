@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
+import binascii
+import io
 import logging
 import os
 import tempfile
@@ -11,7 +14,8 @@ from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, Final
 
-from vllm.inputs import TextPrompt, TokensPrompt
+import torch
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -674,6 +678,85 @@ class BaseWorkerHandler(ABC):
             except Exception as e:
                 logger.warning(f"Failed to clean up temp directory: {e}")
 
+    def _decode_prompt_embeds(self, prompt_embeds_base64: str):
+        """
+        Decode base64-encoded prompt embeddings in PyTorch format.
+
+        Format: PyTorch tensor serialized with torch.save() and base64-encoded.
+        This matches NIM-LLM's implementation for compatibility.
+
+        Args:
+            prompt_embeds_base64: Base64-encoded PyTorch tensor
+
+        Returns:
+            torch.Tensor: Decoded prompt embeddings with preserved shape and dtype
+
+        Raises:
+            ValueError: If decoding fails or format is invalid
+        """
+        try:
+            # Step 1: Decode base64 to bytes
+            embeds_bytes = base64.b64decode(prompt_embeds_base64)
+
+            # Step 2: Load PyTorch tensor from bytes
+            buffer = io.BytesIO(embeds_bytes)
+            embeddings_tensor = torch.load(buffer, weights_only=True)
+
+            # Step 3: Validate it's a tensor
+            if not isinstance(embeddings_tensor, torch.Tensor):
+                raise ValueError(
+                    f"prompt_embeds must be a torch.Tensor, got {type(embeddings_tensor)}"
+                )
+
+            logger.debug(
+                f"Decoded PyTorch format embeddings: shape={embeddings_tensor.shape}, "
+                f"dtype={embeddings_tensor.dtype}, size={len(embeds_bytes)} bytes"
+            )
+
+            return embeddings_tensor
+
+        except binascii.Error as e:
+            logger.error(f"Invalid base64 encoding in prompt_embeds: {e}")
+            raise ValueError(f"Invalid base64 encoding in prompt_embeds: {e}")
+        except Exception as e:
+            logger.error(f"Failed to decode prompt_embeds: {e}")
+            raise ValueError(f"Failed to decode prompt_embeds as PyTorch tensor: {e}")
+
+    def _create_prompt_from_embeddings(
+        self, prompt_embeds_base64: str
+    ) -> tuple[EmbedsPrompt, int, torch.Tensor]:
+        """
+        Decode prompt embeddings and create EmbedsPrompt for vLLM.
+
+        Args:
+            prompt_embeds_base64: Base64-encoded PyTorch tensor
+
+        Returns:
+            Tuple of (EmbedsPrompt, sequence_length, tensor) where:
+            - EmbedsPrompt: The vLLM prompt input
+            - sequence_length: Extracted from tensor shape for usage statistics
+            - tensor: The decoded tensor (for logging shape/dtype)
+
+        Raises:
+            ValueError: If decoding fails or tensor is invalid
+        """
+        embeddings_tensor = self._decode_prompt_embeds(prompt_embeds_base64)
+
+        # Extract sequence length from tensor shape for usage reporting
+        # Shape is typically (sequence_length, hidden_dim) or (batch, sequence_length, hidden_dim)
+        if embeddings_tensor.dim() == 2:
+            sequence_length = embeddings_tensor.shape[0]
+        elif embeddings_tensor.dim() == 3:
+            sequence_length = embeddings_tensor.shape[1]
+        else:
+            # Fallback for unexpected shapes
+            sequence_length = embeddings_tensor.shape[0]
+
+        # EmbedsInputs TypedDict has: {type: 'embeds', prompt_embeds: Tensor, cache_salt?: str}
+        prompt = EmbedsPrompt(prompt_embeds=embeddings_tensor)
+
+        return prompt, sequence_length, embeddings_tensor
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -725,20 +808,95 @@ class BaseWorkerHandler(ABC):
 
         return vllm_mm_data if vllm_mm_data else None
 
+    def _build_prompt_from_request(
+        self,
+        request: Dict[str, Any],
+        request_id: str,
+        multi_modal_data: Dict[str, Any] | None,
+        log_prefix: str = "",
+    ) -> tuple[TokensPrompt | EmbedsPrompt | None, int | None, Dict[str, Any] | None]:
+        """
+        Build a prompt from request, handling both prompt_embeds and token_ids.
+
+        Args:
+            request: The request dict containing either prompt_embeds or token_ids
+            request_id: Request ID for logging
+            multi_modal_data: Optional multimodal data to attach to TokensPrompt
+            log_prefix: Prefix for log messages (e.g., "Prefill " for prefill requests)
+
+        Returns:
+            Tuple of (prompt, embedding_sequence_length, error_dict) where:
+            - On success: (prompt, embedding_sequence_length or None, None)
+            - On failure: (None, None, error_dict to yield)
+        """
+        embedding_sequence_length = None
+
+        if "prompt_embeds" in request and request["prompt_embeds"]:
+            try:
+                (
+                    prompt,
+                    embedding_sequence_length,
+                    tensor,
+                ) = self._create_prompt_from_embeddings(request["prompt_embeds"])
+                logger.info(
+                    f"{log_prefix}Using prompt embeddings: shape={tensor.shape}, "
+                    f"dtype={tensor.dtype}, sequence_length={embedding_sequence_length}, "
+                    f"request_id={request_id}"
+                )
+                return prompt, embedding_sequence_length, None
+            except Exception as e:
+                logger.error(
+                    f"Failed to process prompt_embeds for {log_prefix.lower().strip() or 'request'} "
+                    f"{request_id}: {e}"
+                )
+                return (
+                    None,
+                    None,
+                    {
+                        "finish_reason": f"error: Invalid prompt_embeds: {e}",
+                        "token_ids": [],
+                    },
+                )
+        else:
+            # Normal path: use token IDs
+            prompt = TokensPrompt(
+                prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+            )
+            return prompt, embedding_sequence_length, None
+
     @staticmethod
-    def _build_completion_usage(request_output: RequestOutput) -> Dict[str, Any]:
+    def _build_completion_usage(
+        request_output: RequestOutput,
+        embedding_sequence_length: int | None = None,
+    ) -> Dict[str, Any]:
+        """
+        Build completion usage statistics.
+
+        Args:
+            request_output: vLLM RequestOutput object
+            embedding_sequence_length: If using prompt embeddings, the sequence length
+                                     extracted from the embeddings tensor shape
+
+        Returns:
+            Dict with prompt_tokens, completion_tokens, total_tokens, prompt_tokens_details
+        """
+        # Determine prompt token count:
+        # - For embeddings: use embedding_sequence_length from tensor shape
+        # - For normal text: use len(prompt_token_ids)
+        if embedding_sequence_length is not None:
+            prompt_tokens = embedding_sequence_length
+        elif request_output.prompt_token_ids:
+            prompt_tokens = len(request_output.prompt_token_ids)
+        else:
+            prompt_tokens = None
+
+        completion_tokens = len(request_output.outputs[0].token_ids)
+
         return {
-            "prompt_tokens": (
-                len(request_output.prompt_token_ids)
-                if request_output.prompt_token_ids
-                else None
-            ),
-            "completion_tokens": len(request_output.outputs[0].token_ids),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "total_tokens": (
-                len(request_output.prompt_token_ids)
-                + len(request_output.outputs[0].token_ids)
-                if request_output.prompt_token_ids
-                else None
+                prompt_tokens + completion_tokens if prompt_tokens is not None else None
             ),
             "prompt_tokens_details": (
                 {"cached_tokens": request_output.num_cached_tokens}
@@ -821,6 +979,40 @@ class BaseWorkerHandler(ABC):
         # TODO: properly propagate the trace-flags from current span.
         return {"traceparent": f"00-{trace_id}-{span_id}-01"}
 
+    @staticmethod
+    def _log_with_lora_context(
+        message: str,
+        request_id: str,
+        lora_request=None,
+        level: str = "debug",
+        **kwargs,
+    ) -> None:
+        """
+        Log a message with optional LoRA context.
+
+        Args:
+            message: Base message to log (can include {lora_info} placeholder)
+            request_id: Request ID for correlation
+            lora_request: Optional LoRA request object
+            level: Log level ("debug" or "info")
+            **kwargs: Additional format arguments for the message
+        """
+        if lora_request:
+            lora_info = f" with LoRA {lora_request.lora_name}"
+        else:
+            lora_info = ""
+
+        formatted_message = message.format(
+            request_id=request_id,
+            lora_info=lora_info,
+            **kwargs,
+        )
+
+        if level == "info":
+            logger.info(formatted_message)
+        else:
+            logger.debug(formatted_message)
+
     async def generate_tokens(
         self,
         prompt,
@@ -828,19 +1020,16 @@ class BaseWorkerHandler(ABC):
         request_id,
         data_parallel_rank=None,
         lora_request=None,
+        embedding_sequence_length=None,
         trace_headers=None,
     ):
         try:
             # Log LoRA usage for this generation (debug level to avoid log spam)
-            if lora_request:
-                logger.debug(
-                    f"Starting token generation for request {request_id} with LoRA: "
-                    f"{lora_request.lora_name} (ID: {lora_request.lora_int_id})"
-                )
-            else:
-                logger.debug(
-                    f"Starting token generation for request {request_id} (no LoRA)"
-                )
+            self._log_with_lora_context(
+                "Starting token generation for request {request_id}{lora_info}",
+                request_id,
+                lora_request,
+            )
             gen = self.engine_client.generate(
                 prompt,
                 sampling_params,
@@ -856,12 +1045,17 @@ class BaseWorkerHandler(ABC):
                     # res is vllm's RequestOutput
 
                     if not res.outputs:
-                        if lora_request:
-                            logger.debug(
-                                f"Request {request_id} with LoRA {lora_request.lora_name} "
-                                "returned no outputs"
-                            )
-                        yield {"finish_reason": "error", "token_ids": []}
+                        self._log_with_lora_context(
+                            "Request {request_id}{lora_info} returned no outputs",
+                            request_id,
+                            lora_request,
+                        )
+                        # Use string format "error: message" for consistency with vLLM's string-based finish_reason
+                        # Rust will parse this into FinishReason::Error(message)
+                        yield {
+                            "finish_reason": "error: No outputs from vLLM engine",
+                            "token_ids": [],
+                        }
                         break
 
                     output = res.outputs[0]
@@ -882,20 +1076,18 @@ class BaseWorkerHandler(ABC):
                         out[
                             "completion_usage"
                         ] = BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
                         )
                         # Log completion with LoRA info (debug level to avoid log spam)
-                        if lora_request:
-                            logger.debug(
-                                f"Completed token generation for request {request_id} with LoRA "
-                                f"{lora_request.lora_name}: {next_total_toks} output tokens, "
-                                f"finish_reason={output.finish_reason}"
-                            )
-                        else:
-                            logger.debug(
-                                f"Completed token generation for request {request_id}: "
-                                f"{next_total_toks} output tokens, finish_reason={output.finish_reason}"
-                            )
+                        self._log_with_lora_context(
+                            "Completed token generation for request {request_id}{lora_info}: "
+                            "{output_tokens} output tokens, finish_reason={finish_reason}",
+                            request_id,
+                            lora_request,
+                            output_tokens=next_total_toks,
+                            finish_reason=output.finish_reason,
+                        )
                     if output.stop_reason:
                         out["stop_reason"] = output.stop_reason
                     yield out
@@ -957,9 +1149,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        prompt = TokensPrompt(
-            prompt_token_ids=request["token_ids"], multi_modal_data=multi_modal_data
+        # Build prompt from request (handles both prompt_embeds and token_ids)
+        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+            request, request_id, multi_modal_data
         )
+        if error is not None:
+            yield error
+            return
 
         # Build sampling params from request
         sampling_params = build_sampling_params(
@@ -1017,6 +1213,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     request_id,
                     data_parallel_rank=dp_rank,
                     lora_request=lora_request,
+                    embedding_sequence_length=embedding_sequence_length,
                     trace_headers=trace_headers,
                 ):
                     if prefill_result is not None and "completion_usage" in tok:
@@ -1151,10 +1348,15 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         # Extract and decode multimodal data if present
         multi_modal_data = await self._extract_multimodal_data(request)
 
-        token_ids = request["token_ids"]
-        prompt = TokensPrompt(
-            prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+        # Build prompt from request (handles both prompt_embeds and token_ids)
+        prompt, embedding_sequence_length, error = self._build_prompt_from_request(
+            request, request_id, multi_modal_data, log_prefix="Prefill "
         )
+        if error is not None:
+            # Prefill errors need disaggregated_params field
+            error["disaggregated_params"] = None
+            yield error
+            return
 
         # Build sampling params from request using shared utility
         sampling_params = build_sampling_params(
@@ -1236,17 +1438,21 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                             else None
                         ),
                         "completion_usage": BaseWorkerHandler._build_completion_usage(
-                            request_output=res
+                            request_output=res,
+                            embedding_sequence_length=embedding_sequence_length,
                         ),
                     }
 
                     # Log prefill completion with LoRA info
-                    if lora_request:
-                        logger.info(
-                            f"Prefill completed for request {request_id} with LoRA {lora_request.lora_name}: "
-                            f"generated {len(token_ids)} token(s), "
-                            f"has_kv_params={res.kv_transfer_params is not None}"
-                        )
+                    self._log_with_lora_context(
+                        "Prefill completed for request {request_id}{lora_info}: "
+                        "generated {token_count} token(s), has_kv_params={has_kv_params}",
+                        request_id,
+                        lora_request,
+                        level="info" if lora_request else "debug",
+                        token_count=len(token_ids),
+                        has_kv_params=res.kv_transfer_params is not None,
+                    )
 
                     yield output
             except asyncio.CancelledError:

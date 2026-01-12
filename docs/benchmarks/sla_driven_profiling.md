@@ -63,13 +63,13 @@ profilingConfig:
   config:
     # Override hardware defaults if needed
     hardware:
-      min_num_gpus_per_engine: 1
-      max_num_gpus_per_engine: 8
-      num_gpus_per_node: 8
+      minNumGpusPerEngine: 1
+      maxNumGpusPerEngine: 8
+      numGpusPerNode: 8
 
-    # Only needed when using AI Configurator (sweep.use_ai_configurator: true)
+    # Only needed when using AI Configurator (sweep.useAiConfigurator: true)
     sweep:
-      aic_system: h200_sxm  # GPU type for AI Configurator (h100_sxm, h200_sxm, etc.)
+      aicSystem: h200_sxm  # GPU type for AI Configurator (h100_sxm, h200_sxm, etc.)
 ```
 
 ### Automatic GPU Discovery (Optional Feature)
@@ -120,7 +120,7 @@ Profiles your model by creating real test deployments in Kubernetes and measurin
 profilingConfig:
   config:
     sweep:
-      use_ai_configurator: false  # Default
+      useAiConfigurator: false  # Default
 ```
 
 ### AI Configurator Simulation
@@ -138,11 +138,10 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 profilingConfig:
   config:
     sweep:
-      use_ai_configurator: true
-    aic:
-      system: h200_sxm          # GPU system type
-      model_name: QWEN3_32B     # AIC model identifier
-      backend_version: "0.20.0"
+      useAiConfigurator: true
+      aicSystem: h200_sxm          # GPU system type
+      aicHfId: Qwen/Qwen3-32B      # HuggingFace model ID
+      aicBackendVersion: "0.20.0"
 ```
 
 **Supported Configurations:**
@@ -290,8 +289,7 @@ spec:
     config:                        # Profiler configuration
       sla: { ... }
       hardware: { ... }
-      sweep: { ... }
-      aic: { ... }
+      sweep: { ... }               # AIC settings go here (aicSystem, aicHfId, etc.)
       planner: { ... }
 
   deploymentOverrides:             # Optional
@@ -326,16 +324,16 @@ Control GPU search space and constraints:
 profilingConfig:
   config:
     hardware:
-      min_num_gpus_per_engine: 2      # if not provided, will automatically determine based on model and VRAM size
-      max_num_gpus_per_engine: 8      # Maximum GPUs to test
-      num_gpus_per_node: 8            # GPUs per node (for multi-node MoE)
-      gpu_type: h200_sxm              # GPU type hint
+      minNumGpusPerEngine: 2      # if not provided, will automatically determine based on model and VRAM size
+      maxNumGpusPerEngine: 8      # Maximum GPUs to test
+      numGpusPerNode: 8            # GPUs per node (for multi-node MoE)
+      gpuType: h200_sxm              # GPU type hint
 ```
 
 **When to use:**
-- **min_num_gpus_per_engine**: Skip small TP sizes if your model is large
-- **max_num_gpus_per_engine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error))
-- **num_gpus_per_node**: Determine the upper bound of number of GPUs per node for dense models and configure Grove for multi-node MoE engines.
+- **minNumGpusPerEngine**: Skip small TP sizes if your model is large
+- **maxNumGpusPerEngine**: Limit search space or work around constraints (e.g., [AIC attention heads](#ai-configurator-attention-head-constraint-error))
+- **numGpusPerNode**: Determine the upper bound of number of GPUs per node for dense models and configure Grove for multi-node MoE engines.
 - **gpu_type**: Informational, auto-detected by controller
 
 > [!TIP]
@@ -349,17 +347,17 @@ Control profiling behavior:
 profilingConfig:
   config:
     sweep:
-      use_ai_configurator: false              # Use offline profiling (default: false)
-      prefill_interpolation_granularity: 16   # Samples for prefill TTFT curve
-      decode_interpolation_granularity: 6     # Samples for decode ITL curve
+      useAiConfigurator: false              # Use offline profiling (default: false)
+      prefillInterpolationGranularity: 16   # Samples for prefill TTFT curve
+      decodeInterpolationGranularity: 6     # Samples for decode ITL curve
 ```
 
 **Use cases:**
-- **use_ai_configurator**: Set to `true` for 20-30 second profiling (TensorRT-LLM only)
-- **prefill_interpolation_granularity**: How many samples to benchmark for prefill TTFT curve (lower = faster but may be less accurate)
-- **decode_interpolation_granularity**: How many samples to benchmark for decode ITL curve (lower = faster but may be less accurate). Since ITL interpolation is a 3d plot and takes longer to run, we default to a smaller number of samples. Increasing this value might quadratically increase the profiling time.
+- **useAiConfigurator**: Set to `true` for 20-30 second profiling (TensorRT-LLM only)
+- **prefillInterpolationGranularity**: How many samples to benchmark for prefill TTFT curve (lower = faster but may be less accurate)
+- **decodeInterpolationGranularity**: How many samples to benchmark for decode ITL curve (lower = faster but may be less accurate). Since ITL interpolation is a 3d plot and takes longer to run, we default to a smaller number of samples. Increasing this value might quadratically increase the profiling time.
 
-### AI Configurator Configuration (Required if `use_ai_configurator: true`)
+### AI Configurator Configuration (Required if `useAiConfigurator: true`)
 
 Configure AI Configurator profiling mode:
 
@@ -367,10 +365,10 @@ Configure AI Configurator profiling mode:
 profilingConfig:
   config:
     sweep:
-      use_ai_configurator: true
-      aic_system: h200_sxm              # GPU system: h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm
-      aic_hf_id: Qwen/Qwen3-32B         # Huggingface model id
-      aic_backend_version: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3
+      useAiConfigurator: true
+      aicSystem: h200_sxm              # GPU system: h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm
+      aicHfId: Qwen/Qwen3-32B         # Huggingface model id
+      aicBackendVersion: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3
 ```
 
 **Supported configurations:** See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features)
@@ -390,6 +388,27 @@ profilingConfig:
 
 > [!NOTE]
 > Planner arguments use `planner_` prefix. See planner documentation for full list.
+
+### Model Cache PVC (Advanced)
+
+For large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. This is useful when:
+- The model is not publicly available on HuggingFace
+- You want to avoid repeated downloads during profiling
+- You have a shared model cache across your cluster
+
+```yaml
+profilingConfig:
+  config:
+    deployment:
+      modelCache:
+        pvcName: "model-cache"                        # Name of PVC containing model weights (required)
+        pvcPath: "hub/models--deepseek-ai--DeepSeek-R1"  # Subpath within PVC (optional)
+        mountPath: "/opt/model-cache"                 # Mount path in container (optional, default: /opt/model-cache)
+```
+
+**Requirements:**
+- The PVC must exist in the same namespace as the DGDR
+- The model weights must be accessible at `{mountPath}/{pvcPath}`
 
 ### Engine Configuration (Auto-configured)
 
@@ -434,11 +453,11 @@ spec:
         itl: 20.0
 
       hardware:
-        min_num_gpus_per_engine: 1
-        max_num_gpus_per_engine: 8
+        minNumGpusPerEngine: 1
+        maxNumGpusPerEngine: 8
 
       sweep:
-        use_ai_configurator: false
+        useAiConfigurator: false
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1"
@@ -467,12 +486,10 @@ spec:
         itl: 10.0
 
       sweep:
-        use_ai_configurator: true
-
-      aic:
-        system: h200_sxm
-        model_name: QWEN3_32B
-        backend_version: "0.20.0"
+        useAiConfigurator: true
+        aicSystem: h200_sxm
+        aicHfId: Qwen/Qwen3-32B
+        aicBackendVersion: "0.20.0"
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
@@ -501,11 +518,11 @@ spec:
         itl: 25.0
 
       hardware:
-        num_gpus_per_node: 8
-        max_num_gpus_per_engine: 32
+        numGpusPerNode: 8
+        maxNumGpusPerEngine: 32
 
       engine:
-        is_moe_model: true       # Enable MoE profiling mode
+        isMoeModel: true       # Enable MoE profiling mode
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
@@ -520,15 +537,15 @@ spec:
 **Solution 1**: Use AI Configurator for rapid profiling (TensorRT-LLM only):
 ```yaml
 sweep:
-  use_ai_configurator: true
+  useAiConfigurator: true
 ```
 
 **Solution 2**: Reduce search space:
 ```yaml
 config:
   sweep:
-    min_num_gpus: 4  # Skip TP1, TP2
-    max_num_gpus: 8  # Don't test beyond TP8
+    minNumGpus: 4  # Skip TP1, TP2
+    maxNumGpus: 8  # Don't test beyond TP8
 ```
 
 ### SLA Cannot Be Met
@@ -555,19 +572,18 @@ AssertionError: num_heads <N> should be divisible by tp_size <M> and the divisio
 - **GPT-2** (12 heads): Max TP = 3
 - Most models **<1B parameters**: May hit this constraint
 
-**Solution**: Limit `max_num_gpus_per_engine` in your DGDR:
+**Solution**: Limit `maxNumGpusPerEngine` in your DGDR:
 
 ```yaml
 profilingConfig:
   profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.6.1"
   config:
     hardware:
-      max_num_gpus_per_engine: 4  # For Qwen3-0.6B (16 heads / 4 = max TP of 4)
+      maxNumGpusPerEngine: 4  # For Qwen3-0.6B (16 heads / 4 = max TP of 4)
     sweep:
-      use_ai_configurator: true
-    aic:
-      system: h200_sxm
-      model_name: QWEN3_0_6B
+      useAiConfigurator: true
+      aicSystem: h200_sxm
+      aicHfId: Qwen/Qwen3-0.6B
 ```
 
 **Calculate Max TP**: `max_tp = num_attention_heads / 4`
