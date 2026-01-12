@@ -1006,6 +1006,12 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
 
     # Pass the locally-built EPP image to buildx
     BUILD_CONTEXT_ARG+=" --build-context epp-image=docker-image://${EPP_IMAGE_TAG}"
+
+    docker image inspect ${EPP_IMAGE_TAG}
+    if [ $? -ne 0 ]; then
+        echo "Error: EPP image not found: ${EPP_IMAGE_TAG}"
+        exit 1
+    fi
 fi
 
 # Always build the main image first
