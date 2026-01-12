@@ -177,3 +177,61 @@ def _construct_qwen_image_data(
             "image_grid_thw": grid_thw_tensor,
         }
     }
+
+
+def construct_qwen_decode_mm_data(
+    image_grid_thw: Optional[List[Any]],
+    embeddings_shape: Optional[Any],
+    request_id: str,
+    *,
+    dtype: torch.dtype = torch.float16,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+    """Construct schema-valid Qwen multimodal data for vLLM v1 disagg decode.
+
+    This is a WORKAROUND (WAR) for vLLM's disaggregated multimodal decode limitations.
+
+    Notes:
+    - vLLM parses multimodal inputs and builds `mm_features` from `multi_modal_data`.
+    - For Qwen VL models, the parser enforces that image data contains BOTH
+      `image_embeds` and `image_grid_thw` keys.
+    - In disaggregated decode, the KV cache already includes the vision context
+      from prefill; decode still needs `mm_features` for mRoPE initialization.
+
+    WAR Details:
+    - We generate unique placeholder embeddings based on request_id to prevent
+      incorrect prefix cache matches between different images with same dimensions.
+    - Without this, zero embeddings + same image_grid_thw would create identical
+      cache signatures, causing decode to incorrectly reuse cached KV from
+      different images.
+
+    Caching Caveat:
+    - This WAR disables prefix cache reuse on the DECODE worker (each request
+      has unique placeholder embeddings).
+    - Prefix caching still works correctly on the PREFILL worker, which uses
+      actual image embeddings. This is where the caching benefit matters since
+      prefill does the heavy computation.
+    - Decode receives KV blocks from prefill via NIXL transfer anyway, so
+      decode-side prefix caching provides minimal benefit in disaggregated setup.
+    """
+    if image_grid_thw is None or len(image_grid_thw) == 0:
+        raise ValueError("No image grid provided for Qwen model.")
+    if embeddings_shape is None:
+        raise ValueError("embeddings_shape is required for Qwen decode mm data.")
+
+    # WAR: Use request_id hash as seed for unique placeholder values.
+    # This prevents prefix cache from incorrectly matching different images
+    # that happen to have the same dimensions (same image_grid_thw).
+    seed = hash(request_id) & 0xFFFFFFFF  # Convert to positive 32-bit int
+    generator = torch.Generator().manual_seed(seed)
+    image_embeds = torch.randn(
+        embeddings_shape, dtype=dtype, device="cpu", generator=generator
+    )
+    if image_embeds.ndim == 3:
+        image_embeds = image_embeds.squeeze(0)
+
+    return {
+        "image": {
+            "image_embeds": image_embeds,
+            "image_grid_thw": torch.tensor(image_grid_thw),
+        }
+    }

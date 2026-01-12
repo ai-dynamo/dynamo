@@ -42,7 +42,7 @@ inputs:
     required: false
   cuda_version:
     description: 'Optional override for CUDA_VERSION build-arg'
-    required: false
+    required: true
   torch_backend:
     description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
     required: false
@@ -86,6 +86,7 @@ runs:
         GITHUB_RUN_ID: ${{ github.run_id }}
         GITHUB_JOB: ${{ github.job }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+        CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
         # Determine image tag
@@ -94,6 +95,8 @@ runs:
         else
           IMAGE_TAG="${{ inputs.framework }}:latest"
         fi
+
+        CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
         BUILD_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
         echo "BUILD_START_TIME=${BUILD_START_TIME}" >> $GITHUB_ENV
@@ -110,10 +113,10 @@ runs:
         # Set base cache args and set --cache-to if this is a main commit
         EXTRA_ARGS=""
         EXTRA_ARGS="--cache-to type=inline "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache "
-        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-${PLATFORM##*/} "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache "
+        EXTRA_ARGS+="--cache-from type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:main-${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/} "
         if [[ "$GITHUB_REF_NAME" == "main" ]]; then
-          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-${PLATFORM##*/}-cache,mode=max "
+          EXTRA_ARGS+="--cache-to type=registry,ref=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ inputs.framework }}-cuda${CUDA_VERSION_MAJOR}-${PLATFORM##*/}-cache,mode=max "
         fi
 
         echo "$EXTRA_ARGS"

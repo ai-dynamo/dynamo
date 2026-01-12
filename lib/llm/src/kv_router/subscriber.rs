@@ -564,9 +564,11 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let DiscoveryEvent::Removed(worker_id) = discovery_event else {
+                    let DiscoveryEvent::Removed(id) = discovery_event else {
                         continue;
                     };
+
+                    let worker_id = id.instance_id();
 
                     tracing::warn!(
                         "DISCOVERY: Generate endpoint instance removed, removing worker {worker_id}"
@@ -642,10 +644,12 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let DiscoveryEvent::Removed(router_instance_id) = router_event else {
+                    let DiscoveryEvent::Removed(id) = router_event else {
                         // We only care about removals for cleaning up consumers
                         continue;
                     };
+
+                    let router_instance_id = id.instance_id();
 
                     // The consumer UUID is the instance_id in hex format
                     let consumer_to_delete = router_instance_id.to_string();
@@ -708,7 +712,8 @@ async fn handle_worker_discovery(
                 }
             }
         }
-        DiscoveryEvent::Removed(worker_id) => {
+        DiscoveryEvent::Removed(id) => {
+            let worker_id = id.instance_id();
             tracing::warn!("DISCOVERY: Worker {worker_id} removed, removing from router indexer");
 
             if let Err(e) = remove_worker_tx.send(worker_id).await {
