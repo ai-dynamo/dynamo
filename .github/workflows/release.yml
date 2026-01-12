@@ -89,10 +89,13 @@ jobs:
       DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
 
   # Tag the commit as release candidate and publish to NGC
-  # This job uses the release-env environment for sensitive secrets
+  # This job uses the automated-release environment for sensitive secrets
+  # Runs after ci-pipeline completes (regardless of test results) - environment approval is the gate
   release-publish:
     name: Tag RC & Publish to NGC
     needs: [prepare-release, ci-pipeline]
+    if: |
+      always() && !cancelled() && needs.prepare-release.result == 'success'
     runs-on: ubuntu-latest
     environment: automated-release
     env:
