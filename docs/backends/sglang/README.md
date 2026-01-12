@@ -137,7 +137,7 @@ We are in the process of shipping pre-built docker containers that contain insta
 cd $DYNAMO_ROOT
 ./container/build.sh \
   --framework SGLANG \
-  --tag dynamo-sglang:latest \
+  --tag dynamo-sglang:latest
 ```
 
 And then run it using
