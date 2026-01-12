@@ -859,6 +859,7 @@ class KvEventPublisher:
         block_hashes: List[int],
         lora_id: int,
         parent_hash: Optional[int] = None,
+        block_mm_infos: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> None:
         """
         Publish a KV stored event.
@@ -870,6 +871,9 @@ class KvEventPublisher:
             block_hashes: List of block hashes (signed 64-bit integers)
             lora_id: The LoRA ID
             parent_hash: Optional parent hash (signed 64-bit integer)
+            block_mm_infos: Optional list of multimodal info for each block.
+                Each item is either None or a dict with "mm_objects" key containing
+                a list of {"mm_hash": int, "offsets": [[start, end], ...]} dicts.
         """
         ...
 
