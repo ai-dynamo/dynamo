@@ -139,7 +139,10 @@ impl SharedTcpServer {
                 loop {
                     // Check cancellation first
                     if cancellation_token.is_cancelled() {
-                        tracing::trace!("TCP worker {} shutting down: cancellation requested", worker_id);
+                        tracing::trace!(
+                            "TCP worker {} shutting down: cancellation requested",
+                            worker_id
+                        );
                         break;
                     }
 
@@ -149,7 +152,10 @@ impl SharedTcpServer {
                         match rx.recv().await {
                             Some(item) => item,
                             None => {
-                                tracing::trace!("TCP worker {} shutting down: channel closed", worker_id);
+                                tracing::trace!(
+                                    "TCP worker {} shutting down: channel closed",
+                                    worker_id
+                                );
                                 break;
                             }
                         }
@@ -403,17 +409,14 @@ impl SharedTcpServer {
                 Err(e) => {
                     tracing::warn!("Failed to read TCP request: {}", e);
                     // Send error response
-                    let error_response = TcpResponseMessage::new(Bytes::from(format!(
-                        "Read error: {}",
-                        e
-                    )));
+                    let error_response =
+                        TcpResponseMessage::new(Bytes::from(format!("Read error: {}", e)));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
                     return Err(e.into());
                 }
             };
-
 
             // Get endpoint path (zero-copy string slice)
             let endpoint_path = match request_msg.endpoint_path() {
@@ -465,11 +468,11 @@ impl SharedTcpServer {
 
             // Send acknowledgment immediately (non-blocking)
             let ack_response = TcpResponseMessage::empty();
-            if let Ok(encoded_ack) = ack_response.encode() {
-                if response_tx.send(encoded_ack).is_err() {
-                    tracing::debug!("Write task closed, ending read loop");
-                    break;
-                }
+            if let Ok(encoded_ack) = ack_response.encode()
+                && response_tx.send(encoded_ack).is_err()
+            {
+                tracing::debug!("Write task closed, ending read loop");
+                break;
             }
 
             // Send work to worker pool instead of spawning unbounded task
@@ -485,7 +488,6 @@ impl SharedTcpServer {
                 component_name: handler.component_name.clone(),
                 endpoint_name: handler.endpoint_name.clone(),
             };
-
 
             // Send to worker pool with backpressure
             if let Err(e) = work_tx.send(work_item).await {
