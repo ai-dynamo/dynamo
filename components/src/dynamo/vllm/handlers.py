@@ -211,8 +211,8 @@ def build_sampling_params_openai(
                 setattr(sampling_params, param_key, request[req_key])
 
     # Handle max_tokens
-    if "max_tokens" in request and request["max_tokens"] is not None:
-        sampling_params.max_tokens = request["max_tokens"]
+    if (provided_max_tokens := request.get("max_tokens")) is not None:
+        sampling_params.max_tokens = provided_max_tokens
     elif model_max_len is not None:
         sampling_params.max_tokens = model_max_len
 
