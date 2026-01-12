@@ -25,12 +25,48 @@ use tracing::Instrument;
 /// Default maximum message size for TCP server (32 MB)
 const DEFAULT_MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
 
+/// Default worker pool size for TCP request handling
+const DEFAULT_WORKER_POOL_SIZE: usize = 1500;
+
+/// Default work queue size for TCP request handling
+/// this is 4X the worker pool size to handle burst traffic
+const DEFAULT_WORK_QUEUE_SIZE: usize = 6000;
+
 /// Get maximum message size from environment or use default
 fn get_max_message_size() -> usize {
     std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_MAX_MESSAGE_SIZE)
+}
+
+/// Get worker pool size from environment or use default
+fn get_worker_pool_size() -> usize {
+    std::env::var("DYN_TCP_WORKER_POOL_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_WORKER_POOL_SIZE)
+}
+
+/// Get work queue size from environment or use default
+fn get_work_queue_size() -> usize {
+    std::env::var("DYN_TCP_WORK_QUEUE_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_WORK_QUEUE_SIZE)
+}
+
+/// Work item for the worker pool
+struct WorkItem {
+    service_handler: Arc<dyn PushWorkHandler>,
+    payload: Bytes,
+    headers: std::collections::HashMap<String, String>,
+    inflight: Arc<AtomicU64>,
+    notify: Arc<Notify>,
+    instance_id: u64,
+    namespace: String,
+    component_name: String,
+    endpoint_name: String,
 }
 
 /// Shared TCP server that handles multiple endpoints on a single port
@@ -41,6 +77,8 @@ pub struct SharedTcpServer {
     /// The actual bound address (populated after bind_and_start, contains actual port)
     actual_addr: RwLock<Option<SocketAddr>>,
     cancellation_token: CancellationToken,
+    /// Channel for sending work to the worker pool
+    work_tx: tokio::sync::mpsc::Sender<WorkItem>,
 }
 
 struct EndpointHandler {
@@ -56,6 +94,21 @@ struct EndpointHandler {
 
 impl SharedTcpServer {
     pub fn new(bind_addr: SocketAddr, cancellation_token: CancellationToken) -> Arc<Self> {
+        let worker_pool_size = get_worker_pool_size();
+        let work_queue_size = get_work_queue_size();
+
+        tracing::info!(
+            "Initializing TCP server with worker pool (size={}, queue={})",
+            worker_pool_size,
+            work_queue_size
+        );
+
+        // Create bounded channel for work items
+        let (work_tx, work_rx) = tokio::sync::mpsc::channel(work_queue_size);
+
+        // Start worker pool
+        Self::start_worker_pool(worker_pool_size, work_rx, cancellation_token.clone());
+
         Arc::new(Self {
             handlers: Arc::new(DashMap::new()),
             // address we requested to bind to.
@@ -63,7 +116,93 @@ impl SharedTcpServer {
             // actual address after free port assignment (if DYN_TCP_RPC_PORT is not specified)
             actual_addr: RwLock::new(None),
             cancellation_token,
+            work_tx,
         })
+    }
+
+    /// Start the worker pool that processes requests
+    fn start_worker_pool(
+        pool_size: usize,
+        work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
+        cancellation_token: CancellationToken,
+    ) {
+        // Create a shared receiver using Arc and Mutex
+        let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
+
+        for worker_id in 0..pool_size {
+            let work_rx = work_rx.clone();
+            let cancellation_token = cancellation_token.clone();
+
+            tokio::spawn(async move {
+                tracing::trace!("TCP worker {} started", worker_id);
+
+                loop {
+                    // Check cancellation first
+                    if cancellation_token.is_cancelled() {
+                        tracing::trace!("TCP worker {} shutting down: cancellation requested", worker_id);
+                        break;
+                    }
+
+                    // Receive work item from channel
+                    let work_item = {
+                        let mut rx = work_rx.lock().await;
+                        match rx.recv().await {
+                            Some(item) => item,
+                            None => {
+                                tracing::trace!("TCP worker {} shutting down: channel closed", worker_id);
+                                break;
+                            }
+                        }
+                    };
+
+                    tracing::trace!(
+                        worker_id,
+                        instance_id = work_item.instance_id,
+                        "TCP worker processing request"
+                    );
+
+                    // Create span with trace context from headers
+                    let span = crate::logging::make_handle_payload_span_from_tcp_headers(
+                        &work_item.headers,
+                        &work_item.component_name,
+                        &work_item.endpoint_name,
+                        &work_item.namespace,
+                        work_item.instance_id,
+                    );
+
+                    let result = work_item
+                        .service_handler
+                        .handle_payload(work_item.payload)
+                        .instrument(span)
+                        .await;
+
+                    match result {
+                        Ok(_) => {
+                            tracing::trace!(
+                                worker_id,
+                                instance_id = work_item.instance_id,
+                                "TCP worker completed request successfully"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                worker_id,
+                                instance_id = work_item.instance_id,
+                                error = %e,
+                                "TCP worker failed to handle request"
+                            );
+                        }
+                    }
+
+                    work_item.inflight.fetch_sub(1, Ordering::SeqCst);
+                    work_item.notify.notify_one();
+                }
+
+                tracing::trace!("TCP worker {} exited", worker_id);
+            });
+        }
+
+        tracing::info!("Started {} TCP worker tasks", pool_size);
     }
 
     /// Bind the server and start accepting connections.
@@ -116,8 +255,9 @@ impl SharedTcpServer {
                             tracing::trace!("Accepted TCP connection from {}", peer_addr);
 
                             let handlers = self.handlers.clone();
+                            let work_tx = self.work_tx.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, handlers).await {
+                                if let Err(e) = Self::handle_connection(stream, handlers, work_tx).await {
                                     tracing::error!("TCP connection error: {}", e);
                                 }
                             });
@@ -219,6 +359,7 @@ impl SharedTcpServer {
     async fn handle_connection(
         stream: TcpStream,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
+        work_tx: tokio::sync::mpsc::Sender<WorkItem>,
     ) -> Result<()> {
         use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
 
@@ -232,7 +373,7 @@ impl SharedTcpServer {
         let write_task = tokio::spawn(Self::write_loop(write_half, response_rx));
 
         // Run read task in current context
-        let read_result = Self::read_loop(read_half, handlers, response_tx).await;
+        let read_result = Self::read_loop(read_half, handlers, response_tx, work_tx).await;
 
         // Write task will end when response_tx is dropped
         write_task.await??;
@@ -244,82 +385,43 @@ impl SharedTcpServer {
         mut read_half: tokio::io::ReadHalf<TcpStream>,
         handlers: Arc<DashMap<String, Arc<EndpointHandler>>>,
         response_tx: tokio::sync::mpsc::UnboundedSender<Bytes>,
+        work_tx: tokio::sync::mpsc::Sender<WorkItem>,
     ) -> Result<()> {
-        use crate::pipeline::network::codec::{TcpRequestMessage, TcpResponseMessage};
+        use crate::pipeline::network::codec::{TcpResponseMessage, ZeroCopyTcpDecoder};
+
+        // Create zero-copy decoder with optimized buffer size
+        let mut decoder = ZeroCopyTcpDecoder::new();
 
         loop {
-            // Read endpoint path length (2 bytes)
-            let mut path_len_buf = [0u8; 2];
-            match read_half.read_exact(&mut path_len_buf).await {
-                Ok(_) => {}
+            // Read one complete message with ZERO copies!
+            let request_msg = match decoder.read_message(&mut read_half).await {
+                Ok(msg) => msg,
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    tracing::trace!("Connection closed by peer");
                     break;
                 }
                 Err(e) => {
+                    tracing::warn!("Failed to read TCP request: {}", e);
+                    // Send error response
+                    let error_response = TcpResponseMessage::new(Bytes::from(format!(
+                        "Read error: {}",
+                        e
+                    )));
+                    if let Ok(encoded) = error_response.encode() {
+                        let _ = response_tx.send(encoded);
+                    }
                     return Err(e.into());
                 }
-            }
+            };
 
-            let path_len = u16::from_be_bytes(path_len_buf) as usize;
 
-            // Read endpoint path
-            let mut path_buf = vec![0u8; path_len];
-            read_half.read_exact(&mut path_buf).await?;
-
-            // Read headers length (2 bytes)
-            let mut headers_len_buf = [0u8; 2];
-            read_half.read_exact(&mut headers_len_buf).await?;
-            let headers_len = u16::from_be_bytes(headers_len_buf) as usize;
-
-            // Read headers
-            let mut headers_buf = vec![0u8; headers_len];
-            read_half.read_exact(&mut headers_buf).await?;
-
-            // Read payload length (4 bytes)
-            let mut len_buf = [0u8; 4];
-            read_half.read_exact(&mut len_buf).await?;
-            let payload_len = u32::from_be_bytes(len_buf) as usize;
-
-            // Sanity check - enforce maximum message size
-            let max_message_size = get_max_message_size();
-            if payload_len > max_message_size {
-                tracing::warn!(
-                    "Request too large: {} bytes (max: {} bytes), closing connection",
-                    payload_len,
-                    max_message_size
-                );
-                // Send error response
-                let error_response =
-                    TcpResponseMessage::new(Bytes::from_static(b"Request too large"));
-                if let Ok(encoded) = error_response.encode() {
-                    let _ = response_tx.send(encoded);
-                }
-                break;
-            }
-
-            // Read request payload
-            let mut payload_buf = vec![0u8; payload_len];
-            read_half.read_exact(&mut payload_buf).await?;
-
-            // Reconstruct the full message buffer for decoding using BytesMut
-            let mut full_msg =
-                BytesMut::with_capacity(2 + path_len + 2 + headers_len + 4 + payload_len);
-            full_msg.extend_from_slice(&path_len_buf);
-            full_msg.extend_from_slice(&path_buf);
-            full_msg.extend_from_slice(&headers_len_buf);
-            full_msg.extend_from_slice(&headers_buf);
-            full_msg.extend_from_slice(&len_buf);
-            full_msg.extend_from_slice(&payload_buf);
-
-            // Decode using codec (zero-copy conversion)
-            let full_msg_bytes = full_msg.freeze();
-            let request_msg = match TcpRequestMessage::decode(&full_msg_bytes) {
-                Ok(msg) => msg,
+            // Get endpoint path (zero-copy string slice)
+            let endpoint_path = match request_msg.endpoint_path() {
+                Ok(path) => path,
                 Err(e) => {
-                    tracing::warn!("Failed to decode TCP request: {}", e);
-                    // Send error response
+                    tracing::warn!("Invalid UTF-8 in endpoint path: {}", e);
                     let error_response =
-                        TcpResponseMessage::new(Bytes::from(format!("Decode error: {}", e)));
+                        TcpResponseMessage::new(Bytes::from_static(b"Invalid endpoint path"));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
@@ -327,18 +429,27 @@ impl SharedTcpServer {
                 }
             };
 
-            let endpoint_path = request_msg.endpoint_path;
-            let headers = request_msg.headers;
-            let payload = request_msg.payload;
+            // Get headers (parsed from message)
+            let headers = request_msg.headers();
+
+            // Get payload (zero-copy Bytes - just Arc clone!)
+            let payload = request_msg.payload();
+
+            tracing::trace!(
+                endpoint = endpoint_path,
+                payload_len = payload.len(),
+                total_size = request_msg.total_size(),
+                "Received TCP request"
+            );
 
             // Look up handler (lock-free read with DashMap)
-            let handler = handlers.get(&endpoint_path).map(|h| h.clone());
+            let handler = handlers.get(endpoint_path).map(|h| h.clone());
 
             let handler = match handler {
                 Some(h) => h,
                 None => {
                     tracing::warn!("No handler found for endpoint: {}", endpoint_path);
-                    // Send error response using codec
+                    // Send error response
                     let error_response = TcpResponseMessage::new(Bytes::from(format!(
                         "Unknown endpoint: {}",
                         endpoint_path
@@ -352,54 +463,36 @@ impl SharedTcpServer {
 
             handler.inflight.fetch_add(1, Ordering::SeqCst);
 
-            // Send acknowledgment immediately using codec (non-blocking, zero-copy)
+            // Send acknowledgment immediately (non-blocking)
             let ack_response = TcpResponseMessage::empty();
             if let Ok(encoded_ack) = ack_response.encode() {
-                // Send to write task without blocking reads
                 if response_tx.send(encoded_ack).is_err() {
                     tracing::debug!("Write task closed, ending read loop");
                     break;
                 }
             }
 
-            // Process request asynchronously
-            let service_handler = handler.service_handler.clone();
-            let inflight = handler.inflight.clone();
-            let notify = handler.notify.clone();
-            let instance_id = handler.instance_id;
-            let namespace = handler.namespace.clone();
-            let component_name = handler.component_name.clone();
-            let endpoint_name = handler.endpoint_name.clone();
+            // Send work to worker pool instead of spawning unbounded task
+            // NOTE: payload is Bytes (Arc-counted), so cloning is extremely cheap
+            let work_item = WorkItem {
+                service_handler: handler.service_handler.clone(),
+                payload,
+                headers,
+                inflight: handler.inflight.clone(),
+                notify: handler.notify.clone(),
+                instance_id: handler.instance_id,
+                namespace: handler.namespace.clone(),
+                component_name: handler.component_name.clone(),
+                endpoint_name: handler.endpoint_name.clone(),
+            };
 
-            tokio::spawn(async move {
-                tracing::trace!(instance_id, "handling TCP request");
 
-                // Create span with trace context from headers
-                let span = crate::logging::make_handle_payload_span_from_tcp_headers(
-                    &headers,
-                    &component_name,
-                    &endpoint_name,
-                    &namespace,
-                    instance_id,
-                );
-
-                let result = service_handler
-                    .handle_payload(payload)
-                    .instrument(span)
-                    .await;
-
-                match result {
-                    Ok(_) => {
-                        tracing::trace!(instance_id, "TCP request handled successfully");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to handle TCP request: {}", e);
-                    }
-                }
-
-                inflight.fetch_sub(1, Ordering::SeqCst);
-                notify.notify_one();
-            });
+            // Send to worker pool with backpressure
+            if let Err(e) = work_tx.send(work_item).await {
+                tracing::warn!("Failed to send work to worker pool: {}", e);
+                handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                handler.notify.notify_one();
+            }
         }
 
         Ok(())
