@@ -8,6 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
+> **See also:** [Feature Compatibility Matrix](../../feature-matrix.md) for backend-specific feature support (vLLM, TensorRT-LLM, SGLang).
+
 ## Hardware Compatibility
 
 | **CPU Architecture** | **Status**   |
@@ -60,15 +62,15 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 The following table shows the dependency versions included with each Dynamo release:
 
-| **Dependency** | **main (ToT)** | **v0.8.0 (unreleased)** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
-| :------------- | :------------- | :---------------------- | :--------- | :--------------- | :--------- |
-| SGLang         | 0.5.7          | 0.5.7                   | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
-| TensorRT-LLM   | 1.2.0rc6       | 1.2.0rc6                | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
-| vLLM           | 0.13.0         | 0.12.0                  | 0.11.0     | 0.11.0           | 0.11.0     |
-| NIXL           | 0.8.0          | 0.8.0                   | 0.8.0      | 0.8.0            | 0.8.0      |
+| **Dependency** | **main (ToT)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
+| :------------- | :------------- | :--------- | :--------- | :--------------- | :--------- |
+| SGLang         | 0.5.7          | 0.5.6.post2 | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
+| TensorRT-LLM   | 1.2.0rc6.post1 | 1.2.0rc6.post1 | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
+| vLLM           | 0.13.0         | 0.12.0     | 0.11.0     | 0.11.0           | 0.11.0     |
+| NIXL           | 0.8.0          | 0.8.0      | 0.8.0      | 0.8.0            | 0.8.0      |
 
 > [!Note]
-> **main (ToT)** reflects the current development branch. **v0.8.0** is the upcoming release (planned for January 14, 2025) and not yet available.
+> **main (ToT)** reflects the current development branch.
 
 
 > [!Important]
@@ -77,6 +79,7 @@ The following table shows the dependency versions included with each Dynamo rele
 ### CUDA Support by Framework
 | **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
 | :------------------- | :-----------------------| :-----------------------| :-----------------------|
+| **Dynamo 0.8.0**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.9               |
 | **Dynamo 0.7.1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.9               |
 
 ## Cloud Service Provider Compatibility
