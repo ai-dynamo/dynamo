@@ -32,9 +32,6 @@ jobs:
   # Extract version from branch name for downstream jobs
   prepare-release:
     name: Prepare Release
-    # Wait for manual approval if this is a workflow_dispatch trigger
-    needs: [manual-approval]
-    if: always() && (github.event_name == 'push' || needs.manual-approval.result == 'success')
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.extract.outputs.version }}
@@ -64,8 +61,12 @@ jobs:
   # Run the CI test suite (builds + tests)
   ci-pipeline:
     name: Release CI
-    needs: [prepare-release]
-    if: needs.prepare-release.result == 'success'
+    needs: [prepare-release, manual-approval]
+    # Run if: prepare-release succeeded AND (push event OR manual-approval succeeded)
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
     uses: ./.github/workflows/ci-test-suite.yml
     with:
       pipeline_type: release
