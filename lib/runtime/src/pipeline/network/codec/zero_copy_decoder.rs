@@ -305,13 +305,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_zero_copy_decoder_basic() {
-        // Create a test message
+        // Create a test message with headers
         let endpoint = "test/endpoint";
         let payload = b"Hello, World!";
+        let headers: Vec<u8> = vec![]; // Empty headers
 
         let mut message = Vec::new();
+        // path_len + path
         message.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
         message.extend_from_slice(endpoint.as_bytes());
+        // headers_len + headers
+        message.extend_from_slice(&(headers.len() as u16).to_be_bytes());
+        message.extend_from_slice(&headers);
+        // payload_len + payload
         message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         message.extend_from_slice(payload);
 
@@ -326,6 +332,7 @@ mod tests {
         assert_eq!(msg.endpoint_path().unwrap(), endpoint);
         assert_eq!(msg.payload().as_ref(), payload);
         assert_eq!(msg.total_size(), message.len());
+        assert_eq!(msg.headers().len(), 0); // Empty headers
     }
 
     #[tokio::test]
@@ -333,10 +340,16 @@ mod tests {
         // Create a large payload (200KB)
         let endpoint = "large/endpoint";
         let payload = vec![0x42u8; 200 * 1024];
+        let headers: Vec<u8> = vec![]; // Empty headers
 
         let mut message = Vec::new();
+        // path_len + path
         message.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
         message.extend_from_slice(endpoint.as_bytes());
+        // headers_len + headers
+        message.extend_from_slice(&(headers.len() as u16).to_be_bytes());
+        message.extend_from_slice(&headers);
+        // payload_len + payload
         message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
         message.extend_from_slice(&payload);
 
