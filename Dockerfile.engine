@@ -1,0 +1,26 @@
+FROM python:3.11
+
+# install git, pip, wget dependencies
+RUN apt-get update -y && apt-get install -y git python3-pip wget tmux && rm -rf /var/lib/apt/lists/*
+
+# Rust Setup
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    ca-certificates \
+ && curl https://sh.rustup.rs -sSf | sh -s -- -y \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/dynamo
+
+COPY . /app/dynamo
+ENV DYNAMO_HOME=/app/dynamo
+
+RUN pip install matplotlib
+RUN pip install ai-dynamo
+RUN pip install -e ./benchmarks
+
+WORKDIR /app/dynamo/benchmarks/router
+RUN chmod +x ./run_engines.sh
+
+ENTRYPOINT ["./run_engines.sh"]

@@ -1,0 +1,77 @@
+project_name: dynamo
+log_level: DEBUG
+# token_path: /Users/kerthcet/Workspaces/hiverge/hive-operator/quantinuum.kubeconfig
+# project_name: llm-speedrun
+coordinator_config_name: kante
+repo:
+  source: /Users/kerthcet/Workspaces/hiverge/dynamo #change me
+  evaluation_script: benchmarks/router/evaluator_real.py
+  evolve_files_and_ranges: lib/llm/src/kv_router/scheduler.rs:454-586
+  branch: main
+runtime:
+  num_agents: 30
+  max_runtime_seconds: 18000
+  max_iterations: -1
+sandbox:
+  target_platforms:
+    - linux/amd64
+  # build_secret: GITHUB_TOKEN
+  timeout: 600
+  resources:
+    cpu: "8"
+    memory: "8Gi"
+    extended_resources:
+      ephemeral-storage: 8Gi
+  # accelerators: l4:1 # or a100-80gb:8
+  envs:
+    - name: DYN_REQUEST_PLANE
+      value: nats
+  services:
+  - name: engine
+    image: gcr.io/runsandbox-449400/dynamo-engine:vllm
+    resources:
+      cpu: "2"
+      memory: "4Gi"
+      extended_resources:
+        ephemeral-storage: 400Mi
+    args: ["--mockers", "--num-workers", "8", "--model-path", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "--block-size", "64", "--speedup-ratio", "2.0"]
+    envs:
+      - name: DYN_REQUEST_PLANE
+        value: nats
+  - name: nats
+    image: nats:2.11.4
+    args:
+      - "-js"
+      - "--trace"
+      - "-m"
+      - "8222"
+    ports:
+      - port: 4222
+      - port: 6222
+      - port: 8222
+    resources:
+      cpu: "2"
+      memory: "4Gi"
+      extended_resources:
+        ephemeral-storage: 300Mi
+  - name: etcd
+    image: bitnamilegacy/etcd:3.6.1
+    envs:
+    - name: ALLOW_NONE_AUTHENTICATION
+      value: "yes"
+    ports:
+    - port: 2379
+    - port: 2380
+    resources:
+      cpu: "2"
+      memory: "4Gi"
+      extended_resources:
+        ephemeral-storage: 300Mi
+# cloud vendor configuration
+# pre_processor: |
+provider:
+  gcp:
+    enabled: true
+    spot: true
+    project_id: runsandbox-449400
+    # registry_registry: us-docker.pkg.dev/quantinuum-469520/quantinuum/sandbox
