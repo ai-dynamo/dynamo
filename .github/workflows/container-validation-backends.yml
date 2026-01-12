@@ -185,7 +185,6 @@ jobs:
               -t ${IMAGE_BASE}:${{ github.sha }}-dynamo-operator-${PLATFORM} \
               ${NO_CACHE_FLAG} ${EXTRA_TAGS} .
 
-
   copy-operator-to-acr:
     needs: [operator]
     strategy:
@@ -222,6 +221,7 @@ jobs:
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
 
+
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
   # ============================================================================
@@ -245,6 +245,28 @@ jobs:
       copy_to_acr: true
       push_image: true
     secrets: inherit
+  
+  vllm-cuda-13-pipeline:
+    needs: [init]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    with:
+      framework: vllm
+      arm_base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
+      arm_runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
+      arm_cuda_version: '12.9'
+      arm_torch_backend: 'cu129'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      builder_name: ${{ needs.init.outputs.builder_name }}
+      build_image: true
+      run_tests: true
+      copy_to_acr: true
+      push_image: true
+    secrets: inherit
+
 
   sglang-pipeline:
     needs: [init]

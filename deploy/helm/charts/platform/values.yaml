@@ -417,8 +417,9 @@ nats:
     #     jetstream:
     #       max_memory_store: << 1GB >>
     merge:
-      # 10MB which allows for larger context size : The default NATS max payload size is 1MB, and 256K tokens (with tokens being int32 - 4 bytes each) tips over that 1MB max.
-      max_payload: 10485760
+      # 15MB to accommodate prompt embeddings: 10MB decoded → ~13.3MB base64-encoded + metadata
+      # Also allows larger context: 256K tokens (int32 - 4 bytes each) = 1MB
+      max_payload: 15728640
     patch: []
 
   ############################################################

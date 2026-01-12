@@ -146,11 +146,13 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--no-kv-events",
-        action="store_false",
+        "--kv-events",
+        action=argparse.BooleanOptionalAction,
         dest="use_kv_events",
-        default=os.environ.get("DYN_KV_EVENTS", "true").lower() != "false",
-        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
+        default=(
+            os.environ.get("DYN_KV_EVENTS", "true").lower() == "true"
+        ),  # default is true
+        help="KV Router: Enable/disable KV events. Use --kv-events to enable (default, router receives cache state events from workers) or --no-kv-events to disable (router predicts cache state based on routing decisions).",
     )
     parser.add_argument(
         "--router-ttl",
@@ -325,8 +327,11 @@ async def async_main():
         if prefix:
             os.environ["DYN_METRICS_PREFIX"] = flags.metrics_prefix
 
+    # Enable NATS for KV router mode when kv_events are used (when --no-kv-events is not set)
+    enable_nats = (flags.router_mode == "kv") and flags.use_kv_events
+
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane)
+    runtime = DistributedRuntime(loop, flags.store_kv, flags.request_plane, enable_nats)
 
     def signal_handler():
         asyncio.create_task(graceful_shutdown(runtime))
