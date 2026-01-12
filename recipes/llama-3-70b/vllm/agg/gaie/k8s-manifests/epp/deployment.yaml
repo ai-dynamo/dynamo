@@ -67,6 +67,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
             - name: PLATFORM_NAMESPACE
               value: "$(POD_NAMESPACE)" # set to your dynamo platform namespace if different
             - name: ETCD_ENDPOINTS
