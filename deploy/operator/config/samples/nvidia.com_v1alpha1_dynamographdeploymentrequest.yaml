@@ -37,24 +37,24 @@ spec:
 
       # Engine configuration
       engine:
-        max_context_length: 16384  # will override max context length of the model if provided
+        maxContextLength: 16384  # will override max context length of the model if provided
 
       # Hardware configuration
       hardware:
-        min_num_gpus_per_engine: 1  # Minimum GPUs to test
-        max_num_gpus_per_engine: 4  # Maximum GPUs to test (limited by model's num_heads/4)
-        num_gpus_per_node: 8  # GPUs per node (for MoE models)
+        minNumGpusPerEngine: 1  # Minimum GPUs to test
+        maxNumGpusPerEngine: 4  # Maximum GPUs to test (limited by model's num_heads/4)
+        numGpusPerNode: 8  # GPUs per node (for MoE models)
 
       # Sweep/profiling configuration
       sweep:
-        prefill_interpolation_granularity: 16  # Samples for TTFT interpolation
-        decode_interpolation_granularity: 6  # Samples for ITL interpolation
+        prefillInterpolationGranularity: 16  # Samples for TTFT interpolation
+        decodeInterpolationGranularity: 6  # Samples for ITL interpolation
 
         # AI Configurator mode (fast simulation-based profiling, 20-30 seconds)
-        use_ai_configurator: false  # Set to false for online profiling (2-4 hours)
-        aic_system: h200_sxm  # Target GPU system for AI Configurator
-        aic_hf_id: Qwen/Qwen3-0.6B  # HuggingFace model ID for AI Configurator
-        aic_backend_version: "0.20.0"  # Backend version for AI Configurator
+        useAiConfigurator: false  # Set to false for online profiling (2-4 hours)
+        aicSystem: h200_sxm  # Target GPU system for AI Configurator
+        aicHfId: Qwen/Qwen3-0.6B  # HuggingFace model ID for AI Configurator
+        aicBackendVersion: "0.20.0"  # Backend version for AI Configurator
 
       # SLA targets for profiling
       sla:
@@ -65,8 +65,8 @@ spec:
 
       # Optional: Planner-specific arguments
       # planner:
-      #   planner_min_endpoint: 2
-      #   # Add any other planner args here (use hyphens or underscores)
+      #   plannerMinEndpoint: 2
+      #   # Add any other planner args here
 
     # Reference to ConfigMap containing the DGD base config (disagg.yaml)
     # The path to this file will be automatically set as engine.config

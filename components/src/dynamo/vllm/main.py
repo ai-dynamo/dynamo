@@ -64,9 +64,12 @@ async def worker():
     config = parse_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
-
     overwrite_args(config)
+
+    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, config.use_kv_events
+    )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -79,13 +82,22 @@ async def worker():
 
     dump_config(config.dump_config_to, config)
 
-    # Download the model if necessary.
-    # register_llm would do this for us, but we want it on disk before we start vllm.
-    # Ensure the original HF name (e.g. "Qwen/Qwen3-0.6B") is used as the served_model_name.
+    # Name the model. Use either the full path (vllm and sglang do the same),
+    # or the HF name (e.g. "Qwen/Qwen3-0.6B"), depending on cmd line params.
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
+
+    # Download the model if necessary using modelexpress.
+    # We want it on disk before we start vllm to avoid downloading from HuggingFace.
+    #
+    # We don't set `config.engine_args.model` to the local path fetch_llm returns
+    # because vllm will send that name to its Ray pipeline-parallel workers, which
+    # may not have the local path.
+    # vllm will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
     if not os.path.exists(config.model):
-        config.model = config.engine_args.model = await fetch_llm(config.model)
+        await fetch_llm(config.model)
 
     # Route to appropriate initialization based on config flags
     if config.vllm_native_encoder_worker:
@@ -206,6 +218,13 @@ def setup_kv_event_publisher(
         return None
 
     if config.engine_args.kv_events_config is None:
+        return None
+
+    # Check if kv_cache_events are explicitly disabled
+    if not config.engine_args.kv_events_config.enable_kv_cache_events:
+        logger.info(
+            "KV event publishing skipped: enable_kv_cache_events=False in kv_events_config"
+        )
         return None
 
     # Get data_parallel_size to create publishers for all dp_ranks

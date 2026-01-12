@@ -116,13 +116,15 @@ const (
 	// Volume names
 	VolumeNameProfilingConfig = "profiling-config"
 	VolumeNameProfilingOutput = "profiling-output"
+	VolumeNameModelCache      = "model-cache"
 
 	// Volume paths
-	ProfilingOutputPath       = "/data"
-	ProfilingOutputFile       = "config_with_planner.yaml"
-	ProfilingOutputFileMocker = "mocker_config_with_planner.yaml"
-	ProfilingConfigPath       = "/config"
-	ProfilingConfigFile       = "disagg.yaml"
+	ProfilingOutputPath        = "/data"
+	ProfilingOutputFile        = "config_with_planner.yaml"
+	ProfilingOutputFileMocker  = "mocker_config_with_planner.yaml"
+	ProfilingConfigPath        = "/config"
+	ProfilingConfigFile        = "disagg.yaml"
+	DefaultModelCacheMountPath = "/opt/model-cache"
 
 	// Command line arguments
 	ArgModel   = "--model"
@@ -152,6 +154,7 @@ const (
 	MessageProfilingCheckFailed      = "ProfilingCheckFailed"
 	MessageConfigMapNotFound         = "ConfigMap %s not found in namespace %s"
 	MessageConfigMapKeyNotFound      = "key %s not found in ConfigMap %s"
+	MessageModelCachePVCNotFound     = "model cache PVC %s not found in namespace %s"
 
 	// Validation messages
 	ValidationErrorModelRequired  = "model is required"
@@ -163,6 +166,13 @@ const (
 	BackendVLLM   = "vllm"
 	BackendSGLang = "sglang"
 	BackendTRTLLM = "trtllm"
+
+	// Profiling config field names
+	ConfigKeyDeployment = "deployment"
+	ConfigKeyModelCache = "modelCache"
+	ConfigKeyPVCName    = "pvcName"
+	ConfigKeyPVCPath    = "pvcPath"
+	ConfigKeyMountPath  = "mountPath"
 )
 
 // shell script template for the output copier sidecar
@@ -796,6 +806,10 @@ func isOnlineProfiling(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) boo
 	}
 
 	if sweep, ok := config["sweep"].(map[string]interface{}); ok {
+		// Check camelCase first (preferred), then snake_case (backwards compat)
+		if useAIC, exists := sweep["useAiConfigurator"].(bool); exists {
+			return !useAIC
+		}
 		if useAIC, exists := sweep["use_ai_configurator"].(bool); exists {
 			return !useAIC
 		}
@@ -849,6 +863,23 @@ func (r *DynamoGraphDeploymentRequestReconciler) validateSpec(ctx context.Contex
 
 		if _, exists := cm.Data[key]; !exists {
 			return fmt.Errorf(MessageConfigMapKeyNotFound, key, cm.Name)
+		}
+	}
+
+	// Validate model cache PVC if provided
+	modelCachePVC, _ := extractModelCachePVCConfig(dgdr)
+	if modelCachePVC != "" {
+		pvc := &corev1.PersistentVolumeClaim{}
+		err := r.Get(ctx, types.NamespacedName{
+			Name:      modelCachePVC,
+			Namespace: dgdr.Namespace,
+		}, pvc)
+
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return fmt.Errorf(MessageModelCachePVCNotFound, modelCachePVC, dgdr.Namespace)
+			}
+			return err
 		}
 	}
 
@@ -959,6 +990,17 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 			})
 		}
 
+		// Add model cache PVC mount if configured in profilingConfig.config.deployment
+		modelCachePVC, modelCacheMountPath := extractModelCachePVCConfig(dgdr)
+		if modelCachePVC != "" {
+			logger.Info("Mounting model cache PVC to profiler pod", "pvc", modelCachePVC, "mountPath", modelCacheMountPath)
+			volumeMounts = append(volumeMounts, corev1.VolumeMount{
+				Name:      VolumeNameModelCache,
+				MountPath: modelCacheMountPath,
+				ReadOnly:  true,
+			})
+		}
+
 		// Profiler args: pass the config as an inline YAML string via --profile-config
 		profilerArgs := []string{
 			"--profile-config", string(configYAML),
@@ -1059,6 +1101,19 @@ func (r *DynamoGraphDeploymentRequestReconciler) createProfilingJob(ctx context.
 							Key:  key,
 							Path: ProfilingConfigFile,
 						}},
+					},
+				},
+			})
+		}
+
+		// Add model cache PVC volume if configured
+		if modelCachePVC != "" {
+			volumes = append(volumes, corev1.Volume{
+				Name: VolumeNameModelCache,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: modelCachePVC,
+						ReadOnly:  true,
 					},
 				},
 			})
@@ -1191,6 +1246,41 @@ func (r *DynamoGraphDeploymentRequestReconciler) prepareProfilingConfig(dgdr *nv
 	}
 
 	return configYAML, nil
+}
+
+// extractModelCachePVCConfig extracts model cache PVC settings from the profiling config.
+// Returns (pvcName, mountPath) - both empty if not configured.
+func extractModelCachePVCConfig(dgdr *nvidiacomv1alpha1.DynamoGraphDeploymentRequest) (string, string) {
+	if dgdr.Spec.ProfilingConfig.Config == nil {
+		return "", ""
+	}
+
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(dgdr.Spec.ProfilingConfig.Config.Raw, &config); err != nil {
+		return "", ""
+	}
+
+	deployment, ok := config[ConfigKeyDeployment].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	modelCache, ok := deployment[ConfigKeyModelCache].(map[string]interface{})
+	if !ok {
+		return "", ""
+	}
+
+	pvcName, _ := modelCache[ConfigKeyPVCName].(string)
+	if pvcName == "" {
+		return "", ""
+	}
+
+	mountPath, _ := modelCache[ConfigKeyMountPath].(string)
+	if mountPath == "" {
+		mountPath = DefaultModelCacheMountPath
+	}
+
+	return pvcName, mountPath
 }
 
 // checkProfilingJobStatus checks if the profiling job has completed
