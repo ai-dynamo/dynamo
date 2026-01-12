@@ -455,7 +455,7 @@ RUN apt remove -y python3-apt &&\
 # Install gpgv for verification of GPG keys
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        gpgv \
+        gnupg2 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

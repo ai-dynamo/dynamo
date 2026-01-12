@@ -569,7 +569,7 @@ RUN apt-get update -y \
         ca-certificates \
         libstdc++6 \
         # required for verification of GPG keys
-        gpgv \
+        gnupg2 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

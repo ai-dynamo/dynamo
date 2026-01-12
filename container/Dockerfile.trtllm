@@ -680,7 +680,7 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         git \
         git-lfs \
         # required for verification of GPG keys
-        gpgv \
+        gnupg2 \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
