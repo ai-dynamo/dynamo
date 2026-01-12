@@ -508,6 +508,8 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages --no-cache . && \
+    #TODO: Temporary change until upstream sglang runtime image is updated
+    pip install --no-cache-dir --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
     CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
