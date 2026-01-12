@@ -89,7 +89,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="9ba14263db0045ed3fa0860f949b5ce320107eb3" # 1.2.0rc6
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="e4a6c9995dacf66bab4410475a6774152f95a0a6" # 1.2.0rc6.post1
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -98,7 +98,7 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6.post1"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
