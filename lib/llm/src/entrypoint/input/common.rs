@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+use anyhow::Context as _;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -172,6 +173,7 @@ where
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
@@ -190,12 +192,15 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,
+        model_manager,
         router_mode,
         worker_monitor,
         chooser,
@@ -212,6 +217,7 @@ where
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
@@ -277,8 +283,8 @@ where
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser =
-        prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
+    let prefill_chooser = prefill_chooser
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

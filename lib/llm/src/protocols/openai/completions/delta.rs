@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
@@ -30,6 +30,7 @@ impl NvCreateCompletionRequest {
                 self.inner.stream_options =
                     Some(dynamo_async_openai::types::ChatCompletionStreamOptions {
                         include_usage: true,
+                        continuous_usage_stats: false,
                     });
             } else if let Some(ref mut opts) = self.inner.stream_options {
                 // If stream_options exists, ensure include_usage is true for non-streaming
@@ -63,6 +64,12 @@ impl NvCreateCompletionRequest {
                 .as_ref()
                 .map(|opts| opts.include_usage)
                 .unwrap_or(false),
+            continuous_usage_stats: self
+                .inner
+                .stream_options
+                .as_ref()
+                .map(|opts| opts.continuous_usage_stats)
+                .unwrap_or(false),
             enable_logprobs: self.inner.logprobs.unwrap_or(0) > 0,
             enable_tracking,
         };
@@ -74,6 +81,7 @@ impl NvCreateCompletionRequest {
 #[derive(Debug, Clone, Default)]
 pub struct DeltaGeneratorOptions {
     pub enable_usage: bool,
+    pub continuous_usage_stats: bool,
     pub enable_logprobs: bool,
     pub enable_tracking: bool,
 }
@@ -226,7 +234,11 @@ impl DeltaGenerator {
                 finish_reason,
                 logprobs,
             }],
-            usage: None, // Always None for chunks with content/choices
+            usage: if self.options.enable_usage && self.options.continuous_usage_stats {
+                Some(self.get_usage())
+            } else {
+                None
+            },
             nvext: None, // Will be populated by router layer if needed
         };
 
@@ -260,6 +272,11 @@ impl DeltaGenerator {
         self.options.enable_usage
     }
 
+    /// Check if continuous usage tracking is enabled
+    pub fn is_continuous_usage_enabled(&self) -> bool {
+        self.options.continuous_usage_stats
+    }
+
     pub fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {
         let mut usage = self.usage.clone();
         usage.total_tokens = usage.prompt_tokens.saturating_add(usage.completion_tokens);
@@ -283,14 +300,17 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
         self.usage.completion_tokens += token_length;
 
-        // If backend provides completion_usage with prompt token details,
-        // propagate the entire details struct to usage tracking
-        if let Some(prompt_details) = delta
-            .completion_usage
-            .as_ref()
-            .and_then(|usage| usage.prompt_tokens_details.as_ref())
-        {
-            self.usage.prompt_tokens_details = Some(prompt_details.clone());
+        // If backend provides completion_usage, use it to update usage stats
+        // This is critical for prompt embeddings where prompt_tokens comes from
+        // the embedding sequence length computed by the worker
+        if let Some(completion_usage) = delta.completion_usage.as_ref() {
+            // Update prompt_tokens from worker if provided (e.g., for embeddings)
+            self.usage.prompt_tokens = completion_usage.prompt_tokens;
+
+            // Propagate prompt token details if provided
+            if let Some(prompt_details) = completion_usage.prompt_tokens_details.as_ref() {
+                self.usage.prompt_tokens_details = Some(prompt_details.clone());
+            }
         }
 
         let logprobs = self.create_logprobs(
@@ -369,6 +389,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
 
     fn is_usage_enabled(&self) -> bool {
         DeltaGenerator::is_usage_enabled(self)
+    }
+
+    fn is_continuous_usage_enabled(&self) -> bool {
+        DeltaGenerator::is_continuous_usage_enabled(self)
     }
 
     fn get_usage(&self) -> dynamo_async_openai::types::CompletionUsage {

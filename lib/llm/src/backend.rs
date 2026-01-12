@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Backend
@@ -456,7 +456,7 @@ impl Decoder {
         // check for hidden stop tokens - eos takes precedence
         if self.hidden_stop_ids.contains(&token_id) {
             return Ok(StepResult::with_stop_trigger(
-                token,
+                None,
                 StopTrigger::HiddenStopTokenDetected(token_id),
             ));
         }

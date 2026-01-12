@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Common base classes and utilities for engine tests (vLLM, TRT-LLM, etc.)"""
@@ -158,6 +158,10 @@ def run_serve_deployment(
                     method=payload.method,
                 )
                 server_process.check_response(payload, response)
+
+            # Call final_validation if the payload has one (e.g., CachedTokensChatPayload)
+            if hasattr(payload, "final_validation"):
+                payload.final_validation()
 
 
 def params_with_model_mark(configs: Mapping[str, EngineConfig]):

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -89,7 +89,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="e4c707845ff58fcc0b1d87afb4dd0e64885c780a" # 1.2.0rc5
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="9ba14263db0045ed3fa0860f949b5ce320107eb3" # 1.2.0rc6
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -98,7 +98,7 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc5"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -118,13 +118,19 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
-SGLANG_PYTHON_VERSION="3.10"
+SGLANG_CUDA_VERSION_CU13="13.0.1"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
+
+# GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
+GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
+GAIE_VERSION="v0.5.1"
 
 PYTHON_VERSION="3.12"
 
 NIXL_REF=0.8.0
-NIXL_UCX_REF=v1.20.0-rc1
+NIXL_UCX_REF=1.20.0
 NIXL_GDRCOPY_REF=v2.5.1
 NIXL_LIBFABRIC_REF=v2.3.0
 
@@ -132,6 +138,8 @@ NIXL_LIBFABRIC_REF=v2.3.0
 EFA_VERSION=1.45.1
 
 NO_CACHE=""
+NO_LOAD=""
+PUSH=""
 
 # KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
 # or can be explicitly enabled via --enable-kvbm flag
@@ -170,6 +178,14 @@ get_options() {
                 echo "INFO: Setting CUDA_VERSION to $2"
                 CUDA_VERSION=$2
                 BUILD_ARGS+=" --build-arg CUDA_VERSION=$2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixl-ref)
+            if [ "$2" ]; then
+                NIXL_REF=$2
                 shift
             else
                 missing_requirement "$1"
@@ -282,6 +298,12 @@ get_options() {
             ;;
         --no-cache)
             NO_CACHE=" --no-cache"
+            ;;
+        --no-load)
+            NO_LOAD=true
+            ;;
+        --push)
+            PUSH=" --push"
             ;;
         --cache-from)
             if [ "$2" ]; then
@@ -408,6 +430,17 @@ get_options() {
             echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
 
+
+        if [[ $FRAMEWORK == "SGLANG" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$SGLANG_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${SGLANG_BASE_IMAGE_TAG_CU13} "
+            SGLANG_CUDA_VERSION="${SGLANG_CUDA_VERSION_CU13}"
+            RUNTIME_IMAGE_TAG="${SGLANG_RUNTIME_IMAGE_TAG_CU13}"
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${RUNTIME_IMAGE_TAG} "
+            echo "INFO: Overriding base image tag for SGLang with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
+        fi
+
+
         if [ -z "$BASE_IMAGE" ]; then
             error "ERROR: Framework $FRAMEWORK without BASE_IMAGE"
         fi
@@ -488,6 +521,8 @@ show_help() {
     echo "  [--uid user ID for local-dev images (only with --target local-dev)]"
     echo "  [--gid group ID for local-dev images (only with --target local-dev)]"
     echo "  [--no-cache disable docker build cache]"
+    echo "  [--no-load do not load the image into docker (disables default --load)]"
+    echo "  [--push push the image to the registry]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
@@ -909,11 +944,11 @@ fi
 
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${SGLANG_PYTHON_VERSION}"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
-else
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
 fi
+
+BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
+
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"
@@ -936,15 +971,58 @@ fi
 
 show_image_options
 
+# Handle FRONTEND target: build EPP image first
+if [[ ${TARGET^^} == "FRONTEND" ]]; then
+    echo "Building FRONTEND image - requires EPP image"
+
+    # Build base dynamo image first (framework=NONE, target=dev)
+    echo ""
+    echo "Building EPP image for Frontend..."
+    # Set up paths for GAIE
+    GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
+
+    # Clone GAIE repo
+    echo ""
+    echo "Cloning GAIE repository at ${GAIE_VERSION}..."
+    $RUN_PREFIX rm -rf "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+    $RUN_PREFIX git clone ${GAIE_REPO_URL} "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
+    $RUN_PREFIX git checkout ${GAIE_VERSION}
+    $RUN_PREFIX cd "${BUILD_CONTEXT}"
+
+    # Build EPP image
+    echo ""
+    echo "Building EPP image..."
+    export GAIE_DIR="${GAIE_CLONE_DIR}"
+    export DYNAMO_DIR="${BUILD_CONTEXT}"
+
+    $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
+
+    # Set EPP image tag (matches what build-epp-dynamo.sh produces)
+    EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
+
+    echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
+
+    # Add build args for frontend image
+    BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
+fi
+
 # Always build the main image first
 # Create build log directory for BuildKit reports
 BUILD_LOG_DIR="${BUILD_CONTEXT}/build-logs"
 mkdir -p "${BUILD_LOG_DIR}"
 SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
+# Determine --load flag (default on unless --no-load or --push specified)
+LOAD_FLAG=""
+if [ "$NO_LOAD" != "true" ] && [ -z "$PUSH" ]; then
+    LOAD_FLAG=" --load"
+fi
+
 # Use BuildKit for enhanced metadata
 if docker buildx version &>/dev/null; then
-    $RUN_PREFIX docker buildx build --progress=plain --load -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
+    $RUN_PREFIX docker buildx build --progress=plain${LOAD_FLAG}${PUSH} -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else
     $RUN_PREFIX DOCKER_BUILDKIT=1 docker build --progress=plain -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"

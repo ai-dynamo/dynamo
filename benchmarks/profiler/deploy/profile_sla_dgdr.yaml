@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # DynamoGraphDeploymentRequest for online profiling (actual deployment testing)
@@ -17,7 +17,7 @@ spec:
       # Sweep/profiling configuration
       sweep:
         # Online profiling mode (real deployment testing)
-        use_ai_configurator: false
+        useAiConfigurator: false
 
       # SLA targets for profiling
       sla:

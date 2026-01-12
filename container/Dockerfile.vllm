@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # NOTE FOR dynamo_base AND wheel_builder STAGES:
@@ -74,13 +74,13 @@ ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.12.0"
+ARG VLLM_REF="v0.13.0"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
 ARG FLASHINF_REF="v0.5.3"
 
 # If left blank, then we will fallback to vLLM defaults
 ARG DEEPGEMM_REF=""
-ARG LMCACHE_REF="0.3.10"
+ARG LMCACHE_REF="0.3.12"
 
 ##################################
 ########## Base Image ############
@@ -168,7 +168,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -186,7 +189,18 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel \
+        libcurl-devel \
+        openssl-devel \
+        libuuid-devel \
+        zlib-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
+
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -215,7 +229,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
@@ -349,6 +363,28 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
     ldconfig
 
+# Build and install AWS SDK C++ (required for NIXL OBJ backend / S3 support)
+ARG AWS_SDK_CPP_VERSION=1.11.581
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    git clone --recurse-submodules --depth 1 --branch ${AWS_SDK_CPP_VERSION} \
+        https://github.com/aws/aws-sdk-cpp.git /tmp/aws-sdk-cpp && \
+    mkdir -p /tmp/aws-sdk-cpp/build && \
+    cd /tmp/aws-sdk-cpp/build && \
+    cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_ONLY="s3" \
+        -DENABLE_TESTING=OFF \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=ON && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/aws-sdk-cpp && \
+    ldconfig && \
+    /tmp/use-sccache.sh show-stats "AWS SDK C++"
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
@@ -359,8 +395,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
+    git checkout ${NIXL_REF} && \
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
+    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
+        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
+        exit 1; \
+    fi && \
+    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
@@ -390,7 +434,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     cd /workspace/nixl && \
-    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -642,6 +686,13 @@ COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
+
+# Copy AWS SDK C++ libraries (required for NIXL OBJ backend / S3 support)
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libaws* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/local/lib64/libs2n* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libcrypto.so.1.1* /usr/local/lib/
+COPY --chown=dynamo: --from=wheel_builder /usr/lib64/libssl.so.1.1* /usr/local/lib/
+
 ENV PATH=/usr/local/ucx/bin:$PATH
 
 # Copy ffmpeg
@@ -715,6 +766,37 @@ RUN chmod g+w /workspace /workspace/* /opt/dynamo /opt/dynamo/* ${VIRTUAL_ENV} &
     chmod 755 /opt/dynamo/.launch_screen && \
     echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
     echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+# Fix library symlinks that Docker COPY dereferenced (COPY always follows symlinks)
+# This recreates proper symlinks to save space and suppress ldconfig warnings
+RUN cd /usr/local/lib && \
+    # libaws-c-common: .so.1 should symlink to .so.1.0.0
+    if [ -f libaws-c-common.so.1.0.0 ] && [ ! -L libaws-c-common.so.1 ]; then \
+        rm -f libaws-c-common.so.1 libaws-c-common.so && \
+        ln -s libaws-c-common.so.1.0.0 libaws-c-common.so.1 && \
+        ln -s libaws-c-common.so.1 libaws-c-common.so; \
+    fi && \
+    # libaws-c-s3: .so.0unstable should symlink to .so.1.0.0
+    if [ -f libaws-c-s3.so.1.0.0 ] && [ ! -L libaws-c-s3.so.0unstable ]; then \
+        rm -f libaws-c-s3.so.0unstable libaws-c-s3.so && \
+        ln -s libaws-c-s3.so.1.0.0 libaws-c-s3.so.0unstable && \
+        ln -s libaws-c-s3.so.0unstable libaws-c-s3.so; \
+    fi && \
+    # libs2n: .so.1 should symlink to .so.1.0.0
+    if [ -f libs2n.so.1.0.0 ] && [ ! -L libs2n.so.1 ]; then \
+        rm -f libs2n.so.1 libs2n.so && \
+        ln -s libs2n.so.1.0.0 libs2n.so.1 && \
+        ln -s libs2n.so.1 libs2n.so; \
+    fi && \
+    # OpenSSL 1.1: check for versioned files (e.g., .so.1.1.1k)
+    for lib in libcrypto libssl; do \
+        versioned=$(ls -1 ${lib}.so.1.1.* 2>/dev/null | head -1); \
+        if [ -n "$versioned" ] && [ ! -L "${lib}.so.1.1" ]; then \
+            rm -f "${lib}.so.1.1" && \
+            ln -s "$(basename "$versioned")" "${lib}.so.1.1"; \
+        fi; \
+    done && \
+    ldconfig
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA

@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 mod aggregator;
@@ -11,7 +12,7 @@ mod nvext;
 pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateEmbeddingRequest,
@@ -26,7 +27,7 @@ pub struct NvCreateEmbeddingRequest {
 /// # Fields
 /// - `inner`: The base OpenAI unary chat completion response, embedded
 ///   using `serde(flatten)`.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingResponse {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateEmbeddingResponse,

@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # NOTE FOR dynamo_base AND wheel_builder STAGES:
@@ -21,7 +22,7 @@
 # DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
 #   /workspace            - Users create/modify project files
 #   /home/dynamo          - Users create config/cache files
-#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
+#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.12/site-packages for pip install
 #
 # HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
 # 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
@@ -40,7 +41,7 @@ ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 ARG RUNTIME_IMAGE="lmsysorg/sglang"
-ARG RUNTIME_IMAGE_TAG="v0.5.6.post2-runtime"
+ARG RUNTIME_IMAGE_TAG="v0.5.7-runtime"
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -154,7 +155,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -173,6 +177,12 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         # Libfabric support
         hwloc \
         hwloc-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
 
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
@@ -202,7 +212,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
@@ -346,8 +356,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
+    git checkout ${NIXL_REF} && \
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
+    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
+        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
+        exit 1; \
+    fi && \
+    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
@@ -377,7 +395,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     cd /workspace/nixl && \
-    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -471,12 +489,15 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}
 
 # Install common and test dependencies
@@ -489,12 +510,15 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --break-system-packages --no-cache . && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages that are needed for DeepEP to work properly
-    # This is done in the upstream runtime image too, but we overrode these packages earlier
-    pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
-        nvidia-nccl-cu12==2.28.3 \
-        nvidia-cudnn-cu12==9.16.0.29 \
-        nvidia-cutlass-dsl==4.3.0
+    CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
+    if [ "$CUDA_MAJOR" = "12" ]; then \
+        # Install NVIDIA packages that are needed for DeepEP to work properly
+        # This is done in the upstream runtime image too, but these packages are overridden in earlier commands
+        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+            nvidia-nccl-cu12==2.28.3 \
+            nvidia-cudnn-cu12==9.16.0.29 \
+            nvidia-cutlass-dsl==4.3.0; \
+    fi
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -507,10 +531,19 @@ COPY --chmod=775 --chown=dynamo:0 recipes/ /workspace/recipes/
 # Enable forceful shutdown of inflight requests
 ENV SGLANG_FORCE_SHUTDOWN=1
 
+# Setup launch banner in common directory accessible to all users
+RUN --mount=type=bind,source=./container/launch_message/runtime.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > /opt/dynamo/.launch_screen
+
 # Our scripting assumes /workspace is where dynamo is located
 # In order to maintain the ability to have sglang and dynamo
 # in the same workspace, symlink /workspace to /sgl-workspace/dynamo
 USER root
+
+# Fix directory permissions: COPY --chmod only affects contents, not the directory itself
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
 RUN ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
@@ -518,6 +551,8 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
 ENV PATH=/home/dynamo/.local/bin:$PATH
+# PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
+ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########

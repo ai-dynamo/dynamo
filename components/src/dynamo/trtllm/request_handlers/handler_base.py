@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -517,6 +517,27 @@ class HandlerBase:
         )
         if publishers_error:
             raise publishers_error
+
+        # Decode the disaggregated params from the request
+        disaggregated_params = None
+
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            request["stop_conditions"]["max_tokens"] = 1
+            disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
+
+        if "prefill_result" in request:
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                raise ValueError("Cannot provide disaggregated_params in prefill mode")
+            request["prefill_result"].get("disaggregated_params", {}).pop(
+                "worker_id", None
+            )
+
+            disaggregated_params = DisaggregatedParamsCodec.decode(
+                DisaggregatedParams(
+                    **request["prefill_result"].get("disaggregated_params")
+                )
+            )
+            disaggregated_params.request_type = "generation_only"
 
         if (
             self.disaggregation_mode == DisaggregationMode.DECODE

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import dataclasses
@@ -174,6 +174,22 @@ trtllm_configs = {
         script_name="disagg_multimodal.sh",
         marks=[
             pytest.mark.gpu_2,
+            pytest.mark.trtllm,
+            pytest.mark.multimodal,
+            pytest.mark.nightly,
+        ],
+        model="Qwen/Qwen2-VL-7B-Instruct",
+        frontend_port=DefaultPort.FRONTEND.value,
+        timeout=900,
+        delayed_start=60,
+        request_payloads=[multimodal_payload_default()],
+    ),
+    "aggregated_multimodal_router": TRTLLMConfig(
+        name="aggregated_multimodal_router",
+        directory=trtllm_dir,
+        script_name="agg_multimodal.sh",
+        marks=[
+            pytest.mark.gpu_1,
             pytest.mark.trtllm,
             pytest.mark.multimodal,
             pytest.mark.nightly,

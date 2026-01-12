@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.10.0
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # PURPOSE: AWS EFA support layer
@@ -43,7 +43,10 @@ RUN mkdir -p /tmp/efa && \
     apt-get update && \
     ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
     rm -rf /tmp/efa && \
+    rm -rf /opt/amazon/aws-ofi-nccl && \
     ldconfig
+
+ENV EFA_VERSION="${EFA_VERSION}"
 
 USER dynamo
 
@@ -78,7 +81,10 @@ RUN mkdir -p /tmp/efa && \
     apt-get update && \
     ./efa_installer.sh -y --skip-kmod --skip-limit-conf --no-verify && \
     rm -rf /tmp/efa && \
+    rm -rf /opt/amazon/aws-ofi-nccl && \
     ldconfig
+
+ENV EFA_VERSION="${EFA_VERSION}"
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

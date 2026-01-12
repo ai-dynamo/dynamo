@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # This script installs vLLM and its dependencies from PyPI (release versions only).
@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VLLM_VER="0.12.0"
+VLLM_VER="0.13.0"
 VLLM_REF="v${VLLM_VER}"
 
 # Basic Configurations
@@ -24,8 +24,7 @@ TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to ad
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.5.3"
-# LMCache version - 0.3.9+ required for vLLM 0.11.2 compatibility
-LMCACHE_REF="0.3.10"
+LMCACHE_REF="0.3.12"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -93,6 +92,13 @@ elif [ "$ARCH" = "aarch64" ]; then
     ARCH="arm64"
 fi
 
+# Set alternative CPU architecture naming
+if [ "$ARCH" = "amd64" ]; then
+    ALT_ARCH="x86_64"
+elif [ "$ARCH" = "arm64" ]; then
+    ALT_ARCH="aarch64"
+fi
+
 export MAX_JOBS=$MAX_JOBS
 export CUDA_HOME=/usr/local/cuda
 
@@ -129,8 +135,6 @@ cd $INSTALLATION_DIR
 git clone https://github.com/vllm-project/vllm.git vllm
 cd vllm
 git checkout $VLLM_REF
-# TODO: remove this cherry-pick when vllm is upgraded to > 0.12.0 (when the fix is shipped)
-git cherry-pick --no-commit 799804d140fc99ce3964648ba91aaa810cf28fef # nvshmem fix for CUDA 13.0
 echo "✓ vLLM repository cloned"
 
 
@@ -141,24 +145,15 @@ if [[ "$CUDA_VERSION_MAJOR" == "12" ]]; then
     uv pip install flashinfer-cubin==$FLASHINF_REF
     uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 elif [[ "$CUDA_VERSION_MAJOR" == "13" ]]; then
-    if [ "$ARCH" = "amd64" ]; then
-        echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
-        uv pip install \
-            --index-strategy=unsafe-best-match \
-            --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
-            https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_31_x86_64.whl[flashinfer,runai] \
-            --torch-backend=${TORCH_BACKEND}
-        uv pip install flashinfer-cubin==$FLASHINF_REF
-        uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
-        echo "✓ vLLM installation completed"
-    else
-        echo "⚠ Skipping LMCache on ARM64 (compatibility issues, missing aarch64 wheels)"
-        echo "Building vLLM from source for ${ARCH} architecture..."
-        echo "Try to install specific PyTorch and other dependencies first"
-        uv pip install --index-strategy=unsafe-best-match --index https://download.pytorch.org/whl/ -r requirements/cuda.txt
-        uv pip install setuptools_scm # required to build vLLM from source
-        MAX_JOBS=${MAX_JOBS} uv pip install -v --no-build-isolation .
-    fi
+    echo "⚠ Skipping LMCache on CUDA 13 env since LMCache doesn't support CUDA 13 "
+    echo "Installing vLLM $VLLM_REF from GitHub since CUDA 13 x86_64 wheel is only present on GitHub..."
+    uv pip install \
+        --index-strategy=unsafe-best-match \
+        --extra-index-url https://download.pytorch.org/whl/${TORCH_BACKEND} \
+        https://github.com/vllm-project/vllm/releases/download/v${VLLM_VER}/vllm-${VLLM_VER}+${TORCH_BACKEND}-cp38-abi3-manylinux_2_35_${ALT_ARCH}.whl[flashinfer,runai] \
+        --torch-backend=${TORCH_BACKEND}
+    uv pip install flashinfer-cubin==$FLASHINF_REF
+    uv pip install flashinfer-jit-cache==$FLASHINF_REF --extra-index-url https://flashinfer.ai/whl/${TORCH_BACKEND}
 else
     echo "❌ Unsupported CUDA version for vLLM installation: ${CUDA_VERSION}"
     exit 1
