@@ -77,10 +77,12 @@ The following table shows the dependency versions included with each Dynamo rele
 > Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.
 
 ### CUDA Support by Framework
-| **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
-| :------------------- | :-----------------------| :-----------------------| :-----------------------|
-| **Dynamo 0.8.0**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.9               |
-| **Dynamo 0.7.1**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.9               |
+| **Dynamo Version**   | **SGLang**                        | **TensorRT-LLM**        | **vLLM**                          |
+| :------------------- | :-------------------------------- | :-----------------------| :-------------------------------- |
+| **Dynamo 0.8.0**     | CUDA 12.9, CUDA 13.0 (🧪)         | CUDA 13.0               | CUDA 12.9, CUDA 13.0 (🧪)         |
+| **Dynamo 0.7.1**     | CUDA 12.8                         | CUDA 13.0               | CUDA 12.9                         |
+
+> 🧪 = Experimental
 
 ## Cloud Service Provider Compatibility
 
