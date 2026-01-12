@@ -452,6 +452,13 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 RUN apt remove -y python3-apt &&\
     pip uninstall -y termplotlib
 
+# Install gpgv for verification of GPG keys
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        gpgv \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
 WORKDIR /workspace
