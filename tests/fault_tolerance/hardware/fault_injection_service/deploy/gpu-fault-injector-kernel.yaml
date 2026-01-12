@@ -70,9 +70,8 @@ spec:
 
       containers:
       - name: gpu-fault-injector
-        # UPDATE: Replace with your Azure Container Registry (ACR)
-        # Example: yourregistry.azurecr.io/gpu-fault-injector:latest
-        image: dynamoci.azurecr.io/gpu-fault-injector:latest
+        # GHCR image (public)
+        image: ghcr.io/ai-dynamo/gpu-fault-injector:latest
         imagePullPolicy: Always
 
         # PRIVILEGED MODE - Required for kernel-level operations
