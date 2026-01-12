@@ -65,12 +65,6 @@ env:
   BUILDER_NAME: b-${{ github.run_id }}${{ github.run_attempt }}
   AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
   AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
-  # Default build matrix: amd64 (cuda 12.8) + arm64 (cuda 12.9)
-  DEFAULT_BUILD_MATRIX: >-
-    [
-      {"platform":"amd64","cuda_version":"12.8"},
-      {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
-    ]
 
 jobs:
   # ============================================================================
@@ -256,7 +250,7 @@ jobs:
     with:
       framework: vllm
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_matrix: ${{ github.event.inputs.vllm_build_matrix || env.DEFAULT_BUILD_MATRIX }}
+      build_matrix: ${{ github.event.inputs.vllm_build_matrix || '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
@@ -270,7 +264,7 @@ jobs:
     with:
       framework: sglang
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_matrix: ${{ github.event.inputs.sglang_build_matrix || env.DEFAULT_BUILD_MATRIX }}
+      build_matrix: ${{ github.event.inputs.sglang_build_matrix || '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
@@ -284,7 +278,7 @@ jobs:
     with:
       framework: trtllm
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_matrix: ${{ github.event.inputs.trtllm_build_matrix || env.DEFAULT_BUILD_MATRIX }}
+      build_matrix: ${{ github.event.inputs.trtllm_build_matrix || '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]' }}
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
