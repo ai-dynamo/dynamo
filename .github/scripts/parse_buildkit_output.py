@@ -413,6 +413,14 @@ def main():
         with open(output_json, "w") as f:
             json.dump(build_data, f, indent=2)
         print(f"✅ Build data written to: {output_json}", file=sys.stderr)
+        
+        # Print complete JSON to workflow logs for debugging
+        print("", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print("📄 COMPLETE BUILD METRICS JSON:", file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
+        print(json.dumps(build_data, indent=2), file=sys.stderr)
+        print("=" * 80, file=sys.stderr)
     except Exception as e:
         print(f"Error writing JSON file: {e}", file=sys.stderr)
         sys.exit(1)
