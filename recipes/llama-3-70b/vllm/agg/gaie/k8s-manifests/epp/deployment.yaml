@@ -69,8 +69,9 @@ spec:
                   fieldPath: metadata.namespace
             - name: PLATFORM_NAMESPACE
               value: "$(POD_NAMESPACE)" # set to your dynamo platform namespace if different
-            - name: ETCD_ENDPOINTS
-              value: "dynamo-platform-etcd.$(PLATFORM_NAMESPACE):2379" #  update dynamo-platform to appropriate namespace
+            # if you want to use etcd enable this and remove the DYN_DISCOVERY_BACKEND env var
+            # - name: ETCD_ENDPOINTS
+            #   value: "dynamo-platform-etcd.$(PLATFORM_NAMESPACE):2379" #  update dynamo-platform to appropriate namespace
             - name: NATS_SERVER
               value: "nats://dynamo-platform-nats.$(PLATFORM_NAMESPACE):4222" #  update dynamo-platform to appropriate namespace
             - name: DYNAMO_NAMESPACE
@@ -83,6 +84,8 @@ spec:
               value: "true"
             - name: DYNAMO_ENFORCE_DISAGG
               value: "false"
+            - name: DYN_DISCOVERY_BACKEND
+              value: "kubernetes"
 
           ports:
             - containerPort: 9002

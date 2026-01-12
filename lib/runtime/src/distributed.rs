@@ -544,8 +544,21 @@ impl DistributedConfig {
         // If a NATS server is configured via env, enable the client regardless of request plane.
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
+
+        // Check discovery backend to determine the appropriate KV store backend -
+        // kubernetes discovery, or etcd.
+        let discovery_backend =
+            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
+
+        let store_backend = if discovery_backend == "kubernetes" {
+            tracing::info!("Using Kubernetes discovery backend");
+            kv::Selector::Memory
+        } else {
+            kv::Selector::Etcd(Box::default())
+        };
+
         DistributedConfig {
-            store_backend: kv::Selector::Etcd(Box::default()),
+            store_backend,
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
