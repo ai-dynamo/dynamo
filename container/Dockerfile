@@ -23,6 +23,7 @@
 
 ARG BASE_IMAGE
 ARG BASE_IMAGE_TAG
+ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1"
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
@@ -198,7 +199,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
@@ -343,8 +344,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
+    git checkout ${NIXL_REF} && \
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
+    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
+        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
+        exit 1; \
+    fi && \
+    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
@@ -374,7 +383,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     cd /workspace/nixl && \
-    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -545,3 +554,69 @@ USER dynamo
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+
+##############################################
+########## Frontend entrypoint image #########
+##############################################
+FROM ${EPP_IMAGE} AS epp
+
+FROM nvcr.io/nvidia/base/ubuntu:noble-20250619 AS frontend
+
+ARG PYTHON_VERSION
+RUN apt-get update -y \
+    && apt-get install -y --no-install-recommends \
+        # required for EPP
+        ca-certificates \
+        libstdc++6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+
+# Create dynamo user with group 0 for OpenShift compatibility
+RUN userdel -r ubuntu > /dev/null 2>&1 || true \
+    && useradd -m -s /bin/bash -g 0 dynamo \
+    && [ `id -u dynamo` -eq 1000 ] \
+    && mkdir -p /home/dynamo/.cache /opt/dynamo /workspace \
+    && chown -R dynamo: /opt/dynamo /home/dynamo/.cache /workspace \
+    && chmod -R g+w /opt/dynamo /home/dynamo/.cache /workspace
+
+# Set HOME so ModelExpress can find the cache directory
+ENV HOME=/home/dynamo
+
+# Switch to dynamo user
+USER dynamo
+ENV DYNAMO_HOME=/opt/dynamo
+
+WORKDIR /
+COPY --chown=dynamo: --from=epp /epp /epp
+
+COPY --chown=dynamo: container/launch_message/frontend.txt /opt/dynamo/.launch_screen
+# Copy tests, benchmarks, deploy and components with correct ownership
+COPY --chown=dynamo: tests /workspace/tests
+COPY --chown=dynamo: examples /workspace/examples
+COPY --chown=dynamo: benchmarks /workspace/benchmarks
+COPY --chown=dynamo: deploy /workspace/deploy
+COPY --chown=dynamo: components/ /workspace/components/
+COPY --chown=dynamo: recipes/ /workspace/recipes/
+# Copy attribution files with correct ownership
+COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
+
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="/opt/dynamo/venv/bin:$PATH"
+# Copy virtual environment directly from dynamo_base (dev image)
+# This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
+# Copy uv to system /bin
+COPY --chown=dynamo: --from=dev /bin/uv /bin/uvx /bin/
+RUN uv python install $PYTHON_VERSION
+COPY --chown=dynamo: --from=dev /opt/dynamo/venv/ /opt/dynamo/venv/
+
+# Setup environment for all users
+USER root
+RUN chmod 755 /opt/dynamo/.launch_screen && \
+    echo 'source /opt/dynamo/venv/bin/activate' >> /etc/bash.bashrc && \
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
+
+USER dynamo
+
+ENTRYPOINT ["/epp"]
+CMD ["/bin/bash"]

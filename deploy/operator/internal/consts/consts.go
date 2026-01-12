@@ -95,6 +95,8 @@ const (
 	GroveRoleSuffixWorker = "wkr"
 
 	MainContainerName = "main"
+
+	RestartAnnotation = "nvidia.com/restartAt"
 )
 
 type MultinodeDeploymentType string

@@ -311,7 +311,7 @@ _Appears in:_
 | `model` _string_ | Model specifies the model to deploy (e.g., "Qwen/Qwen3-0.6B", "meta-llama/Llama-3-70b").<br />This is a high-level identifier for easy reference in kubectl output and logs.<br />The controller automatically sets this value in profilingConfig.config.deployment.model. |  | Required: \{\} <br /> |
 | `backend` _string_ | Backend specifies the inference backend for profiling.<br />The controller automatically sets this value in profilingConfig.config.engine.backend.<br />Profiling runs on real GPUs or via AIC simulation to collect performance data. |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
 | `useMocker` _boolean_ | UseMocker indicates whether to deploy a mocker DynamoGraphDeployment instead of<br />a real backend deployment. When true, the deployment uses simulated engines that<br />don't require GPUs, using the profiling data to simulate realistic timing behavior.<br />Mocker is available in all backend images and useful for large-scale experiments.<br />Profiling still runs against the real backend (specified above) to collect performance data. | false |  |
-| `enableGpuDiscovery` _boolean_ | EnableGpuDiscovery controls whether the profiler should automatically discover GPU<br />resources from the Kubernetes cluster nodes. When enabled, the profiler will override<br />any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,<br />num_gpus_per_node) with values detected from the cluster.<br />Requires cluster-wide node access permissions - only available with cluster-scoped operators. | false | Optional: \{\} <br /> |
+| `enableGpuDiscovery` _boolean_ | EnableGpuDiscovery controls whether the profiler should automatically discover GPU<br />resources from the Kubernetes cluster nodes. When enabled, the profiler will override<br />any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,<br />numGpusPerNode) with values detected from the cluster.<br />Requires cluster-wide node access permissions - only available with cluster-scoped operators. | false | Optional: \{\} <br /> |
 | `profilingConfig` _[ProfilingConfigSpec](#profilingconfigspec)_ | ProfilingConfig provides the complete configuration for the profiling job.<br />This configuration is passed directly to the profiler.<br />The structure matches the profile_sla config format exactly (see ProfilingConfigSpec for schema).<br />Note: deployment.model and engine.backend are automatically set from the high-level<br />modelName and backend fields and should not be specified in this config. |  | Required: \{\} <br /> |
 | `autoApply` _boolean_ | AutoApply indicates whether to automatically create a DynamoGraphDeployment<br />after profiling completes. If false, only the spec is generated and stored in status.<br />Users can then manually create a DGD using the generated spec. | false |  |
 | `deploymentOverrides` _[DeploymentOverridesSpec](#deploymentoverridesspec)_ | DeploymentOverrides allows customizing metadata for the auto-created DGD.<br />Only applicable when AutoApply is true. |  | Optional: \{\} <br /> |
@@ -434,6 +434,7 @@ _Appears in:_
 | `services` _object (keys:string, values:[DynamoComponentDeploymentSharedSpec](#dynamocomponentdeploymentsharedspec))_ | Services are the services to deploy as part of this deployment. |  | MaxProperties: 25 <br />Optional: \{\} <br /> |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
+| `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -452,6 +453,7 @@ _Appears in:_
 | `state` _string_ | State is a high-level textual status of the graph deployment lifecycle. |  |  |
 | `conditions` _[Condition](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#condition-v1-meta) array_ | Conditions contains the latest observed conditions of the graph deployment.<br />The slice is merged by type on patch updates. |  |  |
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  |  |
+| `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  |  |
 
 
 #### DynamoModel
@@ -740,6 +742,94 @@ _Appears in:_
 | `requests` _[ResourceItem](#resourceitem)_ | Requests specifies the minimum resources required by the component |  |  |
 | `limits` _[ResourceItem](#resourceitem)_ | Limits specifies the maximum resources allowed for the component |  |  |
 | `claims` _[ResourceClaim](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourceclaim-v1-core) array_ | Claims specifies resource claims for dynamic resource allocation |  |  |
+
+
+#### Restart
+
+
+
+
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `id` _string_ | ID is an arbitrary string that triggers a restart when changed.<br />Any modification to this value will initiate a restart of the graph deployment according to the strategy. |  | MinLength: 1 <br />Required: \{\} <br /> |
+| `strategy` _[RestartStrategy](#restartstrategy)_ | Strategy specifies the restart strategy for the graph deployment. |  | Optional: \{\} <br /> |
+
+
+#### RestartPhase
+
+_Underlying type:_ _string_
+
+
+
+
+
+_Appears in:_
+- [RestartStatus](#restartstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `Restarting` |  |
+| `Completed` |  |
+| `Failed` |  |
+
+
+#### RestartStatus
+
+
+
+RestartStatus contains the status of the restart of the graph deployment.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedID` _string_ | ObservedID is the restart ID that has been observed and is being processed.<br />Matches the Restart.ID field in the spec. |  |  |
+| `phase` _[RestartPhase](#restartphase)_ | Phase is the phase of the restart. |  |  |
+| `inProgress` _string array_ | InProgress contains the names of the services that are currently being restarted. |  |  |
+
+
+#### RestartStrategy
+
+
+
+
+
+
+
+_Appears in:_
+- [Restart](#restart)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[RestartStrategyType](#restartstrategytype)_ | Type specifies the restart strategy type. | Sequential | Enum: [Sequential Parallel] <br /> |
+| `order` _string array_ | Order specifies the order in which the services should be restarted. |  | Optional: \{\} <br /> |
+
+
+#### RestartStrategyType
+
+_Underlying type:_ _string_
+
+
+
+
+
+_Appears in:_
+- [RestartStrategy](#restartstrategy)
+
+| Field | Description |
+| --- | --- |
+| `Sequential` |  |
+| `Parallel` |  |
 
 
 #### ScalingAdapter

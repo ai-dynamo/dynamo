@@ -4,15 +4,14 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: test3-vllm-dsr1
+  name: vllm-dsr1
 spec:
   backendFramework: vllm
   pvcs:
-    - name: model-cache-pvc
+    - name: model-cache
       create: false
   services:
     Frontend:
-      dynamoNamespace: vllm-dsr1
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -26,8 +25,8 @@ spec:
             failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     decode:
-      dynamoNamespace: vllm-dsr1
       componentType: worker
+      subComponentType: decode
       replicas: 1
       multinode:
         nodeCount: 2
@@ -37,7 +36,7 @@ spec:
           custom:
             rdma/ib: "8"
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
@@ -58,7 +57,7 @@ spec:
             - name: VLLM_ALL2ALL_BACKEND
               value: deepep_low_latency
             - name: VLLM_MOE_DP_CHUNK_SIZE
-              value: "512"
+              value: "384"
             - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
@@ -67,8 +66,6 @@ spec:
               value: enabled
             - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
               value: "uniform_random"
-            - name: NVSHMEM_QP_DEPTH
-              value: "1512"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
@@ -93,8 +90,8 @@ spec:
                 --max-num-seqs 512 \
                 --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
     prefill:
-      dynamoNamespace: vllm-dsr1
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       multinode:
         nodeCount: 2
@@ -104,7 +101,7 @@ spec:
           custom:
             rdma/ib: "8"
       volumeMounts:
-        - name: model-cache-pvc
+        - name: model-cache
           mountPoint: /model-cache
       sharedMemory:
         size: 80Gi
@@ -125,7 +122,7 @@ spec:
             - name: VLLM_ALL2ALL_BACKEND
               value: deepep_high_throughput
             - name: VLLM_MOE_DP_CHUNK_SIZE
-              value: "512"
+              value: "384"
             - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
@@ -134,8 +131,6 @@ spec:
               value: enabled
             - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
               value: "uniform_random"
-            - name: NVSHMEM_QP_DEPTH
-              value: "1512"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
