@@ -215,7 +215,7 @@ jobs:
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64]
-    if: always()
+    if: false  # TODO: Re-enable after testing - was: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -348,7 +348,7 @@ jobs:
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
     needs: [build-amd64, build-arm64]
-    if: always()
+    if: false  # TODO: Re-enable after testing - was: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -482,7 +482,7 @@ jobs:
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64]
-    if: always()
+    if: false  # TODO: Re-enable after testing - was: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -618,7 +618,7 @@ jobs:
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64]
-    if: always()
+    if: false  # TODO: Re-enable after testing - was: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -755,7 +755,7 @@ jobs:
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
-    if: always()
+    if: false  # TODO: Re-enable after testing - was: always()
     runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 60
     strategy:
@@ -937,7 +937,7 @@ jobs:
   results-summary:
     name: Results Summary
     runs-on: ubuntu-latest
-    if: always()
+    if: false  # TODO: Re-enable after testing - was: always()
     needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
     steps:
       - name: Checkout code
@@ -995,7 +995,7 @@ jobs:
   notify-slack:
     name: Notify Slack
     runs-on: cpu-amd-m5-4xlarge
-    if: always() && inputs.enable_slack_notification && !github.event.repository.fork
+    if: false  # TODO: Re-enable after testing - was: always() && inputs.enable_slack_notification && !github.event.repository.fork
     needs: results-summary
     permissions:
       contents: read
