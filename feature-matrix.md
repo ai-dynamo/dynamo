@@ -18,7 +18,7 @@ This document provides a comprehensive compatibility matrix for key Dynamo featu
 | **Disaggregated Serving** | ✅ | ✅ | ✅ | [Design Doc][disagg] |
 | **KV-Aware Routing** | ✅ | ✅ | ✅ | [Router Doc][kv-routing] |
 | **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
-| **KV Block Manager** | ✅ | ✅ | ❌ | [KVBM Doc][kvbm] |
+| **KV Block Manager** | ✅ | ✅ | 🚧 | [KVBM Doc][kvbm] |
 | **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
 | **Multimodal (Video)** | ✅ | ❌ | ❌ | [Multimodal Doc][mm] |
 | **Multimodal (Audio)** | 🧪 | ❌ | ❌ | [Multimodal Doc][mm] |
@@ -90,13 +90,13 @@ SGLang is optimized for high-throughput serving with fast primitives, providing 
 | **Disaggregated Serving** | — | | | | | | | | | |
 | **KV-Aware Routing** | ✅ | — | | | | | | | | |
 | **SLA-Based Planner** | ✅ | ✅ | — | | | | | | | |
-| **KV Block Manager** | ❌ | ❌ | ❌ | — | | | | | | |
-| **Multimodal** | ✅<sup>2</sup> | ❌<sup>1</sup> | — | ❌ | — | | | | | |
-| **Request Migration** | ✅ | ✅ | ✅ | ❌ | ✅ | — | | | | |
-| **Request Cancellation** | ⚠️<sup>3</sup> | ✅ | ✅ | ❌ | ⚠️ | ✅ | — | | | |
-| **LoRA** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | — | | |
-| **Tool Calling** | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ❌ | — | |
-| **Speculative Decoding** | 🚧 | 🚧 | — | ❌ | — | 🚧 | — | ❌ | 🚧 | — |
+| **KV Block Manager** | 🚧 | 🚧 | 🚧 | — | | | | | | |
+| **Multimodal** | ✅<sup>2</sup> | ❌<sup>1</sup> | — | 🚧 | — | | | | | |
+| **Request Migration** | ✅ | ✅ | ✅ | 🚧 | ✅ | — | | | | |
+| **Request Cancellation** | ⚠️<sup>3</sup> | ✅ | ✅ | 🚧 | ⚠️ | ✅ | — | | | |
+| **LoRA** | ❌ | ❌ | ❌ | 🚧 | ❌ | ❌ | ❌ | — | | |
+| **Tool Calling** | ✅ | ✅ | ✅ | 🚧 | ✅ | ✅ | ✅ | ❌ | — | |
+| **Speculative Decoding** | 🚧 | 🚧 | — | 🚧 | — | 🚧 | — | ❌ | 🚧 | — |
 
 > **Notes:**
 > 1. **Multimodal + KV-Aware Routing**: Not supported. ([Source][kv-routing])
