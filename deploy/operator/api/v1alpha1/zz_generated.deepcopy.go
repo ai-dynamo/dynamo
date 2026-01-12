@@ -39,9 +39,9 @@ package v1alpha1
 
 import (
 	"k8s.io/api/autoscaling/v2"
-	corev1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
@@ -97,7 +97,7 @@ func (in *BaseStatus) DeepCopyInto(out *BaseStatus) {
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -356,7 +356,7 @@ func (in *DynamoCheckpointStatus) DeepCopyInto(out *DynamoCheckpointStatus) {
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -466,7 +466,7 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 	}
 	if in.Envs != nil {
 		in, out := &in.Envs, &out.Envs
-		*out = make([]corev1.EnvVar, len(*in))
+		*out = make([]v1.EnvVar, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -508,12 +508,12 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 	}
 	if in.LivenessProbe != nil {
 		in, out := &in.LivenessProbe, &out.LivenessProbe
-		*out = new(corev1.Probe)
+		*out = new(v1.Probe)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.ReadinessProbe != nil {
 		in, out := &in.ReadinessProbe, &out.ReadinessProbe
-		*out = new(corev1.Probe)
+		*out = new(v1.Probe)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.Replicas != nil {
@@ -569,7 +569,7 @@ func (in *DynamoComponentDeploymentStatus) DeepCopyInto(out *DynamoComponentDepl
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -742,7 +742,7 @@ func (in *DynamoGraphDeploymentRequestStatus) DeepCopyInto(out *DynamoGraphDeplo
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -906,7 +906,7 @@ func (in *DynamoGraphDeploymentSpec) DeepCopyInto(out *DynamoGraphDeploymentSpec
 	}
 	if in.Envs != nil {
 		in, out := &in.Envs, &out.Envs
-		*out = make([]corev1.EnvVar, len(*in))
+		*out = make([]v1.EnvVar, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -933,7 +933,7 @@ func (in *DynamoGraphDeploymentStatus) DeepCopyInto(out *DynamoGraphDeploymentSt
 	*out = *in
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -1058,7 +1058,7 @@ func (in *DynamoModelStatus) DeepCopyInto(out *DynamoModelStatus) {
 	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]v1.Condition, len(*in))
+		*out = make([]metav1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -1124,12 +1124,12 @@ func (in *ExtraPodSpec) DeepCopyInto(out *ExtraPodSpec) {
 	*out = *in
 	if in.PodSpec != nil {
 		in, out := &in.PodSpec, &out.PodSpec
-		*out = new(corev1.PodSpec)
+		*out = new(v1.PodSpec)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.MainContainer != nil {
 		in, out := &in.MainContainer, &out.MainContainer
-		*out = new(corev1.Container)
+		*out = new(v1.Container)
 		(*in).DeepCopyInto(*out)
 	}
 }
@@ -1314,12 +1314,12 @@ func (in *ProfilingConfigSpec) DeepCopyInto(out *ProfilingConfigSpec) {
 	}
 	if in.Resources != nil {
 		in, out := &in.Resources, &out.Resources
-		*out = new(corev1.ResourceRequirements)
+		*out = new(v1.ResourceRequirements)
 		(*in).DeepCopyInto(*out)
 	}
 	if in.Tolerations != nil {
 		in, out := &in.Tolerations, &out.Tolerations
-		*out = make([]corev1.Toleration, len(*in))
+		*out = make([]v1.Toleration, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
@@ -1373,7 +1373,7 @@ func (in *Resources) DeepCopyInto(out *Resources) {
 	}
 	if in.Claims != nil {
 		in, out := &in.Claims, &out.Claims
-		*out = make([]corev1.ResourceClaim, len(*in))
+		*out = make([]v1.ResourceClaim, len(*in))
 		copy(*out, *in)
 	}
 }
