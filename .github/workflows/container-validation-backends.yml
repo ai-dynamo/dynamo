@@ -49,7 +49,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-latest
-    needs: [changed-files, vllm, sglang, trtllm, operator]
+    needs: [changed-files, vllm, sglang, trtllm, operator]  # THIS list determines blocking jobs
     if: always()
     steps:
       - name: "Check all dependent jobs"
@@ -132,6 +132,73 @@ jobs:
           azure_push: 'true'
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
+  vllm-cuda-13:
+    needs: changed-files
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: vllm-cuda-13 (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: vllm
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          base_image_tag: '25.11-cuda13.0-devel-ubuntu24.04'
+          runtime_image_tag: '13.0.2-runtime-ubuntu24.04'
+          cuda_version: '13.0'
+          torch_backend: 'cu130'
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda13-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-cuda13-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      - name: Run tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          # GH ARM runners have no GPUs, run CPU tests only on ARM
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && 'pre_merge and vllm and (gpu_0 or gpu_1)' || 'pre_merge and vllm and gpu_0' }}
+          framework: "vllm"
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
+
   vllm:
     needs: changed-files
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
@@ -170,7 +237,7 @@ jobs:
           platform: 'linux/${{ matrix.platform.arch }}'
           base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
           runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
-          cuda_version: ${{ matrix.platform.arch == 'arm64' && '12.9' || '' }}
+          cuda_version: '12.9'
           torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -182,24 +249,89 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-{0}', matrix.platform.arch) || '' }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-vllm-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-vllm-cuda12-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-vllm-cuda12-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and vllm and (gpu_0 or gpu_1)"
+          # GH ARM runners have no GPUs, run CPU tests only on ARM
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && 'pre_merge and vllm and (gpu_0 or gpu_1)' || 'pre_merge and vllm and gpu_0' }}
           framework: "vllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
+
+  sglang-cuda-13:
+    needs: changed-files
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+    name: sglang-cuda-13 (${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: sglang
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          cuda_version: '13.0'
+          torch_backend: 'cu130'
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda13-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-cuda13-{0}', matrix.platform.arch) || '' }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      - name: Run tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          # GH arm runners have no GPUs, testing arm containers on cpu only
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && 'pre_merge and sglang and (gpu_0 or gpu_1)' || 'pre_merge and sglang and gpu_0' }}
+          framework: "sglang"
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
 
   sglang:
     needs: changed-files
@@ -235,6 +367,7 @@ jobs:
         uses: ./.github/actions/docker-build
         with:
           framework: sglang
+          cuda_version: '12.9'
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -247,19 +380,21 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-{0}', matrix.platform.arch) || '' }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-sglang-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-sglang-cuda12-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-sglang-cuda12-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run tests
-        if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and sglang and (gpu_0 or gpu_1)"
+          # GH arm runners have no GPUs, testing arm containers on cpu only
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && 'pre_merge and sglang and (gpu_0 or gpu_1)' || 'pre_merge and sglang and gpu_0' }}
           framework: "sglang"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -300,6 +435,7 @@ jobs:
         uses: ./.github/actions/docker-build
         with:
           framework: trtllm
+          cuda_version: '13.0'
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -312,19 +448,25 @@ jobs:
         uses: ./.github/actions/docker-tag-push
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-{0}', matrix.platform.arch) || '' }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-trtllm-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-trtllm-cuda13-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-trtllm-cuda13-{0}', matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
       - name: Run tests
+        # TODO: enable testing on ARM when these tests stop failing on collection on machines without GPUs:
+        #  components/src/dynamo/trtllm/tests/test_trtllm_autodeploy.py
+        #  components/src/dynamo/trtllm/tests/test_trtllm_unit.py
         if: ${{ matrix.platform.arch != 'arm64' }}
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
-          pytest_marks: "pre_merge and trtllm and (gpu_0 or gpu_1)"
+          # GH arm runners have no GPUs, testing arm containers on cpu only
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && 'pre_merge and trtllm and (gpu_0 or gpu_1)' || 'pre_merge and trtllm and gpu_0' }}
           framework: "trtllm"
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}

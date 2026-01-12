@@ -84,9 +84,9 @@ where
                         break;
                     }
                 }
-                Ok(DiscoveryEvent::Removed(instance_id)) => {
+                Ok(DiscoveryEvent::Removed(id)) => {
                     // Remove from state and send update
-                    state.remove(&instance_id);
+                    state.remove(&id.instance_id());
                     if tx.send(state.clone()).is_err() {
                         tracing::debug!("watch_and_extract_field receiver dropped, stopping");
                         break;

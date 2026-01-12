@@ -34,6 +34,12 @@ from tests.utils.payloads import LoraTestChatPayload, ToolCallingChatPayload
 logger = logging.getLogger(__name__)
 
 
+def _is_cuda13() -> bool:
+    v = os.environ.get("CUDA_VERSION", "")
+    # handles "13", "13.0", "13.0.1", etc.
+    return v.startswith("13")
+
+
 @dataclass
 class VLLMConfig(EngineConfig):
     """Configuration for vLLM test scenarios"""
@@ -111,6 +117,11 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+            pytest.mark.xfail(
+                _is_cuda13(),
+                reason="lmcache does not support CUDA 13 as of v0.3.11",
+                strict=False,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         request_payloads=[
@@ -128,6 +139,11 @@ vllm_configs = {
             pytest.mark.gpu_1,
             pytest.mark.pre_merge,
             pytest.mark.timeout(360),  # 3x estimated time (70s) + download time (150s)
+            pytest.mark.xfail(
+                _is_cuda13(),
+                reason="lmcache does not support CUDA 13 as of v0.3.11",
+                strict=False,
+            ),
         ],
         model="Qwen/Qwen3-0.6B",
         env={
