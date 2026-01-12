@@ -97,6 +97,6 @@ fi
 
 # Step 6: Build the EPP image
 echo "Building the custom EPP image for GAIE..."
-make dynamo-image-local-load
+make dynamo-image-load
 
 echo "EPP image with Dynamo KV routing built"
