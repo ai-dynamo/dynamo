@@ -536,7 +536,7 @@ impl PyKvConnectorWorker {
 }
 
 use cudarc::driver::sys::{
-    CUcontext, CUevent, cuCtxGetCurrent, cuEventQuery, cuEventSynchronize, cudaError_enum,
+    CUcontext, CUevent, cuCtxGetCurrent, cuEventSynchronize, cudaError_enum,
 };
 use std::ptr;
 
@@ -560,11 +560,4 @@ pub fn event_sync_blocking(event: u64) {
         cudaError_enum::CUDA_SUCCESS,
         "cuEventSynchronize failed"
     );
-}
-
-/// Non-blocking check if CUDA event has completed.
-/// Returns true if event is complete, false if still pending.
-pub fn event_query(event: u64) -> bool {
-    let status = unsafe { cuEventQuery(event as CUevent) };
-    status == cudaError_enum::CUDA_SUCCESS
 }
