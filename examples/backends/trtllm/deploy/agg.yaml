@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-agg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -16,7 +15,6 @@ spec:
           image: my-registry/tensorrtllm-runtime:my-tag
     TRTLLMWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: trtllm-agg
       componentType: worker
       replicas: 1
       resources:

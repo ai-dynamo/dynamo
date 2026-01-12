@@ -9,7 +9,6 @@ spec:
   backendFramework: vllm
   services:
     Frontend:
-      dynamoNamespace: agg-llava
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -17,7 +16,6 @@ spec:
           image: my-registry/vllm-runtime:my-tag
     EncodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-llava
       componentType: worker
       replicas: 1
       resources:
@@ -34,7 +32,6 @@ spec:
             - python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf
     VLMWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-llava
       componentType: worker
       replicas: 1
       resources:
@@ -51,7 +48,6 @@ spec:
             - python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type prefill
     Processor:
       envFromSecret: hf-token-secret
-      dynamoNamespace: agg-llava
       componentType: worker
       replicas: 1
       resources:

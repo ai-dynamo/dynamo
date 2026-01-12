@@ -122,7 +122,6 @@ spec:
   backendFramework: trtllm
   services:
     Frontend:
-      dynamoNamespace: trtllm-disagg-multinode
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -137,7 +136,6 @@ spec:
           - /bin/sh
           - -c
     prefill:
-      dynamoNamespace: trtllm-disagg-multinode
       componentType: worker
       subComponentType: prefill
       replicas: 1
@@ -195,7 +193,6 @@ spec:
             configMap:
               name: prefill-config
     decode:
-      dynamoNamespace: trtllm-disagg-multinode
       componentType: worker
       subComponentType: decode
       replicas: 1

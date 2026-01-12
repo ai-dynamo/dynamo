@@ -28,22 +28,38 @@ import (
 // This validator is used by both DynamoComponentDeploymentValidator and DynamoGraphDeploymentValidator
 // to provide consistent validation logic for shared spec fields.
 type SharedSpecValidator struct {
-	spec      *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-	fieldPath string // e.g., "spec" for DCD, "spec.services[foo]" for DGD
+	spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+	fieldPath           string // e.g., "spec" for DCD, "spec.services[foo]" for DGD
+	calculatedNamespace string // The namespace that will be used: {k8s_namespace}-{dgd_name}
 }
 
 // NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
 // fieldPath is used to provide context in error messages (e.g., "spec" or "spec.services[main]").
-func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string) *SharedSpecValidator {
+// calculatedNamespace is the namespace the operator will use:
+//   - If GlobalDynamoNamespace is true: "dynamo" (global constant)
+//   - Otherwise: {k8s_namespace}-{dgd_name}
+func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string) *SharedSpecValidator {
 	return &SharedSpecValidator{
-		spec:      spec,
-		fieldPath: fieldPath,
+		spec:                spec,
+		fieldPath:           fieldPath,
+		calculatedNamespace: calculatedNamespace,
 	}
 }
 
 // Validate performs validation on the shared spec fields.
 // Returns warnings (e.g., deprecation notices) and error if validation fails.
 func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
+	// Collect warnings (e.g., deprecation notices)
+	var warnings admission.Warnings
+
+	// Warn about deprecated dynamoNamespace field
+	if v.spec.DynamoNamespace != nil && *v.spec.DynamoNamespace != "" {
+		warnings = append(warnings, fmt.Sprintf(
+			"%s.dynamoNamespace is deprecated and ignored. Value '%s' will be replaced with '%s'. "+
+				"Remove this field from your configuration",
+			v.fieldPath, *v.spec.DynamoNamespace, v.calculatedNamespace))
+	}
+
 	// Validate replicas if specified
 	if v.spec.Replicas != nil && *v.spec.Replicas < 0 {
 		return nil, fmt.Errorf("%s.replicas must be non-negative", v.fieldPath)
@@ -67,9 +83,6 @@ func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
 			return nil, err
 		}
 	}
-
-	// Collect warnings (e.g., deprecation notices)
-	var warnings admission.Warnings
 
 	// Check for deprecated autoscaling field
 	//nolint:staticcheck // SA1019: Intentionally checking deprecated field to warn users
