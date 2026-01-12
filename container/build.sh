@@ -1004,6 +1004,7 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
 
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
 
+    # Pass the locally-built EPP image to buildx
     BUILD_CONTEXT_ARG+=" --build-context epp-image=docker-image://${EPP_IMAGE_TAG}"
 fi
 
