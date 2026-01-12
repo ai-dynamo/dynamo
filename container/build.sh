@@ -183,6 +183,14 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
+        --nixl-ref)
+            if [ "$2" ]; then
+                NIXL_REF=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
         --tensorrtllm-pip-wheel-dir)
             if [ "$2" ]; then
                 TENSORRTLLM_PIP_WHEEL_DIR=$2
