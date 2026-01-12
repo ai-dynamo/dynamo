@@ -15,7 +15,7 @@ name: Docker Build and Test
 on:
   push:
     branches:
-      - ops-2438-ci # todo remove after development
+      - ops-2438-ci-cuda-matrix # todo remove after development
       - main
       - "pull-request/[0-9]+"
       - release/*.*.*
