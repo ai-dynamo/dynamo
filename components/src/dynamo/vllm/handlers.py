@@ -175,6 +175,7 @@ def build_sampling_params(
 def build_sampling_params_openai(
     request: Dict[str, Any],
     default_sampling_params: Dict[str, Any],
+    model_max_len: int | None = None,
 ) -> SamplingParams:
     """
     Build SamplingParams from an OpenAI-compatible request format.
@@ -182,6 +183,7 @@ def build_sampling_params_openai(
     Args:
         request: The OpenAI-style request dict with parameters like temperature, max_tokens, etc.
         default_sampling_params: Default sampling parameters to initialize with
+        model_max_len: Model's max context length, used as default max_tokens if not specified
 
     Returns:
         SamplingParams configured from the request
@@ -211,6 +213,8 @@ def build_sampling_params_openai(
     # Handle max_tokens
     if "max_tokens" in request and request["max_tokens"] is not None:
         sampling_params.max_tokens = request["max_tokens"]
+    elif model_max_len is not None:
+        sampling_params.max_tokens = model_max_len
 
     # Handle stop sequences
     if "stop" in request and request["stop"] is not None:
@@ -1242,7 +1246,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         # Build sampling params from OpenAI-style request
         sampling_params = build_sampling_params_openai(
-            request, self.default_sampling_params
+            request, self.default_sampling_params, self.model_max_len
         )
 
         dp_rank = request.get("dp_rank", None)
