@@ -50,7 +50,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:ad7c569b3b424311237d06477c7bb6c2efb58f831f0da944ec2c5e15c819a498
           command:
             - python
             - -m
@@ -88,7 +88,7 @@ spec:
           value: "9090"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.6.1
+          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:ad7c569b3b424311237d06477c7bb6c2efb58f831f0da944ec2c5e15c819a498
           command:
             - python
             - -m

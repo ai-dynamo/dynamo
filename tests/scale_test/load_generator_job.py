@@ -31,6 +31,8 @@ class LoadGeneratorJob:
         job_name: str = "scale-test-load-generator",
         num_pods: int = 1,
         num_processes_per_pod: int = 1,
+        log_responses: bool = True,
+        log_sample_rate: float = 1.0,
     ):
         self.namespace = namespace
         self.frontend_urls = frontend_urls
@@ -41,6 +43,8 @@ class LoadGeneratorJob:
         self.job_name = job_name
         self.num_pods = num_pods
         self.num_processes_per_pod = num_processes_per_pod
+        self.log_responses = log_responses
+        self.log_sample_rate = max(0.0, min(1.0, log_sample_rate))
         if self.num_pods < 1:
             raise ValueError("num_pods must be at least 1")
         if self.num_processes_per_pod < 1:
@@ -67,6 +71,8 @@ class LoadGeneratorJob:
                 "value": str(self.num_processes_per_pod),
             },
             {"name": "LOAD_GEN_TOTAL_PODS", "value": str(self.num_pods)},
+            {"name": "LOAD_GEN_LOG_RESPONSES", "value": "1" if self.log_responses else "0"},
+            {"name": "LOAD_GEN_LOG_SAMPLE_RATE", "value": str(self.log_sample_rate)},
         ]
 
     def _build_configmap_manifest(self) -> dict:

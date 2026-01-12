@@ -6,13 +6,15 @@ Standalone load generator script for Kubernetes Jobs.
 
 Configuration via environment variables:
     LOAD_GEN_URLS, LOAD_GEN_MODEL, LOAD_GEN_DURATION, LOAD_GEN_QPS_PER_POD,
-    LOAD_GEN_MAX_TOKENS, LOAD_GEN_NUM_PROCESSES, LOAD_GEN_TOTAL_PODS
+    LOAD_GEN_MAX_TOKENS, LOAD_GEN_NUM_PROCESSES, LOAD_GEN_TOTAL_PODS,
+    LOAD_GEN_LOG_RESPONSES, LOAD_GEN_LOG_SAMPLE_RATE
 """
 
 import asyncio
 import json
 import multiprocessing
 import os
+import random
 import sys
 import time
 
@@ -35,10 +37,18 @@ def get_config() -> dict:
         "max_tokens": int(os.environ.get("LOAD_GEN_MAX_TOKENS", "30")),
         "num_processes": int(os.environ.get("LOAD_GEN_NUM_PROCESSES", "1")),
         "total_pods": int(os.environ.get("LOAD_GEN_TOTAL_PODS", "1")),
+        "log_responses": os.environ.get("LOAD_GEN_LOG_RESPONSES", "0") == "1",
+        "log_sample_rate": float(os.environ.get("LOAD_GEN_LOG_SAMPLE_RATE", "0.1")),
     }
 
 
-async def send_request(client: AsyncOpenAI, model: str, max_tokens: int) -> tuple:
+async def send_request(
+    client: AsyncOpenAI,
+    model: str,
+    max_tokens: int,
+    log_responses: bool = False,
+    log_sample_rate: float = 0.1,
+) -> tuple:
     try:
         response = await client.chat.completions.create(
             model=model,
@@ -46,14 +56,29 @@ async def send_request(client: AsyncOpenAI, model: str, max_tokens: int) -> tupl
             max_tokens=max_tokens,
             stream=False,
         )
-        return True, response.usage.completion_tokens if response.usage else 0
+        tokens = response.usage.completion_tokens if response.usage else 0
+
+        if log_responses and random.random() < log_sample_rate:
+            content = ""
+            if response.choices and len(response.choices) > 0:
+                content = response.choices[0].message.content or ""
+            print(f"[Process {os.getpid()}] Response ({tokens} tokens): {content}")
+
+        return True, tokens
     except Exception as e:
         print(f"[Process {os.getpid()}] Request failed: {e}", file=sys.stderr)
         return False, 0
 
 
 async def run_load_test_worker(
-    process_id: int, qps: float, duration: int, urls: list, model: str, max_tokens: int
+    process_id: int,
+    qps: float,
+    duration: int,
+    urls: list,
+    model: str,
+    max_tokens: int,
+    log_responses: bool = False,
+    log_sample_rate: float = 0.1,
 ) -> dict:
     print(
         f"[Process {process_id}] Starting: {duration}s, {qps:.2f} QPS, {len(urls)} targets"
@@ -76,7 +101,9 @@ async def run_load_test_worker(
 
     async def send_and_record(url: str) -> None:
         req_start = time.time()
-        success, tokens = await send_request(clients[url], model, max_tokens)
+        success, tokens = await send_request(
+            clients[url], model, max_tokens, log_responses, log_sample_rate
+        )
         latency = time.time() - req_start
 
         if success:
@@ -114,11 +141,22 @@ def worker_process(
     urls: list,
     model: str,
     max_tokens: int,
+    log_responses: bool,
+    log_sample_rate: float,
     result_queue: multiprocessing.Queue,
 ) -> None:
     try:
         result = asyncio.run(
-            run_load_test_worker(process_id, qps, duration, urls, model, max_tokens)
+            run_load_test_worker(
+                process_id,
+                qps,
+                duration,
+                urls,
+                model,
+                max_tokens,
+                log_responses,
+                log_sample_rate,
+            )
         )
         result_queue.put(result)
     except Exception as e:
@@ -218,6 +256,8 @@ def main() -> int:
     max_tokens = config["max_tokens"]
     num_processes = config["num_processes"]
     total_pods = config["total_pods"]
+    log_responses = config["log_responses"]
+    log_sample_rate = config["log_sample_rate"]
 
     if not urls:
         print("ERROR: No URLs configured", file=sys.stderr)
@@ -235,11 +275,22 @@ def main() -> int:
         f"QPS: {qps_per_pod:.2f}/pod, {qps_per_pod / num_processes:.2f}/process, {qps_per_pod * total_pods:.2f} total"
     )
     print(f"Duration: {duration}s, Frontends: {len(urls)}")
+    if log_responses:
+        print(f"Response logging: enabled (sample rate: {log_sample_rate:.0%})")
     print("=" * 70 + "\n")
 
     if num_processes == 1:
         result = asyncio.run(
-            run_load_test_worker(0, qps_per_pod, duration, urls, model, max_tokens)
+            run_load_test_worker(
+                0,
+                qps_per_pod,
+                duration,
+                urls,
+                model,
+                max_tokens,
+                log_responses,
+                log_sample_rate,
+            )
         )
         results = [result]
     else:
@@ -258,6 +309,8 @@ def main() -> int:
                     urls,
                     model,
                     max_tokens,
+                    log_responses,
+                    log_sample_rate,
                     result_queue,
                 ),
             )
