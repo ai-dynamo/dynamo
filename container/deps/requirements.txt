@@ -14,7 +14,7 @@
 accelerate
 aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@9db6a1a5011c0ff80b5349f377f17846c5274b02
 aiofiles
-aiperf @ git+https://github.com/ai-dynamo/aiperf.git@8c51b4381304a63965abbc6f8272cf4e964d0869
+aiperf @ git+https://github.com/ai-dynamo/aiperf.git@47ae46d9e32d59405a3e71cdba23b548195449ce
 av==15.0.0
 fastapi==0.120.1
 ftfy==6.3.1
@@ -54,8 +54,8 @@ tensorboardX==2.6.2.2
 # - vLLM 0.11.0: >=4.55.2, vLLM 0.11.2: >=4.56.0,<5
 # - TensorRT-LLM 1.2.0rc6: ==4.56.0
 # - SGLang 0.5.7: ==4.57.1
-# Using >=4.56.0 and <=4.57.1 to satisfy all frameworks
-transformers>=4.56.0,<=4.57.1
+# Using >=4.56.0 to satisfy all frameworks
+transformers>=4.56.0
 types-aiofiles==25.1.0.20251011
 types-PyYAML==6.0.12.20250915
 uvicorn==0.38.0
