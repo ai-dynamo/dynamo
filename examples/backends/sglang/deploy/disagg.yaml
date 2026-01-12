@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: sglang-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -16,7 +15,6 @@ spec:
           image: my-registry/sglang-runtime:my-tag
     decode:
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
       componentType: worker
       subComponentType: decode
       replicas: 1
@@ -52,7 +50,6 @@ spec:
             - "0.0.0.0"
     prefill:
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg
       componentType: worker
       subComponentType: prefill
       replicas: 1
