@@ -452,13 +452,6 @@ FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 RUN apt remove -y python3-apt &&\
     pip uninstall -y termplotlib
 
-# Install gpgv for verification of GPG keys
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        gnupg2 \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
 # This ARG is still utilized for SGLANG Version extraction
 ARG RUNTIME_IMAGE_TAG
 WORKDIR /workspace
@@ -480,6 +473,13 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # Set umask globally for all subsequent RUN commands (must be done as root before USER dynamo)
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # required for verification of GPG keys
+        gnupg2 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
