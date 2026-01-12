@@ -1286,6 +1286,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         "choices": [choice_data],
                     }
 
+                    if output.finish_reason:
+                        chunk["usage"] = BaseWorkerHandler._build_completion_usage(
+                            request_output=res,
+                        )
+
                     yield chunk
 
             except EngineDeadError as e:

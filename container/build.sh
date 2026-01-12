@@ -29,7 +29,7 @@ PLATFORM=linux/amd64
 commit_id=${commit_id:-$(git rev-parse --short HEAD)}
 
 # if COMMIT_ID matches a TAG use that
-current_tag=${current_tag:-$($(git describe --tags --exact-match 2>/dev/null | sed 's/^v//') || true)}
+current_tag=${current_tag:-$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || true)}
 
 # Get latest TAG and add COMMIT_ID for dev
 latest_tag=${latest_tag:-$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//' || true)}
@@ -89,7 +89,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="9ba14263db0045ed3fa0860f949b5ce320107eb3" # 1.2.0rc6
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="e4a6c9995dacf66bab4410475a6774152f95a0a6" # 1.2.0rc6.post1
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -98,7 +98,7 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6.post1"
 TENSORRTLLM_PIP_WHEEL=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -118,8 +118,10 @@ NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
+SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
-SGLANG_PYTHON_VERSION="3.10"
+SGLANG_CUDA_VERSION_CU13="13.0.1"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
 
 # GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
 GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
@@ -176,6 +178,14 @@ get_options() {
                 echo "INFO: Setting CUDA_VERSION to $2"
                 CUDA_VERSION=$2
                 BUILD_ARGS+=" --build-arg CUDA_VERSION=$2 "
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --nixl-ref)
+            if [ "$2" ]; then
+                NIXL_REF=$2
                 shift
             else
                 missing_requirement "$1"
@@ -419,6 +429,17 @@ get_options() {
             BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${VLLM_RUNTIME_IMAGE_TAG_CU13} "
             echo "INFO: Overriding base image tag for vLLM with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
         fi
+
+
+        if [[ $FRAMEWORK == "SGLANG" ]] && [[ $CUDA_VERSION == "13."* ]]; then
+            BASE_IMAGE_TAG=$SGLANG_BASE_IMAGE_TAG_CU13
+            BUILD_ARGS+=" --build-arg BASE_IMAGE_TAG=${SGLANG_BASE_IMAGE_TAG_CU13} "
+            SGLANG_CUDA_VERSION="${SGLANG_CUDA_VERSION_CU13}"
+            RUNTIME_IMAGE_TAG="${SGLANG_RUNTIME_IMAGE_TAG_CU13}"
+            BUILD_ARGS+=" --build-arg RUNTIME_IMAGE_TAG=${RUNTIME_IMAGE_TAG} "
+            echo "INFO: Overriding base image tag for SGLang with CUDA 13: $BASE_IMAGE_TAG AND RUNTIME_IMAGE_TAG: $RUNTIME_IMAGE_TAG"
+        fi
+
 
         if [ -z "$BASE_IMAGE" ]; then
             error "ERROR: Framework $FRAMEWORK without BASE_IMAGE"
@@ -923,11 +944,11 @@ fi
 
 if [[ $FRAMEWORK == "SGLANG" ]]; then
     echo "Customizing Python, CUDA, and framework images for sglang images"
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${SGLANG_PYTHON_VERSION}"
     BUILD_ARGS+=" --build-arg CUDA_VERSION=${SGLANG_CUDA_VERSION}"
-else
-    BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
 fi
+
+BUILD_ARGS+=" --build-arg PYTHON_VERSION=${PYTHON_VERSION}"
+
 # Add sccache build arguments
 if [ "$USE_SCCACHE" = true ]; then
     BUILD_ARGS+=" --build-arg USE_SCCACHE=true"

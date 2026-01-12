@@ -1306,12 +1306,12 @@ fn spawn_prefill_watcher(
                         }
                     }
                 }
-                DiscoveryEvent::Removed(instance_id) => {
+                DiscoveryEvent::Removed(id) => {
                     // Log removal for observability
                     // Note: The PrefillRouter remains active - worker availability
                     // is handled dynamically by the underlying Client's instance tracking
                     tracing::debug!(
-                        instance_id = instance_id,
+                        instance_id = id.instance_id(),
                         "Prefill worker instance removed from discovery"
                     );
                 }

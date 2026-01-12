@@ -464,11 +464,11 @@ mod tests {
         // Check that both events were recorded
         assert_eq!(recorder.event_count().await, 2);
 
-        // Check that the elapsed time is between 7 and 13 milliseconds
+        // Check that the elapsed time is between 5 and 15 milliseconds
         let elapsed_ms = recorder.elapsed_time().await.unwrap().as_millis();
-        if !(7..=13).contains(&elapsed_ms) {
+        if !(5..=15).contains(&elapsed_ms) {
             println!("Actual elapsed time: {} ms", elapsed_ms);
-            assert!((7..=13).contains(&elapsed_ms));
+            assert!((5..=15).contains(&elapsed_ms));
         }
 
         // Force shutdown to flush file

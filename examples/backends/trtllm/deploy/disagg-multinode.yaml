@@ -93,7 +93,6 @@ spec:
       volumeMounts:
         - name: models
           mountPoint: /models
-      dynamoNamespace: trtllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -111,7 +110,6 @@ spec:
       volumeMounts:
         - name: models
           mountPoint: /models
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -149,7 +147,6 @@ spec:
       volumeMounts:
         - name: models
           mountPoint: /models
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

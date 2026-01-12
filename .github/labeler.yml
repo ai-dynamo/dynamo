@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Configuration for actions/labeler
+# Labels are applied to PRs based on changed files
+
+# Backend labels
+backend::vllm:
+  - changed-files:
+      - any-glob-to-any-file:
+          - components/src/dynamo/vllm/**
+          - container/Dockerfile.vllm
+          - container/deps/requirements.vllm.txt
+          - container/deps/vllm/**
+          - examples/backends/vllm/**
+
+backend::sglang:
+  - changed-files:
+      - any-glob-to-any-file:
+          - components/src/dynamo/sglang/**
+          - container/Dockerfile.sglang
+          - examples/backends/sglang/**
+
+backend::trtllm:
+  - changed-files:
+      - any-glob-to-any-file:
+          - components/src/dynamo/trtllm/**
+          - container/Dockerfile.trtllm
+          - container/deps/trtllm/**
+          - container/build_trtllm_wheel.sh
+          - examples/backends/trtllm/**
+
+# Component labels
+router:
+  - changed-files:
+      - any-glob-to-any-file:
+          - components/src/dynamo/router/**
+          - lib/llm/src/kv_router/**
+
+frontend:
+  - changed-files:
+      - any-glob-to-any-file:
+          - components/src/dynamo/frontend/**
+          - lib/llm/src/http/**
+          - lib/llm/src/grpc/**
+          - lib/llm/src/preprocessor/**
+          - lib/llm/src/protocols/**
+          - lib/llm/src/preprocessor.rs
+          - lib/llm/src/tokenizers.rs
+
+planner:
+  - changed-files:
+      - any-glob-to-any-file:
+          - components/src/dynamo/planner/**
+          - tests/planner/**
+
+# Deployment labels
+deployment::k8s:
+  - changed-files:
+      - any-glob-to-any-file:
+          - deploy/helm/**
+          - deploy/operator/**
+
+# Misc labels
+build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - container/**
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/workflows/**
+          - .github/actions/**
+          - .github/filters.yaml
+
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - docs/**
+          - '**/*.md'
+          - '**/*.rst'
+
+multimodal:
+  - changed-files:
+      - any-glob-to-any-file:
+          - examples/multimodal/**
+          - components/src/dynamo/vllm/multimodal_handlers/**
+          - components/src/dynamo/vllm/multimodal_utils/**
+          - components/src/dynamo/sglang/multimodal_utils/**
+          - components/src/dynamo/sglang/request_handlers/multimodal/**
+          # NOTE: Consider consolidating multimodal trtllm helpers to a subfolder
+          - components/src/dynamo/trtllm/encode_helper.py
+          - components/src/dynamo/trtllm/multimodal_processor.py

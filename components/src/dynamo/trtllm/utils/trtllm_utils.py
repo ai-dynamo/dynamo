@@ -62,6 +62,8 @@ class Config:
         self.store_kv: str = ""
         self.request_plane: str = ""
         self.enable_local_indexer: bool = False
+        # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
+        self.use_kv_events: bool = False
 
     def __str__(self) -> str:
         return (
@@ -95,7 +97,8 @@ class Config:
             f"custom_jinja_template={self.custom_jinja_template}, "
             f"store_kv={self.store_kv}, "
             f"request_plane={self.request_plane}, "
-            f"enable_local_indexer={self.enable_local_indexer}"
+            f"enable_local_indexer={self.enable_local_indexer}, "
+            f"use_kv_events={self.use_kv_events}"
         )
 
 
@@ -375,6 +378,8 @@ def cmd_line_args():
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
+    # Derive use_kv_events from publish_events_and_metrics
+    config.use_kv_events = config.publish_events_and_metrics
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

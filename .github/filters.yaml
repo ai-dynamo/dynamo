@@ -46,6 +46,7 @@ ignore:
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
+  - '.github/labeler.yml'
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
