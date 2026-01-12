@@ -687,6 +687,7 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         libibumad3 \
         libibverbs1 \
         libnuma1 \
+        numactl \
         librdmacm1 \
         rdma-core \
         # OpenMPI dependencies
