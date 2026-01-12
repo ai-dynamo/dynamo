@@ -434,6 +434,30 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service and torch_memory_saver wheels
+# torch_memory_saver is only used by SGLang's GPU Memory Service adapters
+# Install pip, setuptools, wheel for building, torch for CUDA extensions
+# IMPORTANT: Use --no-build-isolation so the build inherits CUDA_PATH and can find nvcc
+# With --no-build-isolation, build deps (setuptools, wheel) must be pre-installed
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv pip install pip setuptools wheel && \
+    uv pip install torch --index-url https://download.pytorch.org/whl/cu124 --no-cache-dir && \
+    cd /opt/dynamo/lib/gpu_memory_service && \
+    pip wheel --no-deps --no-build-isolation --wheel-dir /tmp/gpu_memory_service_wheels . && \
+    auditwheel repair \
+        --only-plat \
+        --exclude libcuda.so.1 \
+        --exclude libc10.so \
+        --exclude libtorch.so \
+        --exclude libtorch_python.so \
+        --exclude libtorch_cpu.so \
+        --plat manylinux_2_28_${ARCH_ALT} \
+        --wheel-dir /opt/dynamo/dist \
+        /tmp/gpu_memory_service_wheels/gpu_memory_service*.whl && \
+    pip wheel --no-deps --no-build-isolation --wheel-dir /opt/dynamo/dist \
+        git+https://github.com/fzyzcjy/torch_memory_saver.git && \
+    uv pip uninstall torch pip setuptools wheel
+
 ##################################
 ########## Runtime Image #########
 ##################################
@@ -487,7 +511,12 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
+        /opt/dynamo/wheelhouse/torch_memory_saver*.whl \
         sglang==${SGLANG_VERSION}
+
+# Copy lib/ for reference/tests (using pre-built wheels above)
+COPY --chmod=775 --chown=dynamo:0 lib/ /workspace/lib/
 
 # Install common and test dependencies
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
@@ -539,6 +568,7 @@ ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 ENV PATH=/home/dynamo/.local/bin:$PATH
 # PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
 ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
+
 
 ###########################################################
 ########## Development (run.sh, runs as root user) ########
@@ -642,17 +672,26 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 # Copy all packages from runtime stage user site-packages into venv
 # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
 # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
+# Exclude gpu_memory_service - it will be installed editable below
 RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
-          /opt/dynamo/venv/lib/python3.12/site-packages/
+          /opt/dynamo/venv/lib/python3.12/site-packages/ && \
+    rm -rf /opt/dynamo/venv/lib/python3.12/site-packages/gpu_memory_service/ && \
+    rm -rf /opt/dynamo/venv/lib/python3.12/site-packages/gpu_memory_service-*.dist-info/
 
 # Install maturin and uv into venv for development
 # Uninstall broken maturin from upstream, then reinstall properly into venv
 COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
 RUN pip install --ignore-installed maturin[patchelf]
 
+# Install torch_memory_saver from source
+RUN pip install git+https://github.com/fzyzcjy/torch_memory_saver.git
+
 # Editable install of dynamo components
 COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
 RUN pip install --no-deps -e .
+
+# Editable install of gpu_memory_service for development
+RUN pip install --no-build-isolation --no-deps -e /workspace/lib/gpu_memory_service
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
