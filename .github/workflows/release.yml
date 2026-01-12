@@ -169,7 +169,14 @@ jobs:
           echo "✅ Created and pushed tag: ${RC_TAG}"
 
       - name: Setup crane
-        uses: imjasonh/setup-crane@v0.4
+        env:
+          CRANE_VERSION: v0.20.2
+        run: |
+          # Download crane from official Google releases
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          sudo mv crane /usr/local/bin/
+          crane version
 
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
