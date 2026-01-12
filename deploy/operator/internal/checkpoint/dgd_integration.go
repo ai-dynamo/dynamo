@@ -35,25 +35,10 @@ func getCheckpointInfoFromCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *
 		Enabled:        true,
 		CheckpointName: ckpt.Name,
 		Hash:           ckpt.Status.IdentityHash,
-		TarPath:        ckpt.Status.TarPath,
 		Location:       ckpt.Status.Location,
 		StorageType:    ckpt.Status.StorageType,
 		Ready:          ckpt.Status.Phase == nvidiacomv1alpha1.DynamoCheckpointPhaseReady,
-		Identity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-			Model:                ckpt.Spec.Identity.Model,
-			Framework:            ckpt.Spec.Identity.Framework,
-			FrameworkVersion:     ckpt.Spec.Identity.FrameworkVersion,
-			TensorParallelSize:   ckpt.Spec.Identity.TensorParallelSize,
-			PipelineParallelSize: ckpt.Spec.Identity.PipelineParallelSize,
-			Dtype:                ckpt.Spec.Identity.Dtype,
-			MaxModelLen:          ckpt.Spec.Identity.MaxModelLen,
-			ExtraParameters:      ckpt.Spec.Identity.ExtraParameters,
-		},
-	}
-
-	// PVCName only relevant for PVC storage type
-	if string(info.StorageType) == controller_common.CheckpointStorageTypePVC || info.StorageType == "" {
-		info.PVCName = DefaultCheckpointPVCName
+		Identity:       &ckpt.Spec.Identity,
 	}
 
 	return info
@@ -62,19 +47,21 @@ func getCheckpointInfoFromCheckpoint(ckpt *nvidiacomv1alpha1.DynamoCheckpoint) *
 // DefaultCheckpointPVCName is the default PVC name for checkpoint storage
 const DefaultCheckpointPVCName = "checkpoint-storage"
 
-// getBasePathFromStorage returns the base path from storage config, or the default
-func getBasePathFromStorage(storageConfig *controller_common.CheckpointStorageConfig) string {
+// getPVCBasePath returns the PVC base path from storage config, or the default
+// Only applicable for PVC storage type
+func getPVCBasePath(storageConfig *controller_common.CheckpointStorageConfig) string {
 	if storageConfig != nil && storageConfig.PVC.BasePath != "" {
 		return storageConfig.PVC.BasePath
 	}
 	return consts.CheckpointBasePath
 }
 
-// GetCheckpointBasePath returns the configured checkpoint base path from controller config,
+// GetPVCBasePath returns the configured PVC base path from controller config,
 // or the default if not set. This is used by both CheckpointReconciler and DynamoGraphDeploymentReconciler.
-func GetCheckpointBasePath(config *controller_common.CheckpointConfig) string {
+// Only applicable for PVC storage type.
+func GetPVCBasePath(config *controller_common.CheckpointConfig) string {
 	if config != nil && config.Enabled {
-		return getBasePathFromStorage(&config.Storage)
+		return getPVCBasePath(&config.Storage)
 	}
 	return consts.CheckpointBasePath
 }
@@ -93,14 +80,10 @@ type CheckpointInfo struct {
 	Identity *nvidiacomv1alpha1.DynamoCheckpointIdentity
 	// Hash is the computed identity hash
 	Hash string
-	// TarPath is the local path to the checkpoint tar file
-	TarPath string
 	// Location is the full URI/path in the storage backend
 	Location string
 	// StorageType is the storage backend type (pvc, s3, oci)
 	StorageType nvidiacomv1alpha1.DynamoCheckpointStorageType
-	// PVCName is the name of the PVC containing the checkpoint (only for PVC storage)
-	PVCName string
 	// CheckpointName is the name of the Checkpoint CR
 	CheckpointName string
 	// Ready indicates if the checkpoint is ready for use
@@ -204,14 +187,6 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo) 
 		})
 	}
 
-	// Path is the local destination (where tar ends up after fetch)
-	if info.TarPath != "" {
-		envVars = append(envVars, corev1.EnvVar{
-			Name:  consts.EnvCheckpointPath,
-			Value: info.TarPath,
-		})
-	}
-
 	// Include hash for debugging/observability
 	if info.Hash != "" {
 		envVars = append(envVars, corev1.EnvVar{
@@ -277,15 +252,14 @@ func InjectCheckpointIntoPodSpec(
 		return nil
 	}
 
-	// Identity is required to compute the checkpoint path
-	if checkpointInfo.Identity == nil {
-		return fmt.Errorf("checkpoint enabled but identity is nil")
-	}
-
 	// Use the checkpoint info as-is (already computed by ResolveCheckpointForService)
 	// We only need to compute hash if it's not already set
 	info := checkpointInfo
 	if info.Hash == "" {
+		// Identity is required to compute the hash
+		if info.Identity == nil {
+			return fmt.Errorf("checkpoint enabled but identity is nil and hash is not set")
+		}
 		hash, err := ComputeIdentityHash(*info.Identity)
 		if err != nil {
 			return fmt.Errorf("failed to compute identity hash: %w", err)
@@ -317,7 +291,7 @@ func InjectCheckpointIntoPodSpec(
 
 	switch storageType {
 	case controller_common.CheckpointStorageTypeS3:
-		// S3 storage: location is s3:// URI, path is local temp
+		// S3 storage: location is s3:// URI
 		// URI format: s3://[endpoint/]bucket/prefix
 		info.StorageType = storageTypeToAPI(storageType)
 		s3URI := "s3://checkpoint-storage/checkpoints" // default
@@ -326,10 +300,9 @@ func InjectCheckpointIntoPodSpec(
 		}
 		// Append hash to the URI
 		info.Location = fmt.Sprintf("%s/%s.tar", s3URI, info.Hash)
-		info.TarPath = fmt.Sprintf("/tmp/%s.tar", info.Hash)
 
 	case controller_common.CheckpointStorageTypeOCI:
-		// OCI storage: location is oci:// URI, path is local temp
+		// OCI storage: location is oci:// URI
 		// URI format: oci://registry/repository
 		info.StorageType = storageTypeToAPI(storageType)
 		ociURI := "oci://localhost/checkpoints" // default
@@ -338,19 +311,16 @@ func InjectCheckpointIntoPodSpec(
 		}
 		// Append hash as tag
 		info.Location = fmt.Sprintf("%s:%s", ociURI, info.Hash)
-		info.TarPath = fmt.Sprintf("/tmp/%s.tar", info.Hash)
 
 	default: // controller_common.CheckpointStorageTypePVC
-		// PVC storage: location and path are the same
+		// PVC storage: location is the mount path
 		info.StorageType = storageTypeToAPI(storageType)
-		basePath := getBasePathFromStorage(storageConfig)
+		basePath := getPVCBasePath(storageConfig)
 		pvcName := DefaultCheckpointPVCName
 		if storageConfig != nil && storageConfig.PVC.PVCName != "" {
 			pvcName = storageConfig.PVC.PVCName
 		}
-		info.TarPath = GetTarPath(basePath, info.Hash)
-		info.Location = info.TarPath // Same for PVC
-		info.PVCName = pvcName
+		info.Location = fmt.Sprintf("%s/%s.tar", basePath, info.Hash)
 
 		// Inject PVC volume and mount (only for PVC storage)
 		InjectCheckpointVolume(podSpec, pvcName)

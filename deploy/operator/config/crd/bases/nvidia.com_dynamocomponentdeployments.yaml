@@ -699,6 +699,13 @@ spec:
                         Used when Mode is Auto or when looking up existing checkpoints
                         Required when checkpointRef is not specified
                       properties:
+                        backendFramework:
+                          description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                          enum:
+                            - vllm
+                            - sglang
+                            - trtllm
+                          type: string
                         dtype:
                           description: Dtype is the data type (fp16, bf16, fp8, etc.)
                           type: string
@@ -709,13 +716,6 @@ spec:
                             ExtraParameters are additional parameters that affect the checkpoint hash
                             Use for any framework-specific or custom parameters not covered above
                           type: object
-                        framework:
-                          description: Framework is the runtime framework (vllm, sglang, trtllm)
-                          enum:
-                            - vllm
-                            - sglang
-                            - trtllm
-                          type: string
                         frameworkVersion:
                           description: |-
                             FrameworkVersion is the version of the framework (optional)
@@ -742,7 +742,7 @@ spec:
                           minimum: 1
                           type: integer
                       required:
-                        - framework
+                        - backendFramework
                         - model
                       type: object
                     mode:
@@ -757,8 +757,8 @@ spec:
                       type: string
                   type: object
                   x-kubernetes-validations:
-                    - message: When enabled, either checkpointRef or both identity.model and identity.framework must be specified
-                      rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.framework))'
+                    - message: When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified
+                      rule: '!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))'
                 componentType:
                   description: ComponentType indicates the role of this component (for example, "main").
                   type: string

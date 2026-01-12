@@ -20,17 +20,17 @@ func TestComputeIdentityHash(t *testing.T) {
 		{
 			name: "basic identity with known hash",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 			},
 			expectError:  false,
-			expectedHash: "20ca5550ebe7", // Known hash for this specific identity
+			expectedHash: "96429b272576", // Known hash for this specific identity
 		},
 		{
 			name: "identity with all fields",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
 				Model:                "meta-llama/Llama-2-13b-hf",
-				Framework:            "sglang",
+				BackendFramework:     "sglang",
 				FrameworkVersion:     "0.4.2",
 				TensorParallelSize:   2,
 				PipelineParallelSize: 1,
@@ -41,17 +41,17 @@ func TestComputeIdentityHash(t *testing.T) {
 				},
 			},
 			expectError:  false,
-			expectedHash: "bc0863a98d4b", // Known hash for this specific identity
+			expectedHash: "0c5c7799bf09", // Known hash for this specific identity
 		},
 		{
 			name: "same identity produces same hash",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 			},
 			expectError: false,
 			shouldMatch: true,
@@ -59,12 +59,12 @@ func TestComputeIdentityHash(t *testing.T) {
 		{
 			name: "different models produce different hashes",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-13b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-13b-hf",
+				BackendFramework: "vllm",
 			},
 			expectError: false,
 			shouldMatch: false,
@@ -72,12 +72,12 @@ func TestComputeIdentityHash(t *testing.T) {
 		{
 			name: "different frameworks produce different hashes",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "sglang",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "sglang",
 			},
 			expectError: false,
 			shouldMatch: false,
@@ -86,13 +86,13 @@ func TestComputeIdentityHash(t *testing.T) {
 			name: "normalization: zero vs unset numeric fields",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
 				Model:              "meta-llama/Llama-2-7b-hf",
-				Framework:          "vllm",
+				BackendFramework:   "vllm",
 				TensorParallelSize: 0,
 				MaxModelLen:        0,
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 				// TensorParallelSize and MaxModelLen omitted (defaults to 0)
 			},
 			expectError: false,
@@ -101,14 +101,14 @@ func TestComputeIdentityHash(t *testing.T) {
 		{
 			name: "normalization: empty vs nil map",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:           "meta-llama/Llama-2-7b-hf",
-				Framework:       "vllm",
-				ExtraParameters: map[string]string{},
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
+				ExtraParameters:  map[string]string{},
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:           "meta-llama/Llama-2-7b-hf",
-				Framework:       "vllm",
-				ExtraParameters: nil,
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
+				ExtraParameters:  nil,
 			},
 			expectError: false,
 			shouldMatch: true,
@@ -116,16 +116,16 @@ func TestComputeIdentityHash(t *testing.T) {
 		{
 			name: "extra parameters order should not matter",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 				ExtraParameters: map[string]string{
 					"param_a": "value1",
 					"param_b": "value2",
 				},
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 				ExtraParameters: map[string]string{
 					"param_b": "value2",
 					"param_a": "value1",
@@ -137,15 +137,15 @@ func TestComputeIdentityHash(t *testing.T) {
 		{
 			name: "different extra parameters produce different hashes",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 				ExtraParameters: map[string]string{
 					"gpu_memory_utilization": "0.9",
 				},
 			},
 			otherIdentity: &nvidiacomv1alpha1.DynamoCheckpointIdentity{
-				Model:     "meta-llama/Llama-2-7b-hf",
-				Framework: "vllm",
+				Model:            "meta-llama/Llama-2-7b-hf",
+				BackendFramework: "vllm",
 				ExtraParameters: map[string]string{
 					"gpu_memory_utilization": "0.8",
 				},

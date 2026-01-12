@@ -95,7 +95,7 @@ spec:
         mode: auto  # Automatically create checkpoint if not found
         identity:
           model: "meta-llama/Llama-3-8B"
-          framework: "vllm"
+          backendFramework: "vllm"
           tensorParallelSize: 1
           dtype: "bfloat16"
 ```
@@ -187,7 +187,7 @@ checkpoint:
   mode: auto
   identity:
     model: "meta-llama/Llama-3-8B"
-    framework: "vllm"
+    backendFramework: "vllm"
     tensorParallelSize: 1
 ```
 
@@ -249,7 +249,7 @@ checkpoint:
   mode: auto
   identity:
     model: "meta-llama/Llama-3-8B"
-    framework: "vllm"
+    backendFramework: "vllm"
     frameworkVersion: "0.4.0"
     tensorParallelSize: 1
     pipelineParallelSize: 1
@@ -281,7 +281,7 @@ metadata:
 spec:
   identity:
     model: "meta-llama/Llama-3-8B"
-    framework: "vllm"
+    backendFramework: "vllm"
     tensorParallelSize: 1
     dtype: "bfloat16"
 
@@ -436,7 +436,7 @@ metadata:
 spec:
   identity:
     model: "meta-llama/Meta-Llama-3-8B-Instruct"
-    framework: "vllm"
+    backendFramework: "vllm"
     tensorParallelSize: 1
     dtype: "bfloat16"
   job:

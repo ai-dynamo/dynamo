@@ -52,14 +52,6 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
 }
 
-// getCheckpointPVCName returns the configured PVC name, or the default if not set
-func (r *CheckpointReconciler) getCheckpointPVCName() string {
-	if r.Config.Checkpoint.Enabled && r.Config.Checkpoint.Storage.PVC.PVCName != "" {
-		return r.Config.Checkpoint.Storage.PVC.PVCName
-	}
-	return checkpoint.DefaultCheckpointPVCName
-}
-
 // getSignalHostPath returns the configured signal host path, or the default if not set
 func (r *CheckpointReconciler) getSignalHostPath() string {
 	if r.Config.Checkpoint.Enabled && r.Config.Checkpoint.Storage.SignalHostPath != "" {
@@ -96,7 +88,6 @@ func (r *CheckpointReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 
 		ckpt.Status.IdentityHash = hash
-		ckpt.Status.TarPath = checkpoint.GetTarPath(checkpoint.GetCheckpointBasePath(&r.Config.Checkpoint), hash)
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhasePending
 
 		if err := r.Status().Update(ctx, ckpt); err != nil {
@@ -211,7 +202,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionTarAvailable),
 			Status:             metav1.ConditionTrue,
 			Reason:             "TarCreated",
-			Message:            fmt.Sprintf("Checkpoint tar available at %s", ckpt.Status.TarPath),
+			Message:            fmt.Sprintf("Checkpoint available at %s", ckpt.Status.Location),
 			LastTransitionTime: metav1.Now(),
 		})
 
@@ -258,18 +249,8 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	podTemplate.Labels[consts.KubeLabelCheckpointHash] = ckpt.Status.IdentityHash
 	podTemplate.Labels[consts.KubeLabelCheckpointSource] = "true"
 
-	// Add checkpoint PVC volume
-	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
-		Name: consts.CheckpointVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-				ClaimName: r.getCheckpointPVCName(),
-			},
-		},
-	})
-
 	// Add signal volume (hostPath for communication with DaemonSet)
-	// Both the checkpoint pod and DaemonSet mount the same hostPath directory
+	// The DaemonSet writes a signal file after checkpoint is complete
 	hostPathType := corev1.HostPathDirectoryOrCreate
 	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, corev1.Volume{
 		Name: consts.CheckpointSignalVolumeName,
@@ -285,34 +266,20 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
 
-		// Add environment variables
-		// Only CHECKPOINT_PATH is required - its presence indicates checkpoint mode
 		// Compute the signal file path - unique per checkpoint hash
-		// The DaemonSet writes this file after checkpoint is complete
-		// The pod waits for this file, then exits successfully
+		// The pod waits for this file (written by DaemonSet), then exits successfully
 		signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash + ".done"
 
+		// Add signal file env var - this tells the runtime to enter checkpoint mode
 		mainContainer.Env = append(mainContainer.Env,
-			corev1.EnvVar{
-				Name:  consts.EnvCheckpointPath,
-				Value: ckpt.Status.TarPath,
-			},
-			corev1.EnvVar{
-				Name:  consts.EnvCheckpointHash,
-				Value: ckpt.Status.IdentityHash,
-			},
 			corev1.EnvVar{
 				Name:  consts.EnvCheckpointSignalFile,
 				Value: signalFilePath,
 			},
 		)
 
-		// Add volume mounts
+		// Add signal volume mount (required for DaemonSet communication)
 		mainContainer.VolumeMounts = append(mainContainer.VolumeMounts,
-			corev1.VolumeMount{
-				Name:      consts.CheckpointVolumeName,
-				MountPath: checkpoint.GetCheckpointBasePath(&r.Config.Checkpoint),
-			},
 			corev1.VolumeMount{
 				Name:      consts.CheckpointSignalVolumeName,
 				MountPath: consts.CheckpointSignalMountPath,

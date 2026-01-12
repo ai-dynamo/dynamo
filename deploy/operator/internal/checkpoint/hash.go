@@ -30,7 +30,7 @@ import (
 // Only fields that affect checkpoint equivalence are included
 type normalizedIdentity struct {
 	Model                string            `json:"model"`
-	Framework            string            `json:"framework"`
+	BackendFramework     string            `json:"backendFramework"`
 	FrameworkVersion     string            `json:"frameworkVersion,omitempty"`
 	TensorParallelSize   int32             `json:"tensorParallelSize"`
 	PipelineParallelSize int32             `json:"pipelineParallelSize"`
@@ -81,7 +81,7 @@ func normalizeIdentity(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) norm
 
 	return normalizedIdentity{
 		Model:                identity.Model,
-		Framework:            identity.Framework,
+		BackendFramework:     identity.BackendFramework,
 		FrameworkVersion:     identity.FrameworkVersion,
 		TensorParallelSize:   tp,
 		PipelineParallelSize: pp,
@@ -89,9 +89,4 @@ func normalizeIdentity(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) norm
 		MaxModelLen:          identity.MaxModelLen,
 		ExtraParameters:      extraParams,
 	}
-}
-
-// GetTarPath returns the full path to the checkpoint tar file
-func GetTarPath(basePath, hash string) string {
-	return basePath + "/" + hash + ".tar"
 }

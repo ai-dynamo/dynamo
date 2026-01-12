@@ -1122,7 +1122,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 			}
 
 			info.CheckpointName = ckpt.Name
-			// Compute hash and tarPath locally since status may not be populated yet
+			// Compute hash locally since status may not be populated yet
 			// (checkpoint controller reconciles asynchronously)
 			hash, err := checkpoint.ComputeIdentityHash(*component.Checkpoint.Identity)
 			if err != nil {
@@ -1130,8 +1130,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 				return nil, nil, fmt.Errorf("failed to compute checkpoint hash for service %s: %w", serviceName, err)
 			}
 			info.Hash = hash
-			info.TarPath = checkpoint.GetTarPath(checkpoint.GetCheckpointBasePath(&r.Config.Checkpoint), info.Hash)
-			info.PVCName = checkpoint.DefaultCheckpointPVCName
 			info.Ready = false // Newly created checkpoint is not ready yet
 		}
 
@@ -1140,7 +1138,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileCheckpoints(ctx context.Conte
 			CheckpointName: info.CheckpointName,
 			IdentityHash:   info.Hash,
 			Ready:          info.Ready,
-			TarPath:        info.TarPath,
 		}
 	}
 
@@ -1174,7 +1171,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		// Build the checkpoint identity from service identity
 		checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
 			Model:                identity.Model,
-			Framework:            identity.Framework,
+			BackendFramework:     identity.BackendFramework,
 			FrameworkVersion:     identity.FrameworkVersion,
 			TensorParallelSize:   identity.TensorParallelSize,
 			PipelineParallelSize: identity.PipelineParallelSize,
@@ -1191,7 +1188,7 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 			serviceName,
 			dynamoDeployment.Namespace,
 			dynamoDeployment.Name,
-			identity.Framework, // Use framework from checkpoint identity
+			identity.BackendFramework, // Use framework from checkpoint identity
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf("failed to build checkpoint job pod template: %w", err)

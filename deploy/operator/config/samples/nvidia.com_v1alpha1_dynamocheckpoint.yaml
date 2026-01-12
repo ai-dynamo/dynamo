@@ -21,7 +21,7 @@ spec:
   # Identity - determines the checkpoint hash
   identity:
     model: "meta-llama/Meta-Llama-3-8B-Instruct"
-    framework: "vllm"
+    backendFramework: "vllm"
     frameworkVersion: "0.6.0"
     tensorParallelSize: 1
     pipelineParallelSize: 1

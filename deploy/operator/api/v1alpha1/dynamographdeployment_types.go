@@ -128,9 +128,6 @@ type ServiceCheckpointStatus struct {
 	// Ready indicates if the checkpoint is ready for use
 	// +optional
 	Ready bool `json:"ready,omitempty"`
-	// TarPath is the path to the checkpoint tar file
-	// +optional
-	TarPath string `json:"tarPath,omitempty"`
 }
 
 // RestartStatus contains the status of the restart of the graph deployment.

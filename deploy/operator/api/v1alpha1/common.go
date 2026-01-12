@@ -148,7 +148,7 @@ const (
 )
 
 // ServiceCheckpointConfig configures checkpointing for a DGD service
-// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.framework))",message="When enabled, either checkpointRef or both identity.model and identity.framework must be specified"
+// +kubebuilder:validation:XValidation:rule="!self.enabled || (has(self.checkpointRef) && size(self.checkpointRef) > 0) || (has(self.identity) && has(self.identity.model) && has(self.identity.backendFramework))",message="When enabled, either checkpointRef or both identity.model and identity.backendFramework must be specified"
 type ServiceCheckpointConfig struct {
 	// Enabled indicates whether checkpointing is enabled for this service
 	// +optional

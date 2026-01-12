@@ -48,10 +48,10 @@ type DynamoCheckpointIdentity struct {
 	// +kubebuilder:validation:Required
 	Model string `json:"model"`
 
-	// Framework is the runtime framework (vllm, sglang, trtllm)
+	// BackendFramework is the runtime framework (vllm, sglang, trtllm)
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:Enum=vllm;sglang;trtllm
-	Framework string `json:"framework"`
+	BackendFramework string `json:"backendFramework"`
 
 	// FrameworkVersion is the version of the framework (optional)
 	// If not specified, version is not included in identity hash
@@ -141,12 +141,6 @@ type DynamoCheckpointStatus struct {
 	// This hash is used to identify equivalent checkpoints
 	// +optional
 	IdentityHash string `json:"identityHash,omitempty"`
-
-	// TarPath is the local path to the checkpoint tar file
-	// For PVC: the mount path (e.g., /checkpoints/{hash}.tar)
-	// For S3/OCI: the local path after download (e.g., /tmp/{hash}.tar)
-	// +optional
-	TarPath string `json:"tarPath,omitempty"`
 
 	// Location is the full URI/path to the checkpoint in the storage backend
 	// For PVC: same as TarPath (e.g., /checkpoints/{hash}.tar)

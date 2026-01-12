@@ -74,6 +74,13 @@ spec:
                 identity:
                   description: Identity defines the inputs that determine checkpoint equivalence
                   properties:
+                    backendFramework:
+                      description: BackendFramework is the runtime framework (vllm, sglang, trtllm)
+                      enum:
+                        - vllm
+                        - sglang
+                        - trtllm
+                      type: string
                     dtype:
                       description: Dtype is the data type (fp16, bf16, fp8, etc.)
                       type: string
@@ -84,13 +91,6 @@ spec:
                         ExtraParameters are additional parameters that affect the checkpoint hash
                         Use for any framework-specific or custom parameters not covered above
                       type: object
-                    framework:
-                      description: Framework is the runtime framework (vllm, sglang, trtllm)
-                      enum:
-                        - vllm
-                        - sglang
-                        - trtllm
-                      type: string
                     frameworkVersion:
                       description: |-
                         FrameworkVersion is the version of the framework (optional)
@@ -117,7 +117,7 @@ spec:
                       minimum: 1
                       type: integer
                   required:
-                    - framework
+                    - backendFramework
                     - model
                   type: object
                 job:
@@ -7886,12 +7886,6 @@ spec:
                     - pvc
                     - s3
                     - oci
-                  type: string
-                tarPath:
-                  description: |-
-                    TarPath is the local path to the checkpoint tar file
-                    For PVC: the mount path (e.g., /checkpoints/{hash}.tar)
-                    For S3/OCI: the local path after download (e.g., /tmp/{hash}.tar)
                   type: string
               type: object
           type: object

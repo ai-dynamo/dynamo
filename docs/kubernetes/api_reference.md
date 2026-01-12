@@ -205,7 +205,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `model` _string_ | Model is the model identifier (e.g., "meta-llama/Llama-3-70B") |  | Required: \{\} <br /> |
-| `framework` _string_ | Framework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
+| `backendFramework` _string_ | BackendFramework is the runtime framework (vllm, sglang, trtllm) |  | Enum: [vllm sglang trtllm] <br />Required: \{\} <br /> |
 | `frameworkVersion` _string_ | FrameworkVersion is the version of the framework (optional)<br />If not specified, version is not included in identity hash |  |  |
 | `tensorParallelSize` _integer_ | TensorParallelSize is the tensor parallel configuration | 1 | Minimum: 1 <br /> |
 | `pipelineParallelSize` _integer_ | PipelineParallelSize is the pipeline parallel configuration | 1 | Minimum: 1 <br /> |
@@ -285,7 +285,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `phase` _[DynamoCheckpointPhase](#dynamocheckpointphase)_ | Phase represents the current phase of the checkpoint lifecycle |  | Enum: [Pending Creating Ready Failed] <br /> |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity<br />This hash is used to identify equivalent checkpoints |  |  |
-| `tarPath` _string_ | TarPath is the local path to the checkpoint tar file<br />For PVC: the mount path (e.g., /checkpoints/\{hash\}.tar)<br />For S3/OCI: the local path after download (e.g., /tmp/\{hash\}.tar) |  |  |
 | `location` _string_ | Location is the full URI/path to the checkpoint in the storage backend<br />For PVC: same as TarPath (e.g., /checkpoints/\{hash\}.tar)<br />For S3: s3://bucket/prefix/\{hash\}.tar<br />For OCI: oci://registry/repo:\{hash\} |  |  |
 | `storageType` _[DynamoCheckpointStorageType](#dynamocheckpointstoragetype)_ | StorageType indicates the storage backend type used for this checkpoint |  | Enum: [pvc s3 oci] <br /> |
 | `jobName` _string_ | JobName is the name of the checkpoint creation Job |  |  |
@@ -1050,7 +1049,6 @@ _Appears in:_
 | `checkpointName` _string_ | CheckpointName is the name of the associated Checkpoint CR |  |  |
 | `identityHash` _string_ | IdentityHash is the computed hash of the checkpoint identity |  |  |
 | `ready` _boolean_ | Ready indicates if the checkpoint is ready for use |  |  |
-| `tarPath` _string_ | TarPath is the path to the checkpoint tar file |  |  |
 
 
 #### ServiceReplicaStatus
