@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-disagg-planner
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -32,7 +31,6 @@ spec:
             - "0.0"
             - --no-kv-events
     Planner:
-      dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
@@ -63,7 +61,6 @@ spec:
               # See docs/planner/sla_planner_quickstart.md for more details
               name: planner-profile-data
     TRTLLMDecodeWorker:
-      dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -104,7 +101,6 @@ spec:
             - --disaggregation-mode
             - decode
     TRTLLMPrefillWorker:
-      dynamoNamespace: trtllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

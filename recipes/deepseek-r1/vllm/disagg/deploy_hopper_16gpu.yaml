@@ -12,7 +12,6 @@ spec:
       create: false
   services:
     Frontend:
-      dynamoNamespace: vllm-dsr1
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -26,7 +25,6 @@ spec:
             failureThreshold: 60
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     decode:
-      dynamoNamespace: vllm-dsr1
       componentType: worker
       subComponentType: decode
       replicas: 1
@@ -92,7 +90,6 @@ spec:
                 --max-num-seqs 512 \
                 --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
     prefill:
-      dynamoNamespace: vllm-dsr1
       componentType: worker
       subComponentType: prefill
       replicas: 1
