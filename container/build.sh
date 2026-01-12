@@ -1004,8 +1004,7 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
 
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
 
-    # Add build args for frontend image
-    BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
+    BUILD_CONTEXT_ARG+=" --build-context epp-image=docker-image://${EPP_IMAGE_TAG}"
 fi
 
 # Always build the main image first
