@@ -36,22 +36,6 @@ on:
         required: false
         type: boolean
         default: false
-      # ============================================================================
-      # BUILD MATRIX OVERRIDES (JSON format)
-      # Default: amd64 (cuda 12.8) + arm64 (cuda 12.9)
-      # ============================================================================
-      vllm_build_matrix:
-        description: 'vLLM build matrix (JSON)'
-        required: false
-        type: string
-      sglang_build_matrix:
-        description: 'SGLang build matrix (JSON)'
-        required: false
-        type: string
-      trtllm_build_matrix:
-        description: 'TensorRT-LLM build matrix (JSON)'
-        required: false
-        type: string
 
 # concurrency:
 #     # The group name is a ternary operation. If the ref_name is 'main',
@@ -250,7 +234,11 @@ jobs:
     with:
       framework: vllm
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_matrix: ${{ github.event.inputs.vllm_build_matrix || '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]' }}
+      build_matrix: |
+        [
+          {"platform":"amd64","cuda_version":"12.8"},
+          {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
+        ]
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
@@ -264,7 +252,11 @@ jobs:
     with:
       framework: sglang
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_matrix: ${{ github.event.inputs.sglang_build_matrix || '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]' }}
+      build_matrix: |
+        [
+          {"platform":"amd64","cuda_version":"12.8"},
+          {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
+        ]
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
@@ -278,7 +270,11 @@ jobs:
     with:
       framework: trtllm
       builder_name: ${{ needs.init.outputs.builder_name }}
-      build_matrix: ${{ github.event.inputs.trtllm_build_matrix || '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]' }}
+      build_matrix: |
+        [
+          {"platform":"amd64","cuda_version":"12.8"},
+          {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
+        ]
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}

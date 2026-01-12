@@ -209,28 +209,55 @@ jobs:
           TARGET_TAG_FULL="${TARGET_TAG_PLAIN}-cuda${CUDA_VERSION}-${{ matrix.platform }}"
           echo "target_tag_full=${TARGET_TAG_FULL}" >> $GITHUB_OUTPUT
 
-  #     - name: Build Container
-  #       id: build-image
-  #       uses: ./.github/actions/docker-build
-  #       with:
-  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_full }}
-  #         framework: ${{ inputs.framework }}
-  #         target: runtime
-  #         platform: linux/${{ matrix.platform }}
-  #         base_image_tag: ${{ matrix.base_image_tag || '' }}
-  #         runtime_image_tag: ${{ matrix.runtime_image_tag || '' }}
-  #         cuda_version: ${{ matrix.cuda_version }}
-  #         torch_backend: ${{ matrix.torch_backend || '' }}
-  #         ci_token: ${{ secrets.CI_TOKEN }}
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  #         aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  #         no_cache: ${{ inputs.no_cache }}
-  #         extra_tags: ${{ steps.extra-tags.outputs.tags }}
-  #         push_image: ${{ inputs.push_image }}
-  #         no_load: ${{ inputs.no_load }}
+      - name: Debug - Print docker-build variables
+        shell: bash
+        run: |
+          echo "=== Docker Build Variables ==="
+          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_full }}"
+          echo "framework: ${{ inputs.framework }}"
+          echo "target: runtime"
+          echo "platform: linux/${{ matrix.platform }}"
+          echo "base_image_tag: ${{ matrix.base_image_tag || '' }}"
+          echo "runtime_image_tag: ${{ matrix.runtime_image_tag || '' }}"
+          echo "cuda_version: ${{ matrix.cuda_version }}"
+          echo "torch_backend: ${{ matrix.torch_backend || '' }}"
+          echo "no_cache: ${{ inputs.no_cache }}"
+          echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
+          echo "push_image: ${{ inputs.push_image }}"
+          echo "no_load: ${{ inputs.no_load }}"
+          echo ""
+          echo "=== Matrix Values ==="
+          echo "matrix.platform: ${{ matrix.platform }}"
+          echo "matrix.cuda_version: ${{ matrix.cuda_version }}"
+          echo "matrix.base_image_tag: ${{ matrix.base_image_tag }}"
+          echo "matrix.runtime_image_tag: ${{ matrix.runtime_image_tag }}"
+          echo "matrix.torch_backend: ${{ matrix.torch_backend }}"
+          echo ""
+          echo "=== Full Matrix JSON ==="
+          echo '${{ toJSON(matrix) }}'
+
+      # - name: Build Container
+      #   id: build-image
+      #   uses: ./.github/actions/docker-build
+      #   with:
+      #     image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_full }}
+      #     framework: ${{ inputs.framework }}
+      #     target: runtime
+      #     platform: linux/${{ matrix.platform }}
+      #     base_image_tag: ${{ matrix.base_image_tag || '' }}
+      #     runtime_image_tag: ${{ matrix.runtime_image_tag || '' }}
+      #     cuda_version: ${{ matrix.cuda_version }}
+      #     torch_backend: ${{ matrix.torch_backend || '' }}
+      #     ci_token: ${{ secrets.CI_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #     aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      #     no_cache: ${{ inputs.no_cache }}
+      #     extra_tags: ${{ steps.extra-tags.outputs.tags }}
+      #     push_image: ${{ inputs.push_image }}
+      #     no_load: ${{ inputs.no_load }}
 
   # # ============================================================================
   # # TEST (runs on AMD64 with default CUDA version)
