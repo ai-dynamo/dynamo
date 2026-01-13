@@ -37,6 +37,38 @@ class LoadTestConfig:
 
 
 @dataclass
+class AIPerfLoadTestConfig:
+    """Configuration for AIPerf-based load testing."""
+
+    duration_sec: int = 60
+    model: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+    tokenizer: Optional[str] = None
+
+    # Input/output sequence lengths
+    isl_mean: int = 512
+    isl_stddev: int = 0
+    osl_mean: int = 128
+    osl_stddev: int = 0
+
+    # Concurrency
+    concurrency: int = 10
+    request_count: int = 0
+    warmup_request_count: int = 2
+
+    # Prefix caching
+    prefix_prompt_length: int = 0
+    num_prefix_prompts: int = 0
+
+    # Other options
+    random_seed: int = 100
+    streaming: bool = True
+    ignore_eos: bool = True
+
+    # Container image
+    image: Optional[str] = None
+
+
+@dataclass
 class ScaleManagerConfig:
     num_deployments: int = 5
     scale_test: ScaleTestConfig = field(default_factory=ScaleTestConfig)

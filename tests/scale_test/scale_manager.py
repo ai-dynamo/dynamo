@@ -3,14 +3,20 @@
 
 import asyncio
 import logging
+import os
 import tempfile
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional
 
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client import exceptions
 
+from tests.scale_test.aiperf_load_generator_job import (
+    AIPerfConfig,
+    MultiTargetAIPerfJob,
+)
 from tests.scale_test.config import ScaleTestConfig
 from tests.scale_test.dgd_builder import ScaleTestDGDBuilder
 from tests.scale_test.load_generator_job import LoadGeneratorJob
@@ -204,6 +210,188 @@ class ScaleManager:
 
         return urls
 
+    async def get_frontend_pods(self) -> Dict[str, str]:
+        """Get frontend pod names for each deployment.
+
+        Returns:
+            Dict mapping deployment name to pod name.
+        """
+        assert self._core_api is not None
+
+        pods = {}
+        for deployment_name in self._deployment_names:
+            # Frontend pods are labeled by the DGD operator
+            label_selector = f"nvidia.com/dgd={deployment_name},nvidia.com/dgd-service=Frontend"
+            try:
+                pod_list = await self._core_api.list_namespaced_pod(
+                    namespace=self.kubernetes_namespace,
+                    label_selector=label_selector,
+                )
+                if pod_list.items:
+                    # Take the first running pod
+                    for pod in pod_list.items:
+                        if pod.status.phase == "Running":
+                            pods[deployment_name] = pod.metadata.name
+                            break
+                    else:
+                        # No running pod, take the first one
+                        pods[deployment_name] = pod_list.items[0].metadata.name
+            except exceptions.ApiException as e:
+                logger.warning(f"Error getting frontend pod for {deployment_name}: {e}")
+
+        return pods
+
+    async def collect_frontend_logs(
+        self,
+        output_dir: Optional[str] = None,
+        since_seconds: Optional[int] = None,
+    ) -> Dict[str, str]:
+        """Collect logs from all frontend pods.
+
+        Args:
+            output_dir: Directory to save logs. Defaults to self._log_dir.
+            since_seconds: Only return logs from the last N seconds.
+
+        Returns:
+            Dict mapping deployment name to log file path.
+        """
+        assert self._core_api is not None
+
+        output_dir = output_dir or self._log_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        pods = await self.get_frontend_pods()
+        log_files = {}
+
+        for deployment_name, pod_name in pods.items():
+            try:
+                kwargs = {"name": pod_name, "namespace": self.kubernetes_namespace}
+                if since_seconds:
+                    kwargs["since_seconds"] = since_seconds
+
+                logs = await self._core_api.read_namespaced_pod_log(**kwargs)
+
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                log_file = os.path.join(
+                    output_dir, f"{deployment_name}_frontend_{timestamp}.log"
+                )
+
+                with open(log_file, "w") as f:
+                    f.write(logs)
+
+                log_files[deployment_name] = log_file
+                logger.info(f"Saved frontend logs for {deployment_name}: {log_file}")
+
+            except exceptions.ApiException as e:
+                logger.warning(f"Error getting logs for {deployment_name}: {e}")
+
+        return log_files
+
+    async def stream_frontend_logs_to_file(
+        self,
+        output_dir: Optional[str] = None,
+        duration_sec: Optional[int] = None,
+    ) -> Dict[str, str]:
+        """Stream logs from all frontend pods to files in the background.
+
+        Args:
+            output_dir: Directory to save logs. Defaults to self._log_dir.
+            duration_sec: How long to stream logs (optional, runs until cancelled).
+
+        Returns:
+            Dict mapping deployment name to log file path.
+        """
+        assert self._core_api is not None
+
+        output_dir = output_dir or self._log_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        pods = await self.get_frontend_pods()
+        log_files = {}
+        tasks = []
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        for deployment_name, pod_name in pods.items():
+            log_file = os.path.join(
+                output_dir, f"{deployment_name}_frontend_{timestamp}.log"
+            )
+            log_files[deployment_name] = log_file
+
+            task = asyncio.create_task(
+                self._stream_pod_logs(pod_name, log_file, duration_sec)
+            )
+            tasks.append(task)
+
+        # Return immediately, logs are streamed in background
+        # Caller can await these tasks or let them run
+        self._log_stream_tasks = tasks
+        return log_files
+
+    async def _stream_pod_logs(
+        self,
+        pod_name: str,
+        log_file: str,
+        duration_sec: Optional[int] = None,
+    ) -> None:
+        """Stream logs from a pod to a file."""
+        assert self._core_api is not None
+
+        start_time = time.time()
+        logger.info(f"Streaming logs from {pod_name} to {log_file}")
+
+        try:
+            with open(log_file, "w") as f:
+                # Use follow=True for streaming
+                # kubernetes_asyncio doesn't support true streaming easily,
+                # so we poll with since_seconds
+                last_log_time = start_time
+                seen_lines = set()
+
+                while True:
+                    if duration_sec and (time.time() - start_time) >= duration_sec:
+                        break
+
+                    try:
+                        # Get logs since last poll
+                        since = int(time.time() - last_log_time) + 1
+                        logs = await self._core_api.read_namespaced_pod_log(
+                            name=pod_name,
+                            namespace=self.kubernetes_namespace,
+                            since_seconds=since,
+                        )
+
+                        if logs:
+                            # Write new lines (dedupe using hash)
+                            for line in logs.split("\n"):
+                                if line and hash(line) not in seen_lines:
+                                    seen_lines.add(hash(line))
+                                    f.write(line + "\n")
+                                    f.flush()
+
+                        last_log_time = time.time()
+
+                    except exceptions.ApiException as e:
+                        if e.status == 404:
+                            logger.warning(f"Pod {pod_name} no longer exists")
+                            break
+                        logger.debug(f"Error polling logs: {e}")
+
+                    await asyncio.sleep(2)  # Poll every 2 seconds
+
+        except asyncio.CancelledError:
+            logger.info(f"Log streaming cancelled for {pod_name}")
+        except Exception as e:
+            logger.error(f"Error streaming logs from {pod_name}: {e}")
+
+    async def stop_log_streaming(self) -> None:
+        """Stop any background log streaming tasks."""
+        if hasattr(self, "_log_stream_tasks"):
+            for task in self._log_stream_tasks:
+                task.cancel()
+            await asyncio.gather(*self._log_stream_tasks, return_exceptions=True)
+            self._log_stream_tasks = []
+
     async def run_load_generator_job(
         self,
         model: str,
@@ -241,6 +429,54 @@ class ScaleManager:
             num_pods=num_pods,
             num_processes_per_pod=num_processes_per_pod,
         )
+
+        success = await job.create_and_wait(batch_api, self._core_api, timeout)
+        await job.delete()
+        return success
+
+    async def run_aiperf_load_generator(
+        self,
+        model: str,
+        duration_sec: int,
+        config: Optional[AIPerfConfig] = None,
+        timeout: int = 600,
+        image: Optional[str] = None,
+        tokenizer: Optional[str] = None,
+    ) -> bool:
+        """Run AIPerf-based load generation against all frontends."""
+        assert self._core_api is not None
+
+        urls = await self.get_frontend_urls()
+        if not urls:
+            logger.error("No frontend URLs found")
+            return False
+
+        aiperf_config = config or AIPerfConfig()
+
+        logger.info(
+            f"Running AIPerf load generator: {duration_sec}s, "
+            f"concurrency={aiperf_config.concurrency}, {len(urls)} frontends"
+        )
+        logger.info(
+            f"ISL: {aiperf_config.isl_mean} (stddev: {aiperf_config.isl_stddev}), "
+            f"OSL: {aiperf_config.osl_mean} (stddev: {aiperf_config.osl_stddev})"
+        )
+
+        k8s_client = client.ApiClient()
+        batch_api = client.BatchV1Api(k8s_client)
+
+        job_kwargs = {
+            "namespace": self.kubernetes_namespace,
+            "frontend_urls": urls,
+            "model": model,
+            "duration_sec": duration_sec,
+            "config": aiperf_config,
+            "tokenizer": tokenizer or model,
+        }
+        if image:
+            job_kwargs["image"] = image
+
+        job = MultiTargetAIPerfJob(**job_kwargs)
 
         success = await job.create_and_wait(batch_api, self._core_api, timeout)
         await job.delete()
