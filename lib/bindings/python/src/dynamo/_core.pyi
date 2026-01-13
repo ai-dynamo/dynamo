@@ -466,16 +466,12 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    def create_endpoint(self, component: Component) -> None:
         """
         Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
-            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
-
-        .. deprecated::
-            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -1537,34 +1533,6 @@ class KvPushRouter:
                 - worker_id: The ID of the best matching worker
                 - dp_rank: The data parallel rank of the selected worker
                 - overlap_blocks: The number of overlapping blocks found
-        """
-        ...
-
-    async def best_worker_id(
-        self,
-        token_ids: List[int],
-        router_config_override: Optional[JsonLike] = None,
-        request_id: Optional[str] = None,
-    ) -> Tuple[int, int]:
-        """
-        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
-
-        Find the best matching worker for the given tokens.
-
-        Args:
-            token_ids: List of token IDs to find matches for
-            router_config_override: Optional router configuration override
-            request_id: Optional request ID. If provided, router states will be updated
-                       to track this request (active blocks, lifecycle events). If not
-                       provided, this is a query-only operation that doesn't affect state.
-
-        Returns:
-            A tuple of (worker_id, overlap_blocks) where:
-                - worker_id: The ID of the best matching worker
-                - overlap_blocks: The number of overlapping blocks found
-
-        .. deprecated::
-            Use :meth:`best_worker` instead which also returns dp_rank.
         """
         ...
 
