@@ -13,6 +13,7 @@ use dynamo_llm::{
     discovery::{KvWorkerMonitor, ModelWatcher},
     kv_router::{protocols::*, publisher::KvEventPublisher},
 };
+use dynamo_runtime::discovery::DiscoveryQuery;
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
@@ -60,8 +61,6 @@ pub enum DynamoLlmResult {
 /// This ensures list() calls will have data available.
 /// Returns the number of instances found, or 0 if timed out.
 async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
-    use dynamo_runtime::discovery::DiscoveryQuery;
-
     tracing::info!("Waiting for discovery to sync...");
     let discovery = drt.discovery();
     let timeout = std::time::Duration::from_secs(timeout_secs);
