@@ -431,7 +431,8 @@ impl Scheduler {
             // If we have buffered results, we know there should be at least that many
             // immediate operations. Correct if needed (shared Arc visible to worker).
             if num_buffered > current_expected {
-                slot.expected_immediate_ops.store(num_buffered, Ordering::Relaxed);
+                slot.expected_immediate_ops
+                    .store(num_buffered, Ordering::Relaxed);
             }
 
             // Apply buffered count to this worker's slot
