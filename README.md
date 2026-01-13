@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 The Dynamo Authors. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,9 +22,9 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/2486)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/2486)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://dynamo.dev/docs)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Containers](https://github.com/ai-dynamo/dynamo/pkgs/container/dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blog](https://dynamo.dev/blog)**
 
-# NVIDIA Dynamo
+# Dynamo
 
 High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
 
@@ -40,10 +40,10 @@ High-throughput, low-latency inference framework designed for serving generative
 ## Latest News
 
 - [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#qwen3-coder-benchmarks-with-kv-routing)
-- [10/13] [NVIDIA Blackwell Leads on New SemiAnalysis InferenceMax Benchmarks](https://developer.nvidia.com/blog/nvidia-blackwell-leads-on-new-semianalysis-inferencemax-benchmarks/)
-- [09/09] [Dynamo + NVIDIA Blackwell Ultra Sets New MLPerf Inference Benchmark Record](https://blogs.nvidia.com/blog/mlperf-inference-blackwell-ultra/)
-- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
+- [10/16] [How Baseten achieved 2x faster inference with Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#qwen3-coder-benchmarks-with-kv-routing)
+- [10/13] [Blackwell Leads on New SemiAnalysis InferenceMax Benchmarks](https://developer.nvidia.com/blog/nvidia-blackwell-leads-on-new-semianalysis-inferencemax-benchmarks/)
+- [09/09] [Dynamo + Blackwell Ultra Sets New MLPerf Inference Benchmark Record](https://blogs.nvidia.com/blog/mlperf-inference-blackwell-ultra/)
+- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
 
 ## The Era of Multi-GPU, Multi-Node
 
@@ -51,7 +51,7 @@ High-throughput, low-latency inference framework designed for serving generative
   <img src="./docs/images/frontpage-gpu-vertical.png" alt="Multi Node Multi-GPU topology" width="600" />
 </p>
 
-Large language models are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what NVIDIA Dynamo is built to close.
+Large language models are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what Dynamo is built to close.
 
 Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
 
@@ -65,7 +65,7 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
   <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
 </p>
 
-Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
+Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, community-first development approach.
 
 # Installation
 
@@ -231,12 +231,12 @@ You can pass any sglang flags directly to this worker, see https://docs.sglang.a
 
 ## TensorRT-LLM
 
-It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for running the TensorRT-LLM engine.
+It is recommended to use a PyTorch container for running the TensorRT-LLM engine.
 
 > [!Note]
 > Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
 > For example, if you are using `tensorrt-llm==1.2.0rc5`, use the PyTorch container image version `25.10`.
-> To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
+> To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended container tag.
 
 > [!Important]
 > Launch container with the following additional settings `--shm-size=1g --ulimit memlock=-1`
@@ -244,7 +244,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 ### Install prerequisites
 
 ```
-# Optional step: Only required for non-container installations. The PyTorch 25.10 container already includes PyTorch 2.9.0 with CUDA 13.0.
+# Optional step: Only required for non-container installations.
 uv pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
 
 sudo apt-get -y install libopenmpi-dev
@@ -254,7 +254,7 @@ sudo apt-get -y install libzmq3-dev
 ```
 
 > [!Tip]
-> You can learn more about these prequisites and known issues with TensorRT-LLM pip based installation [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html).
+> You can learn more about these prequisites and known issues with TensorRT-LLM pip based installation [here](https://github.com/NVIDIA/TensorRT-LLM#installation).
 
 ### After installing the pre-requisites above, install Dynamo
 
