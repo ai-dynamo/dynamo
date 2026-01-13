@@ -54,20 +54,6 @@ jobs:
 
 
 
-  test-matrix:
-    runs-on: ubuntu-slim
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: ['amd64', 'arm64']
-        cuda_version: ['12.9', '13.0']
-    name: test ${{ matrix.platform }}-cuda${{ matrix.cuda_version }}
-    steps:
-      - name: Test matrix
-        run: |
-          echo "platform: ${{ matrix.platform }}"
-          echo "cuda_version: ${{ matrix.cuda_version }}"
-
 
   # # ============================================================================
   # # SETUP & DETECTION JOBS
@@ -240,28 +226,23 @@ jobs:
   #     target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
 
 
-  # # ============================================================================
-  # # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # # ============================================================================
-  # vllm-pipeline:
-  #   needs: [init]
-  #   uses: ./.github/workflows/build-test-disribute-flavor.yml
-  #   # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-  #   with:
-  #     framework: vllm
-  #     builder_name: ${{ needs.init.outputs.builder_name }}
-  #     build_matrix: |
-  #       [
-  #         {"platform":"amd64","cuda_version":"12.9"},
-  #         {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
-  #         {"platform":"amd64","cuda_version":"13.0","base_image_tag":"25.11-cuda13.0-devel-ubuntu24.04","runtime_image_tag":"13.0.2-runtime-ubuntu24.04","torch_backend":"cu130"}
-  #         {"platform":"arm64","cuda_version":"13.0","base_image_tag":"25.11-cuda13.0-devel-ubuntu24.04","runtime_image_tag":"13.0.2-runtime-ubuntu24.04","torch_backend":"cu130"}
-  #       ]
-  #     no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-  #     extra_tags: |
-  #       ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-  #       ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-  #   secrets: inherit
+  # ============================================================================
+  # FRAMEWORK PIPELINES (Build → Test → Copy)
+  # ============================================================================
+  vllm-pipeline:
+    # needs: [init]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    with:
+      framework: vllm
+      builder_name: "test"
+      platforms: '["arm64", "amd64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+    secrets: inherit
 
   # sglang-pipeline:
   #   needs: [init]

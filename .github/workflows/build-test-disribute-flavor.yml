@@ -1,103 +1,129 @@
 # # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # # SPDX-License-Identifier: Apache-2.0
 
-# name: Build, Test, and Copy Framework Image
 
-# on:
-#   workflow_call:
-#     inputs:
-#       framework:
-#         description: 'Framework name (vllm, sglang, trtllm)'
-#         required: true
-#         type: string
-#       # ============================================================================
-#       # BUILD MATRIX CONFIGURATION
-#       # ============================================================================
-#       # JSON array of build configurations. Each entry specifies a platform+cuda combo.
-#       # Available fields per entry: platform, cuda_version, base_image_tag, runtime_image_tag, torch_backend
-#       build_matrix:
-#         description: 'JSON array of {platform, cuda_version, base_image_tag?, runtime_image_tag?, torch_backend?}'
-#         required: false
-#         type: string
-#         default: '[{"platform":"amd64","cuda_version":"12.8"},{"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}]'
-#       # ============================================================================
-#       # WORKFLOW CONTROL
-#       # ============================================================================
-#       run_tests:
-#         description: 'Whether to run pytest'
-#         required: false
-#         type: boolean
-#         default: true
-#       copy_to_acr:
-#         description: 'Whether to copy images to ACR'
-#         required: false
-#         type: boolean
-#         default: true
-#       builder_name:
-#         description: 'Buildkit builder name'
-#         required: true
-#         type: string
-#       extra_tags:
-#         description: 'Additional tags (newline-separated, -cuda$version-$platform suffix auto-appended)'
-#         required: false
-#         type: string
-#         default: ''
-#       build_image:
-#         description: 'Whether to build image'
-#         required: false
-#         type: boolean
-#         default: true
-#       no_cache:
-#         description: 'Disable Docker build cache'
-#         required: false
-#         type: boolean
-#         default: false
-#       push_image:
-#         description: 'Push image to registry'
-#         required: false
-#         type: boolean
-#         default: true
-#       no_load:
-#         description: 'Do not load the image into docker (useful for validation-only builds with remote builders)'
-#         required: false
-#         type: boolean
-#         default: false
-#     secrets:
-#       AWS_DEFAULT_REGION:
-#         required: true
-#       AWS_ACCOUNT_ID:
-#         required: true
-#       AZURE_ACR_HOSTNAME:
-#         required: true
-#       AZURE_ACR_USER:
-#         required: true
-#       AZURE_ACR_PASSWORD:
-#         required: true
-#       CI_TOKEN:
-#         required: false
-#       SCCACHE_S3_BUCKET:
-#         required: false
-#       AWS_ACCESS_KEY_ID:
-#         required: false
-#       AWS_SECRET_ACCESS_KEY:
-#         required: false
-#     outputs:
-#       build_matrix_json:
-#         description: 'JSON of all build configurations that were executed'
-#         value: ${{ jobs.prepare-matrix.outputs.matrix }}
-#       target_tag_plain:
-#         description: 'Base tag without platform suffix'
-#         value: ${{ jobs.build.outputs.target_tag_plain }}
-#       # Default image tags for backward compatibility (uses first CUDA version found per arch)
-#       image_tag_amd64:
-#         description: 'AMD64 image tag in ACR (first CUDA config)'
-#         value: ${{ jobs.prepare-matrix.outputs.amd64_tag }}
-#       image_tag_arm64:
-#         description: 'ARM64 image tag in ACR (first CUDA config)'
-#         value: ${{ jobs.prepare-matrix.outputs.arm64_tag }}
+name: Build, Test, and Copy Framework Image
 
-# jobs:
+on:
+  workflow_call:
+    inputs:
+      framework:
+        description: 'Framework name (vllm, sglang, trtllm)'
+        required: true
+        type: string
+      platforms:
+        description: 'Platforms to build (JSON array)'
+        required: false
+        type: string
+        default: '["amd64", "arm64"]'
+      cuda_versions:
+        description: 'CUDA versions to build (JSON array)'
+        required: false
+        type: string
+        default: '["12.9", "13.0"]'
+      arm_base_image_tag:
+        description: 'ARM64 base image tag override'
+        required: false
+        type: string
+        default: ''
+      arm_runtime_image_tag:
+        description: 'ARM64 runtime image tag override'
+        required: false
+        type: string
+        default: ''
+      arm_cuda_version:
+        description: 'ARM64 CUDA version override'
+        required: false
+        type: string
+        default: ''
+      arm_torch_backend:
+        description: 'ARM64 torch backend override'
+        required: false
+        type: string
+        default: ''
+      run_tests:
+        description: 'Whether to run pytest'
+        required: false
+        type: boolean
+        default: true
+      copy_to_acr:
+        description: 'Whether to copy images to ACR'
+        required: false
+        type: boolean
+        default: true
+      builder_name:
+        description: 'Buildkit builder name'
+        required: true
+        type: string
+      extra_tags:
+        description: 'Additional tags (newline-separated, -$platform suffix auto-appended)'
+        required: false
+        type: string
+        default: ''
+      build_image:
+        description: 'Whether to build image'
+        required: false
+        type: boolean
+        default: true
+      no_cache:
+        description: 'Disable Docker build cache'
+        required: false
+        type: boolean
+        default: false
+      push_image:
+        description: 'Push image to registry'
+        required: false
+        type: boolean
+        default: true
+      no_load:
+        description: 'Do not load the image into docker (useful for validation-only builds with remote builders)'
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCOUNT_ID:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      CI_TOKEN:
+        required: false
+      SCCACHE_S3_BUCKET:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+    outputs:
+      image_tag_amd64:
+        description: 'AMD64 image tag in ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-amd64
+      image_tag_arm64:
+        description: 'ARM64 image tag in ACR'
+        value: ${{ jobs.copy-to-acr.outputs.target_tag_plain }}-arm64
 
+jobs:
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(inputs.platforms) }}
+        cuda_version: ${{ fromJSON(inputs.cuda_versions) }}
+    name: build ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
+    runs-on: ubuntu-slim
+
+    steps:
+      - name: echo all inputs
+        run: |
+          echo "${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}"
 
 #   # prepare-matrix:
 #   #   runs-on: ubuntu-slim
