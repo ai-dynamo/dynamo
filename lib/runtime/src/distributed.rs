@@ -321,6 +321,18 @@ impl DistributedRuntime {
     }
 
     pub fn shutdown(&self) {
+        // Optionally dump metrics to log before shutdown
+        if crate::config::dump_metrics_on_shutdown() {
+            match self.metrics().prometheus_expfmt() {
+                Ok(metrics) => {
+                    tracing::info!(target: "dynamo_runtime::metrics", metrics = %metrics, "Shutdown metrics dump");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to dump metrics on shutdown: {}", e);
+                }
+            }
+        }
+
         self.runtime.shutdown();
         self.store.shutdown();
     }
