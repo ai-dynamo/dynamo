@@ -73,17 +73,8 @@ env:
 ############################## BUILD JOBS ##############################
 
 jobs:
-  # TODO: Remove after testing - dummy job to allow ci-pipeline to complete
-  dummy-build:
-    name: Dummy Build (Testing)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Skip builds for testing
-        run: echo "Builds skipped for testing. Release-publish will test login only."
-
   build-amd64:
     name: Build ${{ matrix.framework }} (amd64)
-    if: false  # TODO: Re-enable after testing
     runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 120
     strategy:
@@ -145,7 +136,6 @@ jobs:
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
-    if: false  # TODO: Re-enable after testing
     runs-on: cpu-arm-r8g-4xlarge
     timeout-minutes: 120
     strategy:
