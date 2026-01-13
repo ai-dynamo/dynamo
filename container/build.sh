@@ -997,6 +997,12 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     export GAIE_DIR="${GAIE_CLONE_DIR}"
     export DYNAMO_DIR="${BUILD_CONTEXT}"
 
+    # Set DOCKER_PROXY from ECR_HOSTNAME if available (for pulling base images through proxy)
+    if [[ -n "${ECR_HOSTNAME}" ]]; then
+        export DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
+    fi
+
     $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
 
     # Set EPP image tag (matches what build-epp-dynamo.sh produces)

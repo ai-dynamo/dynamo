@@ -30,12 +30,16 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## Framework Support Matrix
 
-| Feature                                                                                           | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
-| ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| Feature                                                              | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
+| -------------------------------------------------------------------- | :--: | :----: | :----------: |
+| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md)      | ✅   | ✅     | ✅           |
+| [**KV-Aware Routing**](docs/router/kv_cache_routing.md)              | ✅   | ✅     | ✅           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                 | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                           | ✅   | 🚧     | ✅           |
+| [**Multimodal**](docs/multimodal/index.md)                           | ✅   | ✅     | ✅           |
+| [**Tool Calling**](docs/agents/tool-calling.md)                      | ✅   | ✅     | ✅           |
+
+> **[Full Feature Matrix →](feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
 
 ## Latest News
 
