@@ -61,8 +61,9 @@ impl ZeroCopyTcpDecoder {
         &mut self,
         reader: &mut R,
     ) -> io::Result<TcpRequestMessageZeroCopy> {
-        // Ensure we have at least the minimum header size (2 bytes path len + some data)
-        const MIN_HEADER_SIZE: usize = 6; // path_len(2) + min_path(1) + payload_len(4)
+        // Ensure we have at least enough bytes to start parsing
+        // Wire format: [path_len(2)][path][headers_len(2)][headers][payload_len(4)][payload]
+        const MIN_HEADER_SIZE: usize = 2;
 
         // Fill buffer if needed
         while self.read_buffer.len() < MIN_HEADER_SIZE {
@@ -443,7 +444,10 @@ mod tests {
             decoded_headers.get("traceparent").unwrap(),
             "00-abc123-def456-01"
         );
-        assert_eq!(decoded_headers.get("user-agent").unwrap(), "test-client/1.0");
+        assert_eq!(
+            decoded_headers.get("user-agent").unwrap(),
+            "test-client/1.0"
+        );
         assert_eq!(decoded_headers.get("request-id").unwrap(), "req-12345");
 
         // Verify headers_bytes returns the raw JSON
