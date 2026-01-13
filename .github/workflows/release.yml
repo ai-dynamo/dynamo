@@ -102,8 +102,6 @@ jobs:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - name: Checkout
@@ -186,10 +184,9 @@ jobs:
           crane version
 
       - name: Login to ECR
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
           echo "Logging into ECR..."
           aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
           echo "✅ ECR login successful"
