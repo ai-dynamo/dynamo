@@ -3,7 +3,6 @@
 
 """
 OpenTelemetry tracing header utilities for Dynamo components.
-
 """
 
 

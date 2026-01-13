@@ -1189,7 +1189,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("dp_rank", None)
 
-        trace_headers = build_sampling_params(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id):
             try:
