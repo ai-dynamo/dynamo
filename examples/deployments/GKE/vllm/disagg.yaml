@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -39,7 +37,6 @@ spec:
             /sbin/ldconfig
             python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

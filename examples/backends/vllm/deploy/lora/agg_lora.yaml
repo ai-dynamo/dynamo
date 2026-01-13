@@ -7,7 +7,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-lora
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -15,7 +14,6 @@ spec:
           image: nvcr.io/nvidian/dynamo-dev/biswa:7e499b5c460f1883a9945d221123e0760051210f-39500608-vllm-amd64
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-lora
       componentType: worker
       subComponentType: decode
       replicas: 1
