@@ -44,6 +44,63 @@ from .publisher import StatLoggerFactory
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+# Track if GPU Memory Service has been set up to avoid duplicate setup
+_gpu_memory_service_setup_done = False
+
+
+def _setup_gpu_memory_service_if_needed(config: Config) -> None:
+    """Setup GPU Memory Service if load_format indicates GPU Memory Service usage.
+
+    This does TWO things:
+    1. Sets environment variables for patches (needed in spawned workers)
+    2. Registers the GPU Memory Service loader and applies patches
+
+    The model loader reads config from load_config.model_loader_extra_config,
+    but the patches (memory accounting, sleep/wake) run at module import time
+    and rely on environment variables.
+    """
+    global _gpu_memory_service_setup_done
+    if _gpu_memory_service_setup_done:
+        return
+
+    load_format = getattr(config.engine_args, "load_format", None)
+    if load_format != "gpu_memory_service":
+        return
+
+    logger.info(
+        "[GPU Memory Service] Detected load_format='gpu_memory_service', setting up GPU Memory Service integration"
+    )
+
+    # Set env var to trigger auto-registration in spawned workers
+    os.environ["GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER"] = "1"
+
+    # Also pass socket path to workers via environment variable
+    # Workers need this to establish early GMS connection before model loading
+    extra_config = getattr(config.engine_args, "model_loader_extra_config", None) or {}
+    socket_path = extra_config.get(
+        "gpu_memory_service_socket_path", "/tmp/gpu_memory_service_{device}.sock"
+    )
+    os.environ["GPU_MEMORY_SERVICE_SOCKET_PATH"] = socket_path
+    logger.debug(f"[GPU Memory Service] Set socket path env var: {socket_path}")
+
+    # Register loader and apply patches in main process
+    try:
+        from dynamo.vllm.gpu_memory_service_adapters import (
+            patch_model_runner_for_gpu_memory_service,
+            register_gpu_memory_service_loader,
+        )
+
+        register_gpu_memory_service_loader()
+        patch_model_runner_for_gpu_memory_service()
+        logger.info(
+            "[GPU Memory Service] Registered GPU Memory Service loader and applied patches"
+        )
+    except Exception as e:
+        logger.error(f"[GPU Memory Service] Failed to setup GPU Memory Service: {e}")
+        raise
+
+    _gpu_memory_service_setup_done = True
+
 
 async def graceful_shutdown(runtime):
     """
@@ -237,6 +294,10 @@ def setup_kv_event_publisher(
 
 
 def setup_vllm_engine(config, stat_logger=None):
+    # Setup GPU Memory Service if using gpu_memory_service load format
+    # This must be called before any vLLM imports in spawned workers
+    _setup_gpu_memory_service_if_needed(config)
+
     # vLLM v0.11.0 bug: vllm/v1.metrics/prometheus.py:79 passes TemporaryDirectory object
     # instead of .name string, causing false error on exit. Set PROMETHEUS_MULTIPROC_DIR
     # ourselves to avoid this and handle cleanup properly.
