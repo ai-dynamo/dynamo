@@ -10,7 +10,7 @@ on:
     - release/*.*.*
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -26,10 +26,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          driver: docker
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
