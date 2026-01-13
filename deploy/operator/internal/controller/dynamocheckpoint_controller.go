@@ -270,11 +270,17 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		// The pod waits for this file (written by DaemonSet), then exits successfully
 		signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash + ".done"
 
-		// Add signal file env var - this tells the runtime to enter checkpoint mode
+		// Add checkpoint-related env vars
 		mainContainer.Env = append(mainContainer.Env,
+			// Signal file: DaemonSet writes this after checkpoint completes
 			corev1.EnvVar{
 				Name:  consts.EnvCheckpointSignalFile,
 				Value: signalFilePath,
+			},
+			// Ready file: Worker creates this when model is loaded
+			corev1.EnvVar{
+				Name:  consts.EnvCheckpointReadyFile,
+				Value: consts.CheckpointReadyFilePath,
 			},
 		)
 
@@ -285,6 +291,18 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 				MountPath: consts.CheckpointSignalMountPath,
 			},
 		)
+
+		// Add readiness probe to wait for model to load before checkpoint
+		// This ensures the DaemonSet only checkpoints after the worker is fully initialized
+		mainContainer.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{
+					Command: []string{"cat", consts.CheckpointReadyFilePath},
+				},
+			},
+			InitialDelaySeconds: 15,
+			PeriodSeconds:       2,
+		}
 	}
 
 	// Set restart policy to Never for Jobs

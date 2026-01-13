@@ -120,6 +120,14 @@ const (
 	// The checkpoint job pod waits for this file, then exits successfully
 	EnvCheckpointSignalFile = "DYNAMO_CHECKPOINT_SIGNAL_FILE"
 
+	// EnvCheckpointReadyFile is the full path to a file the worker creates
+	// when the model is loaded and ready for checkpointing.
+	// The readiness probe watches this file to trigger DaemonSet checkpoint.
+	EnvCheckpointReadyFile = "DYNAMO_CHECKPOINT_READY_FILE"
+
+	// CheckpointReadyFilePath is the default path for the ready file
+	CheckpointReadyFilePath = "/tmp/checkpoint-ready"
+
 	CheckpointVolumeName       = "checkpoint-storage"
 	CheckpointSignalVolumeName = "checkpoint-signal"
 	CheckpointBasePath         = "/checkpoints"
