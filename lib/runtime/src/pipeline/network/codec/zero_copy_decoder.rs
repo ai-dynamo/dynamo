@@ -396,4 +396,104 @@ mod tests {
         assert!(err.to_string().contains("1045")); // total_len
         assert!(err.to_string().contains("1024")); // max_message_size
     }
+
+    #[tokio::test]
+    async fn test_zero_copy_decoder_with_headers() {
+        // Test header parsing with actual header data
+        let endpoint = "api/v1/inference";
+        let payload = b"Request payload data";
+
+        // Create mock headers as JSON
+        let mut headers_map = std::collections::HashMap::new();
+        headers_map.insert("traceparent".to_string(), "00-abc123-def456-01".to_string());
+        headers_map.insert("user-agent".to_string(), "test-client/1.0".to_string());
+        headers_map.insert("request-id".to_string(), "req-12345".to_string());
+
+        let headers_json = serde_json::to_vec(&headers_map).unwrap();
+
+        let mut message = Vec::new();
+        // path_len + path
+        message.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
+        message.extend_from_slice(endpoint.as_bytes());
+        // headers_len + headers (non-empty this time)
+        message.extend_from_slice(&(headers_json.len() as u16).to_be_bytes());
+        message.extend_from_slice(&headers_json);
+        // payload_len + payload
+        message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        message.extend_from_slice(payload);
+
+        // Decode the message
+        let mut reader = &message[..];
+        let mut decoder = ZeroCopyTcpDecoder::new();
+        let msg = decoder.read_message(&mut reader).await.unwrap();
+
+        // Verify endpoint
+        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+
+        // Verify payload
+        assert_eq!(msg.payload().as_ref(), payload);
+
+        // Verify total size includes all components
+        assert_eq!(msg.total_size(), message.len());
+
+        // Verify headers are correctly parsed
+        let decoded_headers = msg.headers();
+        assert_eq!(decoded_headers.len(), 3);
+        assert_eq!(
+            decoded_headers.get("traceparent").unwrap(),
+            "00-abc123-def456-01"
+        );
+        assert_eq!(decoded_headers.get("user-agent").unwrap(), "test-client/1.0");
+        assert_eq!(decoded_headers.get("request-id").unwrap(), "req-12345");
+
+        // Verify headers_bytes returns the raw JSON
+        let headers_bytes = msg.headers_bytes();
+        assert_eq!(headers_bytes, &headers_json[..]);
+    }
+
+    #[tokio::test]
+    async fn test_zero_copy_decoder_empty_vs_populated_headers() {
+        // Test both empty and populated headers in sequence to ensure proper parsing
+        let endpoint = "test/endpoint";
+        let payload = b"test data";
+
+        // Test 1: Empty headers
+        let mut message_empty = Vec::new();
+        message_empty.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
+        message_empty.extend_from_slice(endpoint.as_bytes());
+        message_empty.extend_from_slice(&(0u16).to_be_bytes()); // headers_len = 0
+        // No headers bytes
+        message_empty.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        message_empty.extend_from_slice(payload);
+
+        let mut reader = &message_empty[..];
+        let mut decoder = ZeroCopyTcpDecoder::new();
+        let msg = decoder.read_message(&mut reader).await.unwrap();
+
+        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.payload().as_ref(), payload);
+        assert_eq!(msg.headers().len(), 0);
+        assert_eq!(msg.headers_bytes().len(), 0);
+
+        // Test 2: Populated headers with same decoder
+        let mut headers_map = std::collections::HashMap::new();
+        headers_map.insert("x-test-header".to_string(), "test-value".to_string());
+        let headers_json = serde_json::to_vec(&headers_map).unwrap();
+
+        let mut message_with_headers = Vec::new();
+        message_with_headers.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
+        message_with_headers.extend_from_slice(endpoint.as_bytes());
+        message_with_headers.extend_from_slice(&(headers_json.len() as u16).to_be_bytes());
+        message_with_headers.extend_from_slice(&headers_json);
+        message_with_headers.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        message_with_headers.extend_from_slice(payload);
+
+        let mut reader = &message_with_headers[..];
+        let msg = decoder.read_message(&mut reader).await.unwrap();
+
+        assert_eq!(msg.endpoint_path().unwrap(), endpoint);
+        assert_eq!(msg.payload().as_ref(), payload);
+        assert_eq!(msg.headers().len(), 1);
+        assert_eq!(msg.headers().get("x-test-header").unwrap(), "test-value");
+    }
 }
