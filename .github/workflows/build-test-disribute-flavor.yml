@@ -202,6 +202,8 @@ jobs:
     needs: [build]
     name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.runner }}
+    env:
+      TEST_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -214,20 +216,28 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
+      - name: Pull relevant images
+        shell: bash
+        run: |
+          start_time=$(date +%s)
+          docker pull ${{ env.TEST_IMAGE }}
+          docker pull quay.io/minio/minio
+          end_time=$(date +%s)
+          duration=$((end_time - start_time))
+          echo "⏱️ Image pull duration: ${duration}s"
+          echo "## ⏱️ Pulled ${{ inputs.image_tag }} in ${duration} seconds" >> $GITHUB_STEP_SUMMARY
 
       - name: Run Sanity Check on Runtime Image
         shell: bash
         run: |
-          IMAGE_TAG="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform.arch }}"
-          echo "Running sanity check on image: $IMAGE_TAG"
+          echo "Running sanity check on image: ${{ env.TEST_IMAGE }}"
 
           # Run the sanity check script inside the container
           # The script is located in /workspace/deploy/sanity_check.py in runtime containers
           export WORKSPACE=/workspace
 
           set +e
-          docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          docker run --rm "${{ env.TEST_IMAGE }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
           set -e
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
@@ -237,11 +247,10 @@ jobs:
             echo "✅ Sanity check passed"
           fi
 
-
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
+          image_tag: ${{ env.TEST_IMAGE }}
           pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
