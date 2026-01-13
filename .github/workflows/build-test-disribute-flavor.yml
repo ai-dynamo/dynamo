@@ -146,7 +146,7 @@ jobs:
         id: route-buildkit
         continue-on-error: true
         shell: bash
-        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ inputs.framework }}
+        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ inputs.framework }} --cuda ${{ matrix.cuda_version }}
 
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
@@ -193,8 +193,13 @@ jobs:
   # # ============================================================================
   # test:
   #   if: inputs.run_tests
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform: ['amd64']
+  #       cuda_version: ${{ fromJson(inputs.cuda_versions) }}
   #   needs: [build]
-  #   name: test ${{ inputs.framework }}-amd64
+  #   name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-amd64
   #   runs-on: gpu-l40-amd64
   #   steps:
   #     - name: Checkout repository
