@@ -100,7 +100,7 @@ TensorRT-LLM delivers maximum inference performance and optimization, with full 
 > 2. **Multimodal + KV-Aware Routing**: Not supported. The KV router currently tracks token-based blocks only. ([Source][kv-routing])
 > 3. **Request Migration**: Supported on **Decode/Aggregated** workers only. **Prefill** workers do not support migration. ([Source][trtllm-readme])
 > 4. **Speculative Decoding**: Llama 4 + Eagle support documented. ([Source][trtllm-eagle])
-> 
+
 ---
 
 ## Source References
