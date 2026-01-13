@@ -512,9 +512,8 @@ impl SharedTcpServer {
                     );
 
                     // Send error response to client instead of ACK
-                    let error_response = TcpResponseMessage::new(
-                        Bytes::from(format!("Server overloaded: {}", e))
-                    );
+                    let error_response =
+                        TcpResponseMessage::new(Bytes::from(format!("Server overloaded: {}", e)));
                     if let Ok(encoded) = error_response.encode() {
                         let _ = response_tx.send(encoded);
                     }
