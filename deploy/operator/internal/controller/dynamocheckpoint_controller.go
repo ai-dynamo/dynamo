@@ -292,8 +292,10 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			},
 		)
 
-		// Add readiness probe to wait for model to load before checkpoint
-		// This ensures the DaemonSet only checkpoints after the worker is fully initialized
+		// Override probes for checkpoint mode
+		// Checkpoint jobs need different probe behavior than regular worker pods:
+		// - Readiness: Wait for model to load before checkpoint
+		// - Liveness/Startup: Remove to prevent restarts during slow model loading
 		mainContainer.ReadinessProbe = &corev1.Probe{
 			ProbeHandler: corev1.ProbeHandler{
 				Exec: &corev1.ExecAction{
@@ -303,6 +305,10 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			InitialDelaySeconds: 15,
 			PeriodSeconds:       2,
 		}
+		// Remove liveness probe - we don't want restarts during model loading
+		mainContainer.LivenessProbe = nil
+		// Remove startup probe - not needed for checkpoint jobs
+		mainContainer.StartupProbe = nil
 	}
 
 	// Set restart policy to Never for Jobs
