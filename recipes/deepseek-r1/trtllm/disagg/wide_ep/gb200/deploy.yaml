@@ -20,10 +20,9 @@ metadata:
   name: prefill-config
 data:
   prefill_config.yaml: |
-    build_config:
-        max_batch_size: 4
-        max_num_tokens: 4608
-        max_seq_len: 1227
+    max_batch_size: 4
+    max_num_tokens: 4608
+    max_seq_len: 1227
     tensor_parallel_size: 4
     moe_expert_parallel_size: 4
     enable_attention_dp: true
@@ -52,10 +51,9 @@ data:
     moe_expert_parallel_size: 32
     enable_attention_dp: true
     pipeline_parallel_size: 1
-    build_config:
-        max_batch_size: 32
-        max_num_tokens: 32
-        max_seq_len: 2251
+    max_batch_size: 32
+    max_num_tokens: 32
+    max_seq_len: 2251
     cuda_graph_config:
       enable_padding: true
       batch_sizes:
