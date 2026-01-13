@@ -185,6 +185,14 @@ filterwarnings = [
     'ignore:Field name "schema" in "ResponseFormat" shadows an attribute in parent:UserWarning',
     # pytest-benchmark automatically disables when xdist is active, ignore the warning
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
+
+    ################################################################################################
+    # TRT-LLM
+    ################################################################################################
+    # torchao deprecation warnings for import path changes (see https://github.com/pytorch/ao/issues/2752)
+    "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
+    # nvidia-modelopt warning about transformers version incompatibility
+    "ignore:transformers version .* is incompatible with nvidia-modelopt.*:UserWarning",
 ]
 
 
