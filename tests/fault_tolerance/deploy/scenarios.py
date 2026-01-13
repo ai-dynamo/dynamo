@@ -231,11 +231,16 @@ class DeletePodFailure(Failure):
         pod_names: list[str] = []
         for service_name, pods in service_pod_dict.items():
             for pod in pods:
+                pod_names.append(pod.name)
+
+        # Capture manifest/logs via direct API call and delete pods
+        # Note: With PVC-based logging, logs are automatically persisted to the shared volume
+        for service_name, pods in service_pod_dict.items():
+            for pod in pods:
                 deployment.get_pod_manifest_logs_metrics(
                     service_name, pod, ".before_delete"
                 )
                 pod.delete(force=True)  # force means no graceful termination
-                pod_names.append(pod.name)
 
         return pod_names
 
