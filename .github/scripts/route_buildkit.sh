@@ -9,17 +9,19 @@
 # DESCRIPTION:
 #   Discovers active BuildKit pods via Kubernetes DNS and assigns them to
 #   different framework flavors (vllm, trtllm, sglang, general) using a
-#   modulo-based routing strategy. Outputs are written to GITHUB_OUTPUT for
-#   use in GitHub Actions workflows.
+#   modulo-based routing strategy that accounts for CUDA version. Outputs are
+#   written to GITHUB_OUTPUT for use in GitHub Actions workflows.
 #
 # USAGE:
-#   ./route_buildkit.sh --arch amd64 --flavor all    # Route all flavors for AMD64
-#   ./route_buildkit.sh --arch arm64 --flavor vllm   # Route vllm for ARM64
-#   ./route_buildkit.sh --arch all --flavor all      # Route all flavors for both architectures
+#   ./route_buildkit.sh --arch amd64 --flavor vllm --cuda 12.9   # Route vllm CUDA 12 for AMD64
+#   ./route_buildkit.sh --arch arm64 --flavor trtllm --cuda 13.0 # Route trtllm CUDA 13 for ARM64
+#   ./route_buildkit.sh --arch all --flavor all --cuda 12.9      # Route all flavors for both architectures
+#   ./route_buildkit.sh --arch amd64 --flavor general            # Route general (no CUDA required)
 #
 # ARGUMENTS:
-#   --arch <arch>     Target architecture: amd64, arm64, or all
-#   --flavor <flavor> Target flavor: vllm, trtllm, sglang, general, or all
+#   --arch <arch>       Target architecture: amd64, arm64, or all
+#   --flavor <flavor>   Target flavor: vllm, trtllm, sglang, general, or all
+#   --cuda <version>    CUDA version: 12.9 or 13.0 (optional for "general" flavor)
 #
 # ENVIRONMENT VARIABLES:
 #   MAX_RETRIES   Max attempts to wait for pods (default: 8)
@@ -33,11 +35,17 @@
 #     trtllm_arm64=tcp://buildkit-arm64-1.buildkit-arm64-headless.buildkit.svc.cluster.local:1234
 #
 # ROUTING STRATEGY:
-#   Pods are assigned to flavors based on pod index modulo 3:
-#     - vllm:    pod_index % 3 == 0  (pods 0, 3, 6, ...)
-#     - trtllm:  pod_index % 3 == 1  (pods 1, 4, 7, ...)
-#     - sglang:  pod_index % 3 == 2  (pods 2, 5, 8, ...)
-#     - general: pod_index % 3 == 2  (same as sglang)
+#   Pods are assigned to flavors based on pod index modulo 3, with CUDA version
+#   determining the pool assignment:
+#
+#   Pool 0 (pod_index % 3 == 0) - Standard Heavy Lifters (CUDA 12):
+#     - vllm-cuda12, trtllm-cuda12
+#
+#   Pool 1 (pod_index % 3 == 1) - Next Gen Heavy Lifters (CUDA 13):
+#     - vllm-cuda13, trtllm-cuda13, sglang-cuda13
+#
+#   Pool 2 (pod_index % 3 == 2) - SGLang Isolation & General Tasks:
+#     - sglang-cuda12, general (any/no CUDA)
 #
 #   If no pods match a flavor's modulo, all available pods are used as fallback.
 #
@@ -50,16 +58,16 @@
 #   # In GitHub Actions workflow:
 #   - name: Route Buildkit Workers
 #     run: |
-#       .github/scripts/route_buildkit.sh --arch amd64 --flavor all
-#       .github/scripts/route_buildkit.sh --arch arm64 --flavor all
+#       .github/scripts/route_buildkit.sh --arch amd64 --flavor vllm --cuda 12.9
+#       .github/scripts/route_buildkit.sh --arch arm64 --flavor trtllm --cuda 13.0
 #
-#   # Route specific flavor for specific arch:
-#   - name: Route vllm for AMD64
-#     run: .github/scripts/route_buildkit.sh --arch amd64 --flavor vllm
+#   # Route specific flavor for specific arch with CUDA version:
+#   - name: Route vllm CUDA 12 for AMD64
+#     run: .github/scripts/route_buildkit.sh --arch amd64 --flavor vllm --cuda 12.9
 #
-#   # Route all flavors for all architectures:
-#   - name: Route all
-#     run: .github/scripts/route_buildkit.sh --arch all --flavor all
+#   # Route general tasks (no CUDA required):
+#   - name: Route general
+#     run: .github/scripts/route_buildkit.sh --arch amd64 --flavor general
 #
 #   # Then use outputs:
 #   buildkit_worker_addresses: ${{ steps.route.outputs.vllm_amd64 }}
@@ -71,6 +79,7 @@ set -e
 # --- ARGUMENT PARSING ---
 ARCH_INPUT=""
 FLAVOR_INPUT=""
+CUDA_VERSION=""
 ALL_FLAVORS=("vllm" "trtllm" "sglang" "general")
 
 while [[ $# -gt 0 ]]; do
@@ -83,8 +92,12 @@ while [[ $# -gt 0 ]]; do
       FLAVOR_INPUT="$2"
       shift 2
       ;;
+    --cuda)
+      CUDA_VERSION="$2"
+      shift 2
+      ;;
     *)
-      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all>."
+      echo "❌ Error: Unknown argument '$1'. Use --arch <amd64|arm64|all> --flavor <vllm|trtllm|sglang|general|all> [--cuda <12.9|13.0>]."
       exit 1
       ;;
   esac
@@ -97,6 +110,12 @@ fi
 
 if [ -z "$FLAVOR_INPUT" ]; then
   echo "❌ Error: Must specify --flavor <vllm|trtllm|sglang|general|all>."
+  exit 1
+fi
+
+# CUDA version is required for all flavors except "general"
+if [ -z "$CUDA_VERSION" ] && [ "$FLAVOR_INPUT" != "general" ]; then
+  echo "❌ Error: Must specify --cuda <12.9|13.0> for flavor '$FLAVOR_INPUT'."
   exit 1
 fi
 
@@ -117,6 +136,17 @@ case $FLAVOR_INPUT in
     exit 1
     ;;
 esac
+
+# Validate CUDA version input (allow empty for general flavor)
+if [ -n "$CUDA_VERSION" ]; then
+  case $CUDA_VERSION in
+    12.9|13.0) ;;
+    *)
+      echo "❌ Error: Invalid CUDA version '$CUDA_VERSION'. Must be 12.9 or 13.0."
+      exit 1
+      ;;
+  esac
+fi
 
 # Determine architectures to process
 if [ "$ARCH_INPUT" = "all" ]; then
@@ -155,23 +185,47 @@ get_pod_count() {
   echo $((ip_count))
 }
 
-# Function to get all pod indices for a flavor based on Modulo 3
+# Function to get all pod indices for a flavor based on Modulo 3 and CUDA version
 get_target_indices() {
   local flavor=$1
-  local count=$2
+  local cuda_version=$2
+  local count=$3
 
-  # Target remainder:
-  # vllm   -> % 3 == 0
-  # trtllm -> % 3 == 1
-  # sglang -> % 3 == 2 (and others)
+  # Normalize the CUDA version to a major version for easier grouping
+  # This turns "12.9" -> "12" and "13.0" -> "13", empty stays empty
+  local cuda_major=${cuda_version%%.*}
+
+  local route_key="${flavor}-cuda${cuda_major}"
+
   local target_mod
-  case $flavor in
-    vllm)           target_mod=0 ;;
-    trtllm)         target_mod=1 ;;
-    sglang|general)  target_mod=2 ;;
-    *)              target_mod=2 ;; # Default others to 2
+
+  case "$route_key" in
+    # --- POOL 0: The "Standard" Heavy Lifters (CUDA 12) ---
+    vllm-cuda12|trtllm-cuda12)
+      target_mod=0
+      ;;
+
+    # --- POOL 1: The "Next Gen" Heavy Lifters (CUDA 13) ---
+    vllm-cuda13|trtllm-cuda13|sglang-cuda13)
+      target_mod=1
+      ;;
+
+    # --- POOL 2: SGLang Isolation & General Tasks ---
+    # sglang-cuda12 is here to offload Worker 0
+    # general-* matches all general tasks regardless of CUDA version (including empty)
+    sglang-cuda12|general-*)
+      target_mod=2
+      ;;
+
+    # --- FALLBACK ---
+    *)
+      # Unknown combinations default to pool 2
+      target_mod=2
+      ;;
   esac
 
+  # Debug print to help you verify logic in logs
+  echo "   [DEBUG] Routing Key: '$route_key' -> Worker Index Modulo: $target_mod" >&2
   # Find all valid indices [0 ... count-1] that match the modulo
   local candidates=()
   for (( i=0; i<count; i++ )); do
@@ -233,7 +287,7 @@ for ARCH in "${ARCHS[@]}"; do
 
   # Iterate over flavors and set outputs
   for flavor in "${FLAVORS[@]}"; do
-    TARGET_INDICES=($(get_target_indices "$flavor" "$COUNT"))
+    TARGET_INDICES=($(get_target_indices "$flavor" "$CUDA_VERSION" "$COUNT"))
 
     ADDRS=""
     for idx in "${TARGET_INDICES[@]}"; do
