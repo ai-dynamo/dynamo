@@ -465,6 +465,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 Some(use_kv_events),
                 Some(router_replica_sync),
                 None, // track_active_blocks
+                None, // assume_kv_reuse
                 None, // router_snapshot_threshold
                 None, // router_reset_states
                 None, // router_ttl_secs
@@ -1306,12 +1307,12 @@ fn spawn_prefill_watcher(
                         }
                     }
                 }
-                DiscoveryEvent::Removed(instance_id) => {
+                DiscoveryEvent::Removed(id) => {
                     // Log removal for observability
                     // Note: The PrefillRouter remains active - worker availability
                     // is handled dynamically by the underlying Client's instance tracking
                     tracing::debug!(
-                        instance_id = instance_id,
+                        instance_id = id.instance_id(),
                         "Prefill worker instance removed from discovery"
                     );
                 }
