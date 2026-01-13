@@ -143,7 +143,7 @@ jobs:
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
-          - { major_minor: '12.9', major: '12.9' }
+          - { major_minor: '12.9', major: '12' }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
@@ -221,7 +221,7 @@ jobs:
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
-          - { major_minor: '12.9', major: '12.9' }
+          - { major_minor: '12.9', major: '12' }
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
