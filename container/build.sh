@@ -997,24 +997,15 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     export GAIE_DIR="${GAIE_CLONE_DIR}"
     export DYNAMO_DIR="${BUILD_CONTEXT}"
 
-    # Save current buildx builder name (the * marker is attached to the name, so strip it)
-    ORIGINAL_BUILDER=$(docker buildx ls 2>/dev/null | grep '\*' | awk '{print $1}' | tr -d '*')
-    echo "Saving current buildx builder: ${ORIGINAL_BUILDER}"
-
+    # EPP build uses dynamo-image-local-load which creates a docker driver builder
+    # We intentionally keep using that driver for the frontend build so it can access the local EPP image
+    # (docker-container driver cannot access Docker's local image store)
     $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
 
     # Set EPP image tag (matches what build-epp-dynamo.sh produces)
     EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
 
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
-
-    # Restore original buildx builder for the frontend build (needed for cache export support)
-    if [ -n "$ORIGINAL_BUILDER" ]; then
-        echo "Restoring buildx builder: ${ORIGINAL_BUILDER}"
-        docker buildx use "$ORIGINAL_BUILDER"
-        echo "Active builder after restore:"
-        docker buildx ls | grep '\*'
-    fi
 
     # Add build args for frontend image
     BUILD_ARGS+=" --build-arg EPP_IMAGE=${EPP_IMAGE_TAG}"
