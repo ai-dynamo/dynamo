@@ -56,6 +56,42 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+/// Wait for the discovery daemon to sync and return at least one instance.
+/// This ensures list() calls will have data available.
+/// Returns the number of instances found, or 0 if timed out.
+async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
+    use dynamo_runtime::discovery::DiscoveryQuery;
+
+    tracing::info!("Waiting for discovery to sync...");
+    let discovery = drt.discovery();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+
+    loop {
+        match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(instances) if !instances.is_empty() => {
+                tracing::info!(
+                    "Discovery sync complete: found {} instances",
+                    instances.len()
+                );
+                return instances.len();
+            }
+            Ok(_) => {
+                if start.elapsed() > timeout {
+                    tracing::warn!("Discovery sync timed out waiting for instances");
+                    return 0;
+                }
+                tracing::debug!("No instances yet, waiting...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                tracing::warn!("Discovery list error: {}, continuing...", e);
+                return 0;
+            }
+        }
+    }
+}
+
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
@@ -80,7 +116,14 @@ pub unsafe extern "C" fn dynamo_llm_init(
             .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(drt) => {
+                // Wait for discovery to sync before returning
+                // This is needed because dynamo_create_worker_selection_pipeline() is called
+                // immediately after, and it needs discovery.list() to return data
+                // the discovery daemon takes time to query K8s and returns async, so we need to wait.
+                wait_for_discovery_sync(drt, 10).await;
+                Ok(())
+            }
             Err(e) => {
                 tracing::error!(error = ?e, "Failed to initialize distributed runtime");
                 Err(DynamoLlmResult::ERR)
@@ -1354,10 +1397,29 @@ pub async fn create_worker_selection_pipeline_chat(
 )> {
     use dynamo_llm::kv_router::PrefillRouter;
 
-    let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings();
-    let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
-    let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
+    // Use the global DRT if already initialized (by dynamo_llm_init),
+    // otherwise create a new one for standalone use
+    let distributed_runtime: &'static DistributedRuntime = match DRT.get() {
+        Some(drt) => {
+            tracing::debug!("Using global DistributedRuntime from dynamo_llm_init");
+            // DRT is already 'static since it's in an AsyncOnceCell
+            // We need to leak a reference to match the expected lifetime
+            // This is safe because the global DRT lives for 'static
+            unsafe { std::mem::transmute::<&DistributedRuntime, &'static DistributedRuntime>(drt) }
+        }
+        None => {
+            tracing::debug!("Creating new DistributedRuntime (standalone mode)");
+            let runtime = Runtime::from_settings()?;
+            let dst_config = DistributedConfig::from_settings();
+            let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
+            let drt: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
+
+            // Wait for discovery to sync (same as dynamo_llm_init)
+            wait_for_discovery_sync(drt, 10).await;
+
+            drt
+        }
+    };
 
     let component = distributed_runtime
         .namespace(namespace)?
