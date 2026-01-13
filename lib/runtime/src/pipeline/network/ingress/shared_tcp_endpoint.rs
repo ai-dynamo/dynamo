@@ -98,7 +98,7 @@ impl SharedTcpServer {
         let work_queue_size = get_work_queue_size();
 
         tracing::info!(
-            "Initializing TCP server with worker pool (size={}, queue={})",
+            "Initializing TCP server with dispatcher (concurrency={}, queue={})",
             worker_pool_size,
             work_queue_size
         );
@@ -120,95 +120,97 @@ impl SharedTcpServer {
         })
     }
 
-    /// Start the worker pool that processes requests
+    /// Start the worker pool dispatcher that processes requests with bounded concurrency
+    ///
+    /// Uses a single receiver with a semaphore to bound concurrent execution,
+    /// avoiding mutex contention that would serialize all workers.
     fn start_worker_pool(
         pool_size: usize,
-        work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
+        mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
         cancellation_token: CancellationToken,
     ) {
-        // Create a shared receiver using Arc and Mutex
-        let work_rx = Arc::new(tokio::sync::Mutex::new(work_rx));
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(pool_size));
 
-        for worker_id in 0..pool_size {
-            let work_rx = work_rx.clone();
-            let cancellation_token = cancellation_token.clone();
+        tokio::spawn(async move {
+            tracing::trace!(
+                "TCP worker dispatcher started with concurrency limit {}",
+                pool_size
+            );
 
-            tokio::spawn(async move {
-                tracing::trace!("TCP worker {} started", worker_id);
+            loop {
+                tokio::select! {
+                    biased;
 
-                loop {
-                    // Check cancellation first
-                    if cancellation_token.is_cancelled() {
-                        tracing::trace!(
-                            "TCP worker {} shutting down: cancellation requested",
-                            worker_id
-                        );
+                    _ = cancellation_token.cancelled() => {
+                        tracing::trace!("TCP worker dispatcher shutting down: cancellation requested");
                         break;
                     }
 
-                    // Receive work item from channel
-                    let work_item = {
-                        let mut rx = work_rx.lock().await;
-                        match rx.recv().await {
-                            Some(item) => item,
-                            None => {
-                                tracing::trace!(
-                                    "TCP worker {} shutting down: channel closed",
-                                    worker_id
-                                );
+                    msg = work_rx.recv() => {
+                        let Some(work_item) = msg else {
+                            tracing::trace!("TCP worker dispatcher shutting down: channel closed");
+                            break;
+                        };
+
+                        // Acquire permit before spawning (bounds concurrency)
+                        let permit = match semaphore.clone().acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::trace!("TCP worker dispatcher: semaphore closed");
                                 break;
                             }
-                        }
-                    };
+                        };
 
-                    tracing::trace!(
-                        worker_id,
-                        instance_id = work_item.instance_id,
-                        "TCP worker processing request"
-                    );
-
-                    // Create span with trace context from headers
-                    let span = crate::logging::make_handle_payload_span_from_tcp_headers(
-                        &work_item.headers,
-                        &work_item.component_name,
-                        &work_item.endpoint_name,
-                        &work_item.namespace,
-                        work_item.instance_id,
-                    );
-
-                    let result = work_item
-                        .service_handler
-                        .handle_payload(work_item.payload)
-                        .instrument(span)
-                        .await;
-
-                    match result {
-                        Ok(_) => {
-                            tracing::trace!(
-                                worker_id,
-                                instance_id = work_item.instance_id,
-                                "TCP worker completed request successfully"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                worker_id,
-                                instance_id = work_item.instance_id,
-                                error = %e,
-                                "TCP worker failed to handle request"
-                            );
-                        }
+                        // Spawn task with owned permit (dropped when task completes)
+                        tokio::spawn(async move {
+                            Self::handle_work_item(work_item).await;
+                            drop(permit);
+                        });
                     }
-
-                    work_item.inflight.fetch_sub(1, Ordering::SeqCst);
-                    work_item.notify.notify_one();
                 }
+            }
 
-                tracing::trace!("TCP worker {} exited", worker_id);
-            });
+            tracing::trace!("TCP worker dispatcher exited");
+        });
+
+        tracing::info!(
+            "Started TCP worker dispatcher with concurrency limit {}",
+            pool_size
+        );
+    }
+
+    /// Handle a single work item
+    async fn handle_work_item(work_item: WorkItem) {
+        tracing::trace!(
+            instance_id = work_item.instance_id,
+            "TCP worker processing request"
+        );
+
+        // Create span with trace context from headers
+        let span = crate::logging::make_handle_payload_span_from_tcp_headers(
+            &work_item.headers,
+            &work_item.component_name,
+            &work_item.endpoint_name,
+            &work_item.namespace,
+            work_item.instance_id,
+        );
+
+        let result = work_item
+            .service_handler
+            .handle_payload(work_item.payload)
+            .instrument(span)
+            .await;
+
+        if let Err(e) = result {
+            tracing::warn!(
+                instance_id = work_item.instance_id,
+                error = %e,
+                "TCP worker failed to handle request"
+            );
         }
 
-        tracing::info!("Started {} TCP worker tasks", pool_size);
+        work_item.inflight.fetch_sub(1, Ordering::SeqCst);
+        work_item.notify.notify_one();
     }
 
     /// Bind the server and start accepting connections.
@@ -786,5 +788,139 @@ mod tests {
             .expect("Request should succeed");
 
         tracing::info!("Test passed: unregister_endpoint properly waited for inflight TCP request");
+    }
+
+    ///////////////////// TESTS FOR CONCURRENCY BOUNDING /////////////////////
+
+    /// Mock handler that tracks concurrent execution count
+    struct ConcurrencyTrackingHandler {
+        /// Current number of concurrent requests being processed
+        concurrent_count: Arc<AtomicU64>,
+        /// Maximum concurrent count observed
+        max_concurrent: Arc<AtomicU64>,
+        /// Duration to simulate request processing
+        processing_duration: Duration,
+        /// Notifies when a request completes
+        completed: Arc<Notify>,
+    }
+
+    impl ConcurrencyTrackingHandler {
+        fn new(processing_duration: Duration) -> Self {
+            Self {
+                concurrent_count: Arc::new(AtomicU64::new(0)),
+                max_concurrent: Arc::new(AtomicU64::new(0)),
+                processing_duration,
+                completed: Arc::new(Notify::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PushWorkHandler for ConcurrencyTrackingHandler {
+        async fn handle_payload(&self, _payload: Bytes) -> Result<(), PipelineError> {
+            // Increment concurrent count
+            let current = self.concurrent_count.fetch_add(1, Ordering::SeqCst) + 1;
+
+            // Update max if this is higher
+            self.max_concurrent.fetch_max(current, Ordering::SeqCst);
+
+            // Simulate work
+            tokio::time::sleep(self.processing_duration).await;
+
+            // Decrement concurrent count
+            self.concurrent_count.fetch_sub(1, Ordering::SeqCst);
+            self.completed.notify_one();
+
+            Ok(())
+        }
+
+        fn add_metrics(
+            &self,
+            _endpoint: &crate::component::Endpoint,
+            _metrics_labels: Option<&[(&str, &str)]>,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_worker_pool_bounds_concurrency() {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(tracing::Level::DEBUG)
+            .try_init();
+
+        // Use a small pool size for testing
+        let pool_size = 3;
+        let total_requests = 10;
+
+        // Create bounded channel and dispatcher directly
+        let (work_tx, work_rx) = tokio::sync::mpsc::channel::<WorkItem>(total_requests);
+        let cancellation_token = CancellationToken::new();
+
+        // Start worker pool with small concurrency limit
+        SharedTcpServer::start_worker_pool(pool_size, work_rx, cancellation_token.clone());
+
+        // Create tracking handler
+        let handler = Arc::new(ConcurrencyTrackingHandler::new(Duration::from_millis(50)));
+
+        // Create dummy inflight/notify for work items
+        let inflight = Arc::new(AtomicU64::new(0));
+        let notify = Arc::new(Notify::new());
+
+        // Send more work items than pool size
+        for i in 0..total_requests {
+            inflight.fetch_add(1, Ordering::SeqCst);
+            let work_item = WorkItem {
+                service_handler: handler.clone() as Arc<dyn PushWorkHandler>,
+                payload: Bytes::from(format!("request {}", i)),
+                headers: std::collections::HashMap::new(),
+                inflight: inflight.clone(),
+                notify: notify.clone(),
+                instance_id: 1,
+                namespace: "test".to_string(),
+                component_name: "test".to_string(),
+                endpoint_name: "test".to_string(),
+            };
+            work_tx.send(work_item).await.expect("send should succeed");
+        }
+
+        // Wait for all requests to complete
+        let timeout = tokio::time::timeout(Duration::from_secs(5), async {
+            while inflight.load(Ordering::SeqCst) > 0 {
+                notify.notified().await;
+            }
+        })
+        .await;
+
+        assert!(
+            timeout.is_ok(),
+            "All requests should complete within timeout"
+        );
+
+        // Verify concurrency was bounded
+        let max_observed = handler.max_concurrent.load(Ordering::SeqCst);
+        assert!(
+            max_observed <= pool_size as u64,
+            "Max concurrent ({}) should not exceed pool size ({})",
+            max_observed,
+            pool_size
+        );
+
+        // Verify all requests completed
+        assert_eq!(
+            inflight.load(Ordering::SeqCst),
+            0,
+            "All requests should have completed"
+        );
+
+        tracing::info!(
+            "Test passed: max concurrent {} <= pool size {}",
+            max_observed,
+            pool_size
+        );
+
+        // Cleanup
+        cancellation_token.cancel();
     }
 }
