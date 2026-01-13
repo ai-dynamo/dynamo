@@ -131,7 +131,7 @@ Uses performance simulation to rapidly estimate optimal configurations without r
 - **Duration**: 20-30 seconds
 - **Accuracy**: Estimated (may have errors for unusual configurations)
 - **GPU Requirements**: None
-- **Backends**: TensorRT-LLM only (vLLM/SGLang coming soon)
+- **Backends**: vLLM, SGLang, TensorRT-LLM
 
 **DGDR Configuration:**
 ```yaml
@@ -141,8 +141,11 @@ profilingConfig:
       useAiConfigurator: true
       aicSystem: h200_sxm          # GPU system type
       aicHfId: Qwen/Qwen3-32B      # HuggingFace model ID
-      aicBackendVersion: "0.20.0"
+      aicBackendVersion: "0.11.0"  # Must match backend - see link below
 ```
+
+> [!IMPORTANT]
+> The `aicBackendVersion` must match the backend framework version. For the complete list of supported systems, models, and backend versions, see the [AI Configurator System Data Support Matrix](https://github.com/ai-dynamo/aiconfigurator#system-data-support-matrix).
 
 **Supported Configurations:**
 
@@ -368,10 +371,10 @@ profilingConfig:
       useAiConfigurator: true
       aicSystem: h200_sxm              # GPU system: h100_sxm, h200_sxm, b200_sxm, gb200_sxm, a100_sxm
       aicHfId: Qwen/Qwen3-32B         # Huggingface model id
-      aicBackendVersion: "0.20.0"     # TensorRT-LLM version: 0.20.0, 1.0.0rc3
+      aicBackendVersion: "0.11.0"     # Backend version - must match your backend
 ```
 
-**Supported configurations:** See [AI Configurator documentation](https://github.com/ai-dynamo/aiconfigurator#supported-features)
+**Supported configurations:** See [AI Configurator System Data Support Matrix](https://github.com/ai-dynamo/aiconfigurator#system-data-support-matrix)
 
 ### Planner Configuration (Optional)
 

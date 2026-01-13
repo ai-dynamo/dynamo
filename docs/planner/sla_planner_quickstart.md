@@ -221,8 +221,11 @@ sweep:
   useAiConfigurator: true
   aicSystem: h200_sxm
   aicHfId: Qwen/Qwen3-32B
-  aicBackendVersion: "0.20.0"
+  aicBackendVersion: "0.11.0"  # Must match backend - see link below
 ```
+
+> [!IMPORTANT]
+> **aicBackendVersion**: This specifies the backend framework version for AI Configurator performance simulation. The value must match your chosen backend (vLLM, SGLang, or TensorRT-LLM). For the complete list of supported systems, models, and backend versions, see the [AI Configurator System Data Support Matrix](https://github.com/ai-dynamo/aiconfigurator#system-data-support-matrix).
 
 > [!NOTE]
 > For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](/docs/benchmarks/sla_driven_profiling.md#profiling-methods).
@@ -272,7 +275,7 @@ spec:
         useAiConfigurator: true
         aicSystem: h200_sxm
         aicHfId: deepseek-ai/DeepSeek-V3
-        aicBackendVersion: "0.20.0"
+        aicBackendVersion: "0.5.6.post2"  # SGLang version
 
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
