@@ -650,6 +650,8 @@ RUN apt-get update && \
         jq \
         git \
         git-lfs \
+        # required for verification of GPG keys
+        gnupg2 \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \

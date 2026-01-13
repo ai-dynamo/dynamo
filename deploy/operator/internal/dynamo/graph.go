@@ -337,10 +337,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 }
 
 func getDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
-	if service.GlobalDynamoNamespace {
-		return commonconsts.GlobalDynamoNamespace
-	}
-	return fmt.Sprintf("%s-%s", object.GetNamespace(), object.GetName())
+	return v1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
@@ -1071,15 +1068,15 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 }
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
+	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
+
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
 		DiscoveryBackend:               discoveryBackend,
-	}
-	if component.DynamoNamespace != nil {
-		componentContext.DynamoNamespace = *component.DynamoNamespace
+		DynamoNamespace:                dynamoNamespace,
 	}
 	return componentContext
 }
