@@ -146,6 +146,7 @@ jobs:
           - { major_minor: '12.9', major: '12.9' }
     name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
     env:
       FRAMEWORK: vllm
     steps: &runtime-container-build-push-test
@@ -223,6 +224,7 @@ jobs:
           - { major_minor: '12.9', major: '12.9' }
     name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
     env:
       FRAMEWORK: sglang
     steps: *runtime-container-build-push-test
@@ -240,6 +242,7 @@ jobs:
           - { major_minor: '13.0', major: '13' }
     name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
     env:
       FRAMEWORK: trtllm
     steps: *runtime-container-build-push-test
