@@ -46,13 +46,45 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+ENABLE_OTEL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
 
+# Enable tracing if requested
+TRACE_ARGS=()
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--override-engine-args "{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\" }")
+fi
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run prefill worker (shares GPU with decode)
+OTEL_SERVICE_NAME=dynamo-worker-prefill \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.trtllm \
@@ -61,10 +93,12 @@ python3 -m dynamo.trtllm \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
-  --disaggregation-mode prefill &
+  --disaggregation-mode prefill \
+  "${TRACE_ARGS[@]}" &
 PREFILL_PID=$!
 
 # run decode worker (shares GPU with prefill)
+OTEL_SERVICE_NAME=dynamo-worker-decode \
 CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES \
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 python3 -m dynamo.trtllm \
@@ -73,5 +107,6 @@ python3 -m dynamo.trtllm \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --publish-events-and-metrics \
-  --disaggregation-mode decode
+  --disaggregation-mode decode \
+  "${TRACE_ARGS[@]}"
 

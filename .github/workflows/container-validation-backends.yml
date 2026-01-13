@@ -168,10 +168,7 @@ jobs:
           framework: vllm
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: '25.11-cuda13.0-devel-ubuntu24.04'
-          runtime_image_tag: '13.0.2-runtime-ubuntu24.04'
           cuda_version: '13.0'
-          torch_backend: 'cu130'
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -235,10 +232,7 @@ jobs:
           framework: vllm
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
-          base_image_tag: ${{ matrix.platform.arch == 'arm64' && '25.06-cuda12.9-devel-ubuntu24.04' || '' }}
-          runtime_image_tag: ${{ matrix.platform.arch == 'arm64' && '12.9.0-runtime-ubuntu24.04' || '' }}
           cuda_version: '12.9'
-          torch_backend: ${{ matrix.platform.arch == 'arm64' && 'cu129' || '' }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -305,7 +299,6 @@ jobs:
           target: runtime
           platform: 'linux/${{ matrix.platform.arch }}'
           cuda_version: '13.0'
-          torch_backend: 'cu130'
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}

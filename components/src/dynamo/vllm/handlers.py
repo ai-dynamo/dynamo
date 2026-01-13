@@ -21,8 +21,8 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.engine.exceptions import EngineDeadError
 
-from dynamo._core import Context
 from dynamo.common.utils.input_params import InputParamManager
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.llm import (
     ModelInput,
     ModelType,
@@ -965,20 +965,6 @@ class BaseWorkerHandler(ABC):
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
-    def _build_trace_headers(self, context: Context) -> dict[str, str] | None:
-        """
-        Build trace headers from context for propagation to vLLM engine.
-        """
-        trace_id = context.trace_id
-        span_id = context.span_id
-        if not trace_id or not span_id:
-            return None
-
-        # W3C Trace Context format: {version}-{trace_id}-{parent_id}-{trace_flags}
-        # version: 00, trace_flags: 01 (sampled)
-        # TODO: properly propagate the trace-flags from current span.
-        return {"traceparent": f"00-{trace_id}-{span_id}-01"}
-
     @staticmethod
     def _log_with_lora_context(
         message: str,
@@ -1203,7 +1189,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("dp_rank", None)
 
-        trace_headers = self._build_trace_headers(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -1249,7 +1235,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         openai_request_id = request.get("id") or request.get("request_id", request_id)
         previous_text = ""
 
-        trace_headers = self._build_trace_headers(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id):
             try:
@@ -1411,7 +1397,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         dp_rank = request.get("dp_rank", None)
 
-        trace_headers = self._build_trace_headers(context)
+        trace_headers = build_trace_headers(context)
 
         async with self._abort_monitor(context, request_id, is_prefill=True):
             try:
