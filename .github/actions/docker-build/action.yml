@@ -111,7 +111,7 @@ runs:
 
         # Collect optional overrides provided by the workflow
         # Set base cache args and set --cache-to if this is a main commit
-        # Skip cache for frontend target - it uses docker driver (for local EPP image access) which doesn't support cache export
+        # TODO: Fix this - Skip cache for frontend target - a different docker driver is used for the EPP build, which causes issues with cache export
         EXTRA_ARGS=""
         if [[ "${{ inputs.target }}" != "frontend" ]]; then
           EXTRA_ARGS="--cache-to type=inline "

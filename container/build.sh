@@ -997,9 +997,6 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     export GAIE_DIR="${GAIE_CLONE_DIR}"
     export DYNAMO_DIR="${BUILD_CONTEXT}"
 
-    # EPP build uses dynamo-image-local-load which creates a docker driver builder
-    # We intentionally keep using that driver for the frontend build so it can access the local EPP image
-    # (docker-container driver cannot access Docker's local image store)
     $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
 
     # Set EPP image tag (matches what build-epp-dynamo.sh produces)
