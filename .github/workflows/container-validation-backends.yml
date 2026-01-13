@@ -65,7 +65,7 @@ jobs:
         platform:
           - { arch: amd64, runner: cpu-amd-m5-2xlarge }
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
-    name: operator (${{ matrix.platform.arch }})
+    name: operator-build (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Output Node Name
@@ -144,7 +144,7 @@ jobs:
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
-    name: vllm-runtime-build-test (${{ matrix.platform.arch }})
+    name: vllm-build-test (${{ matrix.cuda_version.major_minor }}, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     env:
@@ -188,7 +188,7 @@ jobs:
           push_tags: |
             ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-${{ matrix.platform.arch }}
             ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform.arch }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-{0}', matrix.platform.arch) || '' }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-{0}-cuda{1}-{2}', env.FRAMEWORK, matrix.cuda_version.major, matrix.platform.arch) || '' }}
           aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
@@ -203,7 +203,7 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           # GH ARM runners have no GPUs, run CPU tests only on ARM
-          pytest_marks: ${{ matrix.platform.arch == 'amd64' && 'pre_merge and env.FRAMEWORK and (gpu_0 or gpu_1)' || 'pre_merge and env.FRAMEWORK and gpu_0' }}
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
           framework: ${{ env.FRAMEWORK }}
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
@@ -222,7 +222,7 @@ jobs:
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
-    name: sglang-runtime-build-test (${{ matrix.platform.arch }})
+    name: sglang-build-test (${{ matrix.cuda_version.major_minor }}, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     env:
@@ -240,7 +240,7 @@ jobs:
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
-    name: trtllm-runtime-build-test (${{ matrix.platform.arch }})
+    name: trtllm-build-test (${{ matrix.cuda_version.major_minor }}, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     env:
