@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-GPU Memory Service Shadow Engine Failover Tests (vLLM).
+GPU Memory Service Shadow Engine Failover Tests.
 
 This test validates the GPU Memory Service shadow engine architecture for fault tolerance:
 1. Start GPU Memory Service servers for each GPU device
@@ -14,6 +14,7 @@ This test validates the GPU Memory Service shadow engine architecture for fault 
 
 Based on:
 - components/src/dynamo/vllm/gpu_memory_service_adapters/TESTING.md
+- components/src/dynamo/sglang/gpu_memory_service_adapters/TESTING.md
 
 Test Execution Notes:
 - Requires 2+ GPUs (for TP=2 model configurations)
@@ -106,12 +107,11 @@ pytestmark = [
     pytest.mark.model(GPU_MEMORY_SERVICE_TEST_MODEL),
     pytest.mark.nightly,  # Resource-intensive test, run nightly
     pytest.mark.fault_tolerance,
-    pytest.mark.vllm,
 ]
 
 
 # =============================================================================
-# Process managers
+# Process managers - Common
 # =============================================================================
 
 
@@ -243,6 +243,11 @@ class EngineWithGPUMemoryServiceProcess(ManagedProcess, ABC):
     def wake(self, *, timeout: int = 30) -> dict:
         """Wake the engine from sleep via HTTP API."""
         pass
+
+
+# =============================================================================
+# Process managers - vLLM
+# =============================================================================
 
 
 class VLLMWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
@@ -391,7 +396,7 @@ def send_completion_request(
     return result
 
 
-def create_engine_process(
+def create_vllm_engine_process(
     request,
     engine_id: str,
     socket_path_template: str,
@@ -421,19 +426,33 @@ def create_engine_process(
 
 @pytest.fixture
 def gpu_memory_service_ports(request):
-    """Allocate ports for GPU Memory Service test."""
+    """Allocate ports for GPU Memory Service test (shared by all backends)."""
+    # Common ports
     shadow_system_port = allocate_port(8100)
     primary_system_port = allocate_port(8101)
     frontend_port = allocate_port(8200)
+    # vLLM-specific ports
     primary_nixl_port = allocate_port(5601)
     primary_kv_event_port = allocate_port(20081)
+    # SGLang-specific ports
+    shadow_sglang_port = allocate_port(30000)
+    primary_sglang_port = allocate_port(30001)
+    shadow_bootstrap_port = allocate_port(8998)
+    primary_bootstrap_port = allocate_port(8999)
 
     ports = {
+        # Common
         "shadow_system_port": shadow_system_port,
         "primary_system_port": primary_system_port,
         "frontend_port": frontend_port,
+        # vLLM
         "primary_nixl_port": primary_nixl_port,
         "primary_kv_event_port": primary_kv_event_port,
+        # SGLang
+        "shadow_sglang_port": shadow_sglang_port,
+        "primary_sglang_port": primary_sglang_port,
+        "shadow_bootstrap_port": shadow_bootstrap_port,
+        "primary_bootstrap_port": primary_bootstrap_port,
     }
 
     yield ports
@@ -445,18 +464,23 @@ def gpu_memory_service_ports(request):
             frontend_port,
             primary_nixl_port,
             primary_kv_event_port,
+            shadow_sglang_port,
+            primary_sglang_port,
+            shadow_bootstrap_port,
+            primary_bootstrap_port,
         ]
     )
 
 
 # =============================================================================
-# Tests
+# Tests - vLLM
 # =============================================================================
 
 
 @pytest.mark.timeout(600)
+@pytest.mark.vllm
 @pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
-def test_gpu_memory_service_shadow_engine_failover(
+def test_gpu_memory_service_shadow_engine_failover_vllm(
     request,
     runtime_services,
     gpu_memory_service_ports,
@@ -499,7 +523,7 @@ def test_gpu_memory_service_shadow_engine_failover(
 
             # Step 3: Start shadow engine
             logger.info("Step 3: Starting shadow engine (vLLM)")
-            shadow_engine = create_engine_process(
+            shadow_engine = create_vllm_engine_process(
                 request=request,
                 engine_id="shadow_engine",
                 socket_path_template=socket_path_template,
@@ -554,7 +578,7 @@ def test_gpu_memory_service_shadow_engine_failover(
 
                 # Step 4: Start primary engine
                 logger.info("Step 4: Starting primary engine (vLLM)")
-                primary_engine = create_engine_process(
+                primary_engine = create_vllm_engine_process(
                     request=request,
                     engine_id="primary_engine",
                     socket_path_template=socket_path_template,
@@ -668,8 +692,9 @@ def test_gpu_memory_service_shadow_engine_failover(
 
 @pytest.mark.timeout(300)
 @pytest.mark.gpu_1
+@pytest.mark.vllm
 @pytest.mark.skipif(not HAS_VLLM, reason="vLLM not installed")
-def test_gpu_memory_service_basic_sleep_wake(
+def test_gpu_memory_service_basic_sleep_wake_vllm(
     request,
     runtime_services,
     predownload_models,
@@ -710,7 +735,7 @@ def test_gpu_memory_service_basic_sleep_wake(
                 }
 
                 logger.info("Starting vLLM engine with GPU Memory Service")
-                engine = create_engine_process(
+                engine = create_vllm_engine_process(
                     request=request,
                     engine_id="test_engine",
                     socket_path_template=socket_path_template,
