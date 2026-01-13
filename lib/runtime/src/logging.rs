@@ -47,7 +47,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
-use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
+use crate::config::{disable_ansi_logging, jsonl_logging_enabled, span_events_enabled};
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
 use axum::http;
@@ -184,6 +184,48 @@ struct PendingDistributedTraceContext {
     tracestate: Option<String>,
     x_request_id: Option<String>,
     x_dynamo_request_id: Option<String>,
+}
+
+/// Helper struct for extracting trace context fields from either
+/// DistributedTraceContext or PendingDistributedTraceContext
+struct TraceContextFields {
+    trace_id: Option<String>,
+    span_id: Option<String>,
+    parent_id: Option<String>,
+    tracestate: Option<String>,
+    x_request_id: Option<String>,
+    x_dynamo_request_id: Option<String>,
+}
+
+impl TraceContextFields {
+    /// Try to extract trace context fields from span extensions.
+    /// First tries DistributedTraceContext (finalized), then falls back to
+    /// PendingDistributedTraceContext (available during span creation events).
+    fn from_extensions(ext: &tracing_subscriber::registry::Extensions<'_>) -> Option<Self> {
+        // First try DistributedTraceContext (finalized)
+        if let Some(ctx) = ext.get::<DistributedTraceContext>() {
+            return Some(Self {
+                trace_id: Some(ctx.trace_id.clone()),
+                span_id: Some(ctx.span_id.clone()),
+                parent_id: ctx.parent_id.clone(),
+                tracestate: ctx.tracestate.clone(),
+                x_request_id: ctx.x_request_id.clone(),
+                x_dynamo_request_id: ctx.x_dynamo_request_id.clone(),
+            });
+        }
+        // Fall back to PendingDistributedTraceContext (during span creation)
+        if let Some(pending) = ext.get::<PendingDistributedTraceContext>() {
+            return Some(Self {
+                trace_id: pending.trace_id.clone(),
+                span_id: pending.span_id.clone(),
+                parent_id: pending.parent_id.clone(),
+                tracestate: pending.tracestate.clone(),
+                x_request_id: pending.x_request_id.clone(),
+                x_dynamo_request_id: pending.x_dynamo_request_id.clone(),
+            });
+        }
+        None
+    }
 }
 
 impl DistributedTraceContext {
@@ -881,8 +923,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
+        let span_events = if span_events_enabled() {
+            FmtSpan::NEW | FmtSpan::CLOSE
+        } else {
+            FmtSpan::NONE
+        };
         let l = fmt::layer()
             .with_ansi(false)
+            .with_span_events(span_events)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
@@ -953,8 +1001,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     } else {
+        let span_events = if span_events_enabled() {
+            FmtSpan::NEW | FmtSpan::CLOSE
+        } else {
+            FmtSpan::NONE
+        };
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
+            .with_span_events(span_events)
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
@@ -1168,16 +1222,20 @@ where
                 serde_json::Value::String(span.name().to_string()),
             );
 
-            if let Some(tracing_context) = ext.get::<DistributedTraceContext>() {
-                visitor.fields.insert(
-                    "span_id".to_string(),
-                    serde_json::Value::String(tracing_context.span_id.clone()),
-                );
-                visitor.fields.insert(
-                    "trace_id".to_string(),
-                    serde_json::Value::String(tracing_context.trace_id.clone()),
-                );
-                if let Some(parent_id) = tracing_context.parent_id.clone() {
+            if let Some(ctx) = TraceContextFields::from_extensions(&ext) {
+                if let Some(span_id) = ctx.span_id {
+                    visitor.fields.insert(
+                        "span_id".to_string(),
+                        serde_json::Value::String(span_id),
+                    );
+                }
+                if let Some(trace_id) = ctx.trace_id {
+                    visitor.fields.insert(
+                        "trace_id".to_string(),
+                        serde_json::Value::String(trace_id),
+                    );
+                }
+                if let Some(parent_id) = ctx.parent_id {
                     visitor.fields.insert(
                         "parent_id".to_string(),
                         serde_json::Value::String(parent_id),
@@ -1185,7 +1243,7 @@ where
                 } else {
                     visitor.fields.remove("parent_id");
                 }
-                if let Some(tracestate) = tracing_context.tracestate.clone() {
+                if let Some(tracestate) = ctx.tracestate {
                     visitor.fields.insert(
                         "tracestate".to_string(),
                         serde_json::Value::String(tracestate),
@@ -1193,7 +1251,7 @@ where
                 } else {
                     visitor.fields.remove("tracestate");
                 }
-                if let Some(x_request_id) = tracing_context.x_request_id.clone() {
+                if let Some(x_request_id) = ctx.x_request_id {
                     visitor.fields.insert(
                         "x_request_id".to_string(),
                         serde_json::Value::String(x_request_id),
@@ -1201,8 +1259,7 @@ where
                 } else {
                     visitor.fields.remove("x_request_id");
                 }
-
-                if let Some(x_dynamo_request_id) = tracing_context.x_dynamo_request_id.clone() {
+                if let Some(x_dynamo_request_id) = ctx.x_dynamo_request_id {
                     visitor.fields.insert(
                         "x_dynamo_request_id".to_string(),
                         serde_json::Value::String(x_dynamo_request_id),

@@ -473,6 +473,12 @@ pub fn use_local_timezone() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOG_USE_LOCAL_TZ)
 }
 
+/// Check whether span event logging is enabled (create/close events)
+/// Set the `DYN_LOGGING_SPAN_EVENTS` environment variable to a [`is_truthy`] value
+pub fn span_events_enabled() -> bool {
+    env_is_truthy(environment_names::logging::DYN_LOGGING_SPAN_EVENTS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

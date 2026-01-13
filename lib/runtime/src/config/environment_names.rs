@@ -37,6 +37,9 @@ pub mod logging {
     /// Use local timezone for logging timestamps (default is UTC)
     pub const DYN_LOG_USE_LOCAL_TZ: &str = "DYN_LOG_USE_LOCAL_TZ";
 
+    /// Enable span event logging (create/close events)
+    pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
+
     /// OTLP (OpenTelemetry Protocol) tracing configuration
     pub mod otlp {
         /// Enable OTLP trace exporting (set to "1" to enable)
