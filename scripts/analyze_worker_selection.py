@@ -69,7 +69,23 @@ def get_dedup_key(line: str) -> str:
     return clean_line.strip()
 
 
-def analyze_log_file(log_path: Path, dedup: bool = False) -> Tuple[List[Dict], List[str]]:
+def extract_worker_id_from_formula_line(line: str) -> Optional[str]:
+    """
+    Extract worker_id from a "Formula for worker_id=X" log line.
+    
+    Returns the worker_id string or None if not found.
+    """
+    # Remove ANSI escape codes
+    ansi_escape = re.compile(r'\x1b\[[0-9;]*m|\[([0-9;]*)m')
+    clean_line = ansi_escape.sub('', line)
+    
+    match = re.search(r'Formula for worker_id=(\d+)', clean_line)
+    if match:
+        return match.group(1)
+    return None
+
+
+def analyze_log_file(log_path: Path, dedup: bool = False) -> Tuple[List[Dict], List[str], set]:
     """
     Read a log file and extract all Selected worker entries.
     
@@ -81,13 +97,21 @@ def analyze_log_file(log_path: Path, dedup: bool = False) -> Tuple[List[Dict], L
     Returns:
         - List of parsed worker selection records
         - List of raw lines containing "Selected worker:"
+        - Set of all unique worker IDs observed in the log (including non-selected)
     """
     records = []
     raw_lines = []
     seen_keys = set()
+    all_worker_ids = set()
     
     with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
+            # Extract worker IDs from "Formula for worker_id=" lines
+            if "Formula for worker_id=" in line:
+                worker_id = extract_worker_id_from_formula_line(line)
+                if worker_id:
+                    all_worker_ids.add(worker_id)
+            
             if "Selected worker:" in line:
                 if dedup:
                     key = get_dedup_key(line)
@@ -99,14 +123,17 @@ def analyze_log_file(log_path: Path, dedup: bool = False) -> Tuple[List[Dict], L
                 parsed = parse_selected_worker_line(line)
                 if parsed:
                     records.append(parsed)
+                    all_worker_ids.add(parsed['worker_id'])
     
-    return records, raw_lines
+    return records, raw_lines, all_worker_ids
 
 
-def print_summary(records: List[Dict]) -> None:
+def print_summary(records: List[Dict], all_worker_ids: set) -> None:
     """Print summary statistics for worker selection data."""
     if not records:
         print("No 'Selected worker:' entries found in log file.")
+        if all_worker_ids:
+            print(f"Total unique worker IDs observed: {len(all_worker_ids)}")
         return
     
     print("=" * 80)
@@ -119,7 +146,8 @@ def print_summary(records: List[Dict]) -> None:
     for r in records:
         by_worker[r['worker_id']].append(r)
     
-    print(f"Unique workers: {len(by_worker)}")
+    print(f"Unique workers selected: {len(by_worker)}")
+    print(f"Total unique worker IDs observed: {len(all_worker_ids)}")
     
     # Job allocation summary
     print("\n" + "-" * 80)
@@ -216,9 +244,9 @@ def main():
     print(f"Analyzing: {args.logfile}")
     if args.dedup:
         print("Deduplication enabled: removing duplicate worker selections")
-    records, raw_lines = analyze_log_file(args.logfile, dedup=args.dedup)
+    records, raw_lines, all_worker_ids = analyze_log_file(args.logfile, dedup=args.dedup)
     
-    print_summary(records)
+    print_summary(records, all_worker_ids)
     
     if not args.no_filter_output:
         if args.output:
