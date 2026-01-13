@@ -570,6 +570,11 @@ RUN apt-get update -y \
         libstdc++6 \
         # required for verification of GPG keys
         gnupg2 \
+        # required for installing dependencies from git repositories
+        git \
+        git-lfs \
+        # Python runtime - required for virtual environment to work
+        python${PYTHON_VERSION}-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -604,12 +609,38 @@ COPY --chown=dynamo: ATTRIBUTION* LICENSE /workspace/
 
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="/opt/dynamo/venv/bin:$PATH"
-# Copy virtual environment directly from dynamo_base (dev image)
-# This includes all installed packages: dynamo, nixl, requirements.txt, requirements.test.txt
-# Copy uv to system /bin
-COPY --chown=dynamo: --from=dev /bin/uv /bin/uvx /bin/
-RUN uv python install $PYTHON_VERSION
-COPY --chown=dynamo: --from=dev /opt/dynamo/venv/ /opt/dynamo/venv/
+
+# Copy uv and wheelhouse from runtime stage
+COPY --chown=dynamo: --from=runtime /bin/uv /bin/uvx /bin/
+COPY --chown=dynamo: --from=runtime /opt/dynamo/wheelhouse/ /opt/dynamo/wheelhouse/
+
+# Create virtual environment
+RUN mkdir -p /opt/dynamo/venv && \
+    uv venv /opt/dynamo/venv --python $PYTHON_VERSION
+
+# Install common and test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt
+
+ARG ENABLE_KVBM
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_KVBM" = "true" ]; then \
+        KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
+        if [ -z "$KVBM_WHEEL" ]; then \
+            echo "ERROR: ENABLE_KVBM is true but no KVBM wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$KVBM_WHEEL"; \
+    fi && \
+    cd /workspace/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache .
 
 # Setup environment for all users
 USER root
