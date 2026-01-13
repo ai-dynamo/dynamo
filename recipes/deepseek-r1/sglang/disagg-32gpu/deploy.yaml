@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sgl-dsr1-8gpu
+  name: sgl-dsr1-32gpu
 spec:
   envs:
     - name: HF_HOME
@@ -26,6 +26,8 @@ spec:
       componentType: worker
       subComponentType: decode
       replicas: 1
+      multinode:
+        nodeCount: 2
       resources:
         limits:
           gpu: "8"
@@ -37,7 +39,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -48,13 +50,14 @@ spec:
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
-            - "8"
+            - "16"
             - --dp
-            - "8"
+            - "16"
             - --enable-dp-attention
             - --ep-size
-            - "8"
+            - "16"
             - --trust-remote-code
+            - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
             - --disaggregation-bootstrap-port
@@ -68,6 +71,8 @@ spec:
       componentType: worker
       subComponentType: prefill
       replicas: 1
+      multinode:
+        nodeCount: 2
       resources:
         limits:
           gpu: "8"
@@ -79,7 +84,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /workspace
+          workingDir: /sgl-workspace/dynamo
           command:
             - python3
             - -m
@@ -90,10 +95,11 @@ spec:
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
-            - "8"
+            - "16"
             - --ep-size
-            - "8"
+            - "16"
             - --trust-remote-code
+            - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
             - --disaggregation-bootstrap-port
