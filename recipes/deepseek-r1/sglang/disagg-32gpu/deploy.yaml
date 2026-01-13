@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sgl-dsr1-16gpu
+  name: sgl-dsr1-32gpu
 spec:
   pvcs:
     - name: model-cache-pvc
