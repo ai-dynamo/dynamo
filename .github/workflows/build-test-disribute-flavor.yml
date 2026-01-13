@@ -194,7 +194,7 @@ jobs:
   test:
     if: inputs.run_tests
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         platform:
          - { arch: amd64, runner: gpu-l40-amd64 }
@@ -248,40 +248,41 @@ jobs:
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
 
-  # # ============================================================================
-  # # COPY TO ACR
-  # # ============================================================================
-  # copy-to-acr:
-  #   needs: [build, test]
-  #   # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
-  #   if: |
-  #     always() &&
-  #     inputs.copy_to_acr &&
-  #     needs.build.result == 'success' &&
-  #     (needs.test.result == 'success' || needs.test.result == 'skipped')
-  #   strategy:
-  #     fail-fast: true
-  #     matrix:
-  #       platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
-  #   name: copy ${{ inputs.framework }}-${{ matrix.platform }}
-  #   runs-on: builder-cpu-amd-runner
-  #   outputs:
-  #     target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  # ============================================================================
+  # COPY TO ACR
+  # ============================================================================
+  copy-to-acr:
+    needs: [build, test]
+    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
+    if: |
+      always() &&
+      inputs.copy_to_acr &&
+      needs.build.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ['amd64']
+        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
+    name: copy ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
+    runs-on: builder-cpu-amd-runner
+    outputs:
+      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-  #     - name: Copy image to target registry
-  #       uses: ./.github/actions/skopeo-copy
-  #       with:
-  #         source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-  #         source_image: ai-dynamo/dynamo
-  #         source_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
-  #         target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         target_image: ai-dynamo/dynamo
-  #         target_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
-  #         source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
