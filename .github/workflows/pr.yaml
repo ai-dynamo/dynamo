@@ -144,7 +144,7 @@ jobs:
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
-    name: vllm-runtime-build-test (${{ matrix.platform.arch }})
+    name: vllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     env:
@@ -222,7 +222,7 @@ jobs:
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
-    name: sglang-runtime-build-test (${{ matrix.platform.arch }})
+    name: sglang (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     env:
@@ -240,7 +240,7 @@ jobs:
           - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
-    name: trtllm-runtime-build-test (${{ matrix.platform.arch }})
+    name: trtllm (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     timeout-minutes: 90
     env:
