@@ -139,8 +139,9 @@ jobs:
         run: |
           CUDA_VERSION_RAW=${{ matrix.cuda_version }}
           CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}-cuda$CUDA_VERSION"
+          TARGET_TAG_PLAIN="${{ github.sha }}-${{ inputs.framework }}"
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Route buildkit workers
         id: route-buildkit
@@ -158,7 +159,7 @@ jobs:
       - name: Print Build Container inputs
         run: |
           echo "=== Build Container Inputs ==="
-          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform }}"
+          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform }}"
           echo "framework: ${{ inputs.framework }}"
           echo "target: runtime"
           echo "platform: linux/${{ matrix.platform }}"
@@ -172,7 +173,7 @@ jobs:
         id: build-image
         uses: ./.github/actions/docker-build
         with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform }}
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ steps.calculate-target-tag.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform }}
           framework: ${{ inputs.framework }}
           target: runtime
           platform: linux/${{ matrix.platform }}
@@ -202,12 +203,18 @@ jobs:
     needs: [build]
     name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.runner }}
-    env:
-      TEST_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-cuda${CUDA_VERSION}-${{ matrix.platform.arch }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -220,24 +227,24 @@ jobs:
         shell: bash
         run: |
           start_time=$(date +%s)
-          docker pull ${{ env.TEST_IMAGE }}
+          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
           docker pull quay.io/minio/minio
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
-          echo "## ⏱️ Pulled ${{ inputs.image_tag }} in ${duration} seconds" >> $GITHUB_STEP_SUMMARY
+          echo "## ⏱️ Pulled ${{ steps.calculate-target-tag.outputs.test_image }} in ${duration} seconds" >> $GITHUB_STEP_SUMMARY
 
       - name: Run Sanity Check on Runtime Image
         shell: bash
         run: |
-          echo "Running sanity check on image: ${{ env.TEST_IMAGE }}"
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
 
           # Run the sanity check script inside the container
           # The script is located in /workspace/deploy/sanity_check.py in runtime containers
           export WORKSPACE=/workspace
 
           set +e
-          docker run --rm "${{ env.TEST_IMAGE }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
           SANITY_CHECK_EXIT_CODE=$?
           set -e
           if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
@@ -250,7 +257,7 @@ jobs:
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
-          image_tag: ${{ env.TEST_IMAGE }}
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
           pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
@@ -281,15 +288,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+
       - name: Copy image to target registry
         uses: ./.github/actions/skopeo-copy
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
+          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform }}
+          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
