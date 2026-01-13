@@ -111,7 +111,6 @@ jobs:
           base_image_tag: ''
           runtime_image_tag: ''
           cuda_version: ''
-          torch_backend: ''
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
@@ -146,17 +145,14 @@ jobs:
             base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
             runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
             cuda_version: '12.9'
-            torch_backend: 'cu129'
           - framework: trtllm
             base_image_tag: '25.06-py3'
             runtime_image_tag: ''
             cuda_version: '12.9'
-            torch_backend: 'cu129'
           - framework: sglang
             base_image_tag: ''
             runtime_image_tag: ''
             cuda_version: ''
-            torch_backend: ''
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
@@ -187,7 +183,6 @@ jobs:
           base_image_tag: ${{ matrix.base_image_tag }}
           runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
-          torch_backend: ${{ matrix.torch_backend }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
