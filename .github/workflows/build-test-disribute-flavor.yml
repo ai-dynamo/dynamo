@@ -188,64 +188,65 @@ jobs:
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
 
-  # # ============================================================================
-  # # TEST
-  # # ============================================================================
-  # test:
-  #   if: inputs.run_tests
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       platform: ['amd64']
-  #       cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-  #   needs: [build]
-  #   name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-amd64
-  #   runs-on: gpu-l40-amd64
-  #   steps:
-  #     - name: Checkout repository
-  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  # ============================================================================
+  # TEST
+  # ============================================================================
+  test:
+    if: inputs.run_tests
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+         - { arch: amd64, runner: gpu-l40-amd64 }
+        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
+    needs: [build]
+    name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
 
-  #     - name: Docker Login
-  #       uses: ./.github/actions/docker-login
-  #       with:
-  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-
-  #     - name: Run Sanity Check on Runtime Image
-  #       shell: bash
-  #       run: |
-  #         IMAGE_TAG="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-amd64"
-  #         echo "Running sanity check on image: $IMAGE_TAG"
-
-  #         # Run the sanity check script inside the container
-  #         # The script is located in /workspace/deploy/sanity_check.py in runtime containers
-  #         export WORKSPACE=/workspace
-
-  #         set +e
-  #         docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
-  #         SANITY_CHECK_EXIT_CODE=$?
-  #         set -e
-  #         if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
-  #           echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
-  #           exit ${SANITY_CHECK_EXIT_CODE}
-  #         else
-  #           echo "✅ Sanity check passed"
-  #         fi
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
 
-  #     - name: Run tests
-  #       uses: ./.github/actions/pytest
-  #       with:
-  #         image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-amd64
-  #         pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
-  #         framework: ${{ inputs.framework }}
-  #         test_type: "pre_merge"
-  #         platform_arch: amd64
-  #         enable_mypy: 'true'
+      - name: Run Sanity Check on Runtime Image
+        shell: bash
+        run: |
+          IMAGE_TAG="${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform.arch }}"
+          echo "Running sanity check on image: $IMAGE_TAG"
+
+          # Run the sanity check script inside the container
+          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "$IMAGE_TAG" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+
+
+      - name: Run tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:${{ needs.build.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
+          pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
 
   # # ============================================================================
   # # COPY TO ACR
