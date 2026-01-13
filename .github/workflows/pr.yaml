@@ -203,7 +203,8 @@ jobs:
         with:
           image_tag: ${{ steps.build-image.outputs.image_tag }}
           # GH ARM runners have no GPUs, run CPU tests only on ARM
-          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}          framework: ${{ env.FRAMEWORK }}
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
+          framework: ${{ env.FRAMEWORK }}
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
