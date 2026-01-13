@@ -66,7 +66,27 @@ ENV PATH=/usr/local/bin:${PATH}
 USER root
 SHELL ["/bin/bash", "-c"]
 
-RUN apt-get update -y && \
+# NOTE: We intentionally disable the NVIDIA CUDA apt repo for this stage.
+# The upstream runtime images may ship CUDA apt sources that occasionally go out of sync (mirror updates),
+# causing apt-get update to fail with "File has unexpected size ... Mirror sync in progress".
+# This stage only installs generic developer tools that are available from Ubuntu repos, so CUDA repos are unnecessary.
+#
+# We also add a small retry/backoff to make transient apt metadata issues less disruptive.
+RUN set -eux; \
+    if [ -d /etc/apt/sources.list.d ]; then \
+        mkdir -p /tmp/apt-disabled; \
+        for f in /etc/apt/sources.list.d/*.list; do \
+            [ -e "$f" ] || continue; \
+            if grep -q "developer.download.nvidia.com/compute/cuda/repos" "$f"; then \
+                mv "$f" "/tmp/apt-disabled/$(basename "$f")"; \
+            fi; \
+        done; \
+    fi; \
+    for i in 1 2 3 4 5; do \
+        apt-get update -y && break; \
+        rm -rf /var/lib/apt/lists/*; \
+        sleep $((i * 5)); \
+    done; \
     apt-get install -y --no-install-recommends \
         # Core CLI utilities
         ca-certificates \
