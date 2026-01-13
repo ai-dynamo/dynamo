@@ -468,16 +468,7 @@ impl SharedTcpServer {
 
             handler.inflight.fetch_add(1, Ordering::SeqCst);
 
-            // Send acknowledgment immediately (non-blocking)
-            let ack_response = TcpResponseMessage::empty();
-            if let Ok(encoded_ack) = ack_response.encode()
-                && response_tx.send(encoded_ack).is_err()
-            {
-                tracing::debug!("Write task closed, ending read loop");
-                break;
-            }
-
-            // Send work to worker pool instead of spawning unbounded task
+            // Build work item
             // NOTE: payload is Bytes (Arc-counted), so cloning is extremely cheap
             let work_item = WorkItem {
                 service_handler: handler.service_handler.clone(),
@@ -491,11 +482,53 @@ impl SharedTcpServer {
                 endpoint_name: handler.endpoint_name.clone(),
             };
 
-            // Send to worker pool with backpressure
-            if let Err(e) = work_tx.send(work_item).await {
-                tracing::warn!("Failed to send work to worker pool: {}", e);
-                handler.inflight.fetch_sub(1, Ordering::SeqCst);
-                handler.notify.notify_one();
+            // Send to worker pool with backpressure - BEFORE sending ACK
+            match work_tx.send(work_item).await {
+                Ok(_) => {
+                    // Send acknowledgment ONLY after successful queuing
+                    let ack_response = TcpResponseMessage::empty();
+                    if let Ok(encoded_ack) = ack_response.encode()
+                        && response_tx.send(encoded_ack).is_err()
+                    {
+                        tracing::debug!("Write task closed, ending read loop");
+                        // Clean up inflight counter since work was queued but ACK failed
+                        handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                        handler.notify.notify_one();
+                        break;
+                    }
+
+                    tracing::trace!(
+                        endpoint = handler.endpoint_name.as_str(),
+                        instance_id = handler.instance_id,
+                        "Request queued and acknowledged"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        endpoint = handler.endpoint_name.as_str(),
+                        instance_id = handler.instance_id,
+                        error = %e,
+                        "Failed to queue work to worker pool, sending error response"
+                    );
+
+                    // Send error response to client instead of ACK
+                    let error_response = TcpResponseMessage::new(
+                        Bytes::from(format!("Server overloaded: {}", e))
+                    );
+                    if let Ok(encoded) = error_response.encode() {
+                        let _ = response_tx.send(encoded);
+                    }
+
+                    // Clean up inflight counter
+                    handler.inflight.fetch_sub(1, Ordering::SeqCst);
+                    handler.notify.notify_one();
+
+                    // If channel is closed, break the loop
+                    if matches!(e, tokio::sync::mpsc::error::SendError(_)) {
+                        tracing::error!("Worker pool channel closed, shutting down read loop");
+                        break;
+                    }
+                }
             }
         }
 
