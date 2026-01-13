@@ -102,6 +102,9 @@ jobs:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -184,9 +187,6 @@ jobs:
 
       - name: Login to Container Registries
         uses: ./.github/actions/docker-login
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         with:
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
