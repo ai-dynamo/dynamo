@@ -25,8 +25,10 @@ Dynamo's coordination layer adapts to the deployment environment:
 
 | Deployment | Service Discovery | KV Events | Request Plane |
 |------------|-------------------|-----------|---------------|
-| **Kubernetes** (default) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
-| **Bare metal** | etcd | NATS (optional) | TCP |
+| **Kubernetes** (with operator) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
+| **Bare metal / Local** (default) | etcd | NATS (optional) | TCP |
+
+> **Note:** The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -49,16 +51,18 @@ Dynamo's coordination layer adapts to the deployment environment:
     └─────────┘          └─────────┘              └─────────┘
 ```
 
-## Kubernetes-Native Service Discovery (Default on K8s)
+## Kubernetes-Native Service Discovery
 
 When running on Kubernetes with the Dynamo operator, service discovery uses native Kubernetes resources instead of etcd.
 
 ### Configuration
 
-The operator automatically sets:
+The operator explicitly sets:
 ```bash
 DYN_DISCOVERY_BACKEND=kubernetes
 ```
+
+> **Important:** This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
 
 ### How It Works
 
@@ -84,9 +88,9 @@ DYN_DISCOVERY_BACKEND=kubernetes
 
 ---
 
-## etcd Architecture (Bare Metal / Local Deployments)
+## etcd Architecture (Default for All Deployments)
 
-When `DYN_DISCOVERY_BACKEND=kv_store` (default for non-K8s deployments), etcd is used for service discovery.
+When `DYN_DISCOVERY_BACKEND=kv_store` (the global default), etcd is used for service discovery.
 
 ### Connection Configuration
 
@@ -387,13 +391,13 @@ This prevents race conditions in concurrent service registration.
 
 ## Operational Modes
 
-### Kubernetes Mode (Default on K8s)
+### Kubernetes Mode (Requires Explicit Configuration)
 
 Native Kubernetes service discovery:
 
 ```bash
-# Operator automatically configures:
-# DYN_DISCOVERY_BACKEND=kubernetes
+# Operator explicitly sets this (not auto-detected):
+export DYN_DISCOVERY_BACKEND=kubernetes
 
 # Workers register via K8s CRDs
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B
@@ -402,15 +406,15 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 python -m dynamo.frontend
 ```
 
-No etcd or NATS required for basic operation.
+No etcd or NATS required for basic operation when using K8s discovery.
 
-### KV Store Mode (Bare Metal)
+### KV Store Mode (Global Default)
 
 Full service discovery with etcd:
 
 ```bash
-# Set discovery backend (default for non-K8s)
-export DYN_DISCOVERY_BACKEND=kv_store
+# This is the default - no configuration needed
+# export DYN_DISCOVERY_BACKEND=kv_store  # (implicit)
 
 # Workers register with etcd
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B
@@ -438,9 +442,9 @@ With `--no-kv-events`:
 
 ## Best Practices
 
-### 1. Use Kubernetes Discovery on K8s (Default)
+### 1. Use Kubernetes Discovery on K8s
 
-The Dynamo operator automatically configures Kubernetes-native discovery. No additional setup required.
+The Dynamo operator automatically sets `DYN_DISCOVERY_BACKEND=kubernetes` for pods. No additional setup required when using the operator.
 
 ### 2. For Bare Metal: Deploy etcd Cluster
 

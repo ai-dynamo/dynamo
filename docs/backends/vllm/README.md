@@ -65,9 +65,9 @@ docker compose -f deploy/docker-compose.yml up -d
 ```
 
 > [!NOTE]
-> - **etcd** is required for service discovery in local development
+> - **etcd** is required for service discovery (the runtime defaults to `kv_store` discovery backend)
 > - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
-> - **On Kubernetes**, neither is required - the Dynamo operator uses native K8s service discovery (DynamoWorkerMetadata CRD)
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
 
