@@ -96,7 +96,7 @@ jobs:
     needs: [prepare-release, ci-pipeline]
     if: |
       always() && !cancelled() && needs.prepare-release.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: cpu-amd-m5-4xlarge  # Self-hosted runner with IAM instance role for ECR access
     environment: automated-release
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
@@ -185,23 +185,14 @@ jobs:
           sudo mv crane /usr/local/bin/
           crane version
 
-      - name: Debug AWS credentials
+      - name: Login to ECR
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          echo "Checking AWS credentials..."
-          echo "AWS_ACCESS_KEY_ID is set: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}"
-          echo "AWS_SECRET_ACCESS_KEY is set: ${{ secrets.AWS_SECRET_ACCESS_KEY != '' }}"
-          echo "AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}"
-          echo "Checking AWS identity..."
-          aws sts get-caller-identity || echo "Failed to get caller identity"
-
-      # TODO: Re-enable after fixing IAM permissions or verifying environment secrets
-      # - name: Login to ECR
-      #   env:
-      #     AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-      #   run: |
-      #     ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-      #     echo "Logging into ECR: ${ECR_HOSTNAME}"
-      #     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          echo "✅ ECR login successful"
 
       - name: Login to NGC
         env:
@@ -221,9 +212,33 @@ jobs:
           docker pull alpine:latest
           NGC_TEST_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/test-upload:${VERSION}rc${RC_NUMBER}-test"
           docker tag alpine:latest "${NGC_TEST_IMAGE}"
-          echo "Pushing test image to NGC: ${NGC_TEST_IMAGE}"
+          echo "Pushing test image to NGC with tag: ${VERSION}rc${RC_NUMBER}-test"
           docker push "${NGC_TEST_IMAGE}"
-          echo "✅ Test upload successful!"
+          echo "✅ Docker push test successful!"
+
+      # TODO: Remove test crane copy after testing
+      - name: Test crane copy
+        env:
+          NGC_REGISTRY: nvcr.io
+          NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+          RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+        run: |
+          set -euo pipefail
+          echo "Testing crane copy (registry-to-registry)..."
+
+          # Authenticate crane with NGC
+          echo "${NGC_TOKEN}" | crane auth login nvcr.io -u '$oauthtoken' --password-stdin
+
+          # Copy the test image to another tag using crane
+          SOURCE_TAG="${VERSION}rc${RC_NUMBER}-test"
+          DEST_TAG="${VERSION}rc${RC_NUMBER}-crane-test"
+          SOURCE_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/test-upload:${SOURCE_TAG}"
+          DEST_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/test-upload:${DEST_TAG}"
+
+          echo "Copying image with crane: ${SOURCE_TAG} -> ${DEST_TAG}"
+          crane copy "${SOURCE_IMAGE}" "${DEST_IMAGE}"
+          echo "✅ Crane copy test successful!"
 
       # TODO: Uncomment after testing - real image copy
       # - name: Copy images to NGC
@@ -242,18 +257,15 @@ jobs:
       #       for ARCH in "${ARCHITECTURES[@]}"; do
       #         SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
       #         SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-      #         NGC_REPO="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime"
       #         NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
-      #         NGC_IMAGE="${NGC_REPO}:${NGC_TAG}"
+      #         NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
       #         echo "----------------------------------------"
-      #         echo "Copying: ${FRAMEWORK} (${ARCH})"
-      #         echo "  From: ${SOURCE_IMAGE}"
-      #         echo "  To:   ${NGC_IMAGE}"
+      #         echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
       #         if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
-      #           echo "⚠️  Warning: Failed to copy ${SOURCE_IMAGE}, skipping..."
+      #           echo "⚠️  Warning: Failed to copy ${FRAMEWORK} (${ARCH}), skipping..."
       #           continue
       #         fi
-      #         echo "✅ Copied: ${NGC_IMAGE}"
+      #         echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
       #       done
       #     done
       #     echo "========================================"
@@ -264,7 +276,6 @@ jobs:
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
           RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
-          NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
         run: |
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -278,8 +289,8 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Images published to NGC:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`nvcr.io/${NGC_ORG}/ai-dynamo/vllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`nvcr.io/${NGC_ORG}/ai-dynamo/trtllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`nvcr.io/${NGC_ORG}/ai-dynamo/sglang-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Image tags published to NGC:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`trtllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
 
