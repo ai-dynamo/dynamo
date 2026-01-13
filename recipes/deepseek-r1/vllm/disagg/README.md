@@ -89,6 +89,7 @@ curl -sS http://localhost:8000/v1/chat/completions \
 
 
 ### Notes
+- For more details on expert parallel and advanced deployment configurations, refer to [vLLM Expert Parallel Deployment Documentation](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment/).
 - If your cluster/network requires specific interfaces, adjust environment variables (e.g., `NCCL_SOCKET_IFNAME`) in the manifest accordingly.
 - If your storage class differs, update `storageClassName` before applying the PVC.
 - **If you want to run multinode deployments, IBGDA (InfiniBand GPU Direct Async) must be enabled on your nodes.** To enable IBGDA, you can follow this configuration script: [configure_system_drivers.sh](https://github.com/vllm-project/vllm/blob/v0.11.2/tools/ep_kernels/configure_system_drivers.sh). The script configures NVIDIA driver parameters and requires a system reboot to take effect.
