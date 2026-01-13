@@ -185,13 +185,16 @@ RUN if [ ! -e /usr/bin/python3 ]; then \
         fi; \
     fi
 
-# Configure UCX/NIXL for dev stage compilation and linking.
-# - SGLang: Copy NIXL/UCX binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
+# Copy UCX and NIXL libraries for dev stage compilation.
+# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
+# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
+# wheels, but dev stage needs it for maturin develop and cargo build from source.
+# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
 # - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
 ARG ARCH_ALT
 RUN --mount=from=wheel_builder,target=/wheel_builder \
-    if [ -d /wheel_builder/usr/local/ucx ]; then \
-        if [ "${FRAMEWORK}" = "sglang" ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
+    if [ "${FRAMEWORK}" = "sglang" ]; then \
+        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
             mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
             cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
             cp -r /wheel_builder/usr/local/ucx /usr/local/; \
@@ -297,7 +300,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /tmp/uv-binary
 RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
         mkdir -p /opt/dynamo/venv && \
         python3 -m venv --system-site-packages /opt/dynamo/venv && \
-        cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
+        # Copy all packages from runtime stage system site-packages into venv
+        # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
+        # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
+        cp -r --no-preserve=mode /usr/local/lib/python3.12/dist-packages/* \
               /opt/dynamo/venv/lib/python3.12/site-packages/; \
         # Ensure `uv` is available on PATH for subsequent `uv pip ...` steps.
         cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
