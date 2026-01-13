@@ -23,8 +23,8 @@ from tests.utils.port_utils import allocate_port, deallocate_port
 from .utils import (
     DynamoFrontendProcess,
     determine_request_receiving_worker,
-    start_completion_request,
-    validate_completion_response,
+    start_request,
+    validate_response,
     verify_migration_metrics,
     verify_migration_occurred,
 )
@@ -221,9 +221,7 @@ def test_request_migration_trtllm_aggregated(
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
                 # Step 3: Send the request
-                request_thread, response_list = start_completion_request(
-                    frontend.frontend_port
-                )
+                request_thread, response_list = start_request(frontend.frontend_port)
 
                 # Step 4: Determine which worker received the request
                 worker, worker_name = determine_request_receiving_worker(
@@ -246,19 +244,19 @@ def test_request_migration_trtllm_aggregated(
 
                 # Step 6: Validate response based on migration setting
                 if migration_limit > 0:
-                    validate_completion_response(request_thread, response_list)
+                    validate_response(request_thread, response_list)
                     verify_migration_occurred(frontend)
                     verify_migration_metrics(
                         frontend.frontend_port, expected_ongoing_request_count=1
                     )
                 else:
                     try:
-                        validate_completion_response(request_thread, response_list)
+                        validate_response(request_thread, response_list)
                         pytest.fail(
                             "Request succeeded unexpectedly when migration was disabled"
                         )
                     except AssertionError as e:
-                        assert "Request failed with status 500: " in str(
+                        assert "SSE error event received: " in str(
                             e
                         ), f"Unexpected error: {e}"
 
@@ -327,7 +325,7 @@ def test_request_migration_trtllm_prefill(
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
                     # Step 4: Send the request
-                    request_thread, response_list = start_completion_request(
+                    request_thread, response_list = start_request(
                         frontend.frontend_port
                     )
 
@@ -354,19 +352,19 @@ def test_request_migration_trtllm_prefill(
 
                     # Step 7: Validate response based on migration setting
                     if migration_limit > 0:
-                        validate_completion_response(request_thread, response_list)
+                        validate_response(request_thread, response_list)
                         verify_migration_occurred(frontend)
                         verify_migration_metrics(
                             frontend.frontend_port, expected_ongoing_request_count=1
                         )
                     else:
                         try:
-                            validate_completion_response(request_thread, response_list)
+                            validate_response(request_thread, response_list)
                             pytest.fail(
                                 "Request succeeded unexpectedly when migration was disabled"
                             )
                         except AssertionError as e:
-                            assert "Request failed with status 500: " in str(
+                            assert "SSE error event received: " in str(
                                 e
                             ), f"Unexpected error: {e}"
 
@@ -434,7 +432,7 @@ def test_request_migration_trtllm_decode(
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
                     # Step 4: Send the request
-                    request_thread, response_list = start_completion_request(
+                    request_thread, response_list = start_request(
                         frontend.frontend_port
                     )
 
@@ -461,19 +459,19 @@ def test_request_migration_trtllm_decode(
 
                     # Step 7: Validate response based on migration setting
                     if migration_limit > 0:
-                        validate_completion_response(request_thread, response_list)
+                        validate_response(request_thread, response_list)
                         verify_migration_occurred(frontend)
                         verify_migration_metrics(
                             frontend.frontend_port, expected_ongoing_request_count=1
                         )
                     else:
                         try:
-                            validate_completion_response(request_thread, response_list)
+                            validate_response(request_thread, response_list)
                             pytest.fail(
                                 "Request succeeded unexpectedly when migration was disabled"
                             )
                         except AssertionError as e:
-                            assert "Request failed with status 500: " in str(
+                            assert "SSE error event received: " in str(
                                 e
                             ), f"Unexpected error: {e}"
 

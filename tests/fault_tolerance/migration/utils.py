@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import logging
 import threading
 import time
@@ -40,18 +41,21 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         )
 
 
-# TODO: Validate TTFT/TPOT never exceeded a certain threshold
-def start_completion_request(frontend_port: int) -> tuple:
+def start_request(frontend_port: int) -> tuple:
     """
-    Start a long-running completion request in a separate thread.
+    Start a long-running chat completion request in a separate thread.
+
+    Logs each streamed chunk as (response_string | None | Exception, timestamp) tuple to
+    response_list. First entry is (None, start_time) to mark when request was sent.
 
     Args:
         frontend_port: Port where the frontend is running
 
     Returns:
-        tuple: (request_thread, response_list)
+        tuple: (request_thread, response_list) where response_list contains
+               (str | None | Exception, float) tuples
     """
-    response_list = []  # Thread safe is not required as only one thread writes to it
+    response_list: list[tuple[str | None | Exception, float]] = []
 
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
@@ -60,27 +64,48 @@ def start_completion_request(frontend_port: int) -> tuple:
 
         payload = {
             "model": FAULT_TOLERANCE_MODEL_NAME,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
+            "stream": True,
         }
-
         headers = {"Content-Type": "application/json"}
 
         logger.info(
-            f"Sending completion request with prompt: '{prompt[:50]}...' and max_tokens: {max_tokens}"
+            f"Sending chat completion request with prompt: '{prompt[:50]}...' and max_tokens: {max_tokens}"
         )
 
+        response_list.append((None, time.time()))  # start timestamp
+
         try:
-            response = requests.post(
-                f"http://localhost:{frontend_port}/v1/completions",
+            with requests.post(
+                f"http://localhost:{frontend_port}/v1/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,
-            )
-            logger.info(f"Received response with status code: {response.status_code}")
-            response_list.append(response)
+                stream=True,
+            ) as response:
+                logger.info(
+                    f"Received response stream with status code: {response.status_code}"
+                )
+
+                if response.status_code != 200:
+                    response_list.append(
+                        (
+                            Exception(
+                                f"Request failed with status {response.status_code}: {response.text}"
+                            ),
+                            time.time(),
+                        )
+                    )
+                    return
+
+                for line in response.iter_lines():
+                    if line:
+                        response_list.append((line.decode("utf-8"), time.time()))
+
         except Exception as e:
             logger.error(f"Request failed with error: {e}")
+            response_list.append((e, time.time()))
 
     request_thread = threading.Thread(target=send_request, daemon=True)
     request_thread.start()
@@ -158,44 +183,56 @@ def determine_request_receiving_worker(
         pytest.fail("Neither worker received the request")
 
 
-def validate_completion_response(
-    request_thread: threading.Thread, response_list: list
+def validate_response(
+    request_thread: threading.Thread,
+    response_list: list[tuple[str | None | Exception, float]],
 ) -> None:
     """
-    Wait for and validate the completion response after worker failure.
+    Wait for and validate the streaming response after migration.
+    Checks that delay before each response is reasonable (covers both TTFT and TPOT).
 
     Args:
-        request_thread: The thread running the completion request
-        response_list: List containing the response from the request
+        request_thread: The thread running the request
+        response_list: List of (response_string | None | Exception, timestamp) tuples
     """
     request_thread.join(timeout=240)
-    if request_thread.is_alive():
-        pytest.fail("Request did not complete within 240 seconds")
+    assert not request_thread.is_alive(), "Request did not complete within 240 seconds"
 
-    # Get the response
-    if len(response_list) != 1:
-        pytest.fail(f"Received {len(response_list)} responses, expected 1")
-    response = response_list[0]
+    assert len(response_list) > 0, "Missing first entry with start timestamp"
+    assert response_list[0][0] is None, "First entry should be start timestamp only"
+    prev_timestamp = response_list[0][1]
 
-    assert (
-        response.status_code == 200
-    ), f"Request failed with status {response.status_code}: {response.text}"
+    response_words: list[str] = []
+    for res, timestamp in response_list[1:]:
+        delay = timestamp - prev_timestamp
+        # Cold workers can take longer on first token - only warn but don't fail
+        if delay > 2.0:
+            logger.warning(f"Delay before response: {delay:.3f} secs")
+            # Capture cases like migration is blocked by engine graceful shutdown
+            assert delay <= 6.0, f"Delay before response > 6 secs, got {delay:.3f} secs"
+        prev_timestamp = timestamp
 
-    try:
-        data = response.json()
-    except ValueError:
-        pytest.fail(f"Response is not valid JSON: {response.text}")
+        assert res is not None, "Response entry should not be None"
+        if isinstance(res, Exception):
+            raise res
+        if res.startswith("event: error"):
+            raise AssertionError(f"SSE error event received: {res}")
 
-    # Validate OpenAI completion response structure
-    assert "choices" in data, f"Response missing 'choices' field: {data}"
-    assert len(data["choices"]) > 0, f"Response has empty 'choices': {data}"
-    assert "text" in data["choices"][0], f"Response choice missing 'text' field: {data}"
-    assert data["choices"][0]["text"], f"Response text is empty: {data}"
+        assert res.startswith("data: "), f"Unexpected SSE line: {res}"
+        data_str = res[6:]  # Remove "data: " prefix
+        if data_str == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(data_str)
+            content = chunk["choices"][0]["delta"].get("content")
+            if content:
+                response_words.append(content)
+        except Exception as e:
+            raise AssertionError(f"Error parsing response chunk: {e}") from e
 
     logger.info(
-        f"Received valid completion response: {data['choices'][0]['text'][:100]}..."
+        f"Received {len(response_words)} responses: {''.join(response_words)[:100]}..."
     )
-    logger.info("Request completed successfully")
 
 
 def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
