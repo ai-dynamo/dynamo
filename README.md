@@ -28,24 +28,18 @@ limitations under the License.
 
 High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
 
-## Feature Compatibility Matrix
+## Framework Support Matrix
 
-| Feature | vLLM | TensorRT-LLM | SGLang | Source |
-| :--- | :---: | :---: | :---: | :--- |
-| **Disaggregated Serving** | ✅ | ✅ | ✅ | [Design Doc][disagg] |
-| **KV-Aware Routing** | ✅ | ✅ | ✅ | [Router Doc][kv-routing] |
-| **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
-| **KV Block Manager** | ✅ | ✅ | 🚧 | [KVBM Doc][kvbm] |
-| **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
-| **Multimodal (Video)** | ✅ |  |  | [Multimodal Doc][mm] |
-| **Multimodal (Audio)** | 🚧 |  |  | [Multimodal Doc][mm] |
-| **Request Migration** | ✅ | 🚧 | ✅ | [Migration Doc][migration] |
-| **Request Cancellation** | ✅ | ✅ | 🚧 | Backend READMEs |
-| **LoRA** | ✅ |  |  | [K8s Guide][lora] |
-| **Tool Calling** | ✅ | ✅ | ✅ | [Tool Calling Doc][tools] |
-| **Speculative Decoding** | ✅ | ✅ | 🚧 | Backend READMEs |
+| Feature                                                              | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
+| -------------------------------------------------------------------- | :--: | :----: | :----------: |
+| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md)      | ✅   | ✅     | ✅           |
+| [**KV-Aware Routing**](docs/router/kv_cache_routing.md)              | ✅   | ✅     | ✅           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                 | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                           | ✅   | 🚧     | ✅           |
+| [**Multimodal**](docs/multimodal/index.md)                           | ✅   | ✅     | ✅           |
+| [**Tool Calling**](docs/agents/tool-calling.md)                      | ✅   | ✅     | ✅           |
 
-✅ Supported  🚧 In Progress
+> **[Full Feature Matrix →](feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
 
 ## Latest News
 
