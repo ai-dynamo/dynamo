@@ -64,7 +64,6 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         cfg = Config.model_validate(config)
 
         # MoE flags (--enable-expert-parallel) are set in set_config_tep_size/set_config_dep_size
-        _ = is_moe_model
 
         # set metadata name
         cfg.metadata.name = "agg"
