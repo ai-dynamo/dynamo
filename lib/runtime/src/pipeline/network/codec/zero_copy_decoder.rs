@@ -14,7 +14,8 @@ use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Maximum message size (32MB default, configurable via env)
-const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024;
+const MAX_MESSAGE_SIZE: usize = 32 * 1024 * 1024; // 32MB
+const INITIAL_BUFFER_SIZE: usize = 262144; // 256KB
 
 fn get_max_message_size() -> usize {
     std::env::var("DYN_TCP_MAX_MESSAGE_SIZE")
@@ -36,10 +37,8 @@ pub struct ZeroCopyTcpDecoder {
 
 impl ZeroCopyTcpDecoder {
     /// Create a new decoder with default buffer size
-    ///
-    /// Initial buffer is 256KB, suitable for typical payloads
     pub fn new() -> Self {
-        Self::with_capacity(262144)
+        Self::with_capacity(INITIAL_BUFFER_SIZE)
     }
 
     /// Create a new decoder with specific initial capacity
@@ -134,19 +133,19 @@ impl ZeroCopyTcpDecoder {
             self.read_buffer[payload_len_offset + 3],
         ]) as usize;
 
-        // Sanity check payload length
-        if payload_len > self.max_message_size {
+        // Calculate total message size
+        let total_len = 2 + path_len + 2 + headers_len + 4 + payload_len;
+
+        // Sanity check total message length (including all overhead)
+        if total_len > self.max_message_size {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
                     "message too large: {} bytes (max: {} bytes)",
-                    payload_len, self.max_message_size
+                    total_len, self.max_message_size
                 ),
             ));
         }
-
-        // Calculate total message size
-        let total_len = 2 + path_len + 2 + headers_len + 4 + payload_len;
 
         // Ensure entire message is buffered
         while self.read_buffer.len() < total_len {
@@ -359,5 +358,42 @@ mod tests {
 
         assert_eq!(msg.endpoint_path().unwrap(), endpoint);
         assert_eq!(msg.payload().len(), payload.len());
+    }
+
+    #[tokio::test]
+    async fn test_zero_copy_decoder_total_size_limit() {
+        // Test that the decoder validates total message size, not just payload size
+        // Create a message where total_len exceeds max but payload alone might not
+        let max_size = 1024; // 1KB limit
+        let mut decoder = ZeroCopyTcpDecoder::with_capacity(256);
+        decoder.max_message_size = max_size;
+
+        // Create a message that exceeds the limit with overhead included
+        let endpoint = "test/endpoint";
+        let payload = vec![0x42u8; max_size]; // Payload equals max
+        let headers: Vec<u8> = vec![]; // Empty headers
+
+        let mut message = Vec::new();
+        // path_len + path
+        message.extend_from_slice(&(endpoint.len() as u16).to_be_bytes());
+        message.extend_from_slice(endpoint.as_bytes());
+        // headers_len + headers
+        message.extend_from_slice(&(headers.len() as u16).to_be_bytes());
+        message.extend_from_slice(&headers);
+        // payload_len + payload
+        message.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        message.extend_from_slice(&payload);
+
+        // total_len = 2 + 13 + 2 + 0 + 4 + 1024 = 1045 bytes > 1024 max
+        let mut reader = &message[..];
+        let result = decoder.read_message(&mut reader).await;
+
+        // Should fail with InvalidData error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("message too large"));
+        assert!(err.to_string().contains("1045")); // total_len
+        assert!(err.to_string().contains("1024")); // max_message_size
     }
 }
