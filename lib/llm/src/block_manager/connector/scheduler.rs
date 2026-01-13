@@ -789,8 +789,10 @@ mod tests {
         scheduler.step().await;
         assert!(scheduler.slots.contains_key("test"));
 
-        // the unprocessed results should now be processed
-        assert_eq!(scheduler.unprocessed_immediate_results.len(), 0);
+        // Buffered results are not removed in add_slot() - cleanup happens in remove_slot()
+        // when the request finishes. This ensures all workers in TP>1 can have the buffered
+        // count applied. The buffered count has already been applied to the slot's completed counter.
+        assert_eq!(scheduler.unprocessed_immediate_results.len(), 1);
 
         // neither the worker nor the scheduler should have observed the completion yet
         // this is because the worker has not yet requested it
@@ -815,6 +817,26 @@ mod tests {
 
         // the worker has not issued any operations yet
         assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 0);
+
+        // enqueue the operation so is_complete() will return true (completed=1, operations.len()=1)
+        let worker_request = WorkerTransferRequest {
+            request_id: "test".to_string(),
+            uuid: operation_id,
+            transfer_type: TransferType::Load,
+            request_type: RequestType::Immediate,
+        };
+        worker_client.enqueue_request(worker_request);
+        assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 1);
+        assert!(worker_client.is_complete("test"));
+
+        // verify that remove_slot() cleans up the buffered results
+        assert_eq!(scheduler.unprocessed_immediate_results.len(), 1);
+        worker_client.remove_slot(&"test".to_string());
+        scheduler.step().await;
+
+        // after remove_slot(), the buffered results should be cleaned up
+        assert_eq!(scheduler.unprocessed_immediate_results.len(), 0);
+        assert!(!scheduler.slots.contains_key("test"));
     }
 
     /// This test verifies that the scheduler can handle the case where the transfer engine's
