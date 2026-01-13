@@ -601,7 +601,7 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 #### 2. Manual State Management (Advanced)
 Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, overlap = await router.best_worker(tokens, request_id="req-123")
+worker_id, _dp_rank, overlap = await router.best_worker(tokens, request_id="req-123")
 response = await client.generate(tokens, request_id="req-123")
 # await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
