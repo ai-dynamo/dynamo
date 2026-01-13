@@ -11,6 +11,7 @@ from benchmarks.profiler.utils.config import (
     break_arguments,
     get_service_name_by_type,
     get_worker_service_from_config,
+    remove_valued_arguments,
     set_argument_value,
     setup_worker_service_resources,
     update_image,
@@ -62,30 +63,8 @@ class VllmV1ConfigModifier(BaseConfigModifier):
     ) -> dict:
         cfg = Config.model_validate(config)
 
-        if is_moe_model:
-            # For MoE models, just ensure --enable-expert-parallel is set
-            # vLLM doesn't need --load-balance-method like SGLang
-            for sub_component_type in [
-                SubComponentType.PREFILL,
-                SubComponentType.DECODE,
-            ]:
-                try:
-                    worker_service = get_worker_service_from_config(
-                        cfg, backend="vllm", sub_component_type=sub_component_type
-                    )
-                    args = validate_and_get_worker_args(worker_service, backend="vllm")
-                    args = break_arguments(args)
-
-                    # Ensure --enable-expert-parallel is set for MoE
-                    if "--enable-expert-parallel" not in args:
-                        args = append_argument(args, "--enable-expert-parallel")
-
-                    worker_service.extraPodSpec.mainContainer.args = args
-                except (ValueError, KeyError):
-                    logger.debug(
-                        f"Skipping {sub_component_type} service as it doesn't exist"
-                    )
-                    continue
+        # MoE flags (--enable-expert-parallel) are set in set_config_tep_size/set_config_dep_size
+        _ = is_moe_model
 
         # set metadata name
         cfg.metadata.name = "vllm-agg"
@@ -192,11 +171,9 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="vllm")
         args = break_arguments(args)
 
-        try:
-            idx = args.index("--tensor-parallel-size")
-            args[idx + 1] = str(tp_size)
-        except ValueError:
-            args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
+        # Remove --tp alias if present, use --tensor-parallel-size as canonical form
+        args = remove_valued_arguments(args, "--tp")
+        args = set_argument_value(args, "--tensor-parallel-size", str(tp_size))
 
         worker_service.extraPodSpec.mainContainer.args = args
 
@@ -230,14 +207,13 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="vllm")
         args = break_arguments(args)
 
-        # 1. Set --tensor-parallel-size=tep_size (splits KV heads across GPUs)
+        # Remove aliases, use canonical forms
+        args = remove_valued_arguments(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", str(tep_size))
-
-        # 2. Set --data-parallel-size=1 (no DP for TEP, all GPUs see same requests)
-        #    Result: expert_parallel_size = tep_size * 1 = tep_size
+        args = remove_valued_arguments(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", "1")
 
-        # 3. Enable expert parallel (for MoE layers to use EP instead of TP)
+        # Enable expert parallel for MoE
         if "--enable-expert-parallel" not in args:
             args = append_argument(args, "--enable-expert-parallel")
 
@@ -272,14 +248,13 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="vllm")
         args = break_arguments(args)
 
-        # 1. Set --tensor-parallel-size=1 (no KV head splitting, each GPU has all heads)
+        # Remove aliases, use canonical forms
+        args = remove_valued_arguments(args, "--tp")
         args = set_argument_value(args, "--tensor-parallel-size", "1")
-
-        # 2. Set --data-parallel-size=dep_size (each GPU handles different requests)
-        #    Result: expert_parallel_size = 1 * dep_size = dep_size
+        args = remove_valued_arguments(args, "--dp")
         args = set_argument_value(args, "--data-parallel-size", str(dep_size))
 
-        # 3. Enable expert parallel (for MoE layers to use EP instead of TP)
+        # Enable expert parallel for MoE
         if "--enable-expert-parallel" not in args:
             args = append_argument(args, "--enable-expert-parallel")
 
@@ -353,10 +328,13 @@ class VllmV1ConfigModifier(BaseConfigModifier):
                         )
                         concurrency = float(line.split(" tokens per request: ")[1][:-1])
 
+                        # Log shows per-rank KV cache; multiply by attention_dp_size for total
+                        kv_cache_per_rank = int(token_count * concurrency)
+                        total_kv_cache = kv_cache_per_rank * attention_dp_size
                         logger.info(
-                            f"Found KV cache info: {token_count} x {concurrency} = {int(token_count * concurrency)}"
+                            f"Found KV cache: {kv_cache_per_rank} per rank x {attention_dp_size} = {total_kv_cache} total"
                         )
-                        return int(token_count * concurrency)
+                        return total_kv_cache
         except Exception as e:
             logger.warning(
                 f"Failed to parse KV cache size from line: {line}. Error: {e}"
