@@ -350,12 +350,12 @@ impl TransferContext {
                 );
 
                 match CudaMemPool::builder(stream.context().clone(), reserve_size)
-                    .use_device_memory()  // Use device memory (GPU VRAM) - requires H2D memcpy
+                    .use_host_numa_memory(0)  // Use HOST NUMA memory - CPU writable, GPU readable, no H2D memcpy!
                     .release_threshold(128 * 1024 * 1024) // Release memory above 128MB back to OS
                     .build()
                 {
                     Ok(pool) => {
-                        tracing::info!("CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with {}MB)",
+                        tracing::info!("CUDA memory pool created successfully (HOST NUMA memory with GPU access, stream-ordered allocation, pre-warmed with {}MB)",
                             reserve_size / (1024 * 1024));
                         Some(Arc::new(pool))
                     }

@@ -21,8 +21,12 @@ use std::sync::Arc;
 pub enum MemoryLocation {
     /// Device memory (GPU VRAM) - faster for kernel access, requires H2D copy
     Device,
-    /// Pinned host memory (page-locked CPU memory) - no H2D copy needed, kernel reads from host
+    /// Pinned host memory (page-locked CPU memory) - CPU accessible only by default
     Pinned,
+    /// Host NUMA memory - CPU accessible, can be configured for GPU access via cuMemPoolSetAccess
+    HostNuma {
+        numa_id: i32,
+    },
 }
 
 /// Builder for creating a CUDA memory pool with configurable parameters.
@@ -83,6 +87,25 @@ impl CudaMemPoolBuilder {
         self
     }
 
+    /// Configure the pool to use host NUMA memory with GPU access.
+    ///
+    /// Host NUMA memory is CPU-accessible and can be configured for direct GPU kernel access
+    /// via cuMemPoolSetAccess. This eliminates H2D memcpy overhead while allowing kernel reads.
+    ///
+    /// # Arguments
+    /// * `numa_id` - NUMA node ID (use 0 for systems without NUMA)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let pool = CudaMemPoolBuilder::new(context, 64 * 1024 * 1024)
+    ///     .use_host_numa_memory(0)  // NUMA node 0
+    ///     .build()?;
+    /// ```
+    pub fn use_host_numa_memory(mut self, numa_id: i32) -> Self {
+        self.memory_location = MemoryLocation::HostNuma { numa_id };
+        self
+    }
+
     /// Set the release threshold for the pool.
     ///
     /// Memory above this threshold is returned to the system when freed.
@@ -106,12 +129,19 @@ impl CudaMemPoolBuilder {
         // Set memory location based on configuration
         match self.memory_location {
             MemoryLocation::Device => {
+                tracing::info!("🔧 Pool config: DEVICE memory (GPU VRAM)");
                 props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
                 props.location.id = self.context.cu_device() as i32;
             }
             MemoryLocation::Pinned => {
+                tracing::info!("🔧 Pool config: HOST pinned memory (CPU-writable)");
                 props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST;
                 props.location.id = 0; // Ignored for host memory
+            }
+            MemoryLocation::HostNuma { numa_id } => {
+                tracing::info!("🔧 Pool config: HOST NUMA memory (CPU-writable, GPU-accessible via cuMemPoolSetAccess), NUMA node {}", numa_id);
+                props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_HOST_NUMA;
+                props.location.id = numa_id;
             }
         }
 
@@ -140,6 +170,39 @@ impl CudaMemPoolBuilder {
                     result
                 ));
             }
+        }
+
+        // For HOST_NUMA pools, grant GPU access via cuMemPoolSetAccess
+        if let MemoryLocation::HostNuma { .. } = self.memory_location {
+            tracing::info!("🔓 Granting GPU device {} access to HOST NUMA pool", self.context.cu_device());
+
+            // Create access descriptor for the GPU device
+            let mut access_desc = sys::CUmemAccessDesc {
+                location: sys::CUmemLocation {
+                    type_: sys::CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE,
+                    id: self.context.cu_device() as i32,
+                },
+                flags: sys::CUmemAccess_flags::CU_MEM_ACCESS_FLAGS_PROT_READWRITE,
+            };
+
+            let result = unsafe {
+                sys::cuMemPoolSetAccess(
+                    pool,
+                    &mut access_desc as *mut sys::CUmemAccessDesc,
+                    1, // count: 1 descriptor
+                )
+            };
+
+            if result != CUresult::CUDA_SUCCESS {
+                // Clean up on failure
+                unsafe { sys::cuMemPoolDestroy(pool) };
+                return Err(anyhow!(
+                    "cuMemPoolSetAccess failed with error: {:?}. GPU cannot access HOST NUMA memory.",
+                    result
+                ));
+            }
+
+            tracing::info!("✅ GPU access granted successfully - kernels can now read from HOST NUMA pool");
         }
 
         let cuda_pool = CudaMemPool { pool };
