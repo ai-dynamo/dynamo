@@ -1,0 +1,176 @@
+/**
+ * NVIDIA Dynamo Documentation Theme
+ * Custom styling to match NVIDIA branding
+ * 
+ * Primary brand color: #76b900 (NVIDIA Green)
+ */
+
+:root {
+  /* NVIDIA Brand Colors */
+  --ifm-color-primary: #76b900;
+  --ifm-color-primary-dark: #6aa600;
+  --ifm-color-primary-darker: #5f9400;
+  --ifm-color-primary-darkest: #4d7a00;
+  --ifm-color-primary-light: #84c219;
+  --ifm-color-primary-lighter: #93cb33;
+  --ifm-color-primary-lightest: #a8d64d;
+
+  /* Navigation */
+  --ifm-navbar-background-color: #1a1a1a;
+  --ifm-navbar-link-color: #ffffff;
+  --ifm-navbar-link-hover-color: #76b900;
+
+  /* Code blocks */
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(118, 185, 0, 0.1);
+
+  /* Sidebar */
+  --ifm-menu-color-active: #76b900;
+
+  /* Links */
+  --ifm-link-color: #76b900;
+  --ifm-link-hover-color: #5f9400;
+
+  /* Font */
+  --ifm-font-family-base: system-ui, -apple-system, 'Segoe UI', Roboto, Ubuntu, Cantarell, 'Noto Sans', sans-serif;
+}
+
+/* Dark mode */
+[data-theme='dark'] {
+  --ifm-background-color: #1a1a1a;
+  --ifm-background-surface-color: #242424;
+  --ifm-color-primary: #76b900;
+  --ifm-color-primary-dark: #6aa600;
+  --ifm-color-primary-darker: #5f9400;
+  --ifm-color-primary-darkest: #4d7a00;
+  --ifm-color-primary-light: #84c219;
+  --ifm-color-primary-lighter: #93cb33;
+  --ifm-color-primary-lightest: #a8d64d;
+  --docusaurus-highlighted-code-line-bg: rgba(118, 185, 0, 0.15);
+}
+
+/* Navbar styling */
+.navbar {
+  box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.1);
+}
+
+.navbar__title {
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.navbar__link {
+  color: #ffffff;
+}
+
+.navbar__link:hover {
+  color: #76b900;
+}
+
+.navbar__link--active {
+  color: #76b900;
+}
+
+/* Navbar logo */
+.navbar__logo {
+  height: 2rem;
+}
+
+/* Footer styling */
+.footer {
+  background-color: #1a1a1a;
+}
+
+.footer__title {
+  color: #ffffff;
+}
+
+.footer__link-item {
+  color: #b0b0b0;
+}
+
+.footer__link-item:hover {
+  color: #76b900;
+  text-decoration: none;
+}
+
+.footer__copyright {
+  color: #888888;
+}
+
+/* Sidebar styling */
+.menu__link--active:not(.menu__link--sublist) {
+  background-color: rgba(118, 185, 0, 0.1);
+}
+
+/* Admonitions / Callouts */
+.alert--note {
+  --ifm-alert-background-color: rgba(118, 185, 0, 0.1);
+  --ifm-alert-border-color: #76b900;
+}
+
+.alert--tip {
+  --ifm-alert-background-color: rgba(118, 185, 0, 0.1);
+  --ifm-alert-border-color: #76b900;
+}
+
+/* Version badge */
+.badge--secondary {
+  background-color: #76b900;
+  border-color: #76b900;
+}
+
+/* Table of contents */
+.table-of-contents__link--active {
+  color: #76b900;
+}
+
+/* Code blocks */
+.prism-code {
+  border-radius: 8px;
+}
+
+/* Pagination */
+.pagination-nav__link:hover {
+  border-color: #76b900;
+}
+
+/* Search */
+.DocSearch-Button {
+  border-radius: 8px;
+}
+
+/* Hero section (if used on landing page) */
+.hero--primary {
+  background-color: #1a1a1a;
+}
+
+.hero__title {
+  color: #ffffff;
+}
+
+.hero__subtitle {
+  color: #b0b0b0;
+}
+
+/* Buttons */
+.button--primary {
+  background-color: #76b900;
+  border-color: #76b900;
+}
+
+.button--primary:hover {
+  background-color: #6aa600;
+  border-color: #6aa600;
+}
+
+/* Tabs */
+.tabs__item--active {
+  border-bottom-color: #76b900;
+  color: #76b900;
+}
+
+/* Mermaid diagrams */
+.mermaid {
+  background-color: transparent;
+}

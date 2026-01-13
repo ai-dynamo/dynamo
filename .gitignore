@@ -118,3 +118,8 @@ profiling_results*
 # Node.js
 node_modules/
 package-lock.json
+
+# Docusaurus
+docs/.docusaurus/
+docs/build/
+docs/.cache-loader/

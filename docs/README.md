@@ -2,81 +2,164 @@
 orphan: true
 ---
 
-# Building Documentation
+# NVIDIA Dynamo Documentation
 
-This directory contains the documentation source files for NVIDIA Dynamo.
+This directory contains the documentation source files for NVIDIA Dynamo, built with [Docusaurus](https://docusaurus.io/).
 
-## Prerequisites
-
-- Python 3.11 or later
-- [uv](https://docs.astral.sh/uv/) package manager
-
-## Build Instructions
-
-### Option 1: Dedicated Docs Environment (Recommended)
-
-This approach builds the docs without requiring the full project dependencies (including `ai-dynamo-runtime`):
+## Quick Start
 
 ```bash
-# One-time setup: Create docs environment and install dependencies
-uv venv .venv-docs
-uv pip install --python .venv-docs --group docs
+# Navigate to the docs directory
+cd docs
 
-# Generate documentation
-uv run --python .venv-docs --no-project docs/generate_docs.py
+# Install dependencies
+npm install
+
+# Start development server (with hot reload)
+npm run start
+# Opens http://localhost:3000 in your browser
+
+# Build for production
+npm run build
+
+# Serve production build locally
+npm run serve
 ```
 
-The generated HTML will be available in `docs/build/html/`.
+## Documentation Commands
 
-### Option 2: Using Full Development Environment
-
-If you already have the full project dependencies installed (i.e., you're actively developing the codebase), you can use `uv run` directly:
-
-```bash
-uv run --group docs docs/generate_docs.py
-```
-
-This will use your existing project environment and add the docs dependencies.
-
-### Option 3: Using Docker
-
-Build the docs in a Docker container with all dependencies isolated:
-
-```bash
-docker build -f container/Dockerfile.docs -t dynamo-docs .
-```
-
-The documentation will be built inside the container. To extract the built docs:
-
-```bash
-# Run the container and copy the output
-docker run --rm -v $(pwd)/docs/build:/workspace/dynamo/docs/build dynamo-docs
-
-# Or create a container to copy files from
-docker create --name temp-docs dynamo-docs
-docker cp temp-docs:/workspace/dynamo/docs/build ./docs/build
-docker rm temp-docs
-```
-
-This approach is ideal for CI/CD pipelines or when you want complete isolation from your local environment.
+| Command | Description |
+|---------|-------------|
+| `npm run start` | Start dev server with hot reload |
+| `npm run build` | Build production static site to `build/` |
+| `npm run serve` | Serve production build locally |
+| `npm run clear` | Clear Docusaurus cache |
+| `npm run docusaurus docs:version X.Y.Z` | Create a new version snapshot |
 
 ## Directory Structure
 
-- `docs/` - Documentation source files (Markdown and reStructuredText)
-- `docs/conf.py` - Sphinx configuration
-- `docs/_static/` - Static assets (CSS, JS, images)
-- `docs/_extensions/` - Custom Sphinx extensions
-- `docs/build/` - Generated documentation output (not tracked in git)
+```
+docs/
+├── docusaurus.config.ts         # Main Docusaurus configuration
+├── sidebars.ts                  # Navigation structure
+├── package.json                 # Dependencies
+├── versions.json                # Version manifest
+├── tsconfig.json                # TypeScript config
+├── docs/                        # Current version content
+├── versioned_docs/              # Released versions (created via docs:version)
+├── versioned_sidebars/          # Sidebars for each version
+├── src/
+│   └── css/custom.css           # NVIDIA theme
+├── static/img/                  # Static images
+├── build/                       # Generated output (gitignored)
+├── agents/                      # Content source (linked in docs/)
+├── backends/
+├── kubernetes/
+└── ...
+```
 
-## Redirect Creation
+## Versioning
 
-When moving or renaming files a redirect must be created.
+The documentation supports multiple versions matching Dynamo releases.
 
-Redirect entries should be added to the `redirects` dictionary in `conf.py`. For detailed information on redirect syntax, see the [sphinx-reredirects usage documentation](https://documatt.com/sphinx-reredirects/usage/#introduction).
+### Creating a New Version
 
-## Dependency Management
+When releasing a new version of Dynamo:
 
-Documentation dependencies are defined in `pyproject.toml` under the `[dependency-groups]` section:
+```bash
+cd docs
+npm run docusaurus docs:version X.Y.Z
+```
+
+This will:
+1. Copy `docs/` to `versioned_docs/version-X.Y.Z/`
+2. Copy `sidebars.ts` to `versioned_sidebars/`
+3. Add the version to `versions.json`
+
+### Version Configuration
+
+After creating versions, update `docusaurus.config.ts` to configure version labels and paths:
+
+```typescript
+docs: {
+  lastVersion: 'X.Y.Z',  // Set the latest stable version
+  versions: {
+    current: { label: 'dev (next)', path: 'dev', banner: 'unreleased' },
+    'X.Y.Z': { label: 'X.Y.Z (latest)', path: '', banner: 'none' },
+  },
+}
+```
+
+## Writing Documentation
+
+### File Format
+
+Documentation is written in Markdown with [MDX](https://mdxjs.com/) support.
+
+### Frontmatter
+
+Each document should have frontmatter:
+
+```markdown
+---
+title: "Page Title"
+sidebar_position: 1
+---
+
+# Page Title
+
+Content here...
+```
+
+### Admonitions
+
+Use Docusaurus admonitions for callouts:
+
+```markdown
+:::note
+This is a note.
+:::
+
+:::tip
+This is a tip.
+:::
+
+:::warning
+This is a warning.
+:::
+
+:::danger
+This is a danger notice.
+:::
+```
+
+### Code Blocks
+
+```markdown
+```python title="example.py"
+def hello():
+    print("Hello, Dynamo!")
+```
+```
+
+### Internal Links
+
+Link to other docs using relative paths:
+
+```markdown
+See the [Backend Guide](./backends/vllm/README.md) for more details.
+```
+
+## Search
+
+The documentation includes local search powered by `@easyops-cn/docusaurus-search-local`. Use `Ctrl+K` to open search.
+
+## Theme
+
+The site uses the Docusaurus Classic theme with custom NVIDIA branding:
+- Primary color: NVIDIA Green (#76b900)
+- Dark navbar and footer
+- Custom logo and favicon
 
 ```toml
 [dependency-groups]
