@@ -28,14 +28,29 @@ limitations under the License.
 
 High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
 
-## Framework Support Matrix
+## Feature Compatibibility Matrix
 
-| Feature                                                                                           | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
-| ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| Feature | vLLM | TensorRT-LLM | SGLang | Source |
+| :--- | :---: | :---: | :---: | :--- |
+| **Disaggregated Serving** | ✅ | ✅ | ✅ | [Design Doc][disagg] |
+| **KV-Aware Routing** | ✅ | ✅ | ✅ | [Router Doc][kv-routing] |
+| **SLA-Based Planner** | ✅ | ✅ | ✅ | [Planner Doc][planner] |
+| **KV Block Manager** | ✅ | ✅ | 🚧 | [KVBM Doc][kvbm] |
+| **Multimodal (Image)** | ✅ | ✅ | ✅ | [Multimodal Doc][mm] |
+| **Multimodal (Video)** | ✅ | ❌ | ❌ | [Multimodal Doc][mm] |
+| **Multimodal (Audio)** | 🧪 | ❌ | ❌ | [Multimodal Doc][mm] |
+| **Request Migration** | ✅ | ⚠️ | ✅ | [Migration Doc][migration] |
+| **Request Cancellation** | ✅ | ✅ | ⚠️ | Backend READMEs |
+| **LoRA** | ✅ | ❌ | ❌ | [K8s Guide][lora] |
+| **Tool Calling** | ✅ | ✅ | ✅ | [Tool Calling Doc][tools] |
+| **Speculative Decoding** | ✅ | ✅ | 🚧 | Backend READMEs |
+
+**Legend:**
+*   ✅ : Fully Supported / Compatible
+*   ❌ : Not Supported / Incompatible
+*   🚧 : Work in Progress
+*   ⚠️ : Limited Support (see notes)
+*   🧪 : Experimental
 
 ## Latest News
 
@@ -88,21 +103,31 @@ Backend engines require Python development headers for JIT compilation. Install 
 sudo apt install python3-dev
 ```
 
-### Install etcd (optional) and NATS (required)
+### Service Discovery and Messaging
 
-To coordinate across a data center, Dynamo relies on etcd and NATS. These will be used in production. To run Dynamo locally etcd is optional.
+Dynamo features Kubernetes-native infrastructure: service discovery via `EndpointSlices` replaces etcd, and TCP is the default request plane. Both etcd and NATS are now optional.
+
+
+| Deployment | etcd | NATS | Notes |
+|------------|------|------|-------|
+| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
+| **Local development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; TCP request plane |
+| **KV-aware routing** | — | ✅ Required | Add NATS for KV event messaging |
+
+For local development without etcd, pass `--store-kv file` to both the frontend and workers. The directory can be configured via `DYN_FILE_KV` (defaults to `$TMPDIR/dynamo_store_kv`).
+
+#### Setting up etcd and NATS (optional)
+
+For distributed non-Kubernetes deployments or KV-aware routing:
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
-- [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
+- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
 
-To quickly setup etcd & NATS, you can also run:
+To quickly setup both:
 
 ```bash
-# At the root of the repository:
 docker compose -f deploy/docker-compose.yml up -d
 ```
-
-To run locally without etcd, pass `--store-kv file` to both the frontend and workers. The directory used for key-value data can be configured via the `DYN_FILE_KV` environment variable (example: `export DYN_FILE_KV=/data/kv/dynamo`). Defaults to `$TMPDIR/dynamo_store_kv`.
 
 
 ## 2. Select an engine
@@ -139,7 +164,7 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 - **Workers** – Set of pre-configured LLM serving engines.
 
 ```
-# Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router.
+# Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
 # Pass the TLS certificate and key paths to use HTTPS instead of HTTP.
 # Pass --store-kv to use the filesystem instead of etcd. The workers and frontend must share a disk.
 python -m dynamo.frontend --http-port 8000 [--tls-cert-path cert.pem] [--tls-key-path key.pem] [--store-kv file]
@@ -194,7 +219,7 @@ This writes the current frontend spec to `docs/frontends/openapi.json` at the re
 
 # Engines
 
-Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, NATS and etcd need to be installed, along with a Dynamo frontend (`python -m dynamo.frontend [--interactive]`).
+Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, start a Dynamo frontend (`python -m dynamo.frontend`). For local development, pass `--store-kv file` to avoid etcd dependency. NATS is optional and only required for KV-aware routing.
 
 ## vLLM
 
@@ -351,7 +376,7 @@ uv pip install -e .
 
 You should now be able to run `python -m dynamo.frontend`.
 
-Remember that nats and etcd must typically be running (see earlier).
+For local development, pass `--store-kv file` to avoid external dependencies (see Service Discovery and Messaging section).
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
