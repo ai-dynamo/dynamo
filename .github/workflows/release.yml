@@ -185,54 +185,79 @@ jobs:
           sudo mv crane /usr/local/bin/
           crane version
 
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          ngc_ci_access_token: ${{ secrets.NGC_PUBLISH_TOKEN }}
+      - name: Debug AWS credentials
+        run: |
+          echo "Checking AWS credentials..."
+          echo "AWS_ACCESS_KEY_ID is set: ${{ secrets.AWS_ACCESS_KEY_ID != '' }}"
+          echo "AWS_SECRET_ACCESS_KEY is set: ${{ secrets.AWS_SECRET_ACCESS_KEY != '' }}"
+          echo "AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION}"
+          echo "Checking AWS identity..."
+          aws sts get-caller-identity || echo "Failed to get caller identity"
 
-      - name: Copy images to NGC
+      - name: Login to ECR
         env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          echo "Logging into ECR: ${ECR_HOSTNAME}"
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+
+      - name: Login to NGC
+        env:
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+        run: |
+          echo "${NGC_TOKEN}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+      # TODO: Remove test upload after testing
+      - name: Test NGC upload with dummy image
+        env:
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
           RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
         run: |
           set -euo pipefail
+          echo "Testing NGC upload with a small dummy image..."
+          docker pull alpine:latest
+          NGC_TEST_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/test-upload:${VERSION}rc${RC_NUMBER}-test"
+          docker tag alpine:latest "${NGC_TEST_IMAGE}"
+          echo "Pushing test image to NGC: ${NGC_TEST_IMAGE}"
+          docker push "${NGC_TEST_IMAGE}"
+          echo "✅ Test upload successful!"
 
-          FRAMEWORKS=("vllm" "trtllm" "sglang")
-          ARCHITECTURES=("amd64" "arm64")
-
-          echo "Copying images from ECR to NGC (registry-to-registry)"
-          echo "Version: ${VERSION}, RC: rc${RC_NUMBER}"
-
-          for FRAMEWORK in "${FRAMEWORKS[@]}"; do
-            for ARCH in "${ARCHITECTURES[@]}"; do
-              SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
-              SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-
-              NGC_REPO="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime"
-              NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
-              NGC_IMAGE="${NGC_REPO}:${NGC_TAG}"
-
-              echo "----------------------------------------"
-              echo "Copying: ${FRAMEWORK} (${ARCH})"
-              echo "  From: ${SOURCE_IMAGE}"
-              echo "  To:   ${NGC_IMAGE}"
-
-              if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
-                echo "⚠️  Warning: Failed to copy ${SOURCE_IMAGE}, skipping..."
-                continue
-              fi
-
-              echo "✅ Copied: ${NGC_IMAGE}"
-            done
-          done
-
-          echo "========================================"
-          echo "✅ NGC publishing completed for ${VERSION}rc${RC_NUMBER}"
-          echo "========================================"
+      # TODO: Uncomment after testing - real image copy
+      # - name: Copy images to NGC
+      #   env:
+      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+      #     NGC_REGISTRY: nvcr.io
+      #     NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
+      #     RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+      #   run: |
+      #     set -euo pipefail
+      #     FRAMEWORKS=("vllm" "trtllm" "sglang")
+      #     ARCHITECTURES=("amd64" "arm64")
+      #     echo "Copying images from ECR to NGC (registry-to-registry)"
+      #     echo "Version: ${VERSION}, RC: rc${RC_NUMBER}"
+      #     for FRAMEWORK in "${FRAMEWORKS[@]}"; do
+      #       for ARCH in "${ARCHITECTURES[@]}"; do
+      #         SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
+      #         SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+      #         NGC_REPO="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime"
+      #         NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
+      #         NGC_IMAGE="${NGC_REPO}:${NGC_TAG}"
+      #         echo "----------------------------------------"
+      #         echo "Copying: ${FRAMEWORK} (${ARCH})"
+      #         echo "  From: ${SOURCE_IMAGE}"
+      #         echo "  To:   ${NGC_IMAGE}"
+      #         if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+      #           echo "⚠️  Warning: Failed to copy ${SOURCE_IMAGE}, skipping..."
+      #           continue
+      #         fi
+      #         echo "✅ Copied: ${NGC_IMAGE}"
+      #       done
+      #     done
+      #     echo "========================================"
+      #     echo "✅ NGC publishing completed for ${VERSION}rc${RC_NUMBER}"
+      #     echo "========================================"
 
       - name: Create release summary
         env:
