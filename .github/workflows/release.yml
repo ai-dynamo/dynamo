@@ -194,13 +194,14 @@ jobs:
           echo "Checking AWS identity..."
           aws sts get-caller-identity || echo "Failed to get caller identity"
 
-      - name: Login to ECR
-        env:
-          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
-        run: |
-          ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
-          echo "Logging into ECR: ${ECR_HOSTNAME}"
-          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+      # TODO: Re-enable after fixing IAM permissions or verifying environment secrets
+      # - name: Login to ECR
+      #   env:
+      #     AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      #   run: |
+      #     ECR_HOSTNAME="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+      #     echo "Logging into ECR: ${ECR_HOSTNAME}"
+      #     aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
 
       - name: Login to NGC
         env:
