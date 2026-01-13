@@ -41,7 +41,7 @@ diff --git a/Makefile b/Makefile
 index dee7e99..d3f9ec7 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -170,6 +170,47 @@ verify-all:
+@@ -170,6 +170,48 @@ verify-all:
  
  ##@ Build
  
@@ -53,6 +53,7 @@ index dee7e99..d3f9ec7 100644
 +	BUILDER=$(shell $(DOCKER_BUILDX_CMD) create --use)
 +	$(MAKE) dynamo-image-build PUSH=$(PUSH)
 +	$(MAKE) dynamo-image-build LOAD=$(LOAD)
++	$(DOCKER_BUILDX_CMD) rm $$BUILDER
 +
 +.PHONY: dynamo-image-local-push
 +dynamo-image-local-push: PUSH=--push ## Build the Dynamo EPP image for local development and push it to $IMAGE_REPO.
