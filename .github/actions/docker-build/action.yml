@@ -43,9 +43,6 @@ inputs:
   cuda_version:
     description: 'Optional override for CUDA_VERSION build-arg'
     required: true
-  torch_backend:
-    description: 'Optional override for TORCH_BACKEND build-arg (e.g., cu129)'
-    required: false
   enable_kvbm:
     description: 'Enable KVBM support (optional)'
     required: false
@@ -129,9 +126,6 @@ runs:
         fi
         if [ -n "${{ inputs.cuda_version }}" ]; then
           EXTRA_ARGS+="--build-arg CUDA_VERSION=${{ inputs.cuda_version }} "
-        fi
-        if [ -n "${{ inputs.torch_backend }}" ]; then
-          EXTRA_ARGS+="--build-arg TORCH_BACKEND=${{ inputs.torch_backend }} "
         fi
         if [ -n "${{ inputs.dynamo_base_image }}" ]; then
           EXTRA_ARGS+=" --dynamo-base-image ${{ inputs.dynamo_base_image }}"

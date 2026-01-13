@@ -679,6 +679,8 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ninja-build \
         git \
         git-lfs \
+        # required for verification of GPG keys
+        gnupg2 \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \

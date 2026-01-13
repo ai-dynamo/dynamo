@@ -1106,6 +1106,7 @@ class KvRouterConfig:
         use_kv_events: bool = True,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
+        router_assume_kv_reuse: bool = True,
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
@@ -1121,6 +1122,8 @@ class KvRouterConfig:
             use_kv_events: Whether to use KV events from workers (default: True)
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
+                When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)

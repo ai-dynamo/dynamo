@@ -568,6 +568,8 @@ RUN apt-get update -y \
         # required for EPP
         ca-certificates \
         libstdc++6 \
+        # required for verification of GPG keys
+        gnupg2 \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -582,7 +584,6 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 
 # Set HOME so ModelExpress can find the cache directory
 ENV HOME=/home/dynamo
-
 # Switch to dynamo user
 USER dynamo
 ENV DYNAMO_HOME=/opt/dynamo

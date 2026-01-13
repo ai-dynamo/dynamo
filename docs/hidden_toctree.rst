@@ -41,6 +41,7 @@
    guides/request_plane.md
 
    router/kv_cache_routing.md
+   router/kv_events.md
    planner/load_planner.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
