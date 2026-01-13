@@ -98,7 +98,7 @@ runs:
          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-         '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=buildkit-amd-worker"' \
+         '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=buildkit-amd64-worker"' \
          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
 
         docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
@@ -109,7 +109,7 @@ runs:
          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-         '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=buildkit-arm-worker"' \
+         '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=buildkit-arm64-worker"' \
          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
 
     - name: Bootstrap buildkit
