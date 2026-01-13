@@ -94,13 +94,13 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull existing images for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
-          echo "Cache pull completed"
+      # - name: Pull existing images for cache
+      #   shell: bash
+      #   continue-on-error: true
+      #   run: |
+      #     echo "Attempting to pull existing images for layer caching..."
+      #     docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
+      #     echo "Cache pull completed"
       - name: Build Runtime Image
         id: build_runtime
         uses: ./.github/actions/docker-build
@@ -170,13 +170,13 @@ jobs:
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull existing images for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
-          echo "Cache pull completed"
+      # - name: Pull existing images for cache
+      #   shell: bash
+      #   continue-on-error: true
+      #   run: |
+      #     echo "Attempting to pull existing images for layer caching..."
+      #     docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
+      #     echo "Cache pull completed"
       - name: Build Runtime Image
         id: build_runtime
         uses: ./.github/actions/docker-build
