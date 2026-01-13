@@ -121,7 +121,13 @@ pub unsafe extern "C" fn dynamo_llm_init(
                 // This is needed because dynamo_create_worker_selection_pipeline() is called
                 // immediately after, and it needs discovery.list() to return data
                 // the discovery daemon takes time to query K8s and returns async, so we need to wait.
-                wait_for_discovery_sync(drt, 10).await;
+                let instance_count = wait_for_discovery_sync(drt, 10).await;
+                if instance_count == 0 {
+                    tracing::error!(
+                        "Discovery sync failed: no worker instances found. Is the backend running?"
+                    );
+                    return Err(DynamoLlmResult::ERR);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -397,7 +403,7 @@ use std::pin::Pin;
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
-use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider};
+use dynamo_runtime::{Runtime, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;
@@ -1397,29 +1403,28 @@ pub async fn create_worker_selection_pipeline_chat(
 )> {
     use dynamo_llm::kv_router::PrefillRouter;
 
-    // Use the global DRT if already initialized (by dynamo_llm_init),
-    // otherwise create a new one for standalone use
-    let distributed_runtime: &'static DistributedRuntime = match DRT.get() {
-        Some(drt) => {
-            tracing::debug!("Using global DistributedRuntime from dynamo_llm_init");
-            // DRT is already 'static since it's in an AsyncOnceCell
-            // We need to leak a reference to match the expected lifetime
-            // This is safe because the global DRT lives for 'static
-            unsafe { std::mem::transmute::<&DistributedRuntime, &'static DistributedRuntime>(drt) }
-        }
-        None => {
-            tracing::debug!("Creating new DistributedRuntime (standalone mode)");
-            let runtime = Runtime::from_settings()?;
-            let dst_config = DistributedConfig::from_settings();
-            let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
-            let drt: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
+    // Use the global DRT singleton - initialize if not already done
+    // Check if already initialized (by dynamo_llm_init) to avoid redundant sync wait
+    let needs_sync = DRT.get().is_none();
 
-            // Wait for discovery to sync (same as dynamo_llm_init)
-            wait_for_discovery_sync(drt, 10).await;
+    let distributed_runtime = DRT
+        .get_or_try_init(async {
+            tracing::debug!("Initializing DistributedRuntime singleton (standalone mode)");
+            DistributedRuntime::from_settings(Runtime::from_settings()?).await
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize DistributedRuntime: {}", e))?;
 
-            drt
+    // Only wait for discovery sync if we just initialized the DRT
+    // (dynamo_llm_init already does this when it initializes)
+    if needs_sync {
+        let instance_count = wait_for_discovery_sync(distributed_runtime, 10).await;
+        if instance_count == 0 {
+            return Err(anyhow::anyhow!(
+                "Discovery sync failed: no worker instances found. Is the backend running?"
+            ));
         }
-    };
+    }
 
     let component = distributed_runtime
         .namespace(namespace)?
