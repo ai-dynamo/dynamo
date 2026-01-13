@@ -10,7 +10,7 @@ name: Docker Build and Test
 # - [ ] make sure all "if" are as in main
 # - [ ] Comment in concurrency section.
 # - [ ] Bake skopeo and pre commit envs into the runner
-# - [ ]
+# - [ ] Add support for main on builds after the change
 
 on:
   push:
@@ -236,8 +236,10 @@ jobs:
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_matrix: |
         [
-          {"platform":"amd64","cuda_version":"12.8"},
+          {"platform":"amd64","cuda_version":"12.9"},
           {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
+          {"platform":"amd64","cuda_version":"13.0","base_image_tag":"25.11-cuda13.0-devel-ubuntu24.04","runtime_image_tag":"13.0.2-runtime-ubuntu24.04","torch_backend":"cu130"}
+          {"platform":"arm64","cuda_version":"13.0","base_image_tag":"25.11-cuda13.0-devel-ubuntu24.04","runtime_image_tag":"13.0.2-runtime-ubuntu24.04","torch_backend":"cu130"}
         ]
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
@@ -254,8 +256,10 @@ jobs:
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_matrix: |
         [
-          {"platform":"amd64","cuda_version":"12.8"},
-          {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
+          {"platform":"amd64","cuda_version":"12.9"},
+          {"platform":"arm64","cuda_version":"12.9"},
+          {"platform":"amd64","cuda_version":"13.0","torch_backend":"cu130"}
+          {"platform":"arm64","cuda_version":"13.0","torch_backend":"cu130"}
         ]
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
@@ -272,8 +276,8 @@ jobs:
       builder_name: ${{ needs.init.outputs.builder_name }}
       build_matrix: |
         [
-          {"platform":"amd64","cuda_version":"12.8"},
-          {"platform":"arm64","cuda_version":"12.9","base_image_tag":"25.06-cuda12.9-devel-ubuntu24.04","runtime_image_tag":"12.9.0-runtime-ubuntu24.04","torch_backend":"cu129"}
+          {"platform":"amd64","cuda_version":"13.0"},
+          {"platform":"arm64","cuda_version":"13.0"}
         ]
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       extra_tags: |
