@@ -10,6 +10,14 @@ on:
         description: 'Framework name (vllm, sglang, trtllm)'
         required: true
         type: string
+      platforms:
+        description: 'Platforms to build (JSON array)'
+        required: true
+        type: string
+      cuda_versions:
+        description: 'CUDA versions to build (JSON array): '
+        required: true
+        type: string
       arm_base_image_tag:
         description: 'ARM64 base image tag override'
         required: false
@@ -30,11 +38,6 @@ on:
         required: false
         type: string
         default: ''
-      build_arm64:
-        description: 'Whether to build ARM64 images'
-        required: false
-        type: boolean
-        default: true
       run_tests:
         description: 'Whether to run pytest'
         required: false
@@ -110,7 +113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: ${{ fromJSON(inputs.build_arm64 && '["amd64", "arm64"]' || '["amd64"]') }}
+        platform:
     name: build ${{ inputs.framework }}-${{ matrix.platform }}
     runs-on: builder-cpu-amd-runner
     outputs:
