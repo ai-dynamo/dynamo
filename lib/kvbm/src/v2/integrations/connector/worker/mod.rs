@@ -36,6 +36,7 @@ mod init;
 mod nova;
 mod state;
 
+use cudarc::driver::CudaStream;
 pub use nova::client::ConnectorWorkerClient;
 
 use init::PendingWorkerState;
@@ -45,6 +46,7 @@ use anyhow::{Result, bail};
 use cudarc::driver::sys::{
     CUevent, CUresult, CUstream, cuEventQuery, cuEventRecord, cuStreamWaitEvent, cudaError_enum,
 };
+use derive_getters::Dissolve;
 use dynamo_memory::TensorDescriptor;
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -52,10 +54,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use crate::KvbmRuntime;
-use crate::v2::distributed::worker::DirectWorker;
+use crate::logical::LogicalLayoutHandle;
+use crate::physical::TransferOptions;
+use crate::v2::distributed::worker::{DirectWorker, WorkerTransfers};
 use crate::v2::integrations::connector::leader::scheduler::KvConnectorMetadata;
 use crate::v2::integrations::vllm::layout::determine_kv_layout;
+use crate::{BlockId, KvbmRuntime};
 
 pub trait ConnectorWorkerInterface: Send + Sync {
     /// Register KV cache tensors (deferred mode - caches state for later).
@@ -79,17 +83,6 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// this function will trigger the loading of the KV cache.
     fn start_load_kv(&self) -> Result<()>;
 
-    /// Save KV layer and trigger forward pass completion on last layer.
-    ///
-    /// Always callable - returns immediately if no action is needed for this layer.
-    /// On the last layer, records a CUDA event and spawns a task to trigger
-    /// the Nova forward pass completion event.
-    ///
-    /// # Arguments
-    /// * `layer_index` - The layer index being saved
-    /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current stream
-    fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
-
     /// Wait for a specific layer's KV cache load to complete.
     ///
     /// If intra-pass onboarding was triggered in `start_load_kv`, this method
@@ -102,13 +95,34 @@ pub trait ConnectorWorkerInterface: Send + Sync {
     /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current torch stream
     fn wait_for_layer_load(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
 
+    /// Save KV layer and trigger forward pass completion on last layer.
+    ///
+    /// Always callable - returns immediately if no action is needed for this layer.
+    /// On the last layer, records a CUDA event and spawns a task to trigger
+    /// the Nova forward pass completion event.
+    ///
+    /// # Arguments
+    /// * `layer_index` - The layer index being saved
+    /// * `stream_handle` - Raw CUDA stream handle (u64) from Python's current stream
+    fn save_kv_layer(&self, layer_index: usize, stream_handle: u64) -> Result<()>;
+
+    /// Wait for the intra-pass offload to complete. This is a blocking call; however, we might choose to make it non-blocking
+    /// in the future.
+    ///
+    /// To make it non-blocking, we would have to put an stream wait event on both the torch stream and intra-pass onboard stream
+    /// to ensure that no cuda stream operations are allowed to modify the kv blocks being offloaded while the offload is in progress.
+    ///
+    /// The CUDA coordination would require that we correctly synchronize any stream, so the intergration with the LLM framework
+    /// needs to be carefully aligned.
+    fn wait_for_save(&self) -> Result<()>;
+
     /// Check if initialization has been completed.
     fn is_initialized(&self) -> bool;
 
     fn shutdown(&self) -> Result<()>;
 
     /// Get and drain all finished request IDs.
-    fn get_finished(&self) -> (HashSet<String>, HashSet<String>);
+    fn get_finished(&self) -> FinishedRequests;
 
     /// Get and drain all failed onboarding block IDs.
     fn get_failed_onboarding(&self) -> HashSet<usize>;
@@ -130,6 +144,12 @@ impl GpuInfo {
     }
 }
 
+struct IntraPassOffloadState {
+    stream: Arc<CudaStream>,
+    g1_src_block_ids: Arc<[BlockId]>,
+    g2_dst_block_ids: Arc<[BlockId]>,
+}
+
 /// Connector worker implementation that uses Nova for communication and
 /// NIXL for RDMA transfers.
 ///
@@ -148,8 +168,8 @@ pub struct ConnectorWorker {
     /// Set to true in bind_connector_metadata when a Nova event is present,
     /// used by save_kv_layer to decide whether to record events.
     forward_pass_completion_active: Arc<AtomicBool>,
-    /// Flag for direct offloading (stub for future use, always false for now).
-    is_direct_offloading_active: Arc<AtomicBool>,
+
+    intra_pass_offload_active: Arc<Mutex<Option<IntraPassOffloadState>>>,
 
     /// Start Forward Pass
     forward_pass_start: Mutex<Option<Instant>>,
@@ -173,7 +193,7 @@ impl ConnectorWorker {
             metadata: Mutex::new(None),
             intra_pass_onboard_active: Arc::new(AtomicBool::new(false)),
             forward_pass_completion_active: Arc::new(AtomicBool::new(false)),
-            is_direct_offloading_active: Arc::new(AtomicBool::new(false)),
+            intra_pass_offload_active: Arc::new(Mutex::new(None)),
             forward_pass_start: Mutex::new(None),
         }
     }
@@ -210,7 +230,7 @@ impl ConnectorWorker {
     /// - Forward pass completion is active AND this is the last layer
     fn needs_offload_action(&self, layer_index: usize) -> bool {
         // Stub for future direct offloading support
-        let is_direct_offloading = self.is_direct_offloading_active.load(Ordering::Relaxed);
+        let is_direct_offloading = self.intra_pass_offload_active.lock().is_some();
 
         // Forward pass completion triggers on last layer only
         let is_last_layer = layer_index == self.num_layers() - 1;
@@ -231,16 +251,10 @@ impl ConnectorWorker {
         let forward_pass_active = self.forward_pass_completion_active.load(Ordering::Relaxed);
 
         // Get pre-allocated save layer events
-        let layer_events = self.state.save_layer_events()?;
+        let layer_events = self.state.compute_layer_events()?;
 
         // Validate layer_index
-        if layer_index >= layer_events.len() {
-            return Err(anyhow::anyhow!(
-                "layer_index {} out of range (num_layers={})",
-                layer_index,
-                layer_events.len()
-            ));
-        }
+        assert!(layer_index < layer_events.len(), "layer_index out of range");
 
         let event = &layer_events[layer_index];
 
@@ -254,11 +268,48 @@ impl ConnectorWorker {
 
         tracing::trace!(layer_index, "Recorded save layer CUDA event");
 
-        // If direct offloading is active, perform enqueue into a kvbm stream the event and the offload action
-        // to take once the event is complete.
-        // todo: add method to DirectWorker for this operation. - this will be a local operation from g1 -> g2
-        // note: the operation might be a permute kernel if we are gathering or scattering kv to remote workers
-        // with different tensor parallel world sizes.
+        if let Some(intra_pass_offload_state) = &self.intra_pass_offload_active.lock().as_ref() {
+            // record a stream wait event on the intra_pass_offload_state.stream with the event just recorded
+            // Insert cudaStreamWaitEvent to make torch stream wait for this layer's onboard
+            unsafe {
+                let status = cuStreamWaitEvent(
+                    intra_pass_offload_state.stream.cu_stream(),
+                    event.cu_event(),
+                    0, // flags = 0
+                );
+                if status != cudaError_enum::CUDA_SUCCESS {
+                    bail!("cuStreamWaitEvent failed with status: {:?}", status);
+                }
+            }
+
+            let worker = self.state.service.get().expect("service not set").worker();
+
+            let options = TransferOptions::builder()
+                .layer_range(layer_index..layer_index + 1)
+                .cuda_stream(intra_pass_offload_state.stream.clone())
+                .build()?;
+
+            // trigger a local transfer operation from g1 to g2 with the block ids using the intra_pass_offload_state.stream
+            // the clones of the block ids are cheap because they are Arc<[BlockId]>
+            worker.execute_local_transfer(
+                LogicalLayoutHandle::G1,
+                LogicalLayoutHandle::G2,
+                intra_pass_offload_state.g1_src_block_ids.clone(),
+                intra_pass_offload_state.g2_dst_block_ids.clone(),
+                options,
+            )?;
+
+            // if this is the last layer, record the final event on the stream
+            if is_last_layer {
+                let event = self
+                    .state
+                    .offload_complete_event
+                    .get()
+                    .expect("offload_complete_event not set")
+                    .clone();
+                event.record(intra_pass_offload_state.stream.as_ref())?;
+            }
+        }
 
         // On last layer with forward pass completion: spawn task to trigger Nova
         if is_last_layer && forward_pass_active {
@@ -400,6 +451,35 @@ impl ConnectorWorkerInterface for ConnectorWorker {
             tracing::info!("Binding connector metadata: {:?}", metadata.summary());
         }
 
+        // TODO: if intra_pass_store is present, we need to mark `is_direct_offloading_active` to true
+        // then we need to prepare the Arc<[BlockId]> for the G1 source block_ids and G2 destination block_ids
+        // so we can immediately clone them into `execute_local_transfer` operations on the worker
+        // we are going to have to grab a d2h_stream from the worker and hold it for this forward pass and clean
+        // it up after the forward pass is complete.
+        if let Some(intra_pass_store) = &metadata.intra_pass_store {
+            let stream = self
+                .state
+                .service
+                .get()
+                .expect("service not set")
+                .worker()
+                .transfer_manager()
+                .context()
+                .acquire_d2h_stream();
+
+            // create a Arc<[BlockId]> for the G1 source block_ids and G2 destination block_ids
+            let g1_src_block_ids: Arc<[BlockId]> =
+                Arc::from(intra_pass_store.g1_src_block_ids.clone());
+            let g2_dst_block_ids: Arc<[BlockId]> =
+                Arc::from(intra_pass_store.g2_dst_block_ids.clone());
+
+            *self.intra_pass_offload_active.lock() = Some(IntraPassOffloadState {
+                stream,
+                g1_src_block_ids,
+                g2_dst_block_ids,
+            });
+        }
+
         // Store the metadata for use by start_load_kv
         *self.metadata.lock() = Some(metadata);
 
@@ -422,9 +502,8 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         *self.metadata.lock() = None;
         self.intra_pass_onboard_active
             .store(false, Ordering::Relaxed);
+        *self.intra_pass_offload_active.lock() = None;
         self.forward_pass_completion_active
-            .store(false, Ordering::Relaxed);
-        self.is_direct_offloading_active
             .store(false, Ordering::Relaxed);
 
         Ok(())
@@ -468,6 +547,21 @@ impl ConnectorWorkerInterface for ConnectorWorker {
                 .store(true, Ordering::Relaxed);
 
             tracing::debug!("Intra-pass onboard initiated - events recorded on transfer stream");
+        }
+
+        Ok(())
+    }
+
+    fn wait_for_save(&self) -> Result<()> {
+        // Wait for the last layer to be saved
+        if self.intra_pass_offload_active.lock().is_some() {
+            let event = self
+                .state
+                .offload_complete_event
+                .get()
+                .expect("offload_complete_event not set")
+                .clone();
+            event.synchronize()?;
         }
 
         Ok(())
@@ -532,8 +626,11 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         Ok(())
     }
 
+    /// Get and drain all finished request IDs.
+    ///
+    /// When [`FinishedRequests::dissolve`] is called, the returned tuple will be (offloading, onboarding).
     #[tracing::instrument(level = "debug", skip(self), ret)]
-    fn get_finished(&self) -> (HashSet<String>, HashSet<String>) {
+    fn get_finished(&self) -> FinishedRequests {
         self.state.finished_state.take_finished()
     }
 
@@ -542,3 +639,12 @@ impl ConnectorWorkerInterface for ConnectorWorker {
         self.state.finished_state.take_failed_onboarding()
     }
 }
+
+#[derive(Default, Debug, Clone, Dissolve)]
+pub struct FinishedRequests {
+    pub offloading: HashSet<String>,
+    pub onboarding: HashSet<String>,
+}
+
+#[cfg(test)]
+mod tests;

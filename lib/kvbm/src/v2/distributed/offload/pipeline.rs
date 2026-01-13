@@ -1394,7 +1394,7 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
             tokio::spawn(async move {
                 let _permit = transfer_permit; // Hold permit until task completes
                 if let Err(e) = Self::execute_transfer(&shared_clone, upgraded).await {
-                    tracing::error!("BlockTransferExecutor: transfer failed: {}", e);
+                    tracing::warn!("BlockTransferExecutor: transfer failed: {}", e);
                 }
             });
         }
@@ -1443,7 +1443,11 @@ impl<Src: BlockMetadata, Dst: BlockMetadata> BlockTransferExecutor<Src, Dst> {
                 .dst_manager
                 .allocate_blocks(resolved.len())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("Failed to allocate {} destination blocks", resolved.len())
+                    anyhow::anyhow!(
+                        "Failed to allocate {} {} blocks; this is an indication of high memory pressure and may impact performance",
+                        resolved.len(),
+                        std::any::type_name::<Dst>()
+                    )
                 })?;
 
             let dst_block_ids: Vec<BlockId> = dst_blocks.iter().map(|b| b.block_id()).collect();
@@ -1895,7 +1899,7 @@ impl<Src: BlockMetadata> ObjectTransferExecutor<Src> {
             tokio::spawn(async move {
                 let _permit = transfer_permit; // Hold permit until task completes
                 if let Err(e) = Self::execute_transfer(&shared_clone, upgraded).await {
-                    tracing::error!("ObjectTransferExecutor: transfer failed: {}", e);
+                    tracing::warn!("ObjectTransferExecutor: transfer failed: {}", e);
                 }
             });
         }

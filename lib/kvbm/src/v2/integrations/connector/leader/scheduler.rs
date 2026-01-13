@@ -10,145 +10,13 @@ use crate::{
 
 use derive_builder::Builder;
 use dynamo_nova::events::EventHandle;
+use serde::{Deserialize, Serialize};
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
-/// Data for a newly scheduled request that hasn't been seen before.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewRequestData {
-    pub req_id: String,
-    pub prompt_token_ids: Vec<u32>,
-    pub block_ids: Vec<BlockId>,
-    pub num_computed_tokens: usize,
-}
-
-/// Data for a cached request that was previously scheduled.
-///
-/// This represents a request that has been scheduled before and may have been
-/// preempted. The `resumed` field indicates if it resumed from preemption,
-/// and `all_token_ids` contains the full token sequence if resumed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedRequestData {
-    pub req_id: String,
-    /// Whether this request resumed from preemption (derived from resumed_req_ids membership).
-    pub resumed: bool,
-    /// New token IDs added in this scheduling step.
-    pub new_token_ids: Vec<u32>,
-    /// All token IDs for the request (present only if resumed from preemption).
-    pub all_token_ids: Option<Vec<u32>>,
-    /// New block IDs allocated in this scheduling step.
-    pub new_block_ids: Vec<BlockId>,
-    /// Number of computed tokens for this request.
-    pub num_computed_tokens: usize,
-    /// Number of output tokens generated for this request.
-    pub num_output_tokens: usize,
-}
-
-/// Scheduler output containing all requests scheduled in a single iteration.
-///
-/// This mirrors vLLM's `SchedulerOutput` structure with the updated API that uses
-/// `resumed_req_ids` and `all_token_ids` instead of deprecated per-item fields.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SchedulerOutput {
-    /// Iteration number
-    pub iteration: usize,
-    /// Requests scheduled for the first time.
-    pub scheduled_new_reqs: Vec<NewRequestData>,
-    /// Requests that have been scheduled before (may have been preempted).
-    pub scheduled_cached_reqs: Vec<CachedRequestData>,
-    /// Number of tokens scheduled for each request ID.
-    pub num_scheduled_tokens: HashMap<String, usize>,
-    /// Total number of tokens scheduled across all requests.
-    pub total_num_scheduled_tokens: usize,
-}
-
-impl SchedulerOutput {
-    /// Create a new empty SchedulerOutput.
-    pub fn new(iteration: usize) -> Self {
-        Self {
-            iteration,
-            ..Default::default()
-        }
-    }
-
-    /// Add a new request to the output.
-    pub fn add_new_request(
-        &mut self,
-        req_id: String,
-        prompt_token_ids: Vec<u32>,
-        block_ids: Vec<BlockId>,
-        num_computed_tokens: usize,
-    ) {
-        self.scheduled_new_reqs.push(NewRequestData {
-            req_id,
-            prompt_token_ids,
-            block_ids,
-            num_computed_tokens,
-        });
-    }
-
-    /// Add a cached request to the output.
-    ///
-    /// # Arguments
-    /// * `req_id` - The request ID
-    /// * `resumed` - Whether this request resumed from preemption
-    /// * `new_token_ids` - New token IDs added in this step
-    /// * `all_token_ids` - All token IDs (if resumed, otherwise None)
-    /// * `new_block_ids` - New block IDs allocated in this step
-    /// * `num_computed_tokens` - Number of computed tokens
-    /// * `num_output_tokens` - Number of output tokens generated
-    #[allow(clippy::too_many_arguments)]
-    pub fn add_cached_request(
-        &mut self,
-        req_id: String,
-        resumed: bool,
-        new_token_ids: Vec<u32>,
-        all_token_ids: Option<Vec<u32>>,
-        new_block_ids: Vec<BlockId>,
-        num_computed_tokens: usize,
-        num_output_tokens: usize,
-    ) {
-        self.scheduled_cached_reqs.push(CachedRequestData {
-            req_id,
-            resumed,
-            new_token_ids,
-            all_token_ids,
-            new_block_ids,
-            num_computed_tokens,
-            num_output_tokens,
-        });
-    }
-
-    /// Set the number of scheduled tokens for each request.
-    ///
-    /// This also updates `total_num_scheduled_tokens` to be the sum of all values.
-    pub fn set_num_scheduled_tokens(&mut self, num_scheduled_tokens: HashMap<String, usize>) {
-        self.num_scheduled_tokens = num_scheduled_tokens;
-        self.total_num_scheduled_tokens = self.num_scheduled_tokens.values().sum();
-    }
-
-    /// Get the total number of scheduled tokens.
-    pub fn total_num_scheduled_tokens(&self) -> usize {
-        self.total_num_scheduled_tokens
-    }
-
-    /// Get the number of scheduled tokens for a specific request.
-    pub fn num_scheduled_tokens(&self, req_id: &str) -> Option<usize> {
-        self.num_scheduled_tokens.get(req_id).copied()
-    }
-
-    /// Get an iterator over new requests.
-    pub fn new_requests(&self) -> impl Iterator<Item = &NewRequestData> {
-        self.scheduled_new_reqs.iter()
-    }
-
-    /// Get an iterator over cached requests.
-    pub fn cached_requests(&self) -> impl Iterator<Item = &CachedRequestData> {
-        self.scheduled_cached_reqs.iter()
-    }
-}
+// Re-export common types for backwards compatibility
+pub use crate::v2::integrations::common::{CachedRequestData, NewRequestData, SchedulerOutput};
 
 pub struct IterationSession {
     pub iteration: usize,
@@ -165,6 +33,9 @@ pub struct KvConnectorMetadata {
 
     /// This will hold the G2 source and G1 destination block_ids
     pub intra_pass_load: Option<IntraPassLoad>,
+
+    /// This will hold the G1 source and G2 destination block_ids
+    pub intra_pass_store: Option<IntraPassStore>,
 }
 
 // impl std::fmt::Debug for IterationSession {
@@ -196,6 +67,12 @@ impl KvConnectorMetadata {
 pub struct IntraPassLoad {
     pub g2_src_block_ids: Vec<BlockId>,
     pub g1_dst_block_ids: Vec<BlockId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntraPassStore {
+    pub g1_src_block_ids: Vec<BlockId>,
+    pub g2_dst_block_ids: Vec<BlockId>,
 }
 
 impl KvConnectorMetadata {
@@ -504,6 +381,16 @@ impl ConnectorLeader {
                 );
             }
 
+            // TODO: Intra-pass offload for P/D disaggregation
+            // When a prefill request is finishing and needs immediate offload to decode node:
+            // 1. Call aggregate_intra_pass_offload() to collect pending offload data
+            // 2. Set metadata.intra_pass_store = Some(offload_data)
+            // 3. Worker will execute layer-wise G1→G2 transfers during save_kv_layer
+            // let intra_pass_store = self.aggregate_intra_pass_offload();
+            // if let Some(ref store) = intra_pass_store {
+            //     metadata.intra_pass_store = Some(store.clone());
+            // }
+
             // Spawn unified cleanup task that:
             // 1. Awaits the merge of all worker events (lazy - only creates merge here)
             // 2. Triggers the forward_pass_promise (unblocks preconditions)
@@ -540,6 +427,42 @@ impl ConnectorLeader {
             })
         }
     }
+
+    // /// Prepare intra-pass offload for a request.
+    // ///
+    // /// This is called on the last pass of prefill when we intend to offload
+    // /// the prefill KV cache to a remote node immediately (within the forward pass).
+    // ///
+    // /// Unlike inter-pass offload which happens between forward passes with preconditions,
+    // /// intra-pass offload executes synchronously layer-by-layer during the forward pass.
+    // ///
+    // /// # When to use
+    // /// - Prefill offload to decode nodes in P/D disaggregation
+    // /// - Request is finishing prefill and being handed off to decode worker
+    // ///
+    // /// # Arguments
+    // /// * `req_id` - Request identifier
+    // /// * `g1_block_ids` - Source blocks on GPU (computed KV cache)
+    // /// * `g2_block_ids` - Destination blocks on host (for RDMA transfer)
+    // fn prepare_intra_pass_offload(
+    //     &self,
+    //     req_id: &str,
+    //     g1_block_ids: Vec<BlockId>,
+    //     g2_block_ids: Vec<BlockId>,
+    // ) -> Result<()> {
+    //     // Store pending intra-pass offload data in slot (similar to extend_pending_intra_pass)
+    //     // This will be aggregated by aggregate_intra_pass_offload() during process_scheduler_output
+    //     todo!("Implement when P/D disaggregation prefill offload is ready")
+    // }
+    //
+    // /// Aggregate pending intra-pass offload data from all active slots.
+    // ///
+    // /// Similar to aggregate_intra_pass_onboarding but for G1→G2 direction.
+    // fn aggregate_intra_pass_offload(&self) -> Option<IntraPassStore> {
+    //     // Collect pending intra-pass offload from all slots
+    //     // Return IntraPassStore with g1_src_block_ids and g2_dst_block_ids
+    //     todo!("Implement when P/D disaggregation prefill offload is ready")
+    // }
 
     /// Create one event per worker for forward pass completion tracking.
     fn create_worker_foward_pass_completion_events(
@@ -814,6 +737,7 @@ impl KvConnectorMetadata {
             iteration,
             foward_pass_completion_events: None,
             intra_pass_load: None,
+            intra_pass_store: None,
         }
     }
 

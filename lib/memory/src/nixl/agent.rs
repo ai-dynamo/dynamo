@@ -163,6 +163,45 @@ impl NixlAgent {
             )
         }
     }
+
+    /// Try to add a backend to the agent, returning whether it was successful.
+    ///
+    /// Unlike `add_backend()` which returns an error if the backend is unavailable,
+    /// this method returns `Ok(false)` if the backend cannot be initialized. Use this
+    /// for optional backends that enhance functionality but are not required.
+    ///
+    /// # Returns
+    /// - `Ok(true)` if the backend was added successfully (or was already present)
+    /// - `Ok(false)` if the backend plugin is not found or initialization failed
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut agent = NixlAgent::new("test")?;
+    /// agent.add_backend("POSIX")?;  // Required - fail if unavailable
+    /// agent.try_add_backend("GDS_MT");  // Optional - continue if unavailable
+    /// ```
+    pub fn try_add_backend(&mut self, backend: &str) -> Result<bool> {
+        if self.available_backends.contains(&backend.to_uppercase()) {
+            return Ok(true);
+        }
+        let backend_upper = backend.to_uppercase();
+        match self.agent.get_plugin_params(&backend_upper) {
+            Ok((_, params)) => match self.agent.create_backend(&backend_upper, &params) {
+                Ok(_) => {
+                    self.available_backends.insert(backend_upper);
+                    Ok(true)
+                }
+                Err(e) => {
+                    tracing::debug!("Optional backend {} not available: {}", backend_upper, e);
+                    Ok(false)
+                }
+            },
+            Err(e) => {
+                tracing::debug!("Plugin {} not found: {}", backend_upper, e);
+                Ok(false)
+            }
+        }
+    }
 }
 
 // Delegate common methods to the underlying agent

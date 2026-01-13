@@ -16,7 +16,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 from vllm.v1.core.sched.interface import SchedulerInterface
+
+
+def _to_serializable(obj: Any) -> Any:
+    """Convert numpy arrays and other non-serializable types to JSON-serializable forms."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.integer, np.floating)):
+        return obj.item()
+    elif isinstance(obj, dict):
+        return {k: _to_serializable(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [_to_serializable(v) for v in obj]
+    return obj
 
 
 @dataclass
@@ -90,6 +104,17 @@ class RecordingScheduler(SchedulerInterface):
             self.recording_path.mkdir(parents=True, exist_ok=True)
             print(f"Recording enabled. Will save to: {self.recording_path}")
 
+    # Forward attributes that vLLM's engine core accesses directly
+    @property
+    def connector(self):
+        """Forward connector attribute from wrapped scheduler."""
+        return getattr(self._wrapped_scheduler, "connector", None)
+
+    @property
+    def ec_connector(self):
+        """Forward ec_connector attribute from wrapped scheduler."""
+        return getattr(self._wrapped_scheduler, "ec_connector", None)
+
     def schedule(self):
         """Schedule requests and record the output."""
         output = self._wrapped_scheduler.schedule()
@@ -132,39 +157,45 @@ class RecordingScheduler(SchedulerInterface):
     def _scheduler_output_to_dict(self, output) -> Dict[str, Any]:
         """Convert SchedulerOutput to a dictionary."""
         try:
-            return {
-                "scheduled_new_reqs": [
-                    {
-                        "req_id": req.req_id,
-                        "prompt_token_ids": req.prompt_token_ids,
-                        "block_ids": [list(blocks) for blocks in req.block_ids]
-                        if req.block_ids
-                        else [],
-                        "num_computed_tokens": req.num_computed_tokens,
-                        "mm_hashes": req.mm_hashes if hasattr(req, "mm_hashes") else [],
-                    }
-                    for req in output.scheduled_new_reqs
-                ],
-                "scheduled_cached_reqs": {
-                    "req_ids": output.scheduled_cached_reqs.req_ids,
-                    "resumed_from_preemption": output.scheduled_cached_reqs.resumed_from_preemption,
-                    "new_token_ids": output.scheduled_cached_reqs.new_token_ids,
-                    "new_block_ids": [
-                        [list(blocks) for blocks in block_ids] if block_ids else None
-                        for block_ids in output.scheduled_cached_reqs.new_block_ids
+            return _to_serializable(
+                {
+                    "scheduled_new_reqs": [
+                        {
+                            "req_id": req.req_id,
+                            "prompt_token_ids": req.prompt_token_ids,
+                            "block_ids": [list(blocks) for blocks in req.block_ids]
+                            if req.block_ids
+                            else [],
+                            "num_computed_tokens": req.num_computed_tokens,
+                            "mm_hashes": req.mm_hashes
+                            if hasattr(req, "mm_hashes")
+                            else [],
+                        }
+                        for req in output.scheduled_new_reqs
                     ],
-                    "num_computed_tokens": output.scheduled_cached_reqs.num_computed_tokens,
-                },
-                "num_scheduled_tokens": dict(output.num_scheduled_tokens),
-                "total_num_scheduled_tokens": output.total_num_scheduled_tokens,
-                "scheduled_spec_decode_tokens": dict(
-                    output.scheduled_spec_decode_tokens
-                ),
-                "scheduled_encoder_inputs": dict(output.scheduled_encoder_inputs),
-                "num_common_prefix_blocks": list(output.num_common_prefix_blocks),
-                "finished_req_ids": list(output.finished_req_ids),
-                "free_encoder_mm_hashes": list(output.free_encoder_mm_hashes),
-            }
+                    "scheduled_cached_reqs": {
+                        "req_ids": output.scheduled_cached_reqs.req_ids,
+                        "resumed_from_preemption": output.scheduled_cached_reqs.resumed_from_preemption,
+                        "new_token_ids": output.scheduled_cached_reqs.new_token_ids,
+                        "new_block_ids": [
+                            [list(blocks) for blocks in block_ids]
+                            if block_ids
+                            else None
+                            for block_ids in output.scheduled_cached_reqs.new_block_ids
+                        ],
+                        "num_computed_tokens": output.scheduled_cached_reqs.num_computed_tokens,
+                    },
+                    "num_scheduled_tokens": dict(output.num_scheduled_tokens),
+                    "total_num_scheduled_tokens": output.total_num_scheduled_tokens,
+                    "scheduled_spec_decode_tokens": dict(
+                        output.scheduled_spec_decode_tokens
+                    ),
+                    "scheduled_encoder_inputs": dict(output.scheduled_encoder_inputs),
+                    "num_common_prefix_blocks": list(output.num_common_prefix_blocks),
+                    "finished_req_ids": list(output.finished_req_ids),
+                    "free_encoder_mm_hashes": list(output.free_encoder_mm_hashes),
+                }
+            )
         except Exception as e:
             print(f"Error converting SchedulerOutput: {e}")
             return {}
@@ -173,20 +204,26 @@ class RecordingScheduler(SchedulerInterface):
         """Convert ModelRunnerOutput to a dictionary."""
         try:
             result = {
-                "req_ids": output.req_ids,
-                "req_id_to_index": dict(output.req_id_to_index),
-                "sampled_token_ids": output.sampled_token_ids,
+                "req_ids": _to_serializable(output.req_ids),
+                "req_id_to_index": _to_serializable(dict(output.req_id_to_index)),
+                "sampled_token_ids": _to_serializable(output.sampled_token_ids),
             }
 
             if output.logprobs:
                 result["logprobs"] = {
-                    "logprob_token_ids": output.logprobs.logprob_token_ids,
-                    "logprobs": output.logprobs.logprobs,
-                    "sampled_token_ranks": output.logprobs.sampled_token_ranks,
+                    "logprob_token_ids": _to_serializable(
+                        output.logprobs.logprob_token_ids
+                    ),
+                    "logprobs": _to_serializable(output.logprobs.logprobs),
+                    "sampled_token_ranks": _to_serializable(
+                        output.logprobs.sampled_token_ranks
+                    ),
                 }
 
             if hasattr(output, "num_nans_in_logits") and output.num_nans_in_logits:
-                result["num_nans_in_logits"] = dict(output.num_nans_in_logits)
+                result["num_nans_in_logits"] = _to_serializable(
+                    dict(output.num_nans_in_logits)
+                )
 
             return result
         except Exception as e:
@@ -205,7 +242,7 @@ class RecordingScheduler(SchedulerInterface):
                     "outputs": [
                         {
                             "request_id": output.request_id,
-                            "new_token_ids": output.new_token_ids,
+                            "new_token_ids": _to_serializable(output.new_token_ids),
                             "finish_reason": output.finish_reason.value
                             if output.finish_reason
                             else None,
@@ -236,7 +273,7 @@ class RecordingScheduler(SchedulerInterface):
 
                 result[str(engine_idx)] = engine_result
 
-            return result
+            return _to_serializable(result)
         except Exception as e:
             print(f"Error converting EngineCoreOutputs: {e}")
             import traceback
@@ -310,3 +347,7 @@ class RecordingScheduler(SchedulerInterface):
     def update_draft_token_ids(self, draft_token_ids) -> None:
         """Update draft token IDs for scheduled requests."""
         return self._wrapped_scheduler.update_draft_token_ids(draft_token_ids)
+
+    def get_grammar_bitmask(self, scheduler_output):
+        """Get grammar bitmask for structured output generation."""
+        return self._wrapped_scheduler.get_grammar_bitmask(scheduler_output)

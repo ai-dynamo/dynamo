@@ -5,7 +5,6 @@
 
 use super::{MemoryDescriptor, Result, StorageError, StorageKind, actions, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
-use cudarc::driver::sys;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -93,9 +92,10 @@ impl PinnedStorage {
                 unsafe {
                     ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-                    let ptr =
-                        cudarc::driver::result::malloc_host(len, sys::CU_MEMHOSTALLOC_DEVICEMAP)
-                            .map_err(StorageError::Cuda)?;
+                    let flags: std::ffi::c_uint = 0;
+
+                    let ptr = cudarc::driver::result::malloc_host(len, flags)
+                        .map_err(StorageError::Cuda)?;
 
                     let ptr = ptr as *mut u8;
                     assert!(!ptr.is_null(), "Failed to allocate pinned memory");

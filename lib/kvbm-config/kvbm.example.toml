@@ -1,0 +1,264 @@
+# KVBM Configuration Example
+#
+# This file shows all available configuration options with their defaults.
+# - Uncommented values: Active defaults (what you get if unspecified)
+# - Commented values: Optional settings you can enable
+#
+# Configuration loading priority (lowest to highest):
+# 1. Code defaults (shown here)
+# 2. System config: /opt/dynamo/etc/kvbm.toml
+# 3. User config: KVBM_CONFIG_PATH environment variable
+# 4. Environment variables: KVBM_* prefixed
+# 5. JSON overrides (from kv_connector_extra_config in vLLM)
+
+# ==============================================================================
+# Tokio Async Runtime Configuration
+# ==============================================================================
+[tokio]
+# Number of worker threads for the async runtime.
+# Default: 1 (conservative to minimize resource usage)
+# Env: KVBM_TOKIO_WORKER_THREADS
+worker_threads = 1
+
+# Maximum number of blocking threads.
+# Default: None (uses Tokio's default of 512)
+# Env: KVBM_TOKIO_MAX_BLOCKING_THREADS
+# max_blocking_threads = 512
+
+# ==============================================================================
+# Rayon Thread Pool Configuration
+# ==============================================================================
+[rayon]
+# Number of threads for CPU-bound parallel work.
+# Default: None (uses logical CPU count)
+# Env: KVBM_RAYON_NUM_THREADS
+# num_threads = 8
+
+# ==============================================================================
+# Nova Transport Configuration
+# ==============================================================================
+[nova.backend]
+# TCP port to bind for Nova transport.
+# Default: 0 (OS-assigned ephemeral port)
+# Env: KVBM_NOVA_BACKEND_TCP_PORT
+tcp_port = 0
+
+# IP address to bind. Mutually exclusive with tcp_interface.
+# Default: None (binds to 0.0.0.0)
+# Env: KVBM_NOVA_BACKEND_TCP_ADDR
+# tcp_addr = "192.168.1.100"
+
+# Network interface name to bind. Mutually exclusive with tcp_addr.
+# Default: None
+# Env: KVBM_NOVA_BACKEND_TCP_INTERFACE
+# tcp_interface = "eth0"
+
+# ------------------------------------------------------------------------------
+# Nova Discovery (Optional)
+# Choose ONE discovery method by uncommenting the appropriate section.
+# ------------------------------------------------------------------------------
+
+# --- Etcd-based Discovery ---
+# [nova.discovery.etcd]
+# cluster_id = "my-kvbm-cluster"
+# endpoints = ["http://localhost:2379"]
+# ttl_secs = 60                    # Range: 10-600
+# operation_timeout_secs = 30
+# max_retries = 3                  # Range: 0-10
+
+# --- P2P Discovery ---
+# [nova.discovery.p2p]
+# cluster_id = "my-kvbm-cluster"
+# listen_port = 0                  # OS-assigned if 0
+# bootstrap_peers = []             # ["192.168.1.10:5000", "192.168.1.11:5000"]
+# replication_factor = 3
+# enable_mdns = false
+# record_ttl_secs = 600
+
+# --- Filesystem Discovery ---
+# [nova.discovery.filesystem]
+# path = "/tmp/kvbm-discovery"
+
+# ==============================================================================
+# NixL Configuration (Optional)
+# High-performance data transfer backends.
+# ==============================================================================
+# [nixl]
+# # Backends are specified as a map of name -> parameters.
+# # Default backends: UCX and POSIX (with empty parameters)
+# [nixl.backends]
+# UCX = {}                         # Unified Communication X
+# POSIX = {}                       # Standard POSIX I/O (fallback)
+# # GDS = {}                       # GPUDirect Storage (requires compatible hardware)
+# # GDS_MT = {}                    # GPUDirect Storage multi-threaded
+
+# ==============================================================================
+# Onboard Configuration
+# Controls how external KV cache blocks are loaded from G2 to G1.
+# ==============================================================================
+[onboard]
+# Onboarding mode: "inter" (async out-of-band) or "intra" (sync layer-wise)
+# - "inter": Blocks loaded asynchronously between scheduler passes via Nova (default)
+# - "intra": Blocks loaded synchronously during forward pass, layer by layer
+# Default: "inter"
+mode = "inter"
+
+# ==============================================================================
+# Cache Configuration
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Host Cache (G2 Tier) - CPU Memory
+# ------------------------------------------------------------------------------
+[cache.host]
+# Cache size in gigabytes. Mutually exclusive with num_blocks.
+# Default: None (disabled - blocks computed from leader config)
+# Env: KVBM_CACHE_HOST_SIZE_GB
+# cache_size_gb = 4.0
+
+# Explicit number of blocks. Takes priority over cache_size_gb.
+# Default: None
+# Env: KVBM_CACHE_HOST_NUM_BLOCKS
+# num_blocks = 1000
+
+# ------------------------------------------------------------------------------
+# Disk Cache (G3 Tier) - Local Storage (Optional)
+# ------------------------------------------------------------------------------
+# [cache.disk]
+# # Cache size in gigabytes. Mutually exclusive with num_blocks.
+# # Env: KVBM_CACHE_DISK_SIZE_GB
+# cache_size_gb = 100.0
+#
+# # Explicit number of blocks. Takes priority over cache_size_gb.
+# # Env: KVBM_CACHE_DISK_NUM_BLOCKS
+# # num_blocks = 10000
+#
+# # Use GPUDirect Storage for disk I/O (requires GDS-compatible hardware).
+# use_gds = false
+#
+# # Path to store cache files.
+# # storage_path = "/var/lib/kvbm/cache"
+
+# ==============================================================================
+# Offload Policy Configuration
+# Controls how blocks are promoted/demoted between storage tiers.
+# ==============================================================================
+[offload]
+
+# ------------------------------------------------------------------------------
+# G1 → G2 (GPU → Host) Offload Policy
+# ------------------------------------------------------------------------------
+[offload.g1_to_g2]
+# Policies to apply (in order, all must pass).
+# Available: "pass_all", "presence", "presence_lfu"
+# Default (applied at runtime if empty): ["presence"]
+policies = ["presence"]
+
+# Presence filter configuration (no parameters currently).
+[offload.g1_to_g2.presence]
+
+# ------------------------------------------------------------------------------
+# G2 → G3 (Host → Disk) Offload Policy
+# ------------------------------------------------------------------------------
+[offload.g2_to_g3]
+# Policies to apply (in order, all must pass).
+# Default (applied at runtime if empty): ["presence_lfu"]
+policies = ["presence_lfu"]
+
+# Presence filter configuration.
+[offload.g2_to_g3.presence]
+
+# Presence + LFU filter configuration.
+[offload.g2_to_g3.presence_lfu]
+# Minimum access count before a block is eligible for offload.
+# Blocks accessed fewer times than this are not offloaded.
+# Default: 8
+min_lfu_count = 8
+
+# ==============================================================================
+# Object Storage Configuration (G4 Tier) - Optional
+# Remote object storage for persistent KV cache sharing.
+# Uses "type" field to select the client implementation.
+# ==============================================================================
+
+# --- S3-Compatible Storage ---
+# [object.client]
+# type = "s3"
+# # S3 endpoint URL. None = AWS S3, or specify for MinIO/other S3-compatible.
+# # endpoint_url = "http://localhost:9000"
+# # S3 bucket name.
+# bucket = "kvbm-blocks"
+# # AWS region.
+# region = "us-east-1"
+# # Use path-style URLs (required for MinIO and some S3-compatible services).
+# # Set to true for MinIO, false for AWS S3.
+# force_path_style = false
+# # Maximum concurrent S3 requests.
+# max_concurrent_requests = 16
+
+# --- NixL S3 Backend (Alternative) ---
+# Uses NixL for S3 transfers instead of the Rust AWS SDK.
+# [object.client]
+# type = "nixl"
+# backend = "s3"
+# bucket = "kvbm-blocks"
+# region = "us-east-1"
+# # endpoint_url = "http://localhost:9000"
+# force_path_style = false
+# max_concurrent_requests = 16
+
+# ==============================================================================
+# Profile-Based Configuration
+# ==============================================================================
+# vLLM uses profile-based configuration with "leader" and "worker" profiles.
+# Values under [leader] apply only when loading with figment_for_leader().
+# Values under [worker] apply only when loading with figment_for_worker().
+# Values under [default] apply to both unless overridden.
+#
+# IMPORTANT: This is the recommended pattern for vLLM deployments.
+
+# --- Leader Profile ---
+# Leaders coordinate block management, discovery, and object storage offload.
+# [leader.tokio]
+# worker_threads = 2
+#
+# [leader.cache.host]
+# cache_size_gb = 4.0
+#
+# [leader.nova.discovery]
+# type = "filesystem"
+# path = "/tmp/nova-discovery/cluster.json"
+#
+# [leader.offload.g1_to_g2]
+# policies = ["presence"]
+#
+# [leader.offload.g2_to_g3]
+# policies = ["presence_lfu"]
+#
+# [leader.offload.g2_to_g3.presence_lfu]
+# min_lfu_count = 8
+#
+# [leader.object.client]
+# type = "s3"
+# endpoint_url = "http://minio:9000"
+# bucket = "kvbm-blocks"
+# region = "us-east-1"
+# force_path_style = true
+# max_concurrent_requests = 16
+
+# --- Worker Profile ---
+# Workers handle data transfer using NixL backends.
+# [worker.tokio]
+# worker_threads = 1
+#
+# [worker.nixl.backends]
+# UCX = {}
+# POSIX = {}
+#
+# [worker.cache.host]
+# cache_size_gb = 2.0
+
+# --- Default Profile ---
+# Values that apply to both leader and worker unless overridden.
+# [default.nova.backend]
+# tcp_port = 0

@@ -331,6 +331,7 @@ fn test_version_check_on_deserialization() {
         layout_type_details: crate::v2::physical::layout::LayoutTypeDetails::FullyContiguous(
             crate::v2::physical::layout::FullyContiguousDetails {
                 block_format: crate::v2::physical::layout::BlockFormat::Operational,
+                kv_block_layout: crate::v2::physical::layout::KvBlockLayout::OperationalNHD,
             },
         ),
     };
@@ -359,5 +360,11 @@ fn test_version_check_on_deserialization() {
         result.is_ok(),
         "Expected successful deserialization, got error: {:?}",
         result.err()
+    );
+
+    let layout = result.unwrap();
+    assert_eq!(
+        layout.layout().block_layout(),
+        crate::physical::layout::KvBlockLayout::OperationalNHD
     );
 }

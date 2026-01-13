@@ -12,7 +12,8 @@ pub mod pools;
 
 // Re-export for public use
 pub use blocks::{
-    BlockError, BlockMetadata, CompleteBlock, ImmutableBlock, MutableBlock, WeakBlock,
+    BlockError, BlockMetadata, BlockRegistry, CompleteBlock, ImmutableBlock, MutableBlock,
+    WeakBlock,
 };
 
 pub use super::BlockId;

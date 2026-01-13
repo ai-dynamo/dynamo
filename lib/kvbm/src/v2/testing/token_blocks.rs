@@ -3,11 +3,23 @@
 
 //! Token block creation utilities for testing.
 
-use dynamo_tokens::{TokenBlock, TokenBlockSequence};
+use dynamo_tokens::{TokenBlock, TokenBlockSequence, compute_hash_v2};
 
 use crate::{KvbmSequenceHashProvider, SequenceHash};
 
+/// Compute the default salt hash for requests with no salt and no lora.
+///
+/// This matches the hash computed by `Request::new()` when salt=None and lora_name=None.
+pub fn default_request_salt_hash() -> u64 {
+    // Matches Request::new() computation:
+    // SaltPayload { salt: None, lora_name: None } serializes to "{}"
+    compute_hash_v2(b"{}", 0)
+}
+
 /// Create a token block from a slice of tokens.
+///
+/// Uses the default request salt hash to match blocks created by
+/// requests with no salt parameter.
 ///
 /// # Example
 /// ```ignore
@@ -15,7 +27,8 @@ use crate::{KvbmSequenceHashProvider, SequenceHash};
 /// let block = create_token_block(&tokens);
 /// ```
 pub fn create_token_block(tokens: &[u32]) -> TokenBlock {
-    let token_sequence = TokenBlockSequence::from_slice(tokens, tokens.len() as u32, Some(42));
+    let salt = default_request_salt_hash();
+    let token_sequence = TokenBlockSequence::from_slice(tokens, tokens.len() as u32, Some(salt));
     if let Some(block) = token_sequence.blocks().first() {
         block.clone()
     } else {
@@ -41,6 +54,9 @@ pub fn create_sequential_block(start: u32, count: usize) -> TokenBlock {
 
 /// Create a token sequence with multiple blocks.
 ///
+/// Uses the default request salt hash to match blocks created by
+/// requests with no salt parameter.
+///
 /// # Arguments
 /// * `num_blocks` - Number of blocks to create
 /// * `block_size` - Tokens per block
@@ -60,9 +76,10 @@ pub fn create_token_sequence(
     block_size: usize,
     start_token: u32,
 ) -> TokenBlockSequence {
+    let salt = default_request_salt_hash();
     let total_tokens = num_blocks * block_size;
     let tokens: Vec<u32> = (start_token..start_token + total_tokens as u32).collect();
-    TokenBlockSequence::from_slice(&tokens, block_size as u32, Some(42))
+    TokenBlockSequence::from_slice(&tokens, block_size as u32, Some(salt))
 }
 
 /// Generate sequence hashes from a token sequence.

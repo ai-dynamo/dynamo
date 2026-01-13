@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use validator::Validate;
 
 use super::serialize::{BlockFormat, FullyContiguousDetails, LayoutTypeDetails};
-use super::{Buffer, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion};
+use super::{Buffer, KvBlockLayout, Layout, LayoutConfig, MemoryDescriptor, MemoryRegion};
 
 /// Fully contiguous layout where all blocks are in a single allocation.
 #[derive(Debug)]
@@ -30,18 +30,121 @@ pub struct FullyContiguousLayout {
     memory: Buffer,
     /// Format of blocks in memory
     block_format: BlockFormat,
+    /// KV block layout describing dimension ordering within blocks
+    kv_block_layout: KvBlockLayout,
+}
+
+/// Builder for creating [`FullyContiguousLayout`] instances.
+///
+/// # Example
+///
+/// ```ignore
+/// let layout = FullyContiguousLayout::builder()
+///     .config(config)
+///     .memory(buffer)
+///     .kv_block_layout(KvBlockLayout::UniversalTP)
+///     .build()?;
+/// ```
+#[derive(Debug, Default)]
+pub struct FullyContiguousLayoutBuilder {
+    config: Option<LayoutConfig>,
+    memory: Option<Buffer>,
+    kv_block_layout: KvBlockLayout,
+    block_format: BlockFormat,
+}
+
+impl FullyContiguousLayoutBuilder {
+    /// Create a new builder with default values.
+    pub fn new() -> Self {
+        Self {
+            config: None,
+            memory: None,
+            kv_block_layout: KvBlockLayout::Unknown,
+            block_format: BlockFormat::default(),
+        }
+    }
+
+    /// Set the layout configuration.
+    pub fn config(&mut self, config: LayoutConfig) -> &mut Self {
+        self.config = Some(config);
+        self
+    }
+
+    /// Set the memory buffer backing this layout.
+    pub fn memory(&mut self, memory: Buffer) -> &mut Self {
+        self.memory = Some(memory);
+        self
+    }
+
+    /// Set the KV block layout describing dimension ordering.
+    ///
+    /// Default: `KvBlockLayout::Unknown`
+    pub fn kv_block_layout(&mut self, layout: KvBlockLayout) -> &mut Self {
+        self.kv_block_layout = layout;
+        self
+    }
+
+    /// Set the block format.
+    ///
+    /// Default: `BlockFormat::default()` (Operational)
+    pub fn block_format(&mut self, format: BlockFormat) -> &mut Self {
+        self.block_format = format;
+        self
+    }
+
+    /// Build the [`FullyContiguousLayout`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `config` is not set
+    /// - `memory` is not set
+    /// - The memory region is too small for the layout
+    /// - The config validation fails
+    pub fn build(&self) -> Result<FullyContiguousLayout> {
+        let config = self
+            .config
+            .clone()
+            .ok_or_else(|| anyhow!("config is required"))?;
+        let memory = self
+            .memory
+            .clone()
+            .ok_or_else(|| anyhow!("memory is required"))?;
+
+        FullyContiguousLayout::new_internal(config, memory, self.kv_block_layout, self.block_format)
+    }
 }
 
 impl FullyContiguousLayout {
-    /// Create a new fully contiguous layout.
+    /// Create a builder for `FullyContiguousLayout`.
+    pub fn builder() -> FullyContiguousLayoutBuilder {
+        FullyContiguousLayoutBuilder::new()
+    }
+
+    /// Create a new fully contiguous layout with default KV block layout.
     ///
     /// # Arguments
     /// * `config` - Layout configuration
     /// * `memory` - Owned memory region that backs this layout
     ///
     /// # Returns
-    /// A new FullyContiguousLayout instance
-    pub fn new(config: LayoutConfig, memory: Buffer) -> Result<Self> {
+    /// A new FullyContiguousLayout instance with `KvBlockLayout::Unknown`
+    pub(crate) fn new(config: LayoutConfig, memory: Buffer) -> Result<Self> {
+        Self::new_internal(
+            config,
+            memory,
+            KvBlockLayout::Unknown,
+            BlockFormat::default(),
+        )
+    }
+
+    /// Internal constructor with all parameters.
+    fn new_internal(
+        config: LayoutConfig,
+        memory: Buffer,
+        kv_block_layout: KvBlockLayout,
+        block_format: BlockFormat,
+    ) -> Result<Self> {
         config.validate()?;
 
         let base_addr = memory.addr();
@@ -70,16 +173,18 @@ impl FullyContiguousLayout {
             outer_stride,
             region_size,
             memory,
-            block_format: BlockFormat::default(),
+            block_format,
+            kv_block_layout,
         })
     }
 
-    /// Create a new fully contiguous layout with a specific block format.
+    /// Create a new fully contiguous layout with a specific block format and KV block layout.
     ///
     /// # Arguments
     /// * `config` - Layout configuration
     /// * `memory` - Owned memory region that backs this layout
     /// * `block_format` - Format of blocks in memory
+    /// * `kv_block_layout` - KV block layout describing dimension ordering
     ///
     /// # Returns
     /// A new FullyContiguousLayout instance
@@ -87,15 +192,24 @@ impl FullyContiguousLayout {
         config: LayoutConfig,
         memory: Buffer,
         block_format: BlockFormat,
+        kv_block_layout: KvBlockLayout,
     ) -> Result<Self> {
-        let mut layout = Self::new(config, memory)?;
-        layout.block_format = block_format;
-        Ok(layout)
+        Self::new_internal(config, memory, kv_block_layout, block_format)
     }
 
     /// Get the block format.
     pub fn block_format(&self) -> BlockFormat {
         self.block_format
+    }
+
+    /// Get the KV block layout.
+    pub fn kv_block_layout(&self) -> KvBlockLayout {
+        self.kv_block_layout
+    }
+
+    /// Set the KV block layout.
+    pub fn set_kv_block_layout(&mut self, layout: KvBlockLayout) {
+        self.kv_block_layout = layout;
     }
 
     /// Calculate the address of a specific memory region.
@@ -194,7 +308,38 @@ impl Layout for FullyContiguousLayout {
     fn serialization_details(&self) -> LayoutTypeDetails {
         LayoutTypeDetails::FullyContiguous(FullyContiguousDetails {
             block_format: self.block_format,
+            kv_block_layout: self.kv_block_layout,
         })
+    }
+
+    fn block_layout(&self) -> KvBlockLayout {
+        self.kv_block_layout
+    }
+}
+
+impl super::ContiguousBlockLayout for FullyContiguousLayout {
+    fn num_blocks(&self) -> usize {
+        self.config.num_blocks
+    }
+
+    fn bytes_per_block(&self) -> usize {
+        self.block_stride
+    }
+
+    fn raw_block(&self, block_id: usize) -> Result<MemoryRegion> {
+        if block_id >= self.config.num_blocks {
+            return Err(anyhow!(
+                "Block ID {} out of range (max: {})",
+                block_id,
+                self.config.num_blocks
+            ));
+        }
+        let addr = self.base_addr + block_id * self.block_stride;
+        Ok(MemoryRegion::new(addr, self.block_stride))
+    }
+
+    fn block_layout(&self) -> KvBlockLayout {
+        self.kv_block_layout
     }
 }
 

@@ -49,7 +49,59 @@ macro_rules! skip_if_stubs_and_device {
     };
 }
 
+/// Check if GDS (GPU Direct Storage) is available on this system.
+///
+/// This function performs a one-time test to verify GDS functionality.
+/// The result is cached for subsequent calls.
+#[allow(dead_code)] // Available for tests that need GDS detection
+pub fn is_gds_available() -> bool {
+    static GDS_AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *GDS_AVAILABLE.get_or_init(|| TransferCapabilities::default().with_gds_if_supported().allow_gds)
+}
+
+/// Skip test if GDS (GPU Direct Storage) is not available.
+///
+/// Call this at the start of any test that requires real GDS operations.
+/// When GDS is not available, the test will print a message and return early.
+///
+/// If `REQUIRE_GDS_TESTS=1` environment variable is set, the test will panic
+/// instead of skipping, ensuring CI environments with GDS hardware enforce
+/// these tests pass.
+///
+/// # Example
+/// ```ignore
+/// #[test]
+/// fn my_gds_test() -> Result<()> {
+///     skip_if_no_gds!();
+///     // ... test code that requires GDS ...
+/// }
+/// ```
+#[allow(unused_macros)] // Available for tests that require real GDS operations
+macro_rules! skip_if_no_gds {
+    () => {
+        if !is_gds_available() {
+            if std::env::var("REQUIRE_GDS_TESTS")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+            {
+                panic!(
+                    "Test '{}' requires GDS but GDS is not available. \
+                     REQUIRE_GDS_TESTS=1 is set, so this is a failure.",
+                    module_path!()
+                );
+            }
+            eprintln!(
+                "Skipping test '{}': GDS not available on this system. \
+                 Set REQUIRE_GDS_TESTS=1 to make this a failure.",
+                module_path!()
+            );
+            return Ok(());
+        }
+    };
+}
+
 // Make the macros available to submodules
+pub(crate) use skip_if_no_gds;
 pub(crate) use skip_if_stubs;
 pub(crate) use skip_if_stubs_and_device;
 

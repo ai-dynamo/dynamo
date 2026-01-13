@@ -1,0 +1,161 @@
+{
+  "___README___": "This file shows ALL available options. Remove ___*___ fields before use.",
+  "___NOTE___": "See kvbm.example.json for minimal working config, kvbm.example.toml for documented config.",
+
+  "leader": {
+    "___LEADER_NOTE___": "Leader-specific configuration (coordination, discovery, object storage)",
+
+    "tokio": {
+      "worker_threads": 2,
+      "max_blocking_threads": 512
+    },
+
+    "rayon": {
+      "num_threads": 4
+    },
+
+    "nova": {
+      "backend": {
+        "tcp_port": 0,
+        "___CHOOSE_ONE___": "tcp_addr OR tcp_interface, not both",
+        "tcp_addr": "192.168.1.100",
+        "tcp_interface": "eth0"
+      },
+      "discovery": {
+        "___DISCOVERY_OPTIONS___": "Choose ONE type: etcd, p2p, or filesystem",
+
+        "___EXAMPLE_ETCD___": {
+          "type": "etcd",
+          "cluster_id": "my-kvbm-cluster",
+          "endpoints": ["http://localhost:2379"],
+          "ttl_secs": 60,
+          "operation_timeout_secs": 30,
+          "max_retries": 3
+        },
+
+        "___EXAMPLE_P2P___": {
+          "type": "p2p",
+          "cluster_id": "my-kvbm-cluster",
+          "listen_port": 0,
+          "bootstrap_peers": ["192.168.1.10:5000"],
+          "replication_factor": 3,
+          "enable_mdns": false,
+          "record_ttl_secs": 600
+        },
+
+        "___ACTUAL_VALUE___": {
+          "type": "filesystem",
+          "path": "/tmp/nova-discovery/cluster.json"
+        }
+      }
+    },
+
+    "cache": {
+      "host": {
+        "___CHOOSE_ONE___": "cache_size_gb OR num_blocks, not both",
+        "cache_size_gb": 4.0,
+        "num_blocks": 1000
+      },
+      "disk": {
+        "cache_size_gb": 100.0,
+        "num_blocks": 10000,
+        "use_gds": false,
+        "storage_path": "/var/lib/kvbm/cache"
+      }
+    },
+
+    "offload": {
+      "g1_to_g2": {
+        "policies": ["presence"],
+        "presence": {}
+      },
+      "g2_to_g3": {
+        "policies": ["presence_lfu"],
+        "presence": {},
+        "presence_lfu": {
+          "min_lfu_count": 8
+        }
+      }
+    },
+
+    "onboard": {
+      "___ONBOARD_OPTIONS___": "mode: 'inter' (async out-of-band) or 'intra' (sync layer-wise)",
+      "mode": "inter"
+    },
+
+    "object": {
+      "client": {
+        "___OBJECT_OPTIONS___": "Choose type: s3 or nixl",
+
+        "___EXAMPLE_S3___": {
+          "type": "s3",
+          "endpoint_url": "http://localhost:9000",
+          "bucket": "kvbm-blocks",
+          "region": "us-east-1",
+          "force_path_style": true,
+          "max_concurrent_requests": 16
+        },
+
+        "___EXAMPLE_NIXL_S3___": {
+          "type": "nixl",
+          "backend": "s3",
+          "endpoint_url": "http://localhost:9000",
+          "bucket": "kvbm-blocks",
+          "region": "us-east-1",
+          "force_path_style": true,
+          "max_concurrent_requests": 16
+        },
+
+        "___ACTUAL_VALUE___": {
+          "type": "s3",
+          "endpoint_url": "http://minio:9000",
+          "bucket": "kvbm-blocks",
+          "region": "us-east-1",
+          "force_path_style": true,
+          "max_concurrent_requests": 16
+        }
+      }
+    }
+  },
+
+  "worker": {
+    "___WORKER_NOTE___": "Worker-specific configuration (data transfer, NixL backends)",
+
+    "tokio": {
+      "worker_threads": 1,
+      "max_blocking_threads": 512
+    },
+
+    "rayon": {
+      "num_threads": 8
+    },
+
+    "nova": {
+      "backend": {
+        "tcp_port": 0
+      }
+    },
+
+    "nixl": {
+      "backends": {
+        "UCX": {},
+        "POSIX": {},
+        "___OPTIONAL___GDS": {},
+        "___OPTIONAL___GDS_MT": {}
+      }
+    },
+
+    "cache": {
+      "host": {
+        "cache_size_gb": 2.0
+      }
+    }
+  },
+
+  "default": {
+    "___DEFAULT_NOTE___": "Values here apply to both leader and worker unless overridden",
+    "tokio": {
+      "worker_threads": 4
+    }
+  }
+}

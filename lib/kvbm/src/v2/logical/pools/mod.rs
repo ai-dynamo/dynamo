@@ -26,8 +26,7 @@ pub(crate) use reset::ResetPool;
 
 // Re-export RAII guards from guards module
 use super::blocks::{
-    Block, BlockId, BlockMetadata, BlockRegistry, ImmutableBlock, MutableBlock, PrimaryBlock,
-    RegisteredBlock,
+    Block, BlockId, BlockMetadata, ImmutableBlock, MutableBlock, PrimaryBlock, RegisteredBlock,
     state::{Registered, Reset},
 };
 

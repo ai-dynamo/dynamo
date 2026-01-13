@@ -5,6 +5,7 @@
 
 pub mod connector;
 pub mod runtime;
+pub mod scheduler;
 pub mod torch;
 pub mod vllm;
 
@@ -30,6 +31,11 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<connector::leader::PyRequest>()?;
     m.add_class::<connector::leader::PySchedulerOutput>()?;
+
+    // Scheduler classes
+    m.add_class::<scheduler::PyScheduler>()?;
+    m.add_class::<scheduler::PySchedulerConfig>()?;
+    m.add_class::<scheduler::PyRequestStatus>()?;
 
     // // vLLM specific classes
     // // Leader connector classes for v2 vLLM integration

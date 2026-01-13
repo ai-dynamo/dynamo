@@ -37,12 +37,6 @@ impl<T: BlockMetadata> PrimaryBlock<T> {
             return_fn,
         }
     }
-
-    /// Register this block and get an Arc to the RegisteredBlock trait object
-    pub(crate) fn register(self) -> Arc<dyn RegisteredBlock<T>> {
-        let block = self.block.clone().unwrap();
-        block.registration_handle().attach_block(self)
-    }
 }
 
 impl<T: BlockMetadata> DuplicateBlock<T> {

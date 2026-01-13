@@ -143,21 +143,21 @@ use std::thread;
 ///
 /// # What This Tests
 ///
-/// This test validates the critical ability of `try_get_block()` to "resurrect" a block
-/// while it's transitioning back to the inactive pool. This happens when:
+/// This test validates the critical ability of `find_or_promote()` to "resurrect" a block
+/// while it's transitioning back to the inactive pool backend. This happens when:
 /// - A `PrimaryBlock` is dropped, triggering its return function
 /// - The return function holds the `Arc<Block<T, Registered>>`
-/// - Another thread calls `try_get_block()` during this window
+/// - Another thread calls `find_or_promote()` during this window
 /// - The weak reference to the raw block can be upgraded before the Arc is unwrapped
 ///
 /// # Why This Matters
 ///
-/// The registry maintains weak references to blocks even after the `PrimaryBlock` wrapper
-/// is dropped. This allows blocks to be found and reused while they're still in memory,
-/// even if they're transitioning to the inactive pool. This is a key optimization:
+/// The InactivePool maintains weak references (in weak_blocks) to active blocks. This allows
+/// blocks to be found and reused while they're still in memory, even if they're transitioning
+/// to the backend. This is a key optimization:
 /// - Avoids unnecessary pool insertion/removal cycles
-/// - Reduces lock contention on the pool
-/// - Enables lock-free block reuse in high-concurrency scenarios
+/// - All lookups under a single lock (no retry loops needed)
+/// - Enables efficient block reuse in high-concurrency scenarios
 ///
 /// # Test Strategy
 ///
@@ -170,19 +170,19 @@ use std::thread;
 ///    - Attempts to return to pool (fails if Arc was upgraded)
 ///
 /// 2. **Upgrade Thread** waits for the Arc to be held by return function, then:
-///    - Calls `try_get_block()` which upgrades the weak reference
+///    - Calls `find_or_promote()` which upgrades the weak reference
 ///    - Creates a new `PrimaryBlock` wrapping the same Arc
 ///    - Signals completion at barrier2
 ///
 /// # Expected Outcome
 ///
-/// - `try_get_block()` successfully upgrades and returns a new `PrimaryBlock`
+/// - `find_or_promote()` successfully upgrades and returns a new `PrimaryBlock`
 /// - The Arc refcount becomes ≥ 2 (held by both return fn and new PrimaryBlock)
 /// - `Arc::try_unwrap()` in the inactive pool's return function fails
-/// - The block never makes it into the inactive pool
+/// - The block never makes it into the inactive pool backend
 /// - The block remains accessible through the upgraded reference
 #[test]
-fn test_concurrent_try_get_block_and_drop() {
+fn test_concurrent_find_or_promote_and_drop() {
     #[derive(Debug, Clone, PartialEq)]
     struct TestData {
         value: u64,
@@ -223,33 +223,30 @@ fn test_concurrent_try_get_block_and_drop() {
         barrier1_clone.wait();
         // Wait for upgrade to complete
         barrier2_clone.wait();
-        // Now try to return - this will fail if try_get_block upgraded the Arc
+        // Now try to return - this will fail if find_or_promote upgraded the Arc
         (registered_pool_clone.return_fn())(block);
     }) as Arc<dyn Fn(Arc<Block<TestData, Registered>>) + Send + Sync>;
 
-    let complete_block = Block::new(0, 4)
+    // Manually create a registered block and PrimaryBlock with custom return function
+    let complete_block = Block::<TestData, _>::new(0, 4)
         .complete(token_block)
         .expect("Block size should match");
+    let registered_block = complete_block.register(handle.clone());
 
-    let immutable_block = handle.register_block(
-        CompleteBlock {
-            block: Some(complete_block),
-            return_fn: reset_pool.return_fn(),
-        },
-        BlockDuplicationPolicy::Allow,
-        pool_return_fn.clone(),
-    );
+    // Create PrimaryBlock with custom return function
+    let primary = PrimaryBlock::new(Arc::new(registered_block), pool_return_fn);
+    let primary_arc = Arc::new(primary);
 
-    let handle_clone = handle.clone();
-    let real_return_fn = registered_pool.return_fn();
+    // Register in InactivePool's weak_blocks for future lookups
+    registered_pool.register_active(&primary_arc);
+
     let registered_pool_clone2 = registered_pool.clone();
 
     let upgrade_thread = thread::spawn(move || {
         // Wait for return function to receive the Arc
         barrier1.wait();
-        // Try to upgrade - should succeed because Arc is held by return fn
-        // Use the real return function (not the custom one) to avoid deadlock
-        let result = handle_clone.try_get_block::<TestData>(real_return_fn);
+        // Try to find_or_promote - should succeed because Arc is held by return fn
+        let result = registered_pool_clone2.find_or_promote(seq_hash);
         // Signal that upgrade is complete
         barrier2.wait();
         result
@@ -257,15 +254,15 @@ fn test_concurrent_try_get_block_and_drop() {
 
     let drop_thread = thread::spawn(move || {
         // Drop the block, which triggers the return function that waits at barriers
-        drop(immutable_block);
+        drop(primary_arc);
     });
 
-    // Get the upgraded block from try_get_block
+    // Get the upgraded block from find_or_promote
     let upgraded_block = upgrade_thread.join().unwrap();
 
     drop_thread.join().unwrap();
 
-    // Verify that try_get_block succeeded
+    // Verify that find_or_promote succeeded
     assert!(
         upgraded_block.is_some(),
         "Should successfully upgrade the weak reference to Arc<Block<T, Registered>>"
@@ -274,11 +271,11 @@ fn test_concurrent_try_get_block_and_drop() {
     // Hold the block to keep Arc refcount > 1
     let _held_block = upgraded_block;
 
-    // Verify that the block never made it to the inactive pool
+    // Verify that the block never made it to the inactive pool backend
     // because Arc::try_unwrap failed due to refcount >= 2
     assert_eq!(
-        registered_pool_clone2.len(),
+        registered_pool.len(),
         0,
-        "Block should not be in inactive pool because Arc refcount was >= 2"
+        "Block should not be in inactive pool backend because Arc refcount was >= 2"
     );
 }

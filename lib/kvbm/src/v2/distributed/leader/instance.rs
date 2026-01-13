@@ -9,7 +9,7 @@ use dynamo_nova::{am::Nova, events::LocalEventSystem};
 use tokio::sync::{Mutex, mpsc, watch};
 use uuid::Uuid;
 
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use crate::{
     logical::{
@@ -1250,9 +1250,11 @@ impl Leader for InstanceLeader {
         // This ensures we only find contiguous blocks from the start of the sequence.
         // For distributed search, remote instances use scan_matches for broad coverage,
         // then first-hole filtering is applied in InitiatorSession after aggregation.
-        let start_time = Instant::now();
+
+        // todo: add explicit timing tracing here
+        // let start_time = Instant::now();
         let matched_g2_blocks = self.g2_manager.match_blocks(sequence_hashes);
-        let g2_search_time = Instant::now().duration_since(start_time);
+        //let g2_search_time = Instant::now().duration_since(start_time);
 
         // Search G3 (disk) for remaining hashes if G3 is available
         let remaining_hashes: Vec<_> = sequence_hashes

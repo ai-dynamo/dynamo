@@ -9,6 +9,8 @@
 //! - Different transfer strategies (Memcpy, CUDA H2D/D2H)
 
 use super::skip_if_stubs_and_device;
+#[allow(unused_imports)]
+use super::skip_if_no_gds;
 use super::*;
 use crate::physical::transfer::TransferCapabilities;
 use crate::physical::transfer::executor::TransferOptionsInternal;
@@ -58,17 +60,21 @@ fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result
         }
     }
 
-    // Optional: Add GDS for Device <-> Disk optimization
+    let backend_vec: Vec<&str> = backends.into_iter().collect();
+    let mut agent = create_test_agent_with_backends("agent", &backend_vec)?;
+
+    // Optional: Try to add GDS for Device <-> Disk transfers.
+    // This is not required since tests use bounce buffers, but enables direct
+    // transfers when GDS is available.
     match (src_kind, dst_kind) {
         (StorageKind::Device(_), StorageKind::Disk(_))
         | (StorageKind::Disk(_), StorageKind::Device(_)) => {
-            backends.insert("GDS_MT");
+            let _ = agent.try_add_backend("GDS_MT");
         }
         _ => {}
     }
 
-    let backend_vec: Vec<&str> = backends.into_iter().collect();
-    create_test_agent_with_backends("agent", &backend_vec)
+    Ok(agent)
 }
 
 #[rstest]

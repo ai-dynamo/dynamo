@@ -1,0 +1,22 @@
+{
+  "leader": {
+    "cache": {
+      "host": { "cache_size_gb": 2.0 }
+    },
+    "tokio": { "worker_threads": 2 },
+    "offload": {
+      "g1_to_g2": { "policies": ["presence"] },
+      "g2_to_g3": {
+        "policies": ["presence_lfu"],
+        "presence_lfu": { "min_lfu_count": 8 }
+      }
+    },
+    "onboard": { "mode": "inter" }
+  },
+  "worker": {
+    "nixl": {
+      "backends": { "UCX": {}, "POSIX": {} }
+    },
+    "tokio": { "worker_threads": 1 }
+  }
+}

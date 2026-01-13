@@ -52,6 +52,10 @@ impl<T: BlockMetadata> ImmutableBlock<T> {
     pub(crate) fn registration_handle(&self) -> BlockRegistrationHandle {
         self.block.registration_handle().clone()
     }
+
+    pub fn use_count(&self) -> usize {
+        Arc::strong_count(&self.block)
+    }
 }
 
 impl<T: BlockMetadata> std::fmt::Debug for ImmutableBlock<T> {

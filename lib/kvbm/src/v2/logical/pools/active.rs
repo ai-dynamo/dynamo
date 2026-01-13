@@ -3,65 +3,43 @@
 
 //! Active pool for managing blocks that are currently in use (have strong references).
 //!
-//! This pool provides a layer of abstraction over the BlockRegistry for finding
-//! active blocks. Active blocks are those that have been registered and are
-//! currently being used, as opposed to inactive blocks which are available
-//! for reuse.
+//! This pool provides a layer of abstraction for finding active blocks.
+//! It delegates to InactivePool which now handles both active (weak_blocks)
+//! and inactive (backend) lookups under a unified lock.
 
 use std::sync::Arc;
 
-use super::{Block, BlockMetadata, BlockRegistry, Registered, RegisteredBlock, SequenceHash};
-
-/// Type alias for registered block return function
-type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, Registered>>) + Send + Sync>;
+use super::{BlockMetadata, InactivePool, RegisteredBlock, SequenceHash};
 
 /// Pool for managing active (in-use) blocks.
 ///
-/// This is a simple wrapper around BlockRegistry that encapsulates the logic
-/// for finding blocks that are currently active (have strong references).
-pub struct ActivePool<T: BlockMetadata> {
-    block_registry: BlockRegistry,
-    return_fn: RegisteredReturnFn<T>,
+/// This delegates to InactivePool which now manages both active and inactive blocks
+/// via its weak_blocks map and backend storage respectively.
+pub struct ActivePool<T: BlockMetadata + Sync> {
+    inactive_pool: InactivePool<T>,
 }
 
-impl<T: BlockMetadata> ActivePool<T> {
-    /// Create a new ActivePool with the given registry and return function.
-    pub fn new(block_registry: BlockRegistry, return_fn: RegisteredReturnFn<T>) -> Self {
-        Self {
-            block_registry,
-            return_fn,
-        }
+impl<T: BlockMetadata + Sync> ActivePool<T> {
+    /// Create a new ActivePool that delegates to the given InactivePool.
+    pub fn new(inactive_pool: InactivePool<T>) -> Self {
+        Self { inactive_pool }
     }
 
     /// Find multiple blocks by sequence hashes, stopping on first miss.
     ///
-    /// This searches for active blocks in the registry and returns them as
-    /// RegisteredBlock guards. If any hash is not found or the block cannot
-    /// be retrieved, the search stops and returns only the blocks found so far.
+    /// This searches for blocks (both active and inactive) and returns them as
+    /// RegisteredBlock guards. If any hash is not found, the search stops.
     #[inline]
     pub fn find_matches(
         &self,
         hashes: &[SequenceHash],
         touch: bool,
     ) -> Vec<Arc<dyn RegisteredBlock<T>>> {
-        let mut matches = Vec::with_capacity(hashes.len());
-
-        for hash in hashes {
-            if let Some(handle) = self.block_registry.match_sequence_hash(*hash, touch) {
-                if let Some(block) = handle.try_get_block::<T>(self.return_fn.clone()) {
-                    matches.push(block);
-                } else {
-                    break; // Stop on first miss
-                }
-            } else {
-                break; // Stop on first miss
-            }
-        }
-
-        matches
+        // Delegate to InactivePool which now handles both active and inactive lookups
+        self.inactive_pool.find_blocks(hashes, touch)
     }
 
-    /// Scan for blocks in the active pool (doesn't stop on miss).
+    /// Scan for blocks (doesn't stop on miss).
     ///
     /// Unlike `find_matches`, this continues scanning even when a hash is not found.
     /// Returns all found blocks with their corresponding sequence hashes.
@@ -70,31 +48,18 @@ impl<T: BlockMetadata> ActivePool<T> {
         &self,
         hashes: &[SequenceHash],
     ) -> Vec<(SequenceHash, Arc<dyn RegisteredBlock<T>>)> {
-        hashes
-            .iter()
-            .filter_map(|hash| {
-                self.block_registry
-                    .match_sequence_hash(*hash, false)
-                    .and_then(|handle| {
-                        handle
-                            .try_get_block::<T>(self.return_fn.clone())
-                            .map(|block| (*hash, block))
-                    })
-            })
-            .collect()
+        self.inactive_pool.scan_blocks(hashes, false)
     }
 
     /// Find a single block by sequence hash.
     ///
-    /// Returns the block if found and active, None otherwise.
+    /// Returns the block if found, None otherwise.
     #[inline]
     pub fn find_match(&self, seq_hash: SequenceHash) -> Option<Arc<dyn RegisteredBlock<T>>> {
-        self.block_registry
-            .match_sequence_hash(seq_hash, true)
-            .and_then(|handle| handle.try_get_block::<T>(self.return_fn.clone()))
+        self.inactive_pool.find_or_promote_dyn(seq_hash)
     }
 
-    /// Check if a block with the given sequence hash is currently active.
+    /// Check if a block with the given sequence hash exists.
     #[expect(dead_code)]
     pub fn has_block(&self, seq_hash: SequenceHash) -> bool {
         self.find_match(seq_hash).is_some()
