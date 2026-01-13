@@ -5,7 +5,6 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
 import sys
 from typing import AsyncIterator, Tuple
 
@@ -188,32 +187,8 @@ class VllmEncodeWorker:
         return args, config
 
 
-async def graceful_shutdown(runtime):
-    """
-    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
-    However, in-flight requests will still be processed until they are finished.
-    After all in-flight requests are finished, the `serve_endpoint` functions will return
-    and the engine will be shutdown by Python's garbage collector.
-    """
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
-
-
-@dynamo_worker()
+@dynamo_worker(register_shutdown=True)
 async def worker(runtime: DistributedRuntime):
-    # Runtime setup
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers set up for graceful shutdown")
-
     # worker setup
     args, config = VllmEncodeWorker.parse_args()
     await init(runtime, args, config)

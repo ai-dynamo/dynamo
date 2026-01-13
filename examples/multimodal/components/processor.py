@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import os
-import signal
 import sys
 import uuid
 from enum import Enum
@@ -281,20 +280,8 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker()
+@dynamo_worker(register_shutdown=True)
 async def worker(runtime: DistributedRuntime):
-    # Runtime setup
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers set up for graceful shutdown")
-
     # worker setup
     args, config = Processor.parse_args()
     await init(runtime, args, config)

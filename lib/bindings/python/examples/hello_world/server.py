@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-import signal
 
 import uvloop
 
@@ -21,26 +20,9 @@ class RequestHandler:
             yield char
 
 
-@dynamo_worker()
+@dynamo_worker(register_shutdown=True)
 async def worker(runtime: DistributedRuntime):
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
-    def signal_handler():
-        # Schedule the shutdown coroutine instead of calling it directly
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    print("Signal handlers registered for graceful shutdown")
     await init(runtime, "dynamo")
-
-
-async def graceful_shutdown(runtime: DistributedRuntime):
-    print("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    print("DistributedRuntime shutdown complete")
 
 
 async def init(runtime: DistributedRuntime, ns: str):
