@@ -4,20 +4,21 @@
 //! Core scheduler implementation.
 
 use super::config::SchedulerConfig;
+use super::connector_shim::SchedulerConnectorShim;
 use super::kv_cache::KVCacheManager;
 use super::policy::{FCFSPolicy, SchedulingPolicy};
 use super::projection::{GlobalProjectionState, PlannedEvictionTracker};
 use super::queues::{PausedRequests, RunningRequests, WaitingQueue};
-use super::request::{RequestStatus, SchedulerRequest};
+use super::request::{OnboardingStatus, RequestStatus, SchedulerRequest};
 use crate::v2::KvbmSequenceHashProvider;
 use crate::v2::integrations::common::{
     BlockAssignmentOps, BlockAssignmentStorage, Request, SchedulerConnectorState, SchedulerOutput,
 };
-use crate::v2::integrations::connector::leader::ConnectorLeader;
+use crate::v2::integrations::connector::leader::{ConnectorLeader, FinishedStatus};
 
 use derive_builder::Builder;
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Error type for SchedulerBuilder.
@@ -66,9 +67,25 @@ impl From<String> for SchedulerBuilderError {
 ///
 /// # Integration with Connector
 ///
-/// When `shared_state` is set, the scheduler can communicate with the
-/// ConnectorLeader for G2+ tier offloading. This is completely optional -
-/// the scheduler works independently without it.
+/// When a [`ConnectorLeader`] is attached via the builder, the scheduler gains:
+///
+/// - **External KV cache lookup**: Query G2/G3/remote for cached tokens via
+///   `get_num_new_matched_tokens()`, reducing prefill computation.
+///
+/// - **Async KV loading**: When external tokens require async transfer (inter-pass
+///   mode), requests are moved to the `onboarding` collection until the G2→G1
+///   transfer completes.
+///
+/// - **Intelligent eviction**: Check `can_evict()` before preemption to avoid
+///   evicting requests with inflight RDMA transfers. Score candidates by G2
+///   coverage via `get_eviction_score()`.
+///
+/// - **Delayed block freeing**: When requests finish with pending offloads,
+///   blocks are held in `pending_block_free` until `finished_sending` signal
+///   arrives, preventing data corruption during G1→G2 transfers.
+///
+/// The connector integration is completely optional - the scheduler works
+/// independently without it.
 ///
 /// # Construction
 ///
@@ -124,17 +141,29 @@ pub struct Scheduler {
     #[builder(setter(strip_option), default)]
     shared_state: Option<Arc<Mutex<dyn SchedulerConnectorState>>>,
 
-    /// Optional connector for intelligent eviction and KV cache offloading.
+    /// Optional connector shim for intelligent eviction and KV cache offloading.
+    ///
+    /// The shim wraps a [`ConnectorLeader`] and manages slot lifecycle automatically:
+    /// - Creates slots on first `get_num_new_matched_tokens` call
+    /// - Tracks inflight requests
+    /// - Deletes slots on `request_finished`
     ///
     /// When present, the scheduler can:
-    /// - Check for inflight offloads before preemption (`connector.can_evict()`)
-    /// - Score eviction candidates by G2 availability (`connector.get_eviction_score()`)
-    /// - Coordinate block freeing on request completion (`connector.request_finished()`)
+    /// - Check for inflight offloads before preemption (`can_evict()`)
+    /// - Score eviction candidates by G2 availability (`get_eviction_score()`)
+    /// - Coordinate block freeing on request completion (`request_finished()`)
     ///
-    /// The connector is accessed via `Arc` to allow shared access with other components.
-    /// Typical usage is to create the `ConnectorLeader` externally and pass it here.
-    #[builder(setter(strip_option), default)]
-    connector: Option<Arc<ConnectorLeader>>,
+    /// This is set via the builder's `.connector()` method, which accepts an
+    /// `Arc<ConnectorLeader>` and internally creates the shim.
+    #[builder(setter(skip), default)]
+    connector_shim: Option<SchedulerConnectorShim>,
+
+    /// The underlying ConnectorLeader (used by builder to create shim).
+    ///
+    /// Note: Use `connector_shim` for all connector operations. This field is
+    /// only used during builder construction.
+    #[builder(setter(strip_option, name = "connector"), default)]
+    connector_leader: Option<Arc<ConnectorLeader>>,
 
     /// Current iteration number.
     #[builder(setter(skip), default = "0")]
@@ -157,6 +186,28 @@ pub struct Scheduler {
     /// to wait for their blocks to be offloaded to G2 first.
     #[builder(setter(skip), default = "PlannedEvictionTracker::new()")]
     planned_evictions: PlannedEvictionTracker,
+
+    // =========================================================================
+    // Async KV Loading Fields
+    // =========================================================================
+    /// Requests actively onboarding (async KV load in progress).
+    ///
+    /// When `get_num_new_matched_tokens` returns `load_kv_async=true`, the request
+    /// is moved here to wait for the async G2→G1 transfer to complete. When
+    /// `finished_recving` signal arrives via `update_connector_signals()`, the
+    /// request's `OnboardingStatus` is set to `Complete`. Then `schedule()` moves
+    /// completed requests back to the waiting queue.
+    #[builder(setter(skip), default = "HashMap::new()")]
+    onboarding: HashMap<String, SchedulerRequest>,
+
+    /// Requests whose blocks are held pending offload completion.
+    ///
+    /// When a request finishes and `request_finished()` returns `FinishedStatus::Pending`,
+    /// the request is held here instead of immediately freeing blocks. When
+    /// `finished_sending` signal arrives via `update_connector_signals()`, blocks
+    /// are freed via RAII.
+    #[builder(setter(skip), default = "HashMap::new()")]
+    pending_block_free: HashMap<String, SchedulerRequest>,
 }
 
 impl SchedulerBuilder {
@@ -164,12 +215,21 @@ impl SchedulerBuilder {
     ///
     /// If no policy was specified via [`policy()`](Self::policy), this will
     /// create a default [`FCFSPolicy`] configured with `config.max_num_seqs`.
+    ///
+    /// If a connector was specified via [`connector()`](Self::connector), this
+    /// will create a [`SchedulerConnectorShim`] that wraps it for automatic
+    /// slot lifecycle management.
     pub fn build(self) -> Result<Scheduler, SchedulerBuilderError> {
         let mut scheduler = self.build_inner()?;
 
         // Apply default policy if none was provided
         if scheduler.policy.is_none() {
             scheduler.policy = Some(Box::new(FCFSPolicy::new(scheduler.config.max_num_seqs)));
+        }
+
+        // Create connector shim if connector was provided
+        if let Some(leader) = scheduler.connector_leader.take() {
+            scheduler.connector_shim = Some(SchedulerConnectorShim::new(leader));
         }
 
         // Initialize projector if projection is enabled
@@ -218,11 +278,14 @@ impl Scheduler {
             running: RunningRequests::new(),
             policy,
             shared_state: None,
-            connector: None,
+            connector_shim: None,
+            connector_leader: None,
             iteration: 0,
             paused: PausedRequests::new(),
             projector,
             planned_evictions: PlannedEvictionTracker::new(),
+            onboarding: HashMap::new(),
+            pending_block_free: HashMap::new(),
         }
     }
 
@@ -241,40 +304,53 @@ impl Scheduler {
     ///
     /// # Connector Integration
     ///
-    /// When attaching a connector, the scheduler gains access to:
+    /// When attaching a connector via `.connector()`, the scheduler gains:
     ///
-    /// - **Inflight transfer awareness**: Before preempting a request, the scheduler
-    ///   can check `connector.can_evict()` to ensure no active G1→G2 transfers are
-    ///   reading from the request's blocks.
+    /// - **External KV cache lookup**: Query G2/G3/remote for cached tokens via
+    ///   `get_num_new_matched_tokens()`, reducing prefill computation.
     ///
-    /// - **G2 availability scoring**: The scheduler can query `connector.get_eviction_score()`
-    ///   to prefer evicting requests that have more blocks already in G2 (host memory),
-    ///   minimizing prefill overhead on resume.
+    /// - **Async KV loading**: When external tokens require async transfer (`load_kv_async=true`),
+    ///   requests are moved to the `onboarding` collection and resume after transfer completes.
     ///
-    /// - **Request lifecycle coordination**: On request completion, the scheduler calls
-    ///   `connector.request_finished()` to check if blocks should be held for offload
-    ///   completion.
+    /// - **Inflight transfer awareness**: Before preempting, check `can_evict()` to ensure
+    ///   no active G1→G2 transfers are reading from the request's blocks.
     ///
-    /// # Mirroring vLLM's KVConnector API
+    /// - **G2 availability scoring**: Query `get_eviction_score()` to prefer evicting
+    ///   requests with more G2 coverage, minimizing prefill overhead on resume.
     ///
-    /// This integration mirrors how vLLM's `Scheduler` interacts with `KVConnector`:
+    /// - **Delayed block freeing**: When requests finish with pending offloads, blocks
+    ///   are held in `pending_block_free` until the `finished_sending` signal arrives.
     ///
-    /// | vLLM Scheduler Method | Connector Call |
-    /// |-----------------------|----------------|
-    /// | `_schedule_new_reqs()` | `get_num_new_matched_tokens()` |
-    /// | After allocation | `update_state_after_alloc()` |
-    /// | `_free_request()` | `request_finished()` |
-    /// | End of `schedule()` | `build_connector_meta()` |
-    /// | **`_try_preempt()`** | **`can_evict()`** (new) |
+    /// # Connector API Integration
     ///
-    /// The `can_evict()` method is our extension to vLLM's API for intelligent eviction.
+    /// The scheduler integrates with the connector at these points:
+    ///
+    /// | Scheduler Operation | Connector Call |
+    /// |---------------------|----------------|
+    /// | New request scheduling | `get_num_new_matched_tokens()` |
+    /// | After block allocation | `update_state_after_alloc()` |
+    /// | Request completion | `request_finished()` |
+    /// | Preemption candidate selection | `can_evict()`, `get_eviction_score()` |
+    /// | After forward pass | `update_connector_output()` (via `update_connector_signals()`) |
     pub fn builder() -> SchedulerBuilder {
         SchedulerBuilder::default()
     }
 
-    /// Get a reference to the connector, if attached.
+    /// Get a reference to the underlying ConnectorLeader, if attached.
+    ///
+    /// For most operations, prefer using the shim methods which handle
+    /// slot lifecycle automatically.
     pub fn connector(&self) -> Option<&Arc<ConnectorLeader>> {
-        self.connector.as_ref()
+        self.connector_shim.as_ref().map(|s| s.leader())
+    }
+
+    /// Get a reference to the connector shim, if attached.
+    ///
+    /// The shim provides automatic slot lifecycle management:
+    /// - Creates slots on first `get_num_new_matched_tokens` call
+    /// - Deletes slots on `request_finished`
+    pub fn connector_shim(&self) -> Option<&SchedulerConnectorShim> {
+        self.connector_shim.as_ref()
     }
 
     /// Get the current iteration number.
@@ -297,6 +373,16 @@ impl Scheduler {
         self.kv_cache.usage()
     }
 
+    /// Get the number of requests actively onboarding (async KV load in progress).
+    pub fn num_onboarding(&self) -> usize {
+        self.onboarding.len()
+    }
+
+    /// Get the number of requests with blocks held pending offload completion.
+    pub fn num_pending_block_free(&self) -> usize {
+        self.pending_block_free.len()
+    }
+
     /// Get a reference to the global projection state.
     ///
     /// Returns `Some` if projection is enabled, `None` otherwise.
@@ -316,35 +402,42 @@ impl Scheduler {
 
     /// Abort a request by ID.
     ///
-    /// The request will be removed from whichever queue it's in.
+    /// Removes the request from whichever collection it's in (waiting, onboarding,
+    /// running, or pending_block_free) and cleans up associated resources.
     ///
-    /// # Block Deallocation and Connector Interaction
+    /// # Request Locations
     ///
-    /// **IMPORTANT**: This implementation currently frees blocks immediately without
-    /// consulting the connector. This is incorrect for requests with active connector
-    /// operations. The correct flow (matching vLLM's `_free_request()`) should be:
+    /// The request may be in one of several locations:
     ///
-    /// 1. Call `connector.request_finished(request_id, block_ids)` to check if the
-    ///    connector has active operations on these blocks
-    /// 2. The connector returns `(delay_free_blocks, kv_xfer_params)`:
-    ///    - If `delay_free_blocks == false`: Free blocks immediately (current behavior)
-    ///    - If `delay_free_blocks == true`: Hold blocks until connector signals
-    ///      `finished_sending` via `update_connector_output()`
-    /// 3. Only after receiving `finished_sending` should blocks be freed
+    /// - **Waiting**: No blocks allocated, immediate cleanup.
+    /// - **Onboarding**: Async KV load in progress, blocks allocated.
+    /// - **Running**: Actively processing, blocks allocated.
+    /// - **Pending Block Free**: Already finished, awaiting offload completion.
     ///
-    /// # Race Condition Risk
+    /// # Connector Interaction
     ///
-    /// Without connector coordination, if the connector is actively offloading blocks
-    /// from this request, freeing them here creates a race condition where the offload
-    /// may read freed/recycled memory.
+    /// When a connector is attached, this method coordinates block cleanup:
     ///
-    /// See `STATE_TRANSITIONS.md` for the complete block hold protocol.
+    /// 1. Calls `connector.request_finished()` to notify the connector and check
+    ///    for inflight offload operations.
     ///
-    /// # TODO
+    /// 2. If the connector returns [`FinishedStatus::Pending`], blocks are held in
+    ///    the `pending_block_free` collection until `finished_sending` signal arrives
+    ///    via [`update_connector_signals()`](Self::update_connector_signals).
     ///
-    /// - Add connector interaction before freeing blocks
-    /// - Track requests with delayed block freeing in a separate collection
-    /// - Handle `finished_sending` signal in `update_from_output()`
+    /// 3. If the connector returns [`FinishedStatus::Finished`] or the request is
+    ///    untracked, blocks are freed immediately via RAII.
+    ///
+    /// # Block Safety
+    ///
+    /// This method ensures blocks are not freed while RDMA transfers are reading
+    /// from them, preventing data corruption during G1→G2 offload operations.
+    ///
+    /// # Note
+    ///
+    /// Requests in `pending_block_free` cannot be truly aborted - they've already
+    /// finished and are just waiting for offload completion. The abort is logged
+    /// but the offload continues to completion.
     pub fn abort_request(&mut self, request_id: &str) {
         // Try to remove from waiting queue.
         // Waiting requests have no blocks allocated, so no connector coordination needed.
@@ -353,40 +446,95 @@ impl Scheduler {
             return;
         }
 
+        // Try to remove from onboarding collection.
+        // These requests have allocated blocks for async KV load.
+        if let Some(mut request) = self.onboarding.remove(request_id) {
+            if let Some(shim) = &self.connector_shim {
+                let status = shim.request_finished(request_id);
+                tracing::debug!(
+                    request_id = %request_id,
+                    ?status,
+                    "Connector notified of aborted onboarding request"
+                );
+                if matches!(status, FinishedStatus::Pending) {
+                    // Even for aborted requests, if offload is in progress, hold blocks
+                    request.finish(RequestStatus::FinishedAborted);
+                    self.pending_block_free
+                        .insert(request_id.to_string(), request);
+                    return;
+                }
+            }
+            request.finish(RequestStatus::FinishedAborted);
+            return;
+        }
+
+        // Try to remove from pending_block_free (request already finished, waiting for offload).
+        // Nothing to do - just let it complete naturally. We can't abort the offload.
+        if self.pending_block_free.contains_key(request_id) {
+            tracing::debug!(
+                request_id = %request_id,
+                "Cannot abort request pending block free - offload in progress"
+            );
+            return;
+        }
+
         // Try to remove from running.
-        // WARNING: Running requests may have blocks that the connector is actively using.
-        // Currently we free immediately, but should check connector.request_finished() first.
         //
         // NOTE: We do NOT update projector here. Projection state is updated via
         // the normal scheduling cycle (finish_requests, update_from_output, etc.) which
         // handles block cleanup atomically with projection updates.
         if let Some(mut request) = self.running.remove(request_id) {
-            // TODO: Check connector.request_finished() and potentially delay block freeing
+            // Notify connector of request finish before freeing blocks.
+            if let Some(shim) = &self.connector_shim {
+                let status = shim.request_finished(request_id);
+                tracing::debug!(
+                    request_id = %request_id,
+                    ?status,
+                    "Connector notified of aborted request"
+                );
+                if matches!(status, FinishedStatus::Pending) {
+                    // Offload in progress - hold blocks until complete
+                    request.finish(RequestStatus::FinishedAborted);
+                    self.pending_block_free
+                        .insert(request_id.to_string(), request);
+                    return;
+                }
+            }
             request.finish(RequestStatus::FinishedAborted);
         }
     }
 
     /// Finish requests by ID with the given status.
     ///
-    /// # Block Deallocation and Connector Interaction
+    /// Marks requests as finished and coordinates block cleanup with the connector.
+    /// This is the normal completion path for requests that have finished generation.
     ///
-    /// **IMPORTANT**: Like `abort_request()`, this method currently frees blocks
-    /// immediately without consulting the connector. For requests where the connector
-    /// is performing offload operations, this can cause race conditions.
+    /// # Connector Interaction
     ///
-    /// The correct implementation should follow the same protocol as `abort_request()`:
-    /// check `connector.request_finished()` and potentially delay block freeing until
-    /// `finished_sending` is signaled.
+    /// When a connector is attached, this method coordinates block cleanup:
     ///
-    /// # When Blocks Are Freed
+    /// 1. Removes the request from the projection state (if enabled).
     ///
-    /// Currently: Immediately when `request.finish()` is called (via RAII on block_state).
+    /// 2. Calls `connector.request_finished()` to notify the connector and check
+    ///    for inflight offload operations (G1→G2 transfers).
     ///
-    /// Should be:
-    /// - Immediately if connector returns `delay_free_blocks == false`
-    /// - After `finished_sending` signal if `delay_free_blocks == true`
+    /// 3. Based on the connector's response:
+    ///    - [`FinishedStatus::Pending`]: Blocks are held in `pending_block_free`
+    ///      until `finished_sending` signal arrives via
+    ///      [`update_connector_signals()`](Self::update_connector_signals).
+    ///    - [`FinishedStatus::Finished`]: Blocks are freed immediately.
+    ///    - [`FinishedStatus::UntrackedRequest`]: Blocks are freed immediately
+    ///      (request wasn't tracked by connector).
     ///
-    /// See `STATE_TRANSITIONS.md` for the complete block hold protocol.
+    /// # Block Safety
+    ///
+    /// This method ensures blocks are not freed while RDMA transfers are reading
+    /// from them, preventing data corruption during G1→G2 offload operations.
+    ///
+    /// # Without Connector
+    ///
+    /// When no connector is attached, blocks are freed immediately via RAII when
+    /// the request is dropped.
     pub fn finish_requests(&mut self, request_ids: &[String], status: RequestStatus) {
         for request_id in request_ids {
             if let Some(mut request) = self.running.remove(request_id) {
@@ -394,34 +542,79 @@ impl Scheduler {
                 if let Some(proj) = &mut self.projector {
                     proj.remove_request(request_id);
                 }
-                // TODO: Check connector.request_finished() before freeing blocks
-                // The connector may need to hold blocks for active offload operations
+
+                // Notify connector of request finish before freeing blocks.
+                // If connector has inflight offloads, hold blocks until finished_sending.
+                if let Some(shim) = &self.connector_shim {
+                    let finished_status = shim.request_finished(request_id);
+                    match finished_status {
+                        FinishedStatus::Pending => {
+                            // Connector has inflight offloads - blocks must be held.
+                            // Move to pending_block_free collection until finished_sending arrives.
+                            tracing::debug!(
+                                request_id = %request_id,
+                                blocks = request.block_state.num_assigned(),
+                                "Request has pending offloads, holding blocks until offload completes"
+                            );
+                            request.finish(status);
+                            self.pending_block_free
+                                .insert(request_id.to_string(), request);
+                            continue; // Skip normal drop - blocks held
+                        }
+                        FinishedStatus::Finished | FinishedStatus::UntrackedRequest => {
+                            // Safe to free blocks immediately
+                            tracing::debug!(
+                                request_id = %request_id,
+                                ?finished_status,
+                                "Connector cleared request for block release"
+                            );
+                        }
+                    }
+                }
+
                 request.finish(status);
+                // Request is dropped here, RAII frees blocks
             }
         }
     }
 
     /// Run the scheduler to produce a scheduling decision.
     ///
-    /// This is the main scheduling loop that:
-    /// 1. Allocates blocks to running requests that need more
-    /// 2. Schedules new requests from the waiting queue
-    /// 3. Handles preemption if memory pressure occurs
+    /// This is the main scheduling loop that orchestrates request scheduling,
+    /// block allocation, and connector coordination.
     ///
-    /// # Block Allocation Timing
+    /// # Scheduling Phases
     ///
-    /// Blocks are allocated at two points during scheduling:
+    /// The scheduler runs through several phases each iteration:
     ///
-    /// ## Phase 1: Running Requests (Decode)
-    /// - Existing running requests may need additional blocks for new tokens
-    /// - `kv_cache.allocate()` is called to get `MutableBlock<G1>`
-    /// - Blocks are added to `request.block_state.pending`
-    /// - If allocation fails, preemption may be triggered
+    /// 1. **Projection Update**: Analyze future block requirements and detect choke points.
     ///
-    /// ## Phase 2: Waiting Requests (Prefill)
-    /// - New requests are moved from waiting to running queue
-    /// - Full block allocation for prompt tokens occurs here
-    /// - Preemption happens here if needed to make room
+    /// 2. **Onboarding Completion**: Move requests that finished async KV loading (G2→G1)
+    ///    back to the waiting queue. These get priority since they've allocated blocks.
+    ///
+    /// 3. **Proactive Eviction**: Pause requests predicted to cause memory pressure.
+    ///
+    /// 4. **Running Allocation**: Allocate blocks for decode phase (1 token/step).
+    ///
+    /// 5. **Resume Paused**: Resume paused requests if headroom exists.
+    ///
+    /// 6. **Schedule Waiting**: Move new requests from waiting to running (prefill phase).
+    ///
+    /// # Connector Integration
+    ///
+    /// When a connector is attached, this method integrates several connector operations:
+    ///
+    /// - **External KV lookup**: During waiting request scheduling, queries the connector
+    ///   for cached tokens in G2/G3/remote via `get_num_new_matched_tokens()`.
+    ///
+    /// - **Async KV loading**: If external tokens require async transfer (`load_kv_async=true`),
+    ///   the request is moved to the `onboarding` collection instead of running.
+    ///
+    /// - **Block allocation notification**: After allocating blocks, notifies the connector
+    ///   via `update_state_after_alloc()`.
+    ///
+    /// - **Eviction safety**: Before preemption, checks `can_evict()` to avoid evicting
+    ///   requests with inflight RDMA transfers.
     ///
     /// # Block State After Scheduling
     ///
@@ -429,11 +622,11 @@ impl Scheduler {
     /// transition to `registered` state after the forward pass completes and
     /// `complete_and_register()` is called with token data.
     ///
-    /// # Connector Integration Point
+    /// # Post-Scheduling
     ///
-    /// If using a connector, the following calls should happen after scheduling:
-    /// 1. `connector.update_state_after_alloc()` - Notify connector of new allocations
-    /// 2. `connector.build_connector_meta()` - Build metadata for workers
+    /// After the forward pass, call:
+    /// - [`update_from_output()`](Self::update_from_output) - Register blocks and process tokens
+    /// - [`update_connector_signals()`](Self::update_connector_signals) - Process async transfer signals
     ///
     /// See `STATE_TRANSITIONS.md` for the complete scheduling flow.
     pub fn schedule(&mut self) -> SchedulerOutput {
@@ -455,6 +648,11 @@ impl Scheduler {
         // therefore, we should preserve that state when possible and only recompute the necessary
         // bits when doing basic updates.
         self.update_projections();
+
+        // Phase 0.3: Process completed onboarding requests
+        // Requests that finished async KV loading (G2→G1) are moved back to waiting.
+        // They get scheduling priority since they've already allocated blocks.
+        self.process_completed_onboarding();
 
         // Phase 0.5: Proactive pause/eviction based on choke point predictions
         // This pauses requests that are eligible for eviction before we run out
@@ -484,32 +682,23 @@ impl Scheduler {
         // Update totals
         output.set_num_scheduled_tokens(num_scheduled_tokens);
 
-        // -------------------------------------------------------------------------
-        // TODO: KV Connector - Build connector metadata for workers
-        // -------------------------------------------------------------------------
+        // Build connector metadata for workers
         // After scheduling is complete, build metadata that workers need for
-        // KV cache operations during the forward pass. This includes:
-        // - Intra-pass block transfers (G2→G1 sync loads)
-        // - Forward pass completion events (for inter-pass coordination)
-        // - Any pending offload operations
-        //
-        // vLLM reference: scheduler.py lines 698-709
-        //
-        // if let Some(connector) = &self.connector {
-        //     match connector.build_connector_meta(&output) {
-        //         Ok(meta) => {
-        //             output.kv_connector_metadata = Some(meta);
-        //         }
-        //         Err(e) => {
-        //             tracing::error!(
-        //                 iteration = self.iteration,
-        //                 error = %e,
-        //                 "Failed to build connector metadata"
-        //             );
-        //         }
-        //     }
-        // }
-        // -------------------------------------------------------------------------
+        // KV cache operations during the forward pass.
+        if let Some(shim) = &self.connector_shim {
+            match shim.build_connector_meta(output.clone()) {
+                Ok(meta) => {
+                    output.kv_connector_metadata = Some(meta);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        iteration = self.iteration,
+                        error = %e,
+                        "Failed to build connector metadata"
+                    );
+                }
+            }
+        }
 
         // Validate block allocations match projections (debug/development check)
         self.validate_allocation_vs_projection();
@@ -556,7 +745,7 @@ impl Scheduler {
         }
 
         // Check paused requests (they shouldn't grow, but verify)
-        for (request_id, request) in self.paused.iter() {
+        for (_request_id, request) in self.paused.iter() {
             let actual_blocks = request.block_state.total_blocks();
             total_actual += actual_blocks;
             // Paused requests are removed from projection, so we just count actuals
@@ -785,9 +974,6 @@ impl Scheduler {
             // Get already-cached tokens to avoid redundant computation.
             // This mirrors vLLM's scheduler.py lines 447-480.
 
-            let num_external_computed_tokens: usize = 0;
-            let load_kv_async = false;
-
             // Get locally-cached tokens from G1 prefix cache.
             //
             // Note on prefix caching optionality: get_computed_blocks() returns (vec![], 0)
@@ -840,81 +1026,136 @@ impl Scheduler {
             }
 
             // -------------------------------------------------------------------------
-            // TODO: KV Connector - Get externally-cached tokens (G2/G3/remote)
+            // KV Connector - Get externally-cached tokens (G2/G3/remote)
             // -------------------------------------------------------------------------
-            // This is where we'd query the connector for external KV cache hits.
+            // Query the connector for external KV cache hits.
             // The connector checks G2 (host memory), G3 (remote storage), and
             // potentially other nodes for matching blocks.
             //
             // vLLM reference: scheduler.py lines 454-469
             //
-            // if let Some(connector) = &self.connector {
-            //     // get_num_new_matched_tokens returns:
-            //     // - (None, false) = search still in progress, skip this request
-            //     // - (Some(0), false) = no external matches found
-            //     // - (Some(n), true) = n tokens available, need async load (inter-pass)
-            //     // - (Some(n), false) = n tokens available, sync load (intra-pass)
-            //     match connector.get_num_new_matched_tokens(
-            //         request.request_id(),
-            //         num_local_computed_tokens,
-            //     ) {
-            //         Ok((None, _)) => {
-            //             // Connector still searching - skip this request for now
-            //             self.waiting.push_front(request);
-            //             continue;
-            //         }
-            //         Ok((Some(ext_tokens), async_load)) => {
-            //             num_external_computed_tokens = ext_tokens;
-            //             load_kv_async = async_load;
-            //         }
-            //         Err(e) => {
-            //             tracing::warn!(
-            //                 request_id = %request.request_id(),
-            //                 error = %e,
-            //                 "Connector get_num_new_matched_tokens failed, proceeding without external cache"
-            //             );
-            //         }
-            //     }
-            // }
+            // get_num_new_matched_tokens returns:
+            // - (None, false) = search still in progress, skip this request
+            // - (Some(0), false) = no external matches found
+            // - (Some(n), true) = n tokens available, need async load (inter-pass)
+            // - (Some(n), false) = n tokens available, sync load (intra-pass)
+            let (mut num_external_computed_tokens, mut load_kv_async) = (0usize, false);
+            if let Some(shim) = &self.connector_shim {
+                match shim.get_num_new_matched_tokens(&request, num_local_computed_tokens) {
+                    Ok((None, _)) => {
+                        // Connector still searching - skip this request for now
+                        self.waiting.push_front(request);
+                        continue;
+                    }
+                    Ok((Some(ext_tokens), async_load)) => {
+                        num_external_computed_tokens = ext_tokens;
+                        load_kv_async = async_load;
+                        tracing::debug!(
+                            request_id = %request.request_id(),
+                            ext_tokens,
+                            async_load,
+                            "Got external cached tokens from connector"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            request_id = %request.request_id(),
+                            error = %e,
+                            "Connector get_num_new_matched_tokens failed, proceeding without external cache"
+                        );
+                    }
+                }
+            }
             // -------------------------------------------------------------------------
 
             // Total computed tokens = local G1 cache + external (G2/G3/remote)
             let num_computed_tokens = num_local_computed_tokens + num_external_computed_tokens;
 
             // -------------------------------------------------------------------------
-            // TODO: KV Connector - Handle async KV loading (inter-pass mode)
+            // KV Connector - Handle async KV loading (inter-pass mode)
             // -------------------------------------------------------------------------
-            // If the connector indicates async loading is needed, transition the
-            // request to WAITING_FOR_REMOTE_KVS state. The blocks will be allocated
-            // but the request won't be scheduled until loading completes.
+            // If the connector indicates async loading is needed, move the request to
+            // the onboarding collection. The blocks will be allocated and the connector
+            // will start the async G2→G1 transfer. When finished_recving signal arrives,
+            // the request will be moved back to waiting for scheduling.
             //
             // vLLM reference: scheduler.py lines 582-587
-            //
-            // if load_kv_async {
-            //     // Allocate blocks for the external tokens
-            //     let blocks_for_external = self.kv_cache.blocks_needed(num_external_computed_tokens);
-            //     if let Some(new_blocks) = self.kv_cache.allocate(blocks_for_external) {
-            //         // Add matched G1 blocks as registered
-            //         request.add_registered_blocks(matched_blocks);
-            //         // Add newly allocated blocks as pending
-            //         request.add_pending_blocks(new_blocks);
-            //         // Transition to waiting for remote KVs
-            //         request.status = RequestStatus::WaitingForRemoteKvs;
-            //         request.num_computed_tokens = num_computed_tokens;
-            //         // Put back in waiting queue (will be re-checked on finished_recving)
-            //         self.waiting.push_front(request);
-            //         continue;
-            //     }
-            //     // Allocation failed - drop matched blocks and try later
-            //     drop(matched_blocks);
-            //     self.waiting.push_front(request);
-            //     break;
-            // }
-            //
-            // TODO: I want to improve on the reference. I want to have a separate queue for requests
-            // that are actively async onboarding.
+            if load_kv_async && num_external_computed_tokens > 0 {
+                // Calculate total blocks needed for external tokens
+                let blocks_for_external = (num_external_computed_tokens + self.config.block_size
+                    - 1)
+                    / self.config.block_size;
 
-            let _ = load_kv_async; // Suppress unused warning until connector integration
+                // Allocate blocks for the async KV load
+                let allocated_for_async = if blocks_for_external > matched_blocks.len() {
+                    let new_blocks_needed = blocks_for_external - matched_blocks.len();
+                    match self.kv_cache.allocate(new_blocks_needed) {
+                        Some(blocks) => blocks,
+                        None => {
+                            // Allocation failed - put request back and try later
+                            tracing::debug!(
+                                request_id = %request.request_id(),
+                                blocks_needed = new_blocks_needed,
+                                free_blocks = self.kv_cache.free_blocks(),
+                                "Insufficient blocks for async KV load, will retry"
+                            );
+                            drop(matched_blocks);
+                            self.waiting.push_front(request);
+                            break;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                // Collect all block IDs for connector
+                let matched_block_ids: Vec<_> =
+                    matched_blocks.iter().map(|b| b.block_id()).collect();
+                let new_block_ids: Vec<_> =
+                    allocated_for_async.iter().map(|b| b.block_id()).collect();
+                let all_block_ids: Vec<_> = matched_block_ids
+                    .iter()
+                    .chain(new_block_ids.iter())
+                    .copied()
+                    .collect();
+
+                // Add matched G1 blocks as registered (they have token data)
+                request.add_registered_blocks(matched_blocks);
+                // Add newly allocated blocks as pending (waiting for async load)
+                request.add_pending_blocks(allocated_for_async);
+
+                // Update computed tokens to reflect what will be loaded
+                request.num_computed_tokens = num_computed_tokens;
+                // Set onboarding status to Loading
+                request.set_onboarding_status(OnboardingStatus::Loading);
+
+                // Notify connector of block allocation
+                if let Some(shim) = &self.connector_shim {
+                    if let Err(e) = shim.update_state_after_alloc(
+                        request.request_id(),
+                        all_block_ids,
+                        num_external_computed_tokens,
+                    ) {
+                        tracing::error!(
+                            request_id = %request.request_id(),
+                            error = %e,
+                            "Failed to update connector state after alloc for async load"
+                        );
+                    }
+                }
+
+                tracing::info!(
+                    request_id = %request.request_id(),
+                    external_tokens = num_external_computed_tokens,
+                    blocks = blocks_for_external,
+                    "Moving request to onboarding for async KV load"
+                );
+
+                // Move to onboarding collection
+                self.onboarding
+                    .insert(request.request_id().to_string(), request);
+                continue;
+            }
             // -------------------------------------------------------------------------
 
             // =========================================================================
@@ -1011,30 +1252,28 @@ impl Scheduler {
             request.start_running();
 
             // -------------------------------------------------------------------------
-            // TODO: KV Connector - Notify of allocation for external tokens
+            // KV Connector - Notify of allocation for external tokens
             // -------------------------------------------------------------------------
             // After successful allocation, notify the connector so it can:
             // - Start loading external blocks (inter-pass mode)
             // - Prepare sync transfer metadata (intra-pass mode)
             //
             // vLLM reference: scheduler.py lines 569-577
-            //
-            // if let Some(connector) = &self.connector {
-            //     if num_external_computed_tokens > 0 {
-            //         if let Err(e) = connector.update_state_after_alloc(
-            //             request.request_id(),
-            //             all_block_ids.clone(),
-            //             num_external_computed_tokens,
-            //         ) {
-            //             tracing::error!(
-            //                 request_id = %request.request_id(),
-            //                 error = %e,
-            //                 "Failed to update connector state after allocation"
-            //             );
-            //         }
-            //     }
-            // }
-            let _ = num_external_computed_tokens; // Suppress unused warning
+            if let Some(shim) = &self.connector_shim {
+                if num_external_computed_tokens > 0 {
+                    if let Err(e) = shim.update_state_after_alloc(
+                        request.request_id(),
+                        all_block_ids.clone(),
+                        num_external_computed_tokens,
+                    ) {
+                        tracing::error!(
+                            request_id = %request.request_id(),
+                            error = %e,
+                            "Failed to update connector state after allocation"
+                        );
+                    }
+                }
+            }
             // -------------------------------------------------------------------------
 
             // Record in output
@@ -1100,6 +1339,7 @@ impl Scheduler {
     }
 
     /// Calculate how many tokens to prefill for a request.
+    #[allow(dead_code)]
     fn calculate_prefill_tokens(&self, request: &SchedulerRequest, current_total: usize) -> usize {
         let remaining_budget = self
             .config
@@ -1241,7 +1481,7 @@ impl Scheduler {
         blocks_needed: usize,
     ) -> Option<String> {
         // If no connector, use policy directly
-        let Some(connector) = &self.connector else {
+        let Some(shim) = &self.connector_shim else {
             // SAFETY: policy is always initialized by new() or build()
             return self
                 .policy
@@ -1256,7 +1496,7 @@ impl Scheduler {
             .iter()
             .filter(|req| {
                 let request_id = req.request_id();
-                let can_evict = connector.can_evict(request_id);
+                let can_evict = shim.can_evict(request_id);
                 if !can_evict {
                     tracing::debug!(
                         request_id,
@@ -1280,7 +1520,7 @@ impl Scheduler {
         let mut scored_candidates: Vec<(&SchedulerRequest, f32)> = safe_candidates
             .iter()
             .map(|req| {
-                let score = connector
+                let score = shim
                     .get_eviction_score(req.request_id())
                     .map(|s| s.coverage_ratio)
                     .unwrap_or(0.0);
@@ -1313,26 +1553,39 @@ impl Scheduler {
 
     /// Update state after model output is received.
     ///
-    /// This should be called after each forward pass to update computed tokens
-    /// and handle finished requests.
+    /// This should be called after each forward pass to update computed tokens,
+    /// register blocks, and extend token sequences with generated output.
     ///
-    /// # Block Deallocation for Finished Requests
+    /// # What This Method Does
     ///
-    /// When requests finish, their blocks are currently freed immediately. With
-    /// connector integration, this should be enhanced to:
+    /// 1. **Block Registration**: Transitions pending blocks to registered state
+    ///    for all running requests. This happens after the forward pass computes
+    ///    KV cache data for the pending blocks.
     ///
-    /// 1. Check `connector.request_finished()` for each finished request
-    /// 2. If `delay_free_blocks == true`, hold blocks in a pending-free collection
-    /// 3. Process connector's `finished_sending` signals to actually free blocks
+    /// 2. **Token Sync**: Extends token sequences with newly generated output
+    ///    tokens, maintaining block hash consistency.
     ///
-    /// # Connector Signal Processing (TODO)
+    /// 3. **Token Count Updates**: Updates computed token counts and applies
+    ///    forward pass completion state.
     ///
-    /// This method should also process signals from the connector:
+    /// 4. **Projection Cleanup**: Removes finished requests from projection state.
     ///
-    /// - `finished_recving`: Requests that completed async KV load, transition
-    ///   from `WAITING_FOR_REMOTE_KVS` back to `WAITING`
-    /// - `finished_sending`: Requests whose offload completed, now safe to free blocks
-    /// - `invalid_block_ids`: Blocks that failed to load, need recomputation
+    /// # Connector Signal Processing
+    ///
+    /// **Note**: Connector signal processing (`finished_recving`, `finished_sending`)
+    /// is handled separately by [`update_connector_signals()`](Self::update_connector_signals).
+    /// Call that method after this one if the model execution returned connector
+    /// output signals.
+    ///
+    /// # Usage
+    ///
+    /// ```ignore
+    /// // After forward pass:
+    /// scheduler.update_from_output(&finished_request_ids, &output_tokens);
+    ///
+    /// // If connector signals were returned:
+    /// scheduler.update_connector_signals(finished_sending, finished_recving);
+    /// ```
     ///
     /// See `STATE_TRANSITIONS.md` for the complete flow.
     pub fn update_from_output(
@@ -1438,15 +1691,43 @@ impl Scheduler {
 
         // Handle finished requests
         // Register any remaining blocks before removing the request
-        // TODO: Check connector.request_finished() before freeing blocks
-        // TODO: Track requests with delay_free_blocks for later processing
         for request_id in finished_ids {
             if let Some(mut request) = self.running.remove(request_id) {
                 // Remove from global projection state if enabled
                 if let Some(proj) = &mut self.projector {
                     proj.remove_request(request_id);
                 }
+
+                // Notify connector of request finish before freeing blocks.
+                // If connector has inflight offloads, hold blocks until finished_sending.
+                if let Some(shim) = &self.connector_shim {
+                    let finished_status = shim.request_finished(request_id);
+                    match finished_status {
+                        FinishedStatus::Pending => {
+                            // Connector has inflight offloads - blocks must be held.
+                            // Move to pending_block_free collection until finished_sending arrives.
+                            tracing::debug!(
+                                request_id = %request_id,
+                                blocks = request.block_state.num_assigned(),
+                                "Request has pending offloads, holding blocks until offload completes"
+                            );
+                            request.finish(RequestStatus::FinishedStopped);
+                            self.pending_block_free
+                                .insert(request_id.to_string(), request);
+                            continue; // Skip normal drop - blocks held until update_connector_output
+                        }
+                        FinishedStatus::Finished | FinishedStatus::UntrackedRequest => {
+                            tracing::debug!(
+                                request_id = %request_id,
+                                ?finished_status,
+                                "Connector cleared request for block release"
+                            );
+                        }
+                    }
+                }
+
                 request.finish(RequestStatus::FinishedStopped);
+                // Request is dropped here, RAII frees blocks
             }
         }
 
@@ -1474,85 +1755,15 @@ impl Scheduler {
         }
 
         // -------------------------------------------------------------------------
-        // TODO: KV Connector - Process connector output signals
+        // Connector Signal Processing
         // -------------------------------------------------------------------------
-        // After the forward pass completes, the connector may return signals
-        // indicating the status of async operations. Process these to update
-        // scheduler state appropriately.
+        // NOTE: Connector output signals (finished_recving, finished_sending) are
+        // processed separately by `update_connector_signals()`. This separation
+        // keeps model output processing distinct from async transfer coordination.
         //
-        // vLLM reference: scheduler.py lines 1117-1136 (_update_from_kv_xfer_finished)
-        //
-        // if let Some(kv_connector_output) = kv_connector_output {
-        //     // Process finished receives - requests that completed async KV loading
-        //     // Transition from WAITING_FOR_REMOTE_KVS back to WAITING for scheduling
-        //     //
-        //     // vLLM reference: scheduler.py lines 1411-1455 (_update_waiting_for_remote_kv)
-        //     //
-        //     // for req_id in &kv_connector_output.finished_recving {
-        //     //     // Find request in waiting queue with WAITING_FOR_REMOTE_KVS status
-        //     //     if let Some(request) = self.waiting.get_mut(req_id) {
-        //     //         if request.status == RequestStatus::WaitingForRemoteKvs {
-        //     //             // Cache the loaded blocks
-        //     //             let block_ids = request.block_ids();
-        //     //             let num_computed = block_ids.len() * self.config.block_size;
-        //     //             // self.kv_cache.cache_blocks(request, num_computed);
-        //     //
-        //     //             // Transition back to WAITING for scheduling
-        //     //             request.status = RequestStatus::Waiting;
-        //     //             request.num_computed_tokens = num_computed;
-        //     //             tracing::info!(
-        //     //                 request_id = %req_id,
-        //     //                 num_computed_tokens = num_computed,
-        //     //                 "Request finished receiving external KV data"
-        //     //             );
-        //     //         }
-        //     //     }
-        //     //     self.finished_recving_kv_req_ids.insert(req_id.clone());
-        //     // }
-        //
-        //     // Process finished sends - requests whose offload completed
-        //     // Now safe to free blocks that were held during offload
-
-        //     // TODO: I want to improve on the reference. I want to have a separate queue for requests
-               // we might want to let the connector clean up first, then clean up the scheduler.
-               // this woudl allow us, if we decide to have shared state between the connector and the scheduler,
-               // to always drive teh connector to completion first, then clean up the scheduler.
-        //     //
-        //     // vLLM reference: scheduler.py lines 1475-1478
-        //     //
-        //     // for req_id in &kv_connector_output.finished_sending {
-        //     //     tracing::debug!(
-        //     //         request_id = %req_id,
-        //     //         "Finished sending KV data, freeing held blocks"
-        //     //     );
-        //     //     // Remove from pending_block_free collection, blocks freed via RAII
-        //     //     if let Some(request) = self.pending_block_free.remove(req_id) {
-        //     //         // Request and blocks are dropped, returning blocks to pool
-        //     //         drop(request);
-        //     //     }
-        //     // }
-        //
-        //     // Process invalid blocks - blocks that failed to load
-        //     // Need to reset computed_tokens and trigger recomputation
-        //     //
-        //     // vLLM reference: scheduler.py lines 1480-1617 (_handle_invalid_blocks)
-        //     //
-        //     // if let Some(invalid_block_ids) = &kv_connector_output.invalid_block_ids {
-        //     //     if !invalid_block_ids.is_empty() {
-        //     //         self.handle_invalid_blocks(invalid_block_ids);
-        //     //     }
-        //     // }
-        //
-        //     // Update connector's internal state with the output
-        //     // if let Some(connector) = &self.connector {
-        //     //     if let Err(e) = connector.update_connector_output(
-        //     //         kv_connector_output.finished_sending.clone().unwrap_or_default(),
-        //     //         kv_connector_output.finished_recving.clone().unwrap_or_default(),
-        //     //     ) {
-        //     //         tracing::error!(error = %e, "Failed to update connector output");
-        //     //     }
-        //     // }
-        // }
+        // See: update_connector_signals() for handling of:
+        // - finished_recving: Completed async KV loads (G2→G1)
+        // - finished_sending: Completed offloads (G1→G2)
         // -------------------------------------------------------------------------
 
         // -------------------------------------------------------------------------
@@ -1566,6 +1777,105 @@ impl Scheduler {
         if let Some(projector) = &mut self.projector {
             for request_id in finished_ids {
                 projector.remove_request(request_id);
+            }
+        }
+    }
+
+    /// Process connector output signals from workers.
+    ///
+    /// Called after model execution with signals indicating completed transfers:
+    /// - `finished_recving`: Async KV load complete (G2→G1), requests can now be scheduled
+    /// - `finished_sending`: Offload complete (G1→G2), blocks can now be freed
+    ///
+    /// This is a separate method from `update_from_output` to keep concerns separate:
+    /// - `update_from_output`: Processes model output (tokens, block registration)
+    /// - `update_connector_signals`: Processes async transfer completion signals
+    ///
+    /// # Usage
+    ///
+    /// ```ignore
+    /// // After model execution returns connector output:
+    /// scheduler.update_connector_signals(
+    ///     connector_output.finished_sending,
+    ///     connector_output.finished_recving,
+    /// );
+    /// ```
+    pub fn update_connector_signals(
+        &mut self,
+        finished_sending: HashSet<String>,
+        finished_recving: HashSet<String>,
+    ) {
+        // Process completed onboarding (async KV loads from G2→G1)
+        // Mark these requests as complete so schedule() can move them to waiting
+        for request_id in &finished_recving {
+            if let Some(request) = self.onboarding.get_mut(request_id) {
+                request.set_onboarding_status(OnboardingStatus::Complete);
+                tracing::debug!(
+                    request_id = %request_id,
+                    "Marked onboarding complete, ready for scheduling"
+                );
+            }
+        }
+
+        // Process completed offloads (G1→G2) - free held blocks
+        // These were requests that finished but held blocks for offload completion
+        for request_id in &finished_sending {
+            if let Some(request) = self.pending_block_free.remove(request_id) {
+                tracing::debug!(
+                    request_id = %request_id,
+                    blocks = request.block_state.num_assigned(),
+                    "Offload complete, freeing held blocks"
+                );
+                drop(request); // RAII frees blocks
+            }
+        }
+
+        // Delegate to connector shim to update leader state
+        if let Some(shim) = &self.connector_shim {
+            if let Err(e) = shim.update_connector_output(finished_sending, finished_recving) {
+                tracing::error!(error = %e, "Failed to update connector output");
+            }
+        }
+    }
+
+    // =========================================================================
+    // Async Onboarding Methods
+    // =========================================================================
+
+    /// Process completed onboarding requests (async KV loads from G2→G1).
+    ///
+    /// Called at the start of each scheduling iteration to move requests that
+    /// have completed their async KV load back to the waiting queue. These
+    /// requests get scheduling priority since they've already allocated blocks
+    /// and are ready to run.
+    fn process_completed_onboarding(&mut self) {
+        // Find all requests with completed onboarding
+        let completed: Vec<String> = self
+            .onboarding
+            .iter()
+            .filter(|(_, req)| req.is_onboarding_complete())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        if completed.is_empty() {
+            return;
+        }
+
+        for request_id in completed {
+            if let Some(mut request) = self.onboarding.remove(&request_id) {
+                // Reset onboarding status
+                request.set_onboarding_status(OnboardingStatus::None);
+                // Set status to waiting
+                request.set_status(RequestStatus::Waiting);
+
+                tracing::info!(
+                    request_id = %request_id,
+                    computed_tokens = request.num_computed_tokens,
+                    "Onboarding complete, moved to waiting queue"
+                );
+
+                // Add to front of waiting queue for priority scheduling
+                self.waiting.push_front(request);
             }
         }
     }
@@ -1887,7 +2197,7 @@ impl std::fmt::Debug for Scheduler {
             .field("paused", &self.paused.len())
             .field("kv_cache", &self.kv_cache)
             .field("has_shared_state", &self.shared_state.is_some())
-            .field("has_connector", &self.connector.is_some())
+            .field("has_connector", &self.connector_shim.is_some())
             .field("projection_enabled", &self.projector.is_some())
             .field("planned_evictions", &self.planned_evictions.len())
             .finish()

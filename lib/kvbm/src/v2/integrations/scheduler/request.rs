@@ -225,6 +225,45 @@ impl RequestStatus {
     }
 }
 
+/// Status of async KV onboarding for a request.
+///
+/// Used when a request is in the `onboarding` collection, waiting for
+/// external KV cache data to be loaded asynchronously (inter-pass mode).
+///
+/// # Flow
+///
+/// ```text
+/// schedule_waiting():
+///   connector returns load_kv_async=true
+///   → allocate blocks
+///   → set onboarding_status = Loading
+///   → move to onboarding collection
+///
+/// update_connector_signals(finished_recving):
+///   → set onboarding_status = Complete
+///
+/// schedule():
+///   → check onboarding collection for Complete status
+///   → move completed requests to waiting queue
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnboardingStatus {
+    /// No async onboarding in progress.
+    #[default]
+    None,
+
+    /// Async KV transfer from external storage is in progress.
+    ///
+    /// The request is in the `onboarding` collection, holding blocks.
+    /// Waiting for `finished_recving` signal from connector.
+    Loading,
+
+    /// Async KV transfer completed successfully.
+    ///
+    /// The request is ready to be moved from `onboarding` to `waiting`.
+    Complete,
+}
+
 /// Internal scheduler representation of a request.
 ///
 /// This struct tracks the block allocations for a request using RAII guards.
@@ -346,6 +385,14 @@ pub struct SchedulerRequest {
     /// When true, the scheduler sends `all_token_ids` to workers since they
     /// may have lost track of this request's state during preemption.
     pub resumed_from_preemption: bool,
+
+    /// Status of async KV onboarding (inter-pass mode).
+    ///
+    /// Used when the request is in the scheduler's `onboarding` collection.
+    /// - `None`: Not in async onboarding
+    /// - `Loading`: Waiting for external KV data
+    /// - `Complete`: Ready to move to waiting queue
+    pub onboarding_status: OnboardingStatus,
 }
 
 impl SchedulerRequest {
@@ -374,6 +421,7 @@ impl SchedulerRequest {
             num_output_tokens: 0,
             num_cached_tokens: -1, // Not yet checked for prefix cache hits
             resumed_from_preemption: false,
+            onboarding_status: OnboardingStatus::None,
         }
     }
 
@@ -763,6 +811,14 @@ impl SchedulerRequest {
         self.block_state.clear();
     }
 
+    /// Set the request status.
+    ///
+    /// Use this for status transitions during scheduling (e.g., Waiting → Running).
+    /// For completing requests, use [`finish()`](Self::finish) instead.
+    pub fn set_status(&mut self, status: RequestStatus) {
+        self.status = status;
+    }
+
     /// Add output tokens after a forward pass.
     pub fn add_output_tokens(&mut self, num_tokens: usize) {
         self.num_output_tokens += num_tokens;
@@ -859,6 +915,25 @@ impl SchedulerRequest {
     /// Check if prefix cache has been checked for this request.
     pub fn has_checked_prefix_cache(&self) -> bool {
         self.num_cached_tokens >= 0
+    }
+
+    // =========================================================================
+    // Onboarding status methods
+    // =========================================================================
+
+    /// Get the current onboarding status.
+    pub fn onboarding_status(&self) -> OnboardingStatus {
+        self.onboarding_status
+    }
+
+    /// Set the onboarding status.
+    pub fn set_onboarding_status(&mut self, status: OnboardingStatus) {
+        self.onboarding_status = status;
+    }
+
+    /// Check if onboarding has completed.
+    pub fn is_onboarding_complete(&self) -> bool {
+        self.onboarding_status == OnboardingStatus::Complete
     }
 }
 

@@ -9,6 +9,7 @@ use crate::v2::integrations::scheduler::{
     GlobalProjectionState, KVCacheManager, Scheduler, SchedulerConfig,
 };
 use crate::v2::logical::manager::BlockManager;
+use crate::v2::testing::connector::{ConnectorTestConfig, TestConnectorInstance};
 use crate::v2::testing::managers::create_test_registry;
 use crate::v2::G1;
 
@@ -44,6 +45,11 @@ pub struct MockEngineCoreConfig {
     pub vocab_size: u32,
     /// Whether to enable projection-based scheduling.
     pub enable_projection: bool,
+    /// Whether to enable connector integration for E2E testing.
+    ///
+    /// When enabled, creates a `TestConnectorInstance` and attaches the
+    /// `ConnectorLeader` to the scheduler for full connector integration testing.
+    pub enable_connector: bool,
 }
 
 impl Default for MockEngineCoreConfig {
@@ -57,6 +63,7 @@ impl Default for MockEngineCoreConfig {
             seed: 42,
             vocab_size: 50257,
             enable_projection: true,
+            enable_connector: false,
         }
     }
 }
@@ -78,6 +85,12 @@ pub struct StepOutput {
 ///
 /// This drives the real Scheduler without GPU by generating deterministic
 /// "model outputs" using seeded random tokens.
+///
+/// # Connector Integration
+///
+/// When `config.enable_connector` is true, a `TestConnectorInstance` is created
+/// and the `ConnectorLeader` is attached to the scheduler. This enables E2E testing
+/// of the scheduler's connector integration without GPU resources.
 pub struct MockEngineCore {
     /// The real scheduler being tested.
     scheduler: Scheduler,
@@ -95,6 +108,12 @@ pub struct MockEngineCore {
     pub output_tokens: HashMap<String, Vec<u32>>,
     /// Requests that have finished.
     pub finished: HashSet<String>,
+
+    /// Optional connector instance for E2E testing.
+    ///
+    /// Must be kept alive as it owns the tokio runtime used by the connector.
+    /// Created when `config.enable_connector` is true.
+    connector_instance: Option<TestConnectorInstance>,
 }
 
 impl MockEngineCore {
@@ -126,8 +145,30 @@ impl MockEngineCore {
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build SchedulerConfig: {}", e))?;
 
-        // Create scheduler
-        let scheduler = Scheduler::new(scheduler_config, kv_cache);
+        // Optionally create connector and attach to scheduler
+        let (scheduler, connector_instance) = if config.enable_connector {
+            // Create connector instance with appropriate cache sizes
+            let connector_config = ConnectorTestConfig::new()
+                .leader_cache_blocks(64)
+                .leader_disk_blocks(32);
+
+            let instance = TestConnectorInstance::create_with_config(connector_config, 1)
+                .map_err(|e| anyhow::anyhow!("Failed to create TestConnectorInstance: {}", e))?;
+
+            // Build scheduler with connector attached
+            let scheduler = Scheduler::builder()
+                .config(scheduler_config)
+                .kv_cache(kv_cache)
+                .connector(instance.leader.clone())
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build Scheduler with connector: {}", e))?;
+
+            (scheduler, Some(instance))
+        } else {
+            // Create scheduler without connector
+            let scheduler = Scheduler::new(scheduler_config, kv_cache);
+            (scheduler, None)
+        };
 
         // Create mock model runner
         let model_runner = MockModelRunner::new(config.seed, config.vocab_size);
@@ -140,6 +181,7 @@ impl MockEngineCore {
             requests: HashMap::new(),
             output_tokens: HashMap::new(),
             finished: HashSet::new(),
+            connector_instance,
         })
     }
 
@@ -325,5 +367,32 @@ impl MockEngineCore {
     /// Use with caution - direct scheduler manipulation may bypass mock engine tracking.
     pub fn scheduler_mut(&mut self) -> &mut Scheduler {
         &mut self.scheduler
+    }
+
+    // === Connector Integration ===
+
+    /// Check if connector integration is enabled.
+    pub fn has_connector(&self) -> bool {
+        self.connector_instance.is_some()
+    }
+
+    /// Get access to the connector instance if enabled.
+    ///
+    /// Returns `None` if `config.enable_connector` was false.
+    pub fn connector_instance(&self) -> Option<&TestConnectorInstance> {
+        self.connector_instance.as_ref()
+    }
+
+    /// Check if the connector shim has a slot for the given request.
+    ///
+    /// Returns `false` if connector is not enabled or the slot doesn't exist.
+    ///
+    /// This is useful for testing that slots are properly created and cleaned up
+    /// during the request lifecycle.
+    pub fn has_connector_slot(&self, request_id: &str) -> bool {
+        self.scheduler
+            .connector_shim()
+            .map(|shim| shim.has_slot(request_id))
+            .unwrap_or(false)
     }
 }

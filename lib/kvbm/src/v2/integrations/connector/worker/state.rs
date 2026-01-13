@@ -140,8 +140,14 @@ pub struct WorkerState {
     /// CUDA events for layer-wise offloading, one per layer.
     /// Created during initialization and reused every iteration.
     /// Recorded on the torch stream during save_kv_layer,
-    /// last layer event triggers Nova forward pass completion notification.
-    pub(crate) save_layer_events: OnceLock<Vec<Arc<CudaEvent>>>,
+    /// and represents the moment in time when the layer has been computed
+    /// and is ready to be offloaded.
+    /// The last layer event triggers Nova forward pass completion notification.
+    pub(crate) compute_layer_events: OnceLock<Vec<Arc<CudaEvent>>>,
+
+    /// Recorded on the offload stream when the last layer is complete.
+    /// This event is then synchronously awaited by the workers in wait_for_save.
+    pub(crate) offload_complete_event: OnceLock<Arc<CudaEvent>>,
 
     // --- Finished tracking (encapsulated with own lock) ---
     /// Tracks finished onboarding/offloading requests and failed blocks.
@@ -159,7 +165,8 @@ impl WorkerState {
             pending: Mutex::new(None),
             forward_pass_nova_event: Mutex::new(None),
             onboard_layer_events: OnceLock::new(),
-            save_layer_events: OnceLock::new(),
+            compute_layer_events: OnceLock::new(),
+            offload_complete_event: OnceLock::new(),
             finished_state: FinishedState::default(),
         }
     }
@@ -230,9 +237,14 @@ impl WorkerState {
             save_events.push(Arc::new(event));
         }
 
-        self.save_layer_events
+        self.compute_layer_events
             .set(save_events)
-            .map_err(|_| anyhow::anyhow!("save_layer_events already set (race condition)"))?;
+            .map_err(|_| anyhow::anyhow!("compute_layer_events already set (race condition)"))?;
+
+        // Create the offload complete event to be awaited by the workers in wait_for_save.
+        self.offload_complete_event
+            .set(Arc::new(d2h_stream.record_event(None)?))
+            .map_err(|_| anyhow::anyhow!("offload_complete_event already set (race condition)"))?;
 
         tracing::debug!(
             num_layers,
@@ -302,11 +314,11 @@ impl WorkerState {
     ///
     /// Returns a reference to the events if they have been allocated (during initialize),
     /// or an error if initialization hasn't completed yet.
-    pub(crate) fn save_layer_events(&self) -> Result<&[Arc<CudaEvent>]> {
-        self.save_layer_events
+    pub(crate) fn compute_layer_events(&self) -> Result<&[Arc<CudaEvent>]> {
+        self.compute_layer_events
             .get()
             .map(|v| v.as_slice())
-            .ok_or_else(|| anyhow::anyhow!("save_layer_events not initialized"))
+            .ok_or_else(|| anyhow::anyhow!("compute_layer_events not initialized"))
     }
 
     /// Store the Nova event handle for forward pass completion.

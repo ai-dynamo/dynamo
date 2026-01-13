@@ -301,34 +301,35 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
     }
 
     /// Check if a block exists in the pool
+    // note: used by tests
     #[allow(dead_code)]
     pub fn has_block(&self, hash: SequenceHash) -> bool {
         let inner = self.inner.read();
         inner.backend.has_block(hash)
     }
 
-    /// Find and promote a single block from inactive to active by sequence hash.
-    /// Returns the concrete `Arc<PrimaryBlock<T>>` for duplicate referencing.
-    ///
-    /// This differs from `find_blocks()` which returns trait objects. This method
-    /// returns the concrete type needed when creating `DuplicateBlock` references.
-    ///
-    /// **Note**: The caller is responsible for calling `attach_block_ref()` on the
-    /// returned PrimaryBlock's registration handle to update the weak reference.
-    /// This is not done here to avoid deadlocks when called while holding the
-    /// registry attachments lock.
-    pub fn find_block_as_primary(
-        &self,
-        hash: SequenceHash,
-        touch: bool,
-    ) -> Option<Arc<PrimaryBlock<T>>> {
-        let mut inner = self.inner.write();
-        let matched = inner.backend.find_matches(&[hash], touch);
-        matched.into_iter().next().map(|block| {
-            let primary = PrimaryBlock::new(Arc::new(block), self.return_fn.clone());
-            Arc::new(primary)
-        })
-    }
+    // /// Find and promote a single block from inactive to active by sequence hash.
+    // /// Returns the concrete `Arc<PrimaryBlock<T>>` for duplicate referencing.
+    // ///
+    // /// This differs from `find_blocks()` which returns trait objects. This method
+    // /// returns the concrete type needed when creating `DuplicateBlock` references.
+    // ///
+    // /// **Note**: The caller is responsible for calling `attach_block_ref()` on the
+    // /// returned PrimaryBlock's registration handle to update the weak reference.
+    // /// This is not done here to avoid deadlocks when called while holding the
+    // /// registry attachments lock.
+    // pub fn find_block_as_primary(
+    //     &self,
+    //     hash: SequenceHash,
+    //     touch: bool,
+    // ) -> Option<Arc<PrimaryBlock<T>>> {
+    //     let mut inner = self.inner.write();
+    //     let matched = inner.backend.find_matches(&[hash], touch);
+    //     matched.into_iter().next().map(|block| {
+    //         let primary = PrimaryBlock::new(Arc::new(block), self.return_fn.clone());
+    //         Arc::new(primary)
+    //     })
+    // }
 
     /// Unified lookup that checks both active (weak_blocks) and inactive (backend) blocks.
     ///

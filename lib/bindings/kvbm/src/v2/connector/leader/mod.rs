@@ -41,6 +41,15 @@ pub struct PyConnectorLeader {
     inner: Arc<ConnectorLeader>,
 }
 
+impl PyConnectorLeader {
+    /// Get the inner Arc<ConnectorLeader> for passing to other Rust components.
+    ///
+    /// This is used by [`PyScheduler`] to attach the connector to the Rust scheduler.
+    pub fn inner(&self) -> Arc<ConnectorLeader> {
+        self.inner.clone()
+    }
+}
+
 #[pymethods]
 impl PyConnectorLeader {
     /// Create a new ConnectorLeader from a KvbmRuntime.

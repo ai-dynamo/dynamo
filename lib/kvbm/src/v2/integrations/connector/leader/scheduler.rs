@@ -33,6 +33,9 @@ pub struct KvConnectorMetadata {
 
     /// This will hold the G2 source and G1 destination block_ids
     pub intra_pass_load: Option<IntraPassLoad>,
+
+    /// This will hold the G1 source and G2 destination block_ids
+    pub intra_pass_store: Option<IntraPassStore>,
 }
 
 // impl std::fmt::Debug for IterationSession {
@@ -64,6 +67,12 @@ impl KvConnectorMetadata {
 pub struct IntraPassLoad {
     pub g2_src_block_ids: Vec<BlockId>,
     pub g1_dst_block_ids: Vec<BlockId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntraPassStore {
+    pub g1_src_block_ids: Vec<BlockId>,
+    pub g2_dst_block_ids: Vec<BlockId>,
 }
 
 impl KvConnectorMetadata {
@@ -372,6 +381,16 @@ impl ConnectorLeader {
                 );
             }
 
+            // TODO: Intra-pass offload for P/D disaggregation
+            // When a prefill request is finishing and needs immediate offload to decode node:
+            // 1. Call aggregate_intra_pass_offload() to collect pending offload data
+            // 2. Set metadata.intra_pass_store = Some(offload_data)
+            // 3. Worker will execute layer-wise G1→G2 transfers during save_kv_layer
+            // let intra_pass_store = self.aggregate_intra_pass_offload();
+            // if let Some(ref store) = intra_pass_store {
+            //     metadata.intra_pass_store = Some(store.clone());
+            // }
+
             // Spawn unified cleanup task that:
             // 1. Awaits the merge of all worker events (lazy - only creates merge here)
             // 2. Triggers the forward_pass_promise (unblocks preconditions)
@@ -408,6 +427,42 @@ impl ConnectorLeader {
             })
         }
     }
+
+    // /// Prepare intra-pass offload for a request.
+    // ///
+    // /// This is called on the last pass of prefill when we intend to offload
+    // /// the prefill KV cache to a remote node immediately (within the forward pass).
+    // ///
+    // /// Unlike inter-pass offload which happens between forward passes with preconditions,
+    // /// intra-pass offload executes synchronously layer-by-layer during the forward pass.
+    // ///
+    // /// # When to use
+    // /// - Prefill offload to decode nodes in P/D disaggregation
+    // /// - Request is finishing prefill and being handed off to decode worker
+    // ///
+    // /// # Arguments
+    // /// * `req_id` - Request identifier
+    // /// * `g1_block_ids` - Source blocks on GPU (computed KV cache)
+    // /// * `g2_block_ids` - Destination blocks on host (for RDMA transfer)
+    // fn prepare_intra_pass_offload(
+    //     &self,
+    //     req_id: &str,
+    //     g1_block_ids: Vec<BlockId>,
+    //     g2_block_ids: Vec<BlockId>,
+    // ) -> Result<()> {
+    //     // Store pending intra-pass offload data in slot (similar to extend_pending_intra_pass)
+    //     // This will be aggregated by aggregate_intra_pass_offload() during process_scheduler_output
+    //     todo!("Implement when P/D disaggregation prefill offload is ready")
+    // }
+    //
+    // /// Aggregate pending intra-pass offload data from all active slots.
+    // ///
+    // /// Similar to aggregate_intra_pass_onboarding but for G1→G2 direction.
+    // fn aggregate_intra_pass_offload(&self) -> Option<IntraPassStore> {
+    //     // Collect pending intra-pass offload from all slots
+    //     // Return IntraPassStore with g1_src_block_ids and g2_dst_block_ids
+    //     todo!("Implement when P/D disaggregation prefill offload is ready")
+    // }
 
     /// Create one event per worker for forward pass completion tracking.
     fn create_worker_foward_pass_completion_events(
@@ -682,6 +737,7 @@ impl KvConnectorMetadata {
             iteration,
             foward_pass_completion_events: None,
             intra_pass_load: None,
+            intra_pass_store: None,
         }
     }
 

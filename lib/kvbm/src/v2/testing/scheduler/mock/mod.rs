@@ -48,3 +48,6 @@ mod tests;
 
 #[cfg(test)]
 mod abort_tests;
+
+#[cfg(test)]
+mod connector_e2e_tests;

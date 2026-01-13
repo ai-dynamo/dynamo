@@ -156,6 +156,24 @@ impl PyConnectorWorker {
             .map_err(to_pyerr)
     }
 
+    /// Wait for the intra-pass offload to complete.
+    ///
+    /// This is a blocking call; however, we might choose to make it non-blocking
+    /// in the future.
+    ///
+    /// To make it non-blocking, we would have to put an stream wait event on both the torch stream and intra-pass onboard stream
+    /// to ensure that no cuda stream operations are allowed to modify the kv blocks being offloaded while the offload is in progress.
+    ///
+    /// The CUDA coordination would require that we correctly synchronize any stream, so the intergration with the LLM framework
+    /// needs to be carefully aligned.
+    ///
+    /// Args:
+    ///     stream_handle: Raw CUDA stream handle (u64) from Python's current stream
+    ///                    Obtained via: torch.cuda.current_stream().cuda_stream
+    pub fn wait_for_save(&self) -> PyResult<()> {
+        self.inner.wait_for_save().map_err(to_pyerr)
+    }
+
     /// Start loading KV cache.
     ///
     /// If the bound metadata dictates that we should start loading KV cache,

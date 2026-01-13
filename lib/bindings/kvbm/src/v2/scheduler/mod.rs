@@ -28,16 +28,18 @@ pub mod status;
 pub use config::PySchedulerConfig;
 pub use status::PyRequestStatus;
 
+use dynamo_kvbm::G1;
 use dynamo_kvbm::v2::integrations::common::{Request, SchedulerOutput};
 use dynamo_kvbm::v2::integrations::scheduler::{KVCacheManager, Scheduler};
 use dynamo_kvbm::v2::logical::BlockRegistry;
 use dynamo_kvbm::v2::logical::manager::BlockManager;
 use dynamo_kvbm::v2::logical::pools::BlockDuplicationPolicy;
 use dynamo_kvbm::v2::utils::tinylfu::TinyLFUTracker;
-use dynamo_kvbm::G1;
-use std::sync::Arc;
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::v2::connector::leader::PyConnectorLeader;
 
 /// Python wrapper for the Rust Scheduler.
 ///
@@ -68,8 +70,13 @@ impl PyScheduler {
     ///
     /// Args:
     ///     config: Scheduler configuration (including total_blocks for KV cache)
+    ///     connector: Optional ConnectorLeader for KV cache offloading and intelligent eviction
     #[new]
-    pub fn new(config: &PySchedulerConfig) -> PyResult<Self> {
+    #[pyo3(signature = (config, connector=None))]
+    pub fn new(
+        config: &PySchedulerConfig,
+        connector: Option<&PyConnectorLeader>,
+    ) -> PyResult<Self> {
         // Calculate total blocks: use configured value or conservative default
         let total_blocks = config.total_blocks.unwrap_or_else(|| {
             // Default: enough blocks for max_num_seqs requests with average 512 tokens each
@@ -79,12 +86,14 @@ impl PyScheduler {
             config.inner.max_num_seqs * blocks_per_request
         });
 
+        let has_connector = connector.is_some();
         tracing::info!(
             max_num_batched_tokens = config.inner.max_num_batched_tokens,
             max_num_seqs = config.inner.max_num_seqs,
             block_size = config.inner.block_size,
             total_blocks = total_blocks,
-            "RustScheduler: Creating scheduler with real BlockManager<G1>"
+            has_connector = has_connector,
+            "Creating Dynamo Scheduler"
         );
 
         // Create frequency tracker for MultiLRU backend
@@ -121,8 +130,18 @@ impl PyScheduler {
             ))
         })?;
 
-        // Create the real Scheduler
-        let inner = Scheduler::new(config.inner.clone(), kv_cache);
+        // Create the Scheduler using builder pattern
+        let mut builder = Scheduler::builder()
+            .config(config.inner.clone())
+            .kv_cache(kv_cache);
+
+        if let Some(conn) = connector {
+            builder = builder.connector(conn.inner());
+        }
+
+        let inner = builder.build().map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to build scheduler: {}", e))
+        })?;
 
         Ok(Self {
             inner,
@@ -336,14 +355,24 @@ fn convert_scheduler_output_to_python(
     )?;
 
     // vLLM-expected empty fields
-    result.set_item(
-        "scheduled_spec_decode_tokens",
-        pyo3::types::PyDict::new(py),
-    )?;
+    result.set_item("scheduled_spec_decode_tokens", pyo3::types::PyDict::new(py))?;
     result.set_item("scheduled_encoder_inputs", pyo3::types::PyDict::new(py))?;
     result.set_item("num_common_prefix_blocks", pyo3::types::PyList::empty(py))?;
     result.set_item("finished_req_ids", pyo3::types::PyList::empty(py))?;
     result.set_item("free_encoder_mm_hashes", pyo3::types::PyList::empty(py))?;
+
+    // Add kv_connector_metadata if present (serialized as JSON bytes)
+    if let Some(ref metadata) = output.kv_connector_metadata {
+        let metadata_bytes = serde_json::to_vec(metadata).map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Failed to serialize kv_connector_metadata: {}",
+                e
+            ))
+        })?;
+        result.set_item("kv_connector_metadata", metadata_bytes)?;
+    } else {
+        result.set_item("kv_connector_metadata", py.None())?;
+    }
 
     Ok(result.into())
 }

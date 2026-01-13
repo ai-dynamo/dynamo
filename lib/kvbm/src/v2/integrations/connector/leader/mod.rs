@@ -564,7 +564,7 @@ impl ConnectorLeader {
             "Priority offload requested (stub - not implemented)"
         );
 
-        Ok(0)
+        unimplemented!("priority offload is not implemented");
     }
 
     /// Get per-block G2 status for a request.

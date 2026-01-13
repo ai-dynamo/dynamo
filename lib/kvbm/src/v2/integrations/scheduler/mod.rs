@@ -130,6 +130,7 @@
 //! [`RequestSlot::has_inflight_offloads()`]: crate::v2::integrations::connector::leader::slot::RequestSlot::has_inflight_offloads
 
 mod config;
+mod connector_shim;
 mod core;
 mod kv_cache;
 mod policy;
@@ -145,6 +146,7 @@ mod trace_tests;
 
 
 pub use config::{SchedulerConfig, SchedulerConfigBuilder, SchedulerConfigBuilderError};
+pub use connector_shim::SchedulerConnectorShim;
 pub use core::{Scheduler, SchedulerBuilder, SchedulerBuilderError};
 pub use kv_cache::{AllocatedBlocks, KVCacheManager, RequestBlockState};
 pub use policy::{FCFSPolicy, SchedulingPolicy};
@@ -153,4 +155,4 @@ pub use projection::{
     PlannedEviction, PlannedEvictionTracker, ProjectionState, RequestBlockSchedule, RequestPhase,
 };
 pub use queues::{PausedRequests, RunningRequests, WaitingQueue};
-pub use request::{RequestStatus, SchedulerRequest};
+pub use request::{OnboardingStatus, RequestStatus, SchedulerRequest};

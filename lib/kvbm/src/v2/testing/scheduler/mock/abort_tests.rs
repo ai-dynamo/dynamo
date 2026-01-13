@@ -20,6 +20,7 @@ fn default_config() -> MockEngineCoreConfig {
         seed: 42,
         vocab_size: 50257,
         enable_projection: true,
+        enable_connector: false,
     }
 }
 

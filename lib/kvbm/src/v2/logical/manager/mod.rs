@@ -217,11 +217,8 @@ impl<T: BlockMetadata> BlockManager<T> {
             "Attempted to register block with handle from different registry"
         );
 
-        let registered_block = handle.register_mutable_block(
-            block,
-            self.duplication_policy,
-            &self.inactive_pool,
-        );
+        let registered_block =
+            handle.register_mutable_block(block, self.duplication_policy, &self.inactive_pool);
 
         ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
     }
@@ -243,11 +240,8 @@ impl<T: BlockMetadata> BlockManager<T> {
         let handle = self.block_registry.register_sequence_hash(seq_hash);
 
         // Register the block using the handle
-        let registered_block = handle.register_mutable_block(
-            block,
-            self.duplication_policy,
-            &self.inactive_pool,
-        );
+        let registered_block =
+            handle.register_mutable_block(block, self.duplication_policy, &self.inactive_pool);
 
         ImmutableBlock::new(registered_block, self.upgrade_fn.clone())
     }
@@ -349,6 +343,7 @@ impl<T: BlockMetadata> BlockManager<T> {
     }
 
     /// Get a reference to the block registry
+    #[allow(dead_code)]
     pub(crate) fn block_registry(&self) -> &BlockRegistry {
         &self.block_registry
     }

@@ -15,6 +15,7 @@ fn default_config() -> MockEngineCoreConfig {
         seed: 42,
         vocab_size: 50257,
         enable_projection: true,
+        enable_connector: false,
     }
 }
 
@@ -84,7 +85,10 @@ fn test_different_seeds_different_output() {
     let tokens2 = engine2.output_tokens["test-1"].clone();
 
     // Very unlikely to be the same
-    assert_ne!(tokens1, tokens2, "Different seeds should produce different tokens");
+    assert_ne!(
+        tokens1, tokens2,
+        "Different seeds should produce different tokens"
+    );
 }
 
 #[test]
@@ -267,10 +271,18 @@ fn test_iteration_counter() {
     assert_eq!(engine.iteration(), 0, "Initial iteration should be 0");
 
     engine.step();
-    assert_eq!(engine.iteration(), 1, "After first step, iteration should be 1");
+    assert_eq!(
+        engine.iteration(),
+        1,
+        "After first step, iteration should be 1"
+    );
 
     engine.step();
-    assert_eq!(engine.iteration(), 2, "After second step, iteration should be 2");
+    assert_eq!(
+        engine.iteration(),
+        2,
+        "After second step, iteration should be 2"
+    );
 }
 
 #[test]

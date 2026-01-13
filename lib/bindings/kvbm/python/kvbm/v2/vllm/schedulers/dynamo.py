@@ -15,30 +15,37 @@ import sys
 from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 # added to the api in vllm v0.11
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorBase_V1,
+    KVConnectorRole,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.kv_cache_manager import KVCacheConfig
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from .connector import DynamoConnector
 from .output import RustCachedRequestData, RustNewRequestData, RustSchedulerOutput
 
 try:
     from kvbm._core import v2 as kvbm_v2
 
+    ConnectorLeader = kvbm_v2.ConnectorLeader
     RustScheduler = kvbm_v2.RustScheduler
     RustSchedulerConfig = kvbm_v2.SchedulerConfig
     RustRequestStatus = kvbm_v2.RequestStatus
     _RUST_SCHEDULER_AVAILABLE = True
 except ImportError:
+    ConnectorLeader = None
     RustScheduler = None
     RustSchedulerConfig = None
     RustRequestStatus = None
@@ -115,6 +122,33 @@ class DynamoScheduler(SchedulerInterface):
                     vllm_config.scheduler_config, "max_prefill_tokens", None
                 )
 
+                # Create KVConnector for the Scheduler. Note that each Worker
+                # will have a corresponding KVConnector with Role=WORKER.
+                # KV Connector pushes/pull of remote KVs for P/D and offloading.
+                self.connector = None
+                self.connector_prefix_cache_stats: PrefixCacheStats | None = None
+                if self.vllm_config.kv_transfer_config is not None:
+                    assert (
+                        not self.is_encoder_decoder
+                    ), "Encoder-decoder models are not currently supported with KV connectors"
+                    self.connector = KVConnectorFactory.create_connector(
+                        config=self.vllm_config,
+                        role=KVConnectorRole.SCHEDULER,
+                        kv_cache_config=self.kv_cache_config,
+                    )
+                    if self.log_stats:
+                        self.connector_prefix_cache_stats = PrefixCacheStats()
+
+                # Extract ConnectorLeader if using DynamoConnector
+                # This allows the Rust scheduler to use the connector for
+                # intelligent eviction and KV cache offloading
+                connector_leader = None
+                if (
+                    isinstance(self.connector, DynamoConnector)
+                    and self.connector._scheduler is not None
+                ):
+                    connector_leader = self.connector._scheduler.leader
+
                 # Create Rust scheduler config from vLLM config
                 # Required fields (from vLLM framework) must be provided explicitly
                 # Optional fields use None to get Rust defaults
@@ -132,9 +166,11 @@ class DynamoScheduler(SchedulerInterface):
                     min_guaranteed_blocks=None,  # Default: 3
                     total_blocks=total_blocks,
                 )
-                self._rust_scheduler = RustScheduler(rust_config)
+                self._rust_scheduler = RustScheduler(
+                    rust_config, connector=connector_leader
+                )
                 print(
-                    f"DynamoScheduler: Rust scheduler initialized (total_blocks={total_blocks}, max_seq_len={max_seq_len})"
+                    f"DynamoScheduler: Rust scheduler initialized (total_blocks={total_blocks}, max_seq_len={max_seq_len}, has_connector={connector_leader is not None})"
                 )
             except Exception as e:
                 print(f"DynamoScheduler: Failed to initialize Rust scheduler: {e}")
@@ -579,7 +615,7 @@ class DynamoScheduler(SchedulerInterface):
 
     # new in vllm v0.11
     def get_kv_connector(self) -> Optional[KVConnectorBase_V1]:
-        return None
+        return self.connector
 
     # new in vllm v0.12
     def get_grammar_bitmask(self, scheduler_output: "SchedulerOutput"):
