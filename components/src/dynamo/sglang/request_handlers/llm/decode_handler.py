@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from typing import Any, AsyncGenerator, Dict
 
@@ -14,7 +15,9 @@ from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
 # Timeout for decode engine to receive first response when waiting for KV cache transfer
-DECODE_KV_TRANSFER_TIMEOUT_SECONDS = 60.0
+DECODE_KV_TRANSFER_TIMEOUT_SECONDS = float(
+    os.environ.get("DYN_DECODE_KV_TRANSFER_TIMEOUT", "60.0")
+)
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -152,8 +155,17 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     decode_iter.__anext__(), timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS
                 )
             except asyncio.TimeoutError:
+                # Abort the request on SGLang side to prevent resource leak
+                if (
+                    hasattr(self.engine, "tokenizer_manager")
+                    and self.engine.tokenizer_manager
+                ):
+                    logging.warning(f"Aborting timed-out request {request_id}")
+                    self.engine.tokenizer_manager.abort_request(
+                        rid=request_id, abort_all=False
+                    )
                 raise RuntimeError(
-                    f"Decode timed out after {DECODE_KV_TRANSFER_TIMEOUT_SECONDS}s waiting for first token. "
+                    f"Decode timed out after {DECODE_KV_TRANSFER_TIMEOUT_SECONDS}s waiting for first token."
                 )
 
             # Create stream starting with first result
