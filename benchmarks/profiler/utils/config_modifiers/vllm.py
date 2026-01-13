@@ -353,6 +353,10 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         Configure prefill-related limits for aggregated prefill runs.
         vLLM uses --max-num-seqs to limit concurrency and
         --max-num-batched-tokens to cap total tokens per step.
+
+        In vLLM, --max-num-batched-tokens controls per-GPU buffer allocation
+        during memory profiling. For DEP (DP > 1), we must use the base token
+        limit per GPU, not the multiplied total, to avoid OOM during profiling.
         """
         cfg = Config.model_validate(config)
         worker_service = get_worker_service_from_config(
@@ -361,10 +365,22 @@ class VllmV1ConfigModifier(BaseConfigModifier):
         args = validate_and_get_worker_args(worker_service, backend="vllm")
         args = break_arguments(args)
 
-        # Concurrency / batch size
+        # Get DP size from args (check both --dp and --data-parallel-size aliases)
+        dp_size = 1
+        for i, arg in enumerate(args):
+            if arg in ("--dp", "--data-parallel-size") and i + 1 < len(args):
+                dp_size = int(args[i + 1])
+                break
+
+        # For DEP (DP > 1), compute per-GPU token limit to avoid OOM
+        per_gpu_max_tokens = (
+            max_num_tokens // dp_size if dp_size > 1 else max_num_tokens
+        )
+
         args = set_argument_value(args, "--max-num-seqs", str(max_batch_size))
-        # Token cap per step
-        args = set_argument_value(args, "--max-num-batched-tokens", str(max_num_tokens))
+        args = set_argument_value(
+            args, "--max-num-batched-tokens", str(per_gpu_max_tokens)
+        )
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
