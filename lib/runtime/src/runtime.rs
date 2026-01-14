@@ -300,6 +300,19 @@ impl Runtime {
 
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
+        self.shutdown_with_pre_disconnect_callback(None::<fn()>);
+    }
+
+    /// Shuts down the [`Runtime`] instance with an optional callback that runs
+    /// after in-flight requests complete (Phase 2) but before disconnecting
+    /// backend services (Phase 3).
+    ///
+    /// This is useful for dumping final metrics or performing other cleanup
+    /// that needs to capture the state after all requests have drained.
+    pub fn shutdown_with_pre_disconnect_callback<F>(&self, callback: Option<F>)
+    where
+        F: FnOnce() + Send + 'static,
+    {
         tracing::info!("Runtime shutdown initiated");
 
         // Spawn the shutdown coordination task BEFORE cancelling tokens
@@ -322,6 +335,12 @@ impl Runtime {
 
             if count != 0 {
                 tracker.wait_for_completion().await;
+            }
+
+            // Run the pre-disconnect callback (e.g., for metrics dump)
+            if let Some(cb) = callback {
+                tracing::debug!("Running pre-disconnect callback");
+                cb();
             }
 
             // Phase 3: Now connections will be disconnected to backend services (e.g. NATS/ETCD) by cancelling the main token
