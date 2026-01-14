@@ -291,7 +291,7 @@ jobs:
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
-    name: sglang-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    name: sglang-build (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
     runs-on: builder-cpu-amd-runner
     timeout-minutes: 90
     env:
@@ -309,7 +309,7 @@ jobs:
         platform: [amd64, arm64]
         cuda_version:
           - { major_minor: '13.0', major: '13' }
-    name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    name: trtllm-build (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
     runs-on: builder-cpu-amd-runner
     timeout-minutes: 90
     env:
