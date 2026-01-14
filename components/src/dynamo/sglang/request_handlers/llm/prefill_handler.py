@@ -22,6 +22,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint=None,
     ) -> None:
         """Initialize prefill worker handler.
 
@@ -30,10 +31,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: The SGLang publisher instance.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         self.engine = engine
         self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info(self.engine)
-        super().__init__(component, engine, config, publisher)
+        super().__init__(component, engine, config, publisher, generate_endpoint)
         self._consume_tasks = set()
         logging.info(
             f"Prefill worker handler initialized - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"

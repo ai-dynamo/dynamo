@@ -33,6 +33,71 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
+logger = logging.getLogger(__name__)
+
+# Track if GPU Memory Service has been set up to avoid duplicate setup
+_gpu_memory_service_setup_done = False
+
+
+def _setup_gpu_memory_service_if_needed(config: Config) -> None:
+    """Setup GPU Memory Service if --load-format gpu_memory_service is passed.
+
+    This does TWO things:
+    1. Sets environment variables for patches (needed in spawned workers)
+    2. Applies GPU Memory Service patches and sets load_format to GPUServiceModelLoader class
+
+    Usage:
+        python -m dynamo.sglang --model-path ... \\
+            --load-format gpu_memory_service \\
+            --model-loader-extra-config '{"gpu_memory_service_socket_path": "/tmp/gpu_memory_service_{device}.sock"}'
+    """
+    global _gpu_memory_service_setup_done
+    if _gpu_memory_service_setup_done:
+        return
+
+    load_format = getattr(config.server_args, "load_format", None)
+    if load_format != "gpu_memory_service":
+        return
+
+    # GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights.
+    # CPU backup would conflict with GPU Memory Service's shared memory approach.
+    server_args = config.server_args
+    if getattr(server_args, "enable_weights_cpu_backup", False):
+        raise ValueError(
+            "Cannot use --enable-weights-cpu-backup with --load-format gpu_memory_service. "
+            "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
+        )
+    if getattr(server_args, "enable_draft_weights_cpu_backup", False):
+        raise ValueError(
+            "Cannot use --enable-draft-weights-cpu-backup with --load-format gpu_memory_service. "
+            "GPU Memory Service provides its own VA-stable sleep/wake mechanism for weights."
+        )
+
+    logger.info("[GPU Memory Service] Setting up GPU Memory Service integration")
+
+    # Set env var to trigger auto-registration in spawned workers
+    os.environ["GPU_MEMORY_SERVICE_SGLANG_AUTO_REGISTER"] = "1"
+
+    # Apply patches in main process
+    try:
+        from dynamo.sglang.gpu_memory_service_adapters import (
+            GPUServiceModelLoader,
+            patch_model_runner_for_gpu_memory_service,
+        )
+
+        patch_model_runner_for_gpu_memory_service()
+        logger.info(
+            "[GPU Memory Service] Applied GPU Memory Service patches for SGLang"
+        )
+
+        # Set load_format to the actual class so SGLang uses our custom loader
+        config.server_args.load_format = GPUServiceModelLoader
+        logger.info("[GPU Memory Service] Set load_format=GPUServiceModelLoader")
+    except Exception as e:
+        logger.error(f"[GPU Memory Service] Failed to setup GPU Memory Service: {e}")
+        raise
+
+    _gpu_memory_service_setup_done = True
 
 
 async def _handle_non_leader_node(
@@ -68,6 +133,9 @@ async def _handle_non_leader_node(
 async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
+
+    # Setup GPU Memory Service if --load-format gpu_memory_service is used
+    _setup_gpu_memory_service_if_needed(config)
 
     loop = asyncio.get_running_loop()
     runtime = DistributedRuntime(
@@ -149,7 +217,21 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(component, engine, config, publisher)
+    handler = DecodeWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+
+    # Register memory management routes using handler methods
+    runtime.register_engine_route(
+        "release_memory_occupation", handler.release_memory_occupation
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", handler.resume_memory_occupation
+    )
+    logging.info(
+        "Registered engine routes: /engine/release_memory_occupation, /engine/resume_memory_occupation"
+    )
+
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -250,7 +332,20 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config, publisher)
+    handler = PrefillWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+
+    # Register memory management routes using handler methods
+    runtime.register_engine_route(
+        "release_memory_occupation", handler.release_memory_occupation
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", handler.resume_memory_occupation
+    )
+    logging.info(
+        "Registered engine routes: /engine/release_memory_occupation, /engine/resume_memory_occupation"
+    )
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
