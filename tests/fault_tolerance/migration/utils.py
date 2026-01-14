@@ -13,7 +13,7 @@ from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import (
     DynamoFrontendProcess as BaseDynamoFrontendProcess,
 )
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -370,3 +370,71 @@ def verify_migration_metrics(
             f"Expected at least {expected_new_request_count} new_request migrations, "
             f"but got {new_request_count}"
         )
+
+
+def run_migration_test(
+    frontend: DynamoFrontendProcess,
+    worker1: ManagedProcess,
+    worker2: ManagedProcess,
+    receiving_pattern: str,
+    migration_limit: int,
+    immediate_kill: bool,
+    use_long_prompt: bool = False,
+    wait_for_new_response_before_stop: bool = False,
+) -> None:
+    """
+    Run the common migration test flow after frontend and workers are started.
+
+    Args:
+        frontend: The frontend process
+        worker1: First worker process
+        worker2: Second worker process
+        receiving_pattern: Log pattern to identify which worker received the request
+        migration_limit: Migration limit setting (0 = disabled)
+        immediate_kill: True for immediate kill, False for graceful shutdown
+        use_long_prompt: Whether to use long prompt (for prefill tests)
+        wait_for_new_response_before_stop: Whether to wait for response before stopping (for decode tests)
+    """
+    # Step 1: Send the request
+    request_thread, response_list = start_request(
+        frontend.frontend_port, use_long_prompt=use_long_prompt
+    )
+
+    # Step 2: Determine which worker received the request
+    worker, worker_name = determine_request_receiving_worker(
+        worker1, worker2, receiving_pattern=receiving_pattern
+    )
+
+    # Step 3: Optionally wait for new response before stop (for decode tests)
+    if wait_for_new_response_before_stop:
+        wait_for_response(response_list)
+
+    # Step 4: Stop the worker (kill or graceful shutdown)
+    if immediate_kill:
+        logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
+        terminate_process_tree(worker.get_pid(), immediate_kill=True, timeout=0)
+    else:
+        logger.info(
+            f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
+        )
+        terminate_process_tree(worker.get_pid(), immediate_kill=False, timeout=10)
+
+    # Step 5: Validate response based on migration setting
+    if migration_limit > 0:
+        validate_response(request_thread, response_list)
+        verify_migration_occurred(frontend)
+        verify_migration_metrics(
+            frontend.frontend_port, expected_ongoing_request_count=1
+        )
+    else:
+        try:
+            validate_response(request_thread, response_list)
+            pytest.fail("Request succeeded unexpectedly when migration was disabled")
+        except AssertionError as e:
+            assert "SSE error event received: " in str(e), f"Unexpected error: {e}"
+
+        try:
+            verify_migration_occurred(frontend)
+            pytest.fail("Migration unexpectedly occurred when disabled")
+        except AssertionError as e:
+            assert "'Cannot recreate stream: ...' error found in logs" in str(e)

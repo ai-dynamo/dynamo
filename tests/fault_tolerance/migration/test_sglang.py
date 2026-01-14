@@ -15,20 +15,12 @@ import shutil
 import pytest
 
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.managed_process import ManagedProcess, terminate_process_tree
+from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
 # Import utilities from the refactored utils module
-from .utils import (
-    DynamoFrontendProcess,
-    determine_request_receiving_worker,
-    start_request,
-    validate_response,
-    verify_migration_metrics,
-    verify_migration_occurred,
-    wait_for_response,
-)
+from .utils import DynamoFrontendProcess, run_migration_test
 
 logger = logging.getLogger(__name__)
 
@@ -236,54 +228,15 @@ def test_request_migration_sglang_aggregated(
             ) as worker2:
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
-                # Step 3: Send the request
-                request_thread, response_list = start_request(frontend.frontend_port)
-
-                # Step 4: Determine which worker received the request
-                worker, worker_name = determine_request_receiving_worker(
-                    worker1, worker2, receiving_pattern="New Request ID: "
+                # Step 3: Run migration test
+                run_migration_test(
+                    frontend,
+                    worker1,
+                    worker2,
+                    receiving_pattern="New Request ID: ",
+                    migration_limit=migration_limit,
+                    immediate_kill=immediate_kill,
                 )
-
-                # Step 5: Stop the worker (kill or graceful shutdown)
-                if immediate_kill:
-                    logger.info(f"Killing {worker_name} with PID {worker.get_pid()}")
-                    terminate_process_tree(
-                        worker.get_pid(), immediate_kill=True, timeout=0
-                    )
-                else:
-                    logger.info(
-                        f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
-                    )
-                    terminate_process_tree(
-                        worker.get_pid(), immediate_kill=False, timeout=10
-                    )
-
-                # Step 6: Validate response based on migration setting
-                if migration_limit > 0:
-                    validate_response(request_thread, response_list)
-                    verify_migration_occurred(frontend)
-                    verify_migration_metrics(
-                        frontend.frontend_port, expected_ongoing_request_count=1
-                    )
-                else:
-                    try:
-                        validate_response(request_thread, response_list)
-                        pytest.fail(
-                            "Request succeeded unexpectedly when migration was disabled"
-                        )
-                    except AssertionError as e:
-                        assert "SSE error event received: " in str(
-                            e
-                        ), f"Unexpected error: {e}"
-
-                    try:
-                        verify_migration_occurred(frontend)
-                        pytest.fail("Migration unexpectedly occurred when disabled")
-                    except AssertionError as e:
-                        assert (
-                            "'Cannot recreate stream: ...' error found in logs"
-                            in str(e)
-                        )
 
 
 @pytest.mark.skip(reason="Cannot reliably migrate at Prefill that finish < 1 ms")
@@ -340,58 +293,16 @@ def test_request_migration_sglang_prefill(
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
-                    # Step 4: Send the request (long prompt to extend prefill time)
-                    request_thread, response_list = start_request(
-                        frontend.frontend_port, use_long_prompt=True
+                    # Step 4: Run migration test
+                    run_migration_test(
+                        frontend,
+                        prefill1,
+                        prefill2,
+                        receiving_pattern="New Request ID: ",
+                        migration_limit=migration_limit,
+                        immediate_kill=immediate_kill,
+                        use_long_prompt=True,
                     )
-
-                    # Step 5: Determine which prefill worker received the request
-                    worker, worker_name = determine_request_receiving_worker(
-                        prefill1, prefill2, receiving_pattern="New Request ID: "
-                    )
-
-                    # Step 6: Stop the worker (kill or graceful shutdown)
-                    if immediate_kill:
-                        logger.info(
-                            f"Killing {worker_name} with PID {worker.get_pid()}"
-                        )
-                        terminate_process_tree(
-                            worker.get_pid(), immediate_kill=True, timeout=0
-                        )
-                    else:
-                        logger.info(
-                            f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
-                        )
-                        terminate_process_tree(
-                            worker.get_pid(), immediate_kill=False, timeout=10
-                        )
-
-                    # Step 7: Validate response based on migration setting
-                    if migration_limit > 0:
-                        validate_response(request_thread, response_list)
-                        verify_migration_occurred(frontend)
-                        verify_migration_metrics(
-                            frontend.frontend_port, expected_ongoing_request_count=1
-                        )
-                    else:
-                        try:
-                            validate_response(request_thread, response_list)
-                            pytest.fail(
-                                "Request succeeded unexpectedly when migration was disabled"
-                            )
-                        except AssertionError as e:
-                            assert "SSE error event received: " in str(
-                                e
-                            ), f"Unexpected error: {e}"
-
-                        try:
-                            verify_migration_occurred(frontend)
-                            pytest.fail("Migration unexpectedly occurred when disabled")
-                        except AssertionError as e:
-                            assert (
-                                "'Cannot recreate stream: ...' error found in logs"
-                                in str(e)
-                            )
 
 
 @pytest.mark.skip(reason="KV cache transfer may fail")
@@ -447,58 +358,13 @@ def test_request_migration_sglang_decode(
                 ) as decode2:
                     logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
 
-                    # Step 4: Send the request
-                    request_thread, response_list = start_request(
-                        frontend.frontend_port
+                    # Step 4: Run migration test
+                    run_migration_test(
+                        frontend,
+                        decode1,
+                        decode2,
+                        receiving_pattern="New Request ID: ",
+                        migration_limit=migration_limit,
+                        immediate_kill=immediate_kill,
+                        wait_for_new_response_before_stop=True,
                     )
-
-                    # Step 5: Determine which decode worker received the request
-                    worker, worker_name = determine_request_receiving_worker(
-                        decode1, decode2, receiving_pattern="New Request ID: "
-                    )
-
-                    # Wait for a new response making sure worker is actively decoding
-                    wait_for_response(response_list)
-
-                    # Step 6: Stop the worker (kill or graceful shutdown)
-                    if immediate_kill:
-                        logger.info(
-                            f"Killing {worker_name} with PID {worker.get_pid()}"
-                        )
-                        terminate_process_tree(
-                            worker.get_pid(), immediate_kill=True, timeout=0
-                        )
-                    else:
-                        logger.info(
-                            f"Gracefully shutting down {worker_name} with PID {worker.get_pid()}"
-                        )
-                        terminate_process_tree(
-                            worker.get_pid(), immediate_kill=False, timeout=10
-                        )
-
-                    # Step 7: Validate response based on migration setting
-                    if migration_limit > 0:
-                        validate_response(request_thread, response_list)
-                        verify_migration_occurred(frontend)
-                        verify_migration_metrics(
-                            frontend.frontend_port, expected_ongoing_request_count=1
-                        )
-                    else:
-                        try:
-                            validate_response(request_thread, response_list)
-                            pytest.fail(
-                                "Request succeeded unexpectedly when migration was disabled"
-                            )
-                        except AssertionError as e:
-                            assert "SSE error event received: " in str(
-                                e
-                            ), f"Unexpected error: {e}"
-
-                        try:
-                            verify_migration_occurred(frontend)
-                            pytest.fail("Migration unexpectedly occurred when disabled")
-                        except AssertionError as e:
-                            assert (
-                                "'Cannot recreate stream: ...' error found in logs"
-                                in str(e)
-                            )
