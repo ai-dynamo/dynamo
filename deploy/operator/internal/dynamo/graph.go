@@ -1075,12 +1075,12 @@ func GenerateBasePodSpec(
 
 	// Inject checkpoint configuration if enabled
 	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
-	// Storage config comes from the operator's controller config (Helm values)
-	var storageConfig *controller_common.CheckpointStorageConfig
+	// Checkpoint config comes from the operator's controller config (Helm values)
+	var checkpointConfig *controller_common.CheckpointConfig
 	if controllerConfig.Checkpoint.Enabled {
-		storageConfig = &controllerConfig.Checkpoint.Storage
+		checkpointConfig = &controllerConfig.Checkpoint
 	}
-	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, storageConfig); err != nil {
+	if err := checkpoint.InjectCheckpointIntoPodSpec(&podSpec, checkpointInfo, checkpointConfig); err != nil {
 		return nil, fmt.Errorf("failed to inject checkpoint config: %w", err)
 	}
 

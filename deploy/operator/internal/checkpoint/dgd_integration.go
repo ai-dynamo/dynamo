@@ -27,6 +27,7 @@ import (
 	controller_common "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -161,8 +162,8 @@ func ResolveCheckpointForService(
 }
 
 // InjectCheckpointEnvVars adds checkpoint-related environment variables to a container
-// Sets STORAGE_TYPE, LOCATION, PATH, and HASH for unified storage backend handling.
-func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo) {
+// Sets STORAGE_TYPE, LOCATION, PATH, HASH, and CRIU-related vars for unified storage backend handling.
+func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo, config *controller_common.CheckpointConfig) {
 	if !info.Enabled {
 		return
 	}
@@ -206,6 +207,35 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo) 
 			Value: info.Hash,
 		})
 	}
+
+	// Add CRIU-related env vars for restore operations
+	criuTimeout := consts.DefaultCRIUTimeout
+	if config != nil && config.CRIUTimeout != "" {
+		criuTimeout = config.CRIUTimeout
+	}
+
+	envVars = append(envVars,
+		corev1.EnvVar{
+			Name:  consts.EnvRestoreMarkerFile,
+			Value: consts.RestoreMarkerFilePath,
+		},
+		corev1.EnvVar{
+			Name:  consts.EnvCRIUWorkDir,
+			Value: consts.CRIUWorkDirPath,
+		},
+		corev1.EnvVar{
+			Name:  consts.EnvCRIULogDir,
+			Value: consts.CRIULogDirPath,
+		},
+		corev1.EnvVar{
+			Name:  consts.EnvCUDAPluginDir,
+			Value: consts.CUDAPluginDirPath,
+		},
+		corev1.EnvVar{
+			Name:  consts.EnvCRIUTimeout,
+			Value: criuTimeout,
+		},
+	)
 
 	// Prepend checkpoint env vars to ensure they're available
 	container.Env = append(envVars, container.Env...)
@@ -253,12 +283,12 @@ func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 
 // InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec.
 // Takes CheckpointInfo (resolved by ResolveCheckpointForService) and adds checkpoint-related
-// environment variables and volumes to the pod spec.
-// Storage configuration is optional - if not provided, defaults to PVC.
+// environment variables, volumes, and security context to the pod spec.
+// Checkpoint config is optional - if not provided, defaults are used.
 func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
-	storageConfig *controller_common.CheckpointStorageConfig,
+	checkpointConfig *controller_common.CheckpointConfig,
 ) error {
 	if checkpointInfo == nil || !checkpointInfo.Enabled {
 		return nil
@@ -295,10 +325,25 @@ func InjectCheckpointIntoPodSpec(
 		return fmt.Errorf("no container found to inject checkpoint config")
 	}
 
+	// Apply pod-level security context for CRIU restore
+	// hostIPC: Required for CRIU to access shared memory segments and IPC resources
+	podSpec.HostIPC = true
+
+	// Apply container-level security context for CRIU restore
+	// Privileged mode is required for CRIU restore operations
+	if mainContainer.SecurityContext == nil {
+		mainContainer.SecurityContext = &corev1.SecurityContext{}
+	}
+	mainContainer.SecurityContext.Privileged = ptr.To(true)
+
 	// Determine storage type and compute location/path
 	storageType := controller_common.CheckpointStorageTypePVC // default
-	if storageConfig != nil && storageConfig.Type != "" {
-		storageType = storageConfig.Type
+	var storageConfig *controller_common.CheckpointStorageConfig
+	if checkpointConfig != nil {
+		storageConfig = &checkpointConfig.Storage
+		if storageConfig.Type != "" {
+			storageType = storageConfig.Type
+		}
 	}
 
 	switch storageType {
@@ -341,7 +386,7 @@ func InjectCheckpointIntoPodSpec(
 	}
 
 	// Inject checkpoint environment variables (for all storage types)
-	InjectCheckpointEnvVars(mainContainer, info)
+	InjectCheckpointEnvVars(mainContainer, info, checkpointConfig)
 
 	return nil
 }

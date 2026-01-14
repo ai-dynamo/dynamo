@@ -125,8 +125,30 @@ const (
 	// The readiness probe watches this file to trigger DaemonSet checkpoint.
 	EnvCheckpointReadyFile = "DYNAMO_CHECKPOINT_READY_FILE"
 
+	// CRIU-related environment variables for restore operations
+	// EnvRestoreMarkerFile is the file created by CRIU after successful restore
+	EnvRestoreMarkerFile = "DYNAMO_RESTORE_MARKER_FILE"
+	// EnvCRIUWorkDir is the working directory for CRIU operations
+	EnvCRIUWorkDir = "CRIU_WORK_DIR"
+	// EnvCRIULogDir is the directory where CRIU writes logs
+	EnvCRIULogDir = "CRIU_LOG_DIR"
+	// EnvCUDAPluginDir is the directory containing CRIU CUDA plugins
+	EnvCUDAPluginDir = "CUDA_PLUGIN_DIR"
+	// EnvCRIUTimeout is the timeout for CRIU operations
+	EnvCRIUTimeout = "CRIU_TIMEOUT"
+
 	// CheckpointReadyFilePath is the default path for the ready file
 	CheckpointReadyFilePath = "/tmp/checkpoint-ready"
+	// RestoreMarkerFilePath is the default path for the restore marker
+	RestoreMarkerFilePath = "/tmp/dynamo-restored"
+	// CRIUWorkDirPath is the default CRIU work directory
+	CRIUWorkDirPath = "/var/criu-work"
+	// CRIULogDirPath is the default CRIU log directory
+	CRIULogDirPath = "/checkpoints/restore-logs"
+	// CUDAPluginDirPath is the default CUDA plugin directory
+	CUDAPluginDirPath = "/usr/local/lib/criu"
+	// DefaultCRIUTimeout is the default CRIU timeout in seconds (6 hours)
+	DefaultCRIUTimeout = "21600"
 
 	CheckpointVolumeName       = "checkpoint-storage"
 	CheckpointSignalVolumeName = "checkpoint-signal"

@@ -154,6 +154,7 @@ func main() {
 	var checkpointEnabled bool
 	var checkpointStorageType string
 	var checkpointSignalHostPath string
+	var checkpointCRIUTimeout string
 	var checkpointPVCName string
 	var checkpointPVCBasePath string
 	var checkpointS3URI string
@@ -220,6 +221,8 @@ func main() {
 		"Checkpoint storage backend type: pvc, s3, or oci")
 	flag.StringVar(&checkpointSignalHostPath, "checkpoint-signal-host-path", "",
 		"Host path for signal files used for checkpoint job coordination")
+	flag.StringVar(&checkpointCRIUTimeout, "checkpoint-criu-timeout", "21600",
+		"CRIU timeout in seconds (required for CUDA checkpoints/restores, default: 21600 = 6 hours)")
 	flag.StringVar(&checkpointPVCName, "checkpoint-pvc-name", "checkpoint-storage",
 		"Name of the PVC for checkpoint storage (used when storage-type=pvc)")
 	flag.StringVar(&checkpointPVCBasePath, "checkpoint-pvc-base-path", "/checkpoints",
@@ -301,7 +304,8 @@ func main() {
 		},
 		DiscoveryBackend: discoveryBackend,
 		Checkpoint: commonController.CheckpointConfig{
-			Enabled: checkpointEnabled,
+			Enabled:     checkpointEnabled,
+			CRIUTimeout: checkpointCRIUTimeout,
 			Storage: commonController.CheckpointStorageConfig{
 				Type:           checkpointStorageType,
 				SignalHostPath: checkpointSignalHostPath,

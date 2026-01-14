@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -313,6 +314,15 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 
 	// Set restart policy to Never for Jobs
 	podTemplate.Spec.RestartPolicy = corev1.RestartPolicyNever
+
+	// Apply seccomp profile to block io_uring syscalls
+	// CRIU doesn't support io_uring memory mappings, so we must block these syscalls
+	podTemplate.Spec.SecurityContext = &corev1.PodSecurityContext{
+		SeccompProfile: &corev1.SeccompProfile{
+			Type:             corev1.SeccompProfileTypeLocalhost,
+			LocalhostProfile: ptr.To("profiles/block-iouring.json"),
+		},
+	}
 
 	// Build the Job
 	activeDeadlineSeconds := ckpt.Spec.Job.ActiveDeadlineSeconds

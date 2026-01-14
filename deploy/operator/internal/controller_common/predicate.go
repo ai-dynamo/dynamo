@@ -103,6 +103,8 @@ type CheckpointConfig struct {
 	Enabled bool
 	// Storage holds storage backend configuration
 	Storage CheckpointStorageConfig
+	// CRIUTimeout is the CRIU timeout in seconds (required for CUDA checkpoints/restores)
+	CRIUTimeout string
 }
 
 // Checkpoint storage type constants
