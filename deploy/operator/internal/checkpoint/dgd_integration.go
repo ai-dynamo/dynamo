@@ -282,9 +282,14 @@ func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 }
 
 // InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec.
-// Takes CheckpointInfo (resolved by ResolveCheckpointForService) and adds checkpoint-related
-// environment variables, volumes, and security context to the pod spec.
-// Checkpoint config is optional - if not provided, defaults are used.
+// This is the single entry point for ALL checkpoint-related pod modifications:
+// 1. Command/Args transformation - moves Command to Args to respect image ENTRYPOINT
+// 2. Security context - applies hostIPC and privileged mode for CRIU restore
+// 3. Environment variables - injects checkpoint path, hash, and CRIU settings
+// 4. Storage configuration - adds volumes and mounts based on storage type
+//
+// Takes CheckpointInfo (resolved by ResolveCheckpointForService) and checkpoint config.
+// Returns error if checkpoint is enabled but configuration is invalid.
 func InjectCheckpointIntoPodSpec(
 	podSpec *corev1.PodSpec,
 	checkpointInfo *CheckpointInfo,
@@ -309,7 +314,7 @@ func InjectCheckpointIntoPodSpec(
 		info.Hash = hash
 	}
 
-	// Find the main container first (needed for all storage types)
+	// Find the main container first (needed for all modifications)
 	var mainContainer *corev1.Container
 	for i := range podSpec.Containers {
 		if podSpec.Containers[i].Name == consts.MainContainerName {
@@ -325,7 +330,21 @@ func InjectCheckpointIntoPodSpec(
 		return fmt.Errorf("no container found to inject checkpoint config")
 	}
 
-	// Apply pod-level security context for CRIU restore
+	// 1. Handle command/args for checkpoint-enabled images
+	// When checkpoint is enabled, the image has a smart ENTRYPOINT (e.g., /smart-entrypoint.sh)
+	// that detects checkpoints and decides between restore and cold start.
+	// We need to pass the user's command as arguments to this ENTRYPOINT rather than
+	// overriding it with Command.
+	if len(mainContainer.Command) > 0 {
+		// Combine Command + Args into a single Args array
+		// This allows the image's ENTRYPOINT to receive the full command as arguments
+		combinedArgs := append(mainContainer.Command, mainContainer.Args...)
+		mainContainer.Args = combinedArgs
+		mainContainer.Command = nil // Clear Command to use image's ENTRYPOINT
+	}
+	// If Command is empty but Args exists, keep Args as-is (they'll be passed to ENTRYPOINT)
+
+	// 2. Apply pod-level security context for CRIU restore
 	// hostIPC: Required for CRIU to access shared memory segments and IPC resources
 	podSpec.HostIPC = true
 

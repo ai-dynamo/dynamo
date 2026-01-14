@@ -1074,6 +1074,11 @@ func GenerateBasePodSpec(
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
 
 	// Inject checkpoint configuration if enabled
+	// This handles ALL checkpoint-related modifications:
+	// - Command/Args transformation (moves Command to Args to respect image ENTRYPOINT)
+	// - Security context (hostIPC, privileged mode)
+	// - Environment variables (checkpoint path, hash, CRIU settings)
+	// - Storage configuration (volumes, mounts)
 	// CheckpointInfo should have been resolved by ResolveCheckpointForService before calling this function
 	// Checkpoint config comes from the operator's controller config (Helm values)
 	var checkpointConfig *controller_common.CheckpointConfig
