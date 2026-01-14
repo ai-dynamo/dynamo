@@ -7,6 +7,7 @@
 
 name: Test Coverage Feature
 on:
+  pull_request:
   workflow_dispatch:  # Manual trigger only
 
 permissions:
