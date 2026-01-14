@@ -186,6 +186,35 @@ def determine_request_receiving_worker(
         pytest.fail("Neither worker received the request")
 
 
+def wait_for_response(
+    response_list: list[tuple[str | None | Exception, float]],
+    num_responses: int = 5,
+    max_wait_time: float = 10.0,
+) -> None:
+    """
+    Block until num_responses new responses are received or max_wait_time is reached.
+
+    Args:
+        response_list: List being populated by background thread
+        num_responses: Number of new responses to wait for (default 5)
+        max_wait_time: Maximum time to wait in seconds (default 10s)
+    """
+    initial_len = len(response_list)
+    target_len = initial_len + num_responses
+    poll_interval = 0.001  # 1ms
+    elapsed = 0.0
+
+    while elapsed < max_wait_time:
+        if len(response_list) >= target_len:
+            return
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+    logger.warning(
+        f"Only received {len(response_list) - initial_len}/{num_responses} new responses within {max_wait_time}s"
+    )
+
+
 def validate_response(
     request_thread: threading.Thread,
     response_list: list[tuple[str | None | Exception, float]],

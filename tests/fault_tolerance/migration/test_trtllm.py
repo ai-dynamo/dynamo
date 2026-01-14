@@ -27,6 +27,7 @@ from .utils import (
     validate_response,
     verify_migration_metrics,
     verify_migration_occurred,
+    wait_for_response,
 )
 
 logger = logging.getLogger(__name__)
@@ -440,6 +441,9 @@ def test_request_migration_trtllm_decode(
                     worker, worker_name = determine_request_receiving_worker(
                         decode1, decode2, receiving_pattern="Decode Request ID: "
                     )
+
+                    # Wait for a new response making sure worker is actively decoding
+                    wait_for_response(response_list)
 
                     # Step 6: Stop the worker (kill or graceful shutdown)
                     if immediate_kill:
