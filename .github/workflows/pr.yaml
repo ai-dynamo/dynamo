@@ -738,7 +738,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: builder-cpu-amd-runner
     if: always()
-    needs: [init, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    needs: [init, operator, vllm-build, sglang-build, trtllm-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
