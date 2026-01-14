@@ -11,7 +11,7 @@ on:
   workflow_dispatch:  # Manual trigger only
 
 permissions:
-  contents: read
+  contents: write  # Required for coverage-report job to push to coverage-snapshots branch
 
 jobs:
   test-coverage:

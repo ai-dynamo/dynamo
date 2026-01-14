@@ -9,7 +9,7 @@ on:
   workflow_dispatch:  # Allow manual triggering for testing
 
 permissions:
-  contents: read
+  contents: write  # Required for coverage-report job to push to coverage-snapshots branch
 
 jobs:
   ci-pipeline:
