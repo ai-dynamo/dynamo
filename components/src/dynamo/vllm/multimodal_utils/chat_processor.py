@@ -20,7 +20,7 @@ from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_check
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     CompletionRequest,
     RequestResponseMetadata,
@@ -198,7 +198,9 @@ class ChatProcessor:
         if request.stream:
             # Handle streaming response
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
@@ -231,7 +233,9 @@ class ChatProcessor:
             # Collect all chunks into a single response
             full_response = None
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
