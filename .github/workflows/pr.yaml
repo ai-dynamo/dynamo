@@ -187,7 +187,6 @@ jobs:
   vllm-build:
     needs: [init]
     if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.init.outputs.core == 'true' || needs.init.outputs.vllm == 'true'
-    with:
     strategy:
       fail-fast: false
       matrix:
@@ -285,7 +284,6 @@ jobs:
   sglang-build:
     needs: [init]
     if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.init.outputs.core == 'true' || needs.init.outputs.sglang == 'true'
-    with:
     strategy:
       fail-fast: false
       matrix:
