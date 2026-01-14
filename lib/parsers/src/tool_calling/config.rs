@@ -294,4 +294,16 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Dsml(DsmlParserConfig::default()),
         }
     }
+
+    /// Configuration for Meituan LongCat tool calls
+    /// <longcat_tool_call>{"name": "get_weather", "arguments": {"location": "San Francisco, CA"}}</longcat_tool_call>
+    pub fn longcat() -> Self {
+        Self {
+            parser_config: ParserConfig::Json(JsonParserConfig {
+                tool_call_start_tokens: vec!["<longcat_tool_call>".to_string()],
+                tool_call_end_tokens: vec!["</longcat_tool_call>".to_string()],
+                ..Default::default()
+            }),
+        }
+    }
 }

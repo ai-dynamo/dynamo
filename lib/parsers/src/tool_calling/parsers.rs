@@ -42,6 +42,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("deepseek_v3_2", ToolCallConfig::deepseek_v3_2());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
+        map.insert("longcat", ToolCallConfig::longcat());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
         map
@@ -208,6 +209,7 @@ mod tests {
             "deepseek_v3_2",
             "qwen3_coder",
             "jamba",
+            "longcat",
             "nemotron_nano",
         ];
         for parser in available_parsers {
@@ -1676,6 +1678,110 @@ Remember, San Francisco weather can be quite unpredictable, particularly with it
         assert_eq!(name, "get_weather");
         assert_eq!(args["location"], "San Francisco, CA");
         assert_eq!(args["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_longcat_simple_tool_call() {
+        let input = r#"<longcat_tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</longcat_tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("longcat"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco, CA");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[tokio::test]
+    async fn test_longcat_tool_call_with_normal_text() {
+        let input = r#"Let me check the weather for you.
+<longcat_tool_call>
+{"name": "get_weather", "arguments": {"location": "New York, NY"}}
+</longcat_tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("longcat"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            content,
+            Some("Let me check the weather for you.".to_string())
+        );
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "New York, NY");
+    }
+
+    #[tokio::test]
+    async fn test_longcat_multiple_tool_calls() {
+        // LongCat supports multiple consecutive tool calls
+        let input = r#"<longcat_tool_call>
+{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "unit": "fahrenheit"}}
+</longcat_tool_call><longcat_tool_call>
+{"name": "get_weather", "arguments": {"location": "New York, NY", "unit": "celsius"}}
+</longcat_tool_call>"#;
+        let config = ToolCallConfig::longcat();
+        let (result, content) = try_tool_call_parse(input, &config, None).await.unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert!(!result.is_empty());
+        assert_eq!(result.len(), 2);
+        let (name1, args1) = extract_name_and_args(result[0].clone());
+        assert_eq!(name1, "get_weather");
+        assert_eq!(args1["location"], "San Francisco, CA");
+        assert_eq!(args1["unit"], "fahrenheit");
+        let (name2, args2) = extract_name_and_args(result[1].clone());
+        assert_eq!(name2, "get_weather");
+        assert_eq!(args2["location"], "New York, NY");
+        assert_eq!(args2["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_longcat_tool_call_compact_format() {
+        // Test without newlines inside the tag
+        let input = r#"<longcat_tool_call>{"name": "search", "arguments": {"query": "test"}}</longcat_tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("longcat"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "search");
+        assert_eq!(args["query"], "test");
+    }
+
+    #[tokio::test]
+    async fn test_longcat_tool_call_with_complex_arguments() {
+        let input = r#"<longcat_tool_call>
+{"name": "process_data", "arguments": {"items": [1, 2, 3], "config": {"enabled": true, "threshold": 0.5}}}
+</longcat_tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("longcat"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "process_data");
+        assert_eq!(args["items"], serde_json::json!([1, 2, 3]));
+        assert_eq!(args["config"]["enabled"], true);
+        assert_eq!(args["config"]["threshold"], 0.5);
+    }
+
+    #[tokio::test]
+    async fn test_longcat_no_tool_call() {
+        let input = r#"Hello, how can I help you today?"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("longcat"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            content,
+            Some("Hello, how can I help you today?".to_string())
+        );
+        assert!(result.is_empty());
     }
 }
 
