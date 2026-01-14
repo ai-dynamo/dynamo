@@ -212,7 +212,7 @@ dynamo-operator:
   # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
   checkpoint:
     # -- Whether to enable checkpoint/restore functionality. When enabled, deploys the checkpoint-agent DaemonSet for creating container checkpoints.
-    enabled: false
+    enabled: true
 
     # Storage configuration for checkpoint tar files
     # Supports multiple backends: pvc (default), s3, oci
@@ -249,9 +249,9 @@ dynamo-operator:
       # Container image for the checkpoint agent
       image:
         # -- Container image repository for the checkpoint agent
-        repository: nvcr.io/nvidia/ai-dynamo/checkpoint-agent
+        repository: jmancuso768/cr-daemonset
         # -- Container image tag for the checkpoint agent
-        tag: "latest"
+        tag: 8dfe6b08348207b1c731ebd93a52ec7ca5c2d09c
         # -- Image pull policy for the checkpoint agent
         pullPolicy: IfNotPresent
 
@@ -265,11 +265,17 @@ dynamo-operator:
           memory: "128Mi"
 
       # -- Node selector for checkpoint agent pods. Use this to restrict checkpoint agents to specific nodes (e.g., GPU nodes).
-      nodeSelector: {}
-      #  nvidia.com/gpu.present: "true"
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
 
-      # -- Node tolerations for checkpoint agent pods
-      tolerations: []
+      # -- Node tolerations for checkpoint agent pods. Default: tolerate GPU taints and dedicated compute nodes.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+        - key: dedicated_compute
+          operator: Exists
+          effect: NoSchedule
 
       # -- Affinity rules for checkpoint agent pods
       affinity: {}
@@ -285,6 +291,18 @@ dynamo-operator:
 
       # -- Path to the container runtime socket. The checkpoint agent needs access to the container runtime to perform checkpoint operations. Change to /var/run/docker.sock for Docker runtime.
       containerRuntimeSocket: /run/containerd/containerd.sock
+
+      # -- Runtime class for the checkpoint agent pods. Set to "nvidia" for GPU access (required for CUDA checkpointing). Leave empty to use the default runtime.
+      runtimeClassName: nvidia
+
+      # -- Path to CUDA plugin directory for GPU checkpoint support. Required for GPU workloads to checkpoint CUDA device memory.
+      cudaPluginDir: /usr/local/lib/criu
+
+      # -- CRIU ghost file size limit in bytes. Ghost files are used for temporary file handling during checkpoint. 512MB is recommended for GPU workloads with large memory allocations.
+      criuGhostLimit: "536870912"
+
+      # -- CRIU operation timeout in seconds. Maximum time to wait for checkpoint/restore to complete. Increase for models with very large memory footprints. Default: 21600 (6 hours)
+      criuTimeout: "21600"
 
 
 # Grove component - distributed inference orchestration

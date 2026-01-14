@@ -206,11 +206,18 @@ checkpoint:
 
     # Node selector for checkpoint agent pods
     # Use this to restrict to GPU nodes
-    nodeSelector: {}
-    #  nvidia.com/gpu.present: "true"
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
 
     # Additional tolerations for the checkpoint agent
-    tolerations: []
+    # Default: tolerate GPU taints and dedicated compute nodes
+    tolerations:
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      - key: dedicated_compute
+        operator: Exists
+        effect: NoSchedule
 
     # Affinity rules for checkpoint agent pods
     affinity: {}
@@ -227,6 +234,26 @@ checkpoint:
     # Path to container runtime socket
     # Change to /var/run/docker.sock for Docker runtime
     containerRuntimeSocket: /run/containerd/containerd.sock
+
+    # Runtime class for the checkpoint agent pods
+    # Set to "nvidia" for GPU access (required for CUDA checkpointing)
+    # Leave empty to use the default runtime
+    runtimeClassName: nvidia
+
+    # Path to CUDA plugin directory for GPU checkpoint support
+    # Required for GPU workloads to checkpoint CUDA device memory
+    cudaPluginDir: /usr/local/lib/criu
+
+    # CRIU ghost file size limit in bytes
+    # Ghost files are used for temporary file handling during checkpoint
+    # 512MB is recommended for GPU workloads with large memory allocations
+    criuGhostLimit: "536870912"
+
+    # CRIU operation timeout in seconds
+    # Maximum time to wait for checkpoint/restore to complete
+    # Increase for models with very large memory footprints
+    # 21600s (6 hours) is recommended for large LLMs (70B+)
+    criuTimeout: "21600"
 
 # Webhook configuration
 webhook:

@@ -149,6 +149,7 @@ spec:
           - --checkpoint-enabled=true
           - --checkpoint-storage-type={{ .Values.checkpoint.storage.type }}
           - --checkpoint-signal-host-path={{ .Values.checkpoint.storage.signalHostPath }}
+          - --checkpoint-criu-timeout={{ .Values.checkpoint.agent.criuTimeout }}
           {{- if eq .Values.checkpoint.storage.type "pvc" }}
           - --checkpoint-pvc-name={{ .Values.checkpoint.storage.pvc.pvcName }}
           - --checkpoint-pvc-base-path={{ .Values.checkpoint.storage.pvc.basePath }}

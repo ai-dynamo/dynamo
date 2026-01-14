@@ -15,6 +15,30 @@
 
 {{- if .Values.checkpoint.enabled }}
 ---
+# Seccomp profile to block io_uring syscalls
+# CRIU doesn't support io_uring memory mappings, so we block these syscalls
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dynamo-operator.fullname" . }}-seccomp-block-iouring
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+data:
+  block-iouring.json: |
+    {
+      "defaultAction": "SCMP_ACT_ALLOW",
+      "architectures": ["SCMP_ARCH_X86_64", "SCMP_ARCH_X86", "SCMP_ARCH_X32"],
+      "syscalls": [
+        {
+          "names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],
+          "action": "SCMP_ACT_ERRNO",
+          "comment": "Block io_uring syscalls - CRIU doesn't support io_uring memory mappings"
+        }
+      ]
+    }
+---
 # ServiceAccount for checkpoint agent
 apiVersion: v1
 kind: ServiceAccount
@@ -39,13 +63,6 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
-  # Update DynamoCheckpoint CR status after checkpoint creation
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocheckpoints"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["nvidia.com"]
-    resources: ["dynamocheckpoints/status"]
-    verbs: ["patch", "update"]
 ---
 # ClusterRoleBinding for checkpoint agent
 apiVersion: rbac.authorization.k8s.io/v1
@@ -109,6 +126,28 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.checkpoint.agent.runtimeClassName }}
+      # Use specified runtime class for GPU access (e.g., nvidia for CUDA checkpointing)
+      runtimeClassName: {{ .Values.checkpoint.agent.runtimeClassName }}
+      {{- end }}
+      initContainers:
+        # Deploy seccomp profile to host before starting the agent
+        # This profile blocks io_uring syscalls that CRIU doesn't support
+        - name: deploy-seccomp
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /host-seccomp/profiles
+              cp /seccomp-profiles/block-iouring.json /host-seccomp/profiles/block-iouring.json
+              echo "Deployed seccomp profile to /var/lib/kubelet/seccomp/profiles/block-iouring.json"
+          volumeMounts:
+            - name: seccomp-profiles
+              mountPath: /seccomp-profiles
+              readOnly: true
+            - name: host-seccomp
+              mountPath: /host-seccomp
       containers:
         - name: agent
           image: "{{ .Values.checkpoint.agent.image.repository }}:{{ .Values.checkpoint.agent.image.tag }}"
@@ -120,40 +159,56 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
-            # Unified checkpoint env vars (same as worker pods)
+            # Agent mode: use "watcher" to watch for labeled pods
+            - name: CHECKPOINT_SIGNAL_FROM
+              value: "watcher"
+            # Checkpoint storage directory (PVC-only for now)
+            - name: CHECKPOINT_DIR
+              value: {{ .Values.checkpoint.storage.pvc.basePath | quote }}
+            # Host proc mount point for CRIU operations
+            - name: HOST_PROC
+              value: "/host/proc"
+            # Containerd socket path
+            - name: CONTAINERD_SOCKET
+              value: {{ .Values.checkpoint.agent.containerRuntimeSocket }}
+            {{- if .Values.checkpoint.agent.cudaPluginDir }}
+            # CUDA plugin directory for GPU checkpoint support
+            - name: CUDA_PLUGIN_DIR
+              value: {{ .Values.checkpoint.agent.cudaPluginDir | quote }}
+            {{- end }}
+            {{- if .Values.checkpoint.agent.criuGhostLimit }}
+            # CRIU ghost file size limit in bytes
+            - name: CRIU_GHOST_LIMIT
+              value: {{ .Values.checkpoint.agent.criuGhostLimit | quote }}
+            {{- end }}
+            {{- if .Values.checkpoint.agent.criuTimeout }}
+            # CRIU timeout in seconds
+            - name: CRIU_TIMEOUT
+              value: {{ .Values.checkpoint.agent.criuTimeout | quote }}
+            {{- end }}
+            # Keep for future S3/OCI support (not yet used by agent)
             - name: DYNAMO_CHECKPOINT_STORAGE_TYPE
               value: {{ .Values.checkpoint.storage.type | quote }}
-            # Base location URI (agent appends /{hash}.tar when writing)
-            - name: DYNAMO_CHECKPOINT_LOCATION
-              {{- if eq .Values.checkpoint.storage.type "pvc" }}
-              value: {{ .Values.checkpoint.storage.pvc.basePath | quote }}
-              {{- else if eq .Values.checkpoint.storage.type "s3" }}
-              value: {{ .Values.checkpoint.storage.s3.uri | quote }}
-              {{- else if eq .Values.checkpoint.storage.type "oci" }}
-              value: {{ .Values.checkpoint.storage.oci.uri | quote }}
-              {{- end }}
-            # Signal directory for checkpoint completion signaling
-            - name: DYNAMO_CHECKPOINT_SIGNAL_DIR
-              value: {{ .Values.checkpoint.storage.signalHostPath | quote }}
-            # Labels to watch for checkpoint source pods
-            - name: CHECKPOINT_SOURCE_LABEL
-              value: "nvidia.com/checkpoint-source=true"
           volumeMounts:
             {{- if eq .Values.checkpoint.storage.type "pvc" }}
             # Mount the checkpoint PVC (only for PVC storage type)
             - name: checkpoints
               mountPath: {{ .Values.checkpoint.storage.pvc.basePath }}
             {{- end }}
-            # Mount the signal directory for communication with checkpoint jobs
-            - name: signal-dir
-              mountPath: {{ .Values.checkpoint.storage.signalHostPath }}
-            # Mount containerd socket for container access
-            - name: containerd-socket
-              mountPath: /run/containerd/containerd.sock
-            # Mount host proc for CRIU
-            - name: host-proc
-              mountPath: /host-proc
+            # Mount containerd runtime directory for checkpoint operations
+            - name: containerd-run
+              mountPath: /run/containerd
+            # Mount kubelet pods directory for volume discovery
+            - name: kubelet-pods
+              mountPath: /var/lib/kubelet/pods
               readOnly: true
+            # Mount containerd storage for filesystem info
+            - name: containerd-storage
+              mountPath: /var/lib/containerd
+              readOnly: true
+            # Mount host proc for CRIU and signal file writing
+            - name: host-proc
+              mountPath: /host/proc
             # Mount host cgroup for CRIU
             - name: host-cgroup
               mountPath: /sys/fs/cgroup
@@ -172,23 +227,41 @@ spec:
           resources:
             {{- toYaml .Values.checkpoint.agent.resources | nindent 12 }}
       volumes:
+        # Seccomp profile ConfigMap (used by initContainer)
+        - name: seccomp-profiles
+          configMap:
+            name: {{ include "dynamo-operator.fullname" . }}-seccomp-block-iouring
+        # Host seccomp directory (for deploying the profile)
+        - name: host-seccomp
+          hostPath:
+            path: /var/lib/kubelet/seccomp
+            type: DirectoryOrCreate
         {{- if eq .Values.checkpoint.storage.type "pvc" }}
         - name: checkpoints
           persistentVolumeClaim:
             claimName: {{ .Values.checkpoint.storage.pvc.pvcName }}
         {{- end }}
-        - name: signal-dir
+        # Containerd runtime directory (read-write for checkpoint operations)
+        - name: containerd-run
           hostPath:
-            path: {{ .Values.checkpoint.storage.signalHostPath }}
-            type: DirectoryOrCreate
-        - name: containerd-socket
+            path: /run/containerd
+            type: Directory
+        # Kubelet pods directory (for volume discovery)
+        - name: kubelet-pods
           hostPath:
-            path: {{ .Values.checkpoint.agent.containerRuntimeSocket }}
-            type: Socket
+            path: /var/lib/kubelet/pods
+            type: Directory
+        # Containerd storage directory (for filesystem info)
+        - name: containerd-storage
+          hostPath:
+            path: /var/lib/containerd
+            type: Directory
+        # Host proc (for CRIU and signal files - needs write access)
         - name: host-proc
           hostPath:
             path: /proc
             type: Directory
+        # Host cgroup (for CRIU)
         - name: host-cgroup
           hostPath:
             path: /sys/fs/cgroup
