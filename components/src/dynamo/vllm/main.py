@@ -68,7 +68,9 @@ async def wait_for_checkpoint_signal_file(signal_file: str) -> bool:
         False if signal file detected (should exit)
     """
     # Get restore marker file path (created by restore entrypoint before CRIU restore)
-    restore_marker = os.environ.get("DYNAMO_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
+    restore_marker = os.environ.get(
+        "DYNAMO_RESTORE_MARKER_FILE", "/tmp/dynamo-restored"
+    )
 
     logger.info("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
     logger.info(f"CHECKPOINT_READY: Waiting for signal file: {signal_file}")
@@ -77,7 +79,9 @@ async def wait_for_checkpoint_signal_file(signal_file: str) -> bool:
     while True:
         # Check if we've been restored (marker file created by restore entrypoint)
         if os.path.exists(restore_marker):
-            logger.info(f"Detected restore from checkpoint (marker file exists: {restore_marker})")
+            logger.info(
+                f"Detected restore from checkpoint (marker file exists: {restore_marker})"
+            )
             return True  # Restored - proceed with registration
 
         # Check if checkpoint is complete (signal file exists)
@@ -136,7 +140,9 @@ async def worker():
     is_restored = False
     if is_checkpoint_mode:
         # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
-        logger.info(f"Checkpoint mode enabled (DYNAMO_CHECKPOINT_SIGNAL_FILE={signal_file})")
+        logger.info(
+            f"Checkpoint mode enabled (DYNAMO_CHECKPOINT_SIGNAL_FILE={signal_file})"
+        )
 
         # Set up vLLM engine (loads model into GPU)
         pre_created_engine = setup_vllm_engine(config)
@@ -199,7 +205,9 @@ async def worker():
         or config.multimodal_decode_worker
         or config.multimodal_encode_prefill_worker
     ):
-        await init_multimodal_worker(runtime, config, pre_created_engine=pre_created_engine)
+        await init_multimodal_worker(
+            runtime, config, pre_created_engine=pre_created_engine
+        )
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
         await init_prefill(runtime, config, pre_created_engine=pre_created_engine)
@@ -471,7 +479,9 @@ async def register_vllm_model(
     )
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
+async def init_prefill(
+    runtime: DistributedRuntime, config: Config, pre_created_engine=None
+):
     """
     Instantiate and serve
     """
@@ -983,7 +993,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_multimodal_worker(runtime: DistributedRuntime, config: Config, pre_created_engine=None):
+async def init_multimodal_worker(
+    runtime: DistributedRuntime, config: Config, pre_created_engine=None
+):
     """
     Initialize multimodal worker component.
 
