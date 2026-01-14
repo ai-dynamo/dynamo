@@ -41,7 +41,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-235b-a22b-agg
       replicas: 1
       extraPodSpec:
         affinity:
@@ -63,7 +62,6 @@ spec:
             - -c
     TrtllmWorker:
       componentType: main
-      dynamoNamespace: qwen3-235b-a22b-agg
       envFromSecret: hf-token-secret
       sharedMemory:
         size: 256Gi

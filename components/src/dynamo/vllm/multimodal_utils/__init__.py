@@ -24,6 +24,8 @@ from dynamo.vllm.multimodal_utils.protocol import (
     MultiModalRequest,
     MyRequestOutput,
     PatchedTokensPrompt,
+    VLLMNativeEncoderRequest,
+    VLLMNativeEncoderResponse,
     vLLMMultimodalRequest,
 )
 
@@ -45,4 +47,6 @@ __all__ = [
     "MultiModalRequest",
     "MyRequestOutput",
     "vLLMMultimodalRequest",
+    "VLLMNativeEncoderRequest",
+    "VLLMNativeEncoderResponse",
 ]

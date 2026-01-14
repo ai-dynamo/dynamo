@@ -43,6 +43,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
         map.insert("default", ToolCallConfig::default());
+        map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
         map
     })
 }
@@ -207,6 +208,7 @@ mod tests {
             "deepseek_v3_2",
             "qwen3_coder",
             "jamba",
+            "nemotron_nano",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
