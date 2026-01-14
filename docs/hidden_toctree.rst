@@ -41,6 +41,7 @@
    guides/request_plane.md
 
    router/kv_cache_routing.md
+   router/kv_events.md
    planner/load_planner.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
@@ -52,9 +53,6 @@
    backends/trtllm/gpt-oss.md
    backends/trtllm/prometheus.md
 
-   backends/sglang/multinode-examples.md
-   backends/sglang/dsr1-wideep-gb200.md
-   backends/sglang/dsr1-wideep-h100.md
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
    backends/sglang/profiling.md
@@ -73,6 +71,7 @@
    backends/vllm/LMCache_Integration.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
+   backends/vllm/prompt-embeddings.md
    backends/vllm/speculative_decoding.md
 
    benchmarks/kv-router-ab-testing.md

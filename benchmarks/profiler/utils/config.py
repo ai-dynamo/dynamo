@@ -93,7 +93,6 @@ class DgdPlannerServiceConfig(BaseModel):
     automatically created and mounted by the profiler; no PVC dependencies
     """
 
-    dynamoNamespace: str = "dynamo"  # placeholder
     componentType: str = "planner"
     replicas: int = 1
     extraPodSpec: PodSpec = PodSpec(

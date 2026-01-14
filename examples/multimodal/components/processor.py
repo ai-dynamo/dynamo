@@ -27,6 +27,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.chat_message_utils import extract_user_text
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import (
     MultiModalInput,
@@ -134,7 +135,6 @@ class Processor(ProcessMixIn):
         (
             request,
             conversation,
-            prompt,
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
@@ -204,11 +204,7 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text
-        try:
-            user_text = raw_request.messages[0].content[0].text
-        except (IndexError, AttributeError) as e:
-            raise ValueError(f"Invalid message structure: {e}")
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 

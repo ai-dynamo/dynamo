@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-agg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -19,7 +18,6 @@ spec:
           value: kv
     TRTLLMWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: trtllm-agg-router
       componentType: worker
       replicas: 2
       resources:
