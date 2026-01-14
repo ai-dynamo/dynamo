@@ -94,10 +94,10 @@ python src/client.py
 ```
 tritonserver/
 ├── launch/
-│   ├── agg.sh           # Launch script (frontend + worker)
-│   └── client.py        # Test client (KServe gRPC)
+│   └── identity.sh      # Launch script (frontend + worker)
 ├── src/
-│   └── tritonworker.py  # Main Dynamo worker implementation
+│   ├── tritonworker.py  # Main Dynamo worker implementation
+│   └── client.py        # Test client (KServe gRPC)
 ├── model_repo/
 │   └── identity/        # Sample identity model
 │       ├── config.pbtxt
@@ -114,7 +114,7 @@ tritonserver/
 ### Launch Script Options
 
 ```bash
-./launch/agg.sh --help
+./launch/identity.sh --help
 
 Options:
   --model-name <name>         Model name to load (default: identity)
@@ -172,7 +172,7 @@ Options:
 3. Launch with your model:
 
    ```bash
-   ./launch/agg.sh --model-name my_model
+   ./launch/identity.sh --model-name my_model
    ```
 
 ## Known Limitations

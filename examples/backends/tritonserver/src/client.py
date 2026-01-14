@@ -6,9 +6,9 @@
 Test client for Triton Server backend via Dynamo KServe gRPC frontend.
 
 Usage:
-    # After starting the server with ./launch/agg.sh
-    python launch/client.py
-    python launch/client.py --model identity --shape 1 10
+    # After starting the server with ./launch/identity.sh
+    python src/client.py
+    python src/client.py --model identity --shape 1 10
 """
 
 import argparse

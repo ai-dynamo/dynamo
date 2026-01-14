@@ -16,6 +16,7 @@ ENV PATH=/opt/tritonserver/bin:$PATH
 
 COPY --chown=dynamo: src/ /workspace/src/
 COPY --chown=dynamo: model_repo/ /workspace/model_repo/
+COPY --chown=dynamo: launch/ /workspace/launch/
 
 WORKDIR /workspace
 USER dynamo
