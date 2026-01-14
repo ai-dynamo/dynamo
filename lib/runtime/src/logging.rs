@@ -1735,10 +1735,7 @@ pub mod tests {
                 let span_created_events: Vec<_> = lines
                     .iter()
                     .filter(|log_line| {
-                        log_line
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            == Some("SPAN_CREATED")
+                        log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
                     })
                     .collect();
 
@@ -1746,10 +1743,7 @@ pub mod tests {
                 let span_closed_events: Vec<_> = lines
                     .iter()
                     .filter(|log_line| {
-                        log_line
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            == Some("SPAN_CLOSED")
+                        log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CLOSED")
                     })
                     .collect();
 
@@ -1834,7 +1828,9 @@ pub mod tests {
                 for log_line in &lines {
                     if log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED") {
                         // SPAN_CREATED should have trace_id (from PendingDistributedTraceContext)
-                        if let Some(event_trace_id) = log_line.get("trace_id").and_then(|v| v.as_str()) {
+                        if let Some(event_trace_id) =
+                            log_line.get("trace_id").and_then(|v| v.as_str())
+                        {
                             assert_eq!(
                                 event_trace_id, &trace_id,
                                 "SPAN_CREATED trace_id should match the trace"
@@ -1851,7 +1847,9 @@ pub mod tests {
 
                     // SPAN_CLOSED should also have trace context (from DistributedTraceContext)
                     if log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CLOSED") {
-                        if let Some(event_trace_id) = log_line.get("trace_id").and_then(|v| v.as_str()) {
+                        if let Some(event_trace_id) =
+                            log_line.get("trace_id").and_then(|v| v.as_str())
+                        {
                             assert_eq!(
                                 event_trace_id, &trace_id,
                                 "SPAN_CLOSED trace_id should match the trace"
