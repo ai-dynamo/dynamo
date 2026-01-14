@@ -159,6 +159,7 @@ class VLLMNativeEncoderRequest(BaseModel):
     """Request for vLLM-native encoder worker using ECConnector"""
 
     request_id: str
+    prompt: str
     multimodal_input: MultiModalInput
     modality: Literal["image", "video", "audio"]
     batch_items: Optional[List[MultiModalInput]] = None  # For future batch processing

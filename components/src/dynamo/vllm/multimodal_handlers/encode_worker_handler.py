@@ -293,7 +293,7 @@ class VLLMEncodeWorkerHandler:
         try:
             # Prompt can be a random string as the encoder is only interested in the multimodal data
             prompt_dict = TextPrompt(
-                prompt="<image>", multi_modal_data={media_key: media}
+                prompt=request.prompt, multi_modal_data={media_key: media}
             )
 
             gen = self.engine_client.generate(
