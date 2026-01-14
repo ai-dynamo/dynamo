@@ -257,7 +257,7 @@ jobs:
           echo "target: runtime"
           echo "platform: linux/${{ matrix.platform }}"
           echo "cuda_version: ${{ matrix.cuda_version.major_minor }}"
-          echo "no_cache: ${{ github.ref_name == 'main' ? true || false }}"
+          echo "no_cache: ${{ github.ref_name == 'main' && true || false }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ env.PUSH_IMAGE }}"
           echo "no_load: ${{ env.NO_LOAD }}"
@@ -276,7 +276,7 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          no_cache: ${{ github.ref_name == 'main' ? true || false }}
+          no_cache: ${{ github.ref_name == 'main' && true || false }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: true
           no_load: false
