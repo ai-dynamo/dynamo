@@ -596,6 +596,7 @@ jobs:
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
 
+  # TODO: Add back multi-gpu e2e tests when infra is available.
   # e2e-multi-gpu-tests:
   #   name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
   #   needs: [build-amd64, build-arm64]
