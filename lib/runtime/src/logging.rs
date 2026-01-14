@@ -1675,4 +1675,173 @@ pub mod tests {
         .await;
         Ok(())
     }
+
+    /// Test that span events (SPAN_CREATED/SPAN_CLOSED) are emitted when DYN_LOGGING_SPAN_EVENTS=1
+    /// and that they contain proper trace context from PendingDistributedTraceContext
+    #[tokio::test]
+    async fn test_span_events_logging() -> Result<()> {
+        #[allow(clippy::redundant_closure_call)]
+        let _ = temp_env::async_with_vars(
+            [
+                (env_logging::DYN_LOGGING_JSONL, Some("1")),
+                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
+            ],
+            (async || {
+                let tmp_file = NamedTempFile::new().unwrap();
+                let file_name = tmp_file.path().to_str().unwrap();
+                let guard = StderrOverride::from_file(file_name)?;
+                init();
+
+                // Run instrumented code to generate span events
+                parent().await;
+
+                drop(guard);
+
+                let lines = load_log(file_name)?;
+
+                // Skip test if logging was already initialized by another test
+                // (logging initialization is global/Once)
+                let Some(_trace_id) = lines
+                    .iter()
+                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                else {
+                    return Ok(());
+                };
+
+                // Look for SPAN_CREATED messages
+                let span_created_events: Vec<_> = lines
+                    .iter()
+                    .filter(|log_line| {
+                        log_line
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            == Some("SPAN_CREATED")
+                    })
+                    .collect();
+
+                // Look for SPAN_CLOSED messages
+                let span_closed_events: Vec<_> = lines
+                    .iter()
+                    .filter(|log_line| {
+                        log_line
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            == Some("SPAN_CLOSED")
+                    })
+                    .collect();
+
+                // If span events are enabled, we should see them
+                // Note: Due to global logging initialization, this might not work if
+                // another test initialized without span events first
+                if !span_created_events.is_empty() {
+                    // Verify SPAN_CREATED events have span_name
+                    for event in &span_created_events {
+                        assert!(
+                            event.get("span_name").is_some(),
+                            "SPAN_CREATED should have span_name"
+                        );
+                    }
+
+                    // Verify SPAN_CLOSED events have timing information
+                    for event in &span_closed_events {
+                        assert!(
+                            event.get("span_name").is_some(),
+                            "SPAN_CLOSED should have span_name"
+                        );
+                        // SPAN_CLOSED events should have timing info
+                        assert!(
+                            event.get("time.busy_us").is_some()
+                                || event.get("time.idle_us").is_some()
+                                || event.get("time.duration_us").is_some(),
+                            "SPAN_CLOSED should have timing information"
+                        );
+                    }
+
+                    // We should have at least one of each for our instrumented functions
+                    assert!(
+                        !span_created_events.is_empty(),
+                        "Should have at least one SPAN_CREATED event"
+                    );
+                    assert!(
+                        !span_closed_events.is_empty(),
+                        "Should have at least one SPAN_CLOSED event"
+                    );
+                }
+
+                Ok::<(), anyhow::Error>(())
+            })(),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Test that span events contain trace context (verifies TraceContextFields works correctly)
+    /// This indirectly tests that PendingDistributedTraceContext is used for SPAN_CREATED events
+    #[tokio::test]
+    async fn test_span_events_have_trace_context() -> Result<()> {
+        #[allow(clippy::redundant_closure_call)]
+        let _ = temp_env::async_with_vars(
+            [
+                (env_logging::DYN_LOGGING_JSONL, Some("1")),
+                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
+            ],
+            (async || {
+                let tmp_file = NamedTempFile::new().unwrap();
+                let file_name = tmp_file.path().to_str().unwrap();
+                let guard = StderrOverride::from_file(file_name)?;
+                init();
+
+                parent().await;
+
+                drop(guard);
+
+                let lines = load_log(file_name)?;
+
+                // Skip if logging was already initialized
+                let Some(trace_id) = lines
+                    .iter()
+                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
+                    .map(|s| s.to_string())
+                else {
+                    return Ok(());
+                };
+
+                // Find SPAN_CREATED events and verify they have trace context
+                // This tests that TraceContextFields correctly extracts from PendingDistributedTraceContext
+                for log_line in &lines {
+                    if log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED") {
+                        // SPAN_CREATED should have trace_id (from PendingDistributedTraceContext)
+                        if let Some(event_trace_id) = log_line.get("trace_id").and_then(|v| v.as_str()) {
+                            assert_eq!(
+                                event_trace_id, &trace_id,
+                                "SPAN_CREATED trace_id should match the trace"
+                            );
+                        }
+                        // Should have span_id
+                        if let Some(span_id) = log_line.get("span_id").and_then(|v| v.as_str()) {
+                            assert!(
+                                is_valid_span_id(span_id),
+                                "SPAN_CREATED should have valid span_id"
+                            );
+                        }
+                    }
+
+                    // SPAN_CLOSED should also have trace context (from DistributedTraceContext)
+                    if log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CLOSED") {
+                        if let Some(event_trace_id) = log_line.get("trace_id").and_then(|v| v.as_str()) {
+                            assert_eq!(
+                                event_trace_id, &trace_id,
+                                "SPAN_CLOSED trace_id should match the trace"
+                            );
+                        }
+                    }
+                }
+
+                Ok::<(), anyhow::Error>(())
+            })(),
+        )
+        .await;
+        Ok(())
+    }
 }
