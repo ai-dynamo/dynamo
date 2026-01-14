@@ -344,16 +344,13 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     ).model_dump_json()
 
         else:
-            CHECK_LENGTH = False
             async for response in gen:
                 logger.debug(
                     f"Response kv_transfer_params: {response.kv_transfer_params}"
                 )
-                if not CHECK_LENGTH:
-                    CHECK_LENGTH = True
-                    logger.info(
-                        f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
-                    )
+                logger.debug(
+                    f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
+                )
                 # logger.info(f"Response outputs: {response.outputs}")
                 yield MyRequestOutput(
                     request_id=response.request_id,

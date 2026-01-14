@@ -80,7 +80,6 @@ class PreprocessedHandler(ProcessMixIn):
         encode_request = vLLMMultimodalRequest(
             engine_prompt=PatchedTokensPrompt(prompt_token_ids=[]),
             sampling_params=VllmSamplingParams(),
-            # sampling_params=sampling_params,
             request_id=request_id,
             multimodal_inputs=[],
         )
