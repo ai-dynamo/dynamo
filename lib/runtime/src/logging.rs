@@ -877,16 +877,34 @@ where
 
             // Re-acquire mutable borrow to insert the finalized context
             let mut extensions = span.extensions_mut();
+            let trace_id_val = trace_id.expect("Trace ID must be set");
+            let span_id_val = span_id.expect("Span ID must be set");
+
             extensions.insert(DistributedTraceContext {
-                trace_id: trace_id.expect("Trace ID must be set"),
-                span_id: span_id.expect("Span ID must be set"),
-                parent_id,
-                tracestate,
+                trace_id: trace_id_val.clone(),
+                span_id: span_id_val.clone(),
+                parent_id: parent_id.clone(),
+                tracestate: tracestate.clone(),
                 start: Some(Instant::now()),
                 end: None,
-                x_request_id,
-                x_dynamo_request_id,
+                x_request_id: x_request_id.clone(),
+                x_dynamo_request_id: x_dynamo_request_id.clone(),
             });
+
+            // Emit SPAN_CREATED on first entry (this block only runs on first entry)
+            // We emit here instead of using FmtSpan::NEW because trace context is now available
+            if span_events_enabled() {
+                let span_name = span.name();
+                drop(extensions); // Release borrow before logging
+
+                tracing::info!(
+                    message = "new",
+                    span_name = %span_name,
+                    trace_id = %trace_id_val,
+                    span_id = %span_id_val,
+                    parent_id = parent_id.as_deref().unwrap_or(""),
+                );
+            }
         }
     }
 }
@@ -945,8 +963,10 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
+        // SPAN_CREATED is emitted manually in on_enter (after trace context is available)
+        // SPAN_CLOSED uses FmtSpan::CLOSE for timing information
         let span_events = if span_events_enabled() {
-            FmtSpan::NEW | FmtSpan::CLOSE
+            FmtSpan::CLOSE
         } else {
             FmtSpan::NONE
         };
@@ -1023,14 +1043,10 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     } else {
-        let span_events = if span_events_enabled() {
-            FmtSpan::NEW | FmtSpan::CLOSE
-        } else {
-            FmtSpan::NONE
-        };
+        // Non-JSONL logging doesn't support span events (no trace context available)
+        // Span events require DYN_LOGGING_JSONL=true
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
-            .with_span_events(span_events)
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
@@ -1305,15 +1321,28 @@ where
                 }
             }
         } else {
-            let reserved_fields = [
-                "trace_id",
-                "span_id",
-                "parent_id",
-                "span_name",
-                "tracestate",
-            ];
-            for reserved_field in reserved_fields {
-                visitor.fields.remove(reserved_field);
+            // No current span context - check if this is a manually emitted span event
+            let is_span_event =
+                message.as_str() == Some("new") || message.as_str() == Some("close");
+            if is_span_event {
+                // Transform message and keep trace context fields for span events
+                message = match message.as_str() {
+                    Some("new") => serde_json::Value::String("SPAN_CREATED".to_string()),
+                    Some("close") => serde_json::Value::String("SPAN_CLOSED".to_string()),
+                    _ => message,
+                };
+            } else {
+                // Regular event without span context - remove reserved fields
+                let reserved_fields = [
+                    "trace_id",
+                    "span_id",
+                    "parent_id",
+                    "span_name",
+                    "tracestate",
+                ];
+                for reserved_field in reserved_fields {
+                    visitor.fields.remove(reserved_field);
+                }
             }
         }
         let metadata = event.metadata();
