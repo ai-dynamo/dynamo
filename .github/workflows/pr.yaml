@@ -91,7 +91,7 @@ jobs:
 
   backend-status-check:
     runs-on: ubuntu-slim
-    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    needs: [init, operator, vllm-build, sglang-build, trtllm-build, vllm-test, sglang-test, trtllm-test]
     if: always()
     steps:
       - name: "Check all dependent jobs"
