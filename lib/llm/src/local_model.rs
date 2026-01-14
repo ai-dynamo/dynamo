@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dynamo_runtime::component::{Endpoint, Instance, build_transport_type};
+use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::discovery::DiscoveryInstance;
 use dynamo_runtime::discovery::DiscoverySpec;
 use dynamo_runtime::protocols::EndpointId;
@@ -541,69 +541,6 @@ impl LocalModel {
         } else {
             tracing::info!("Successfully unregistered model from discovery");
         }
-
-        Ok(())
-    }
-
-    /// Unregister the endpoint instance from discovery.
-    ///
-    /// This removes the endpoint from the instances bucket, preventing the router
-    /// from sending requests to this worker. Use this when a worker is sleeping
-    /// and should not receive any requests.
-    pub async fn unregister_endpoint_instance(endpoint: &Endpoint) -> anyhow::Result<()> {
-        let drt = endpoint.drt();
-        let instance_id = drt.connection_id();
-        let endpoint_id = endpoint.id();
-
-        // Get the transport type for the endpoint
-        let transport = build_transport_type(endpoint, &endpoint_id, instance_id).await?;
-
-        let instance = DiscoveryInstance::Endpoint(Instance {
-            namespace: endpoint_id.namespace,
-            component: endpoint_id.component,
-            endpoint: endpoint_id.name,
-            instance_id,
-            transport,
-        });
-
-        let discovery = drt.discovery();
-        discovery.unregister(instance).await?;
-
-        tracing::info!(
-            instance_id = instance_id,
-            "Successfully unregistered endpoint instance from discovery - worker removed from routing pool"
-        );
-
-        Ok(())
-    }
-
-    /// Re-register the endpoint instance to discovery.
-    ///
-    /// This adds the endpoint back to the instances bucket, allowing the router
-    /// to send requests to this worker again. Use this when a worker wakes up
-    /// and should start receiving requests.
-    pub async fn register_endpoint_instance(endpoint: &Endpoint) -> anyhow::Result<()> {
-        let drt = endpoint.drt();
-        let instance_id = drt.connection_id();
-        let endpoint_id = endpoint.id();
-
-        // Get the transport type for the endpoint
-        let transport = build_transport_type(endpoint, &endpoint_id, instance_id).await?;
-
-        let spec = DiscoverySpec::Endpoint {
-            namespace: endpoint_id.namespace,
-            component: endpoint_id.component,
-            endpoint: endpoint_id.name,
-            transport,
-        };
-
-        let discovery = drt.discovery();
-        discovery.register(spec).await?;
-
-        tracing::info!(
-            instance_id = instance_id,
-            "Successfully re-registered endpoint instance to discovery - worker added back to routing pool"
-        );
 
         Ok(())
     }

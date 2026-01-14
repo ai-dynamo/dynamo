@@ -187,6 +187,26 @@ class Endpoint:
         """
         ...
 
+    async def unregister_endpoint_instance(self) -> None:
+        """
+        Unregister this endpoint instance from discovery.
+
+        This removes the endpoint from the instances bucket, preventing the router
+        from sending requests to this worker. Use this when a worker is sleeping
+        and should not receive any requests.
+        """
+        ...
+
+    async def register_endpoint_instance(self) -> None:
+        """
+        Re-register this endpoint instance to discovery.
+
+        This adds the endpoint back to the instances bucket, allowing the router
+        to send requests to this worker again. Use this when a worker wakes up
+        and should start receiving requests.
+        """
+        ...
+
 
 class Client:
     """
@@ -1149,26 +1169,6 @@ async def unregister_llm(
     Unregister a model from the discovery system.
 
     If lora_name is provided, unregisters a LoRA adapter instead of a base model.
-    """
-    ...
-
-async def unregister_endpoint_instance(endpoint: Endpoint) -> None:
-    """
-    Unregister the endpoint instance from discovery.
-
-    This removes the endpoint from the instances bucket, preventing the router
-    from sending requests to this worker. Use this when a worker is sleeping
-    and should not receive any requests.
-    """
-    ...
-
-async def register_endpoint_instance(endpoint: Endpoint) -> None:
-    """
-    Re-register the endpoint instance to discovery.
-
-    This adds the endpoint back to the instances bucket, allowing the router
-    to send requests to this worker again. Use this when a worker wakes up
-    and should start receiving requests.
     """
     ...
 
