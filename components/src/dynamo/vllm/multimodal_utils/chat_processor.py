@@ -22,10 +22,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.engine.protocol import (
     CompletionRequest,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
