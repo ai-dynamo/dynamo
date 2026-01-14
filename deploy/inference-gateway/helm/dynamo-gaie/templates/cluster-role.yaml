@@ -49,4 +49,3 @@ rules:
   - subjectaccessreviews
   verbs:
   - create
-
