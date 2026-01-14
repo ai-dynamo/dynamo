@@ -267,7 +267,7 @@ jobs:
         uses: ./.github/actions/docker-build
         with:
           image_tag: ${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform }}
-          framework: ${{ inputs.framework }}
+          framework: ${{ env.FRAMEWORK }}
           target: runtime
           platform: linux/${{ matrix.platform }}
           cuda_version: ${{ matrix.cuda_version.major_minor }}
@@ -471,7 +471,6 @@ jobs:
     needs: [vllm-build, vllm-test]
     if: |
       always() &&
-      inputs.copy_to_acr &&
       needs.vllm-build.result == 'success' &&
       (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
     strategy:
@@ -510,7 +509,6 @@ jobs:
     needs: [sglang-build, sglang-test]
     if: |
       always() &&
-      inputs.copy_to_acr &&
       needs.sglang-build.result == 'success' &&
       (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
     strategy:
@@ -533,7 +531,6 @@ jobs:
     needs: [trtllm-build, trtllm-test]
     if: |
       always() &&
-      inputs.copy_to_acr &&
       needs.trtllm-build.result == 'success' &&
       (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
     strategy:
