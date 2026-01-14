@@ -1,26 +1,27 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Nightly CI Pipeline
+# This is a TEST workflow to verify coverage collection works
+# Use this to test without waiting for nightly build
+# You can delete this file once coverage is verified working
 
+name: Test Coverage Feature
 on:
-  schedule:
-    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
-  workflow_dispatch:  # Allow manual triggering for testing
+  workflow_dispatch:  # Manual trigger only
 
 permissions:
   contents: read
 
 jobs:
-  ci-pipeline:
-    name: Nightly CI
+  test-coverage:
+    name: Test Coverage Collection
     uses: ./.github/workflows/ci-test-suite.yml
     with:
-      pipeline_type: nightly
-      include_nightly_marks: true
-      image_prefix: nightly
-      enable_slack_notification: true
-      enable_coverage: true
+      pipeline_type: test
+      include_nightly_marks: false  # Only run pre_merge tests for speed
+      image_prefix: test-coverage
+      enable_slack_notification: false
+      enable_coverage: true  # Enable coverage collection
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}

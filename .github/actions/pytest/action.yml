@@ -38,6 +38,10 @@ inputs:
     default: 'false'
   hf_token:
     required: false
+  enable_coverage:
+    description: 'Enable coverage collection (true/false)'
+    required: false
+    default: 'false'
 
 
 runs:
@@ -122,7 +126,17 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+
+          # Add coverage flags if enabled
+          COVERAGE_FLAGS=""
+          COVERAGE_ENV=""
+          if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+            echo "📊 Coverage collection enabled"
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov-report=xml:/workspace/test-results/coverage.xml --cov-report=term --cov-report=term-missing"
+            COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage"
+          fi
+
+          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} ${COVERAGE_FLAGS} -m \"${{ inputs.pytest_marks }}\""
 
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
@@ -143,6 +157,7 @@ runs:
           --cpus=${NUM_CPUS} \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
+          ${COVERAGE_ENV} \
           --name ${{ env.CONTAINER_ID }}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
@@ -212,3 +227,13 @@ runs:
         name: test-results-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}-${{ job.check_run_id }}
         path: test-results/pytest_test_report_${{ inputs.framework }}_${{ env.STR_TEST_TYPE }}_${{ inputs.platform_arch }}_${{ github.run_id }}_${{ job.check_run_id }}.xml
         retention-days: 7
+
+    - name: Upload Coverage Data
+      uses: actions/upload-artifact@v4
+      if: always() && inputs.enable_coverage == 'true'
+      with:
+        name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}
+        path: |
+          test-results/coverage.xml
+          test-results/.coverage
+        retention-days: 2

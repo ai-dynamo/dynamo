@@ -27,6 +27,11 @@ on:
         required: false
         type: boolean
         default: false
+      enable_coverage:
+        description: 'Enable test coverage collection and reporting'
+        required: false
+        type: boolean
+        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -339,6 +344,7 @@ jobs:
           platform_arch: ${{ matrix.arch.arch }}
           cpu_limit: '8'
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
@@ -473,6 +479,7 @@ jobs:
           test_type: integration
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
@@ -609,6 +616,7 @@ jobs:
           test_type: e2e-single-gpu
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: ${{ matrix.arch.arch == 'arm64' && 'true' || 'false' }}
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
@@ -745,6 +753,7 @@ jobs:
           test_type: e2e-multi-gpu
           platform_arch: ${{ matrix.arch.arch }}
           dry_run: 'true'
+          enable_coverage: ${{ inputs.enable_coverage }}
 
   ############################## FAULT TOLERANCE TESTS ##############################
   fault-tolerance-tests:
@@ -927,6 +936,191 @@ jobs:
           echo "Namespace $NAMESPACE deletion initiated, proceeding with cleanup..."
           kubectl delete namespace $NAMESPACE || true
           echo "Namespace $NAMESPACE completed."
+
+  ############################## COVERAGE REPORT ##############################
+  coverage-report:
+    name: Generate Coverage Report
+    runs-on: ubuntu-latest
+    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests]
+    if: inputs.enable_coverage && always()
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Coverage Tools
+        run: |
+          pip install coverage[toml]==7.4.0 pytest-cov
+          echo "✅ Coverage tools installed"
+
+      - name: Download All Coverage Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-python-*
+          path: coverage-artifacts/
+          merge-multiple: false
+
+      - name: List Downloaded Artifacts
+        run: |
+          echo "📦 Downloaded coverage artifacts:"
+          find coverage-artifacts/ -type f -name "*.xml" -o -name ".coverage*" | sort
+
+      - name: Merge Coverage by Test Type
+        run: |
+          set -x
+          mkdir -p coverage-by-type
+
+          echo "📊 Processing unit test coverage..."
+          find coverage-artifacts/ -path "*-unit-*" -name ".coverage" 2>/dev/null | while read -r file; do
+            cp "$file" "coverage-by-type/.coverage.unit.$(basename $(dirname $file))"
+          done
+
+          if ls coverage-by-type/.coverage.unit.* 1> /dev/null 2>&1; then
+            cd coverage-by-type
+            coverage combine .coverage.unit.* --keep
+            mv .coverage .coverage.unit
+            coverage report --data-file=.coverage.unit > unit-report.txt || echo "No unit coverage data"
+            cat unit-report.txt
+            cd ..
+          else
+            echo "No unit test coverage found" > coverage-by-type/unit-report.txt
+          fi
+
+          echo "📊 Processing unit + integration test coverage..."
+          find coverage-artifacts/ -path "*-unit-*" -o -path "*-integration-*" | grep ".coverage$" 2>/dev/null | while read -r file; do
+            cp "$file" "coverage-by-type/.coverage.integration.$(basename $(dirname $file))"
+          done
+
+          if ls coverage-by-type/.coverage.integration.* 1> /dev/null 2>&1; then
+            cd coverage-by-type
+            coverage combine .coverage.integration.* --keep
+            mv .coverage .coverage.integration
+            coverage report --data-file=.coverage.integration > integration-report.txt || echo "No integration coverage data"
+            cat integration-report.txt
+            cd ..
+          else
+            echo "No integration test coverage found" > coverage-by-type/integration-report.txt
+          fi
+
+          echo "📊 Processing all test coverage (unit + integration + e2e)..."
+          find coverage-artifacts/ -name ".coverage" 2>/dev/null | while read -r file; do
+            cp "$file" "coverage-by-type/.coverage.all.$(basename $(dirname $file))"
+          done
+
+          if ls coverage-by-type/.coverage.all.* 1> /dev/null 2>&1; then
+            cd coverage-by-type
+            coverage combine .coverage.all.* --keep
+            mv .coverage .coverage.all
+            coverage report --data-file=.coverage.all > all-report.txt || echo "No coverage data"
+            coverage html --data-file=.coverage.all -d ../coverage-html/ || echo "Could not generate HTML"
+            coverage xml --data-file=.coverage.all -o ../coverage-merged.xml || echo "Could not generate XML"
+            cat all-report.txt
+            cd ..
+          else
+            echo "No test coverage found" > coverage-by-type/all-report.txt
+          fi
+
+      - name: Generate Incremental Coverage Analysis
+        run: |
+          echo "🔬 Generating incremental coverage analysis..."
+          python scripts/coverage_analysis.py \
+            --unit coverage-by-type/unit-report.txt \
+            --integration coverage-by-type/integration-report.txt \
+            --e2e coverage-by-type/all-report.txt \
+            --output coverage-incremental-summary.txt \
+            --json-output coverage-data.json
+
+      - name: Create Combined Report
+        run: |
+          DATE=$(date +"%Y-%m-%d %H:%M:%S UTC")
+          cat > coverage-full-summary.md << EOF
+          # 📊 Nightly Test Coverage Report
+
+          **Date:** ${DATE}
+          **Run ID:** ${{ github.run_id }}
+          **Workflow:** ${{ github.workflow }}
+
+          ---
+
+          $(cat coverage-incremental-summary.txt)
+
+          ---
+
+          ## 📁 Artifacts
+          - Full HTML Report: Download \`coverage-reports-${{ github.run_id }}\` artifact
+          - Coverage XML: \`coverage-merged.xml\`
+          - Historical Data: \`coverage-data.json\`
+
+          EOF
+
+          echo "📄 Coverage report generated"
+          cat coverage-full-summary.md
+
+      - name: Post to Workflow Summary
+        run: cat coverage-full-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Coverage Reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-reports-${{ github.run_id }}
+          path: |
+            coverage-html/
+            coverage-merged.xml
+            coverage-incremental-summary.txt
+            coverage-full-summary.md
+            coverage-data.json
+          retention-days: 30
+
+      - name: Store Daily Snapshot to Branch
+        if: github.event_name == 'schedule'
+        run: |
+          set -x
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Fetch the coverage branch or create it
+          git fetch origin coverage-snapshots:coverage-snapshots || git checkout --orphan coverage-snapshots || true
+
+          # Switch to coverage branch
+          git checkout coverage-snapshots 2>/dev/null || git switch --orphan coverage-snapshots
+
+          # Clear working directory but keep our new files
+          git rm -rf . 2>/dev/null || true
+
+          # Create snapshot directory
+          DATE=$(date +"%Y-%m-%d")
+          mkdir -p snapshots/$DATE
+
+          # Copy coverage files to snapshot
+          cp coverage-merged.xml snapshots/$DATE/ 2>/dev/null || echo "No XML file"
+          cp coverage-incremental-summary.txt snapshots/$DATE/ 2>/dev/null || echo "No summary file"
+          cp coverage-data.json snapshots/$DATE/ 2>/dev/null || echo "No JSON file"
+
+          # Create simple index
+          cat > snapshots/INDEX.md << 'INDEXEOF'
+          # Coverage Snapshots
+
+          This branch contains daily coverage snapshots from nightly builds.
+
+          ## Available Snapshots
+          INDEXEOF
+
+          ls -1 snapshots/ | grep -E "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" | sort -r | head -30 | while read date; do
+            echo "- [$date](snapshots/$date/)" >> snapshots/INDEX.md
+          done
+
+          # Commit and push
+          git add snapshots/
+          git commit -m "Coverage snapshot: $DATE [run: ${{ github.run_id }}]" || echo "No changes to commit"
+          git push origin coverage-snapshots || git push --set-upstream origin coverage-snapshots
 
   ############################## RESULTS SUMMARY ##############################
   results-summary:
