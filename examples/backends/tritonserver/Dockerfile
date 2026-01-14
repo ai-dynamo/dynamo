@@ -8,7 +8,7 @@ FROM ${DYNAMO_BASE_IMAGE} AS dynamo_base
 COPY --from=triton_source /opt/tritonserver /opt/tritonserver
 COPY --from=triton_source /usr/local/dcgm /usr/local/dcgm
 COPY --from=triton_source /lib/x86_64-linux-gnu/libdcgm*.so* /lib/x86_64-linux-gnu/
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/opt/tritonserver/lib:/opt/tritonserver/backends:/usr/local/dcgm/lib64:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib:/usr/local/nvidia/lib64:/usr/local/cuda/lib64:/opt/tritonserver/lib:/opt/tritonserver/backends:/usr/local/dcgm/lib64
 ENV PATH=/opt/tritonserver/bin:$PATH
 
 COPY --chown=dynamo: src/ /workspace/src/
