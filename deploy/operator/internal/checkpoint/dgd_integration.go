@@ -20,6 +20,7 @@ package checkpoint
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
@@ -187,7 +188,18 @@ func InjectCheckpointEnvVars(container *corev1.Container, info *CheckpointInfo) 
 		})
 	}
 
-	// Include hash for debugging/observability
+	// For PVC storage, also inject DYNAMO_CHECKPOINT_PATH (base directory)
+	// This is used by k8s-runc-bypass restore entrypoint
+	if string(storageType) == controller_common.CheckpointStorageTypePVC && info.Location != "" {
+		// Extract base path using filepath.Dir()
+		basePath := filepath.Dir(info.Location)
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  consts.EnvCheckpointPath,
+			Value: basePath,
+		})
+	}
+
+	// Include hash for debugging/observability and for k8s-runc-bypass
 	if info.Hash != "" {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  consts.EnvCheckpointHash,
@@ -313,14 +325,15 @@ func InjectCheckpointIntoPodSpec(
 		info.Location = fmt.Sprintf("%s:%s", ociURI, info.Hash)
 
 	default: // controller_common.CheckpointStorageTypePVC
-		// PVC storage: location is the mount path
+		// PVC storage: location is the checkpoint directory
+		// k8s-runc-bypass expects: /checkpoints/{hash}/ (directory with checkpoint data)
 		info.StorageType = storageTypeToAPI(storageType)
 		basePath := getPVCBasePath(storageConfig)
 		pvcName := DefaultCheckpointPVCName
 		if storageConfig != nil && storageConfig.PVC.PVCName != "" {
 			pvcName = storageConfig.PVC.PVCName
 		}
-		info.Location = fmt.Sprintf("%s/%s.tar", basePath, info.Hash)
+		info.Location = fmt.Sprintf("%s/%s", basePath, info.Hash)
 
 		// Inject PVC volume and mount (only for PVC storage)
 		InjectCheckpointVolume(podSpec, pvcName)
