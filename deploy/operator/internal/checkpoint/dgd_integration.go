@@ -281,6 +281,51 @@ func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	})
 }
 
+// InjectCheckpointSignalVolume adds the checkpoint signal hostPath volume to a pod spec
+// This is needed for CRIU mount namespace consistency between checkpoint and restore pods
+func InjectCheckpointSignalVolume(podSpec *corev1.PodSpec, checkpointConfig *controller_common.CheckpointConfig) {
+	// Check if volume already exists
+	for _, v := range podSpec.Volumes {
+		if v.Name == consts.CheckpointSignalVolumeName {
+			return
+		}
+	}
+
+	// Get signal host path from config or use default
+	signalHostPath := consts.CheckpointSignalHostPath
+	if checkpointConfig != nil && checkpointConfig.Storage.SignalHostPath != "" {
+		signalHostPath = checkpointConfig.Storage.SignalHostPath
+	}
+
+	hostPathType := corev1.HostPathDirectoryOrCreate
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: consts.CheckpointSignalVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: signalHostPath,
+				Type: &hostPathType,
+			},
+		},
+	})
+}
+
+// InjectCheckpointSignalVolumeMount adds the checkpoint signal volume mount to a container
+// This is needed for CRIU mount namespace consistency between checkpoint and restore pods
+func InjectCheckpointSignalVolumeMount(container *corev1.Container) {
+	// Check if mount already exists
+	for _, m := range container.VolumeMounts {
+		if m.Name == consts.CheckpointSignalVolumeName {
+			return
+		}
+	}
+
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      consts.CheckpointSignalVolumeName,
+		MountPath: consts.CheckpointSignalMountPath,
+		ReadOnly:  false,
+	})
+}
+
 // InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec.
 // This is the single entry point for ALL checkpoint-related pod modifications:
 // 1. Command/Args transformation - moves Command to Args to respect image ENTRYPOINT
@@ -413,6 +458,12 @@ func InjectCheckpointIntoPodSpec(
 		InjectCheckpointVolume(podSpec, pvcName)
 		InjectCheckpointVolumeMount(mainContainer, basePath)
 	}
+
+	// Inject signal volume for CRIU mount namespace consistency
+	// Even though restore pods don't use the signal file, they need it mounted
+	// to match the checkpoint job's mount namespace for CRIU compatibility
+	InjectCheckpointSignalVolume(podSpec, checkpointConfig)
+	InjectCheckpointSignalVolumeMount(mainContainer)
 
 	// Inject checkpoint environment variables (for all storage types)
 	InjectCheckpointEnvVars(mainContainer, info, checkpointConfig)
