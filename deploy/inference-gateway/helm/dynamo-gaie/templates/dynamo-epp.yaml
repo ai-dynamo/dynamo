@@ -87,8 +87,23 @@ spec:
 
         env:
         {{- if $useDynamo }}
-          - name: ETCD_ENDPOINTS
-            value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
+          - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          - name: POD_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
+          - name: POD_UID
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.uid
+          # enable if you want to use ETCD instead of K8 discovery and remove DYN_DISCOVERY_BACKEND
+          # - name: ETCD_ENDPOINTS
+          #   value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
+          - name: DYN_DISCOVERY_BACKEND
+              value: "kubernetes"
           - name: NATS_SERVER
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYNAMO_NAMESPACE
