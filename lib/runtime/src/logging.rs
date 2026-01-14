@@ -186,6 +186,11 @@ struct PendingDistributedTraceContext {
     x_dynamo_request_id: Option<String>,
 }
 
+/// Marker to indicate this is the first entry into a span.
+/// Present after first on_enter, removed on subsequent entries.
+/// Used by formatter to emit SPAN_CREATED only on first entry.
+struct FirstEntryMarker;
+
 /// Trait for extracting trace context fields from either
 /// DistributedTraceContext or PendingDistributedTraceContext
 trait TraceContext {
@@ -813,6 +818,10 @@ where
             {
                 let extensions = span.extensions();
                 if extensions.get::<DistributedTraceContext>().is_some() {
+                    // Re-entry: remove FirstEntryMarker so formatter skips ENTER events
+                    drop(extensions);
+                    let mut extensions = span.extensions_mut();
+                    extensions.remove::<FirstEntryMarker>();
                     return;
                 }
             }
@@ -877,34 +886,21 @@ where
 
             // Re-acquire mutable borrow to insert the finalized context
             let mut extensions = span.extensions_mut();
-            let trace_id_val = trace_id.expect("Trace ID must be set");
-            let span_id_val = span_id.expect("Span ID must be set");
 
             extensions.insert(DistributedTraceContext {
-                trace_id: trace_id_val.clone(),
-                span_id: span_id_val.clone(),
-                parent_id: parent_id.clone(),
-                tracestate: tracestate.clone(),
+                trace_id: trace_id.expect("Trace ID must be set"),
+                span_id: span_id.expect("Span ID must be set"),
+                parent_id,
+                tracestate,
                 start: Some(Instant::now()),
                 end: None,
-                x_request_id: x_request_id.clone(),
-                x_dynamo_request_id: x_dynamo_request_id.clone(),
+                x_request_id,
+                x_dynamo_request_id,
             });
 
-            // Emit SPAN_CREATED on first entry (this block only runs on first entry)
-            // We emit here instead of using FmtSpan::NEW because trace context is now available
-            if span_events_enabled() {
-                let span_name = span.name();
-                drop(extensions); // Release borrow before logging
-
-                tracing::info!(
-                    message = "new",
-                    span_name = %span_name,
-                    trace_id = %trace_id_val,
-                    span_id = %span_id_val,
-                    parent_id = parent_id.as_deref().unwrap_or(""),
-                );
-            }
+            // Insert marker for first entry - formatter will emit SPAN_CREATED
+            // Marker is removed on re-entry (above) so subsequent ENTER events are skipped
+            extensions.insert(FirstEntryMarker);
         }
     }
 }
@@ -963,10 +959,10 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
-        // SPAN_CREATED is emitted manually in on_enter (after trace context is available)
+        // SPAN_CREATED uses FmtSpan::ENTER (first entry only, controlled by FirstEntryMarker)
         // SPAN_CLOSED uses FmtSpan::CLOSE for timing information
         let span_events = if span_events_enabled() {
-            FmtSpan::CLOSE
+            FmtSpan::ENTER | FmtSpan::CLOSE
         } else {
             FmtSpan::NONE
         };
@@ -1249,11 +1245,27 @@ where
                 );
             }
 
-            message = match message.as_str() {
-                Some("new") => serde_json::Value::String("SPAN_CREATED".to_string()),
-                Some("close") => serde_json::Value::String("SPAN_CLOSED".to_string()),
-                _ => message.clone(),
-            };
+            // Handle span events:
+            // - "enter": Check FirstEntryMarker - if present emit SPAN_CREATED, else skip
+            // - "close": Always emit SPAN_CLOSED
+            // - "new": Transform to SPAN_CREATED (fallback, shouldn't happen with current config)
+            match message.as_str() {
+                Some("enter") => {
+                    // Only emit SPAN_CREATED on first entry (marker present)
+                    if ext.get::<FirstEntryMarker>().is_none() {
+                        // Re-entry: skip this event entirely
+                        return Ok(());
+                    }
+                    message = serde_json::Value::String("SPAN_CREATED".to_string());
+                }
+                Some("close") => {
+                    message = serde_json::Value::String("SPAN_CLOSED".to_string());
+                }
+                Some("new") => {
+                    message = serde_json::Value::String("SPAN_CREATED".to_string());
+                }
+                _ => {}
+            }
 
             visitor.fields.insert(
                 "span_name".to_string(),
@@ -1321,13 +1333,17 @@ where
                 }
             }
         } else {
-            // No current span context - check if this is a manually emitted span event
-            let is_span_event =
-                message.as_str() == Some("new") || message.as_str() == Some("close");
+            // No current span context - check if this is a span event
+            let is_span_event = matches!(
+                message.as_str(),
+                Some("new") | Some("enter") | Some("close")
+            );
             if is_span_event {
                 // Transform message and keep trace context fields for span events
                 message = match message.as_str() {
-                    Some("new") => serde_json::Value::String("SPAN_CREATED".to_string()),
+                    Some("new") | Some("enter") => {
+                        serde_json::Value::String("SPAN_CREATED".to_string())
+                    }
                     Some("close") => serde_json::Value::String("SPAN_CLOSED".to_string()),
                     _ => message,
                 };
