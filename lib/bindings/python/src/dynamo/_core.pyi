@@ -1406,15 +1406,6 @@ class BlockManager:
         """
         ...
 
-class KvbmCacheManager:
-    """
-    A KV cache manager for VLLM
-    """
-
-    def __init__(self, block_manager: BlockManager) -> None:
-        ...
-
-
 class KvbmRequest:
     """
     A request for KV cache
