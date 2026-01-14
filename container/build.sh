@@ -31,11 +31,26 @@ commit_id=${commit_id:-$(git rev-parse --short HEAD)}
 # if COMMIT_ID matches a TAG use that
 current_tag=${current_tag:-$(git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || true)}
 
-# Get latest TAG and add COMMIT_ID for dev
-latest_tag=${latest_tag:-$(git describe --tags --abbrev=0 "$(git rev-list --tags --max-count=1)" | sed 's/^v//' || true)}
+# Get latest version from release branches or tags
+# Strategy:
+# 1. Check for release/X.Y.Z branches (most reliable for development)
+# 2. Fall back to git tags, excluding test-rc tags
+# 3. Default to 0.0.1 if nothing found
+
+# Try to find the latest release branch first
+latest_release_branch=$(git branch -r 2>/dev/null | grep -E 'origin/release/[0-9]+\.[0-9]+\.[0-9]+$' | sed 's|.*/||' | sort -V | tail -1 || true)
+
+if [[ -n ${latest_release_branch} ]]; then
+    latest_tag=${latest_tag:-$latest_release_branch}
+    echo "INFO: Using version from latest release branch: ${latest_tag}"
+else
+    # Fall back to tags, excluding test-rc tags
+    latest_tag=${latest_tag:-$(git tag -l 'v*' --sort=-version:refname | grep -v 'test-rc' | head -1 | sed 's/^v//' || true)}
+fi
+
 if [[ -z ${latest_tag} ]]; then
     latest_tag="0.0.1"
-    echo "No git release tag found, setting to unknown version: ${latest_tag}"
+    echo "No git release tag or branch found, setting to unknown version: ${latest_tag}"
 fi
 
 # Use tag if available, otherwise use latest_tag.dev.commit_id
