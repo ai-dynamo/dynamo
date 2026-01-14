@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Docker Build and Test
+name: PR
 
 
 # TODO before Merge:
@@ -111,7 +111,7 @@ jobs:
         platform:
           - { arch: amd64 }
           - { arch: arm64  }
-    name: operator (${{ matrix.platform.arch }})
+    name: operator-build (${{ matrix.platform.arch }})
     runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
@@ -223,6 +223,120 @@ jobs:
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
 
+  vllm:
+    needs: changed-files
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: vllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: vllm
+    steps: &runtime-container-build-push-test
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: 'linux/${{ matrix.platform.arch }}'
+          cuda_version: ${{ matrix.cuda_version.major_minor }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      - name: Docker Tag and Push
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: ${{ steps.build-image.outputs.image_tag }}
+          push_tags: |
+            ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-${{ matrix.platform.arch }}
+            ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform.arch }}
+          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-{0}-cuda{1}-{2}', env.FRAMEWORK, matrix.cuda_version.major, matrix.platform.arch) || '' }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      - name: Run tests
+        # TODO: enable testing on ARM when these tests stop failing on collection on machines without GPUs:
+        #   components/src/dynamo/trtllm/tests/test_trtllm_autodeploy.py
+        #   components/src/dynamo/trtllm/tests/test_trtllm_unit.py
+        if: ${{ env.FRAMEWORK != 'trtllm' || matrix.platform.arch == 'amd64' }} # Excludes trtllm on arm64
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          # GH ARM runners have no GPUs, run CPU tests only on ARM
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
+          framework: ${{ env.FRAMEWORK }}
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  sglang:
+    needs: changed-files
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: sglang-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: sglang
+    steps: *runtime-container-build-push-test
+
+  trtllm:
+    needs: changed-files
+    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+    name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: trtllm
+    steps: *runtime-container-build-push-test
 
   # ============================================================================
   # FRAMEWORK PIPELINES (Build → Test → Copy)
