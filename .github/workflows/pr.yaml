@@ -246,7 +246,7 @@ jobs:
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
         with:
-          builder_name: ${{ inputs.builder_name }}
+          builder_name: ${{ env.BUILDER_NAME }}
           buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}_{1}', env.FRAMEWORK, matrix.platform)] }}
           platform: linux/${{ matrix.platform }}
       - name: Print Build Container inputs
