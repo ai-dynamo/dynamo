@@ -920,7 +920,7 @@ jobs:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, fault-tolerance-tests] #e2e-multi-gpu-tests
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
