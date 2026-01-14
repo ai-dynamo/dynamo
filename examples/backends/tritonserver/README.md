@@ -31,29 +31,7 @@ This example shows how to run Triton Server models through Dynamo's distributed 
 
 ## Quick Start
 
-### Option 1: Local Development
-
-This requires Dynamo to be installed locally.
-
-```bash
-# From the dynamo repo root
-cd examples/backends/tritonserver
-
-# Build Triton Server (first time only, ~30 minutes)
-make all
-
-# Install Python dependencies
-pip install wheelhouse/tritonserver-*.whl
-pip install tritonclient[grpc]
-
-# Launch the server
-./launch/agg.sh
-
-# In another terminal, test with the client
-python launch/client.py
-```
-
-### Option 2: Container Deployment
+### Option 1: Container Deployment
 
 #### Step 1: Build Container Images
 
@@ -73,17 +51,42 @@ docker build -t dynamo-triton:latest .
 ```bash
 docker run --rm -it --gpus all --network host \
   dynamo-triton:latest \
-  ./launch/agg.sh
+  ./examples/backends/tritonserver/launch/identity.sh
 ```
 
 #### Step 3: Test the Deployment
+
+In another terminal:
 
 ```bash
 # Install client dependencies
 pip install tritonclient[grpc]
 
 # Test with the client
-python launch/client.py --host 127.0.0.1 --port 8787
+cd examples/backends/tritonserver
+python src/client.py --port 8000
+```
+
+### Option 2: Local Development
+
+This requires Dynamo to be installed locally.
+
+```bash
+# From the dynamo repo root
+cd examples/backends/tritonserver
+
+# Build Triton Server (first time only, ~30 minutes)
+make all
+
+# Install Python dependencies
+pip install wheelhouse/tritonserver-*.whl
+pip install tritonclient[grpc]
+
+# Launch the server
+./launch/identity.sh
+
+# In another terminal, test with the client
+python src/client.py
 ```
 
 ## Directory Structure

@@ -1,94 +1,117 @@
+#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
-import asyncio
-import logging
-from typing import List
+"""
+Test client for Triton Server backend via Dynamo KServe gRPC frontend.
+
+Usage:
+    # After starting the server with ./launch/agg.sh
+    python launch/client.py
+    python launch/client.py --model identity --shape 1 10
+"""
+
+import argparse
 
 import numpy as np
-import uvloop
-from pydantic import BaseModel
-
-from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.runtime.logging import configure_dynamo_logging
-
-logger = logging.getLogger(__name__)
-configure_dynamo_logging(service_name="tritonserver_client", worker_id=0)
+import tritonclient.grpc as triton_grpc
+from tritonclient.utils import InferenceServerException
 
 
-class ArrayData(BaseModel):
-    data: List
-    shape: List[int]
-    dtype: str
-
-
-@dynamo_worker()
-async def worker(runtime: DistributedRuntime):
-    # Get endpoint
-    endpoint = (
-        runtime.namespace("triton").component("tritonserver").endpoint("generate")
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Send inference requests to Triton model via Dynamo frontend"
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host serving the gRPC endpoint (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="Port of the gRPC endpoint (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--model",
+        default="identity",
+        help="Model name to target (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--shape",
+        type=int,
+        nargs="+",
+        default=[1, 5],
+        help="Input tensor shape (default: 1 5)",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=1,
+        help="Number of inference iterations (default: %(default)s)",
     )
 
-    # Create client and wait for service to be ready
-    client = await endpoint.client()
-    await client.wait_for_instances()
+    args = parser.parse_args()
 
-    idx = 0
-    base_delay = 0.1  # Start with 100ms
-    max_delay = 5.0  # Max 5 seconds
-    current_delay = base_delay
+    target = f"{args.host}:{args.port}"
+    print(f"Connecting to {target}...")
 
-    logger.info("Starting worker")
-    while True:
+    try:
+        client = triton_grpc.InferenceServerClient(url=target)
+    except Exception as e:
+        print(f"Failed to connect: {e}")
+        return
+
+    # Query model metadata
+    print(f"\nQuerying model '{args.model}' metadata...")
+    try:
+        metadata = client.get_model_metadata(args.model)
+        print(f"  Name: {metadata.name}")
+        print(
+            f"  Inputs: {[(i.name, i.datatype, list(i.shape)) for i in metadata.inputs]}"
+        )
+        print(
+            f"  Outputs: {[(o.name, o.datatype, list(o.shape)) for o in metadata.outputs]}"
+        )
+    except InferenceServerException as e:
+        print(f"  Could not get metadata: {e}")
+        print("  Proceeding with default INPUT0/OUTPUT0...")
+
+    # Generate input data
+    shape = args.shape
+    input_size = int(np.prod(shape))
+    input_data = np.arange(1, input_size + 1, dtype=np.int32).reshape(shape)
+
+    print(f"\nRunning {args.iterations} inference iteration(s)...")
+    for i in range(args.iterations):
+        print(f"\n--- Iteration {i + 1} ---")
+        print(f"Input shape: {shape}")
+        print(f"Input data:\n{input_data}")
+
+        # Create input tensor
+        input_tensor = triton_grpc.InferInput("INPUT0", shape, "INT32")
+        input_tensor.set_data_from_numpy(input_data)
+
         try:
-            # Issue request and process the stream
-            idx += 1
-            # Create numpy array and serialize to ArrayData
-            arr = np.array([[1, 2, 3, 4, 5]], dtype=np.int32)
-            request = ArrayData(
-                data=arr.flatten().tolist(), shape=list(arr.shape), dtype=str(arr.dtype)
-            )
-            # Convert Pydantic model to dict for dynamo runtime
-            stream = await client.generate(request.model_dump())
-            async for response in stream:
-                # Deserialize response back to numpy array
-                response_data = response.data()
-                if isinstance(response_data, dict):
-                    result_arr = np.array(
-                        response_data["data"], dtype=np.dtype(response_data["dtype"])
-                    ).reshape(response_data["shape"])
-                    print(f"Received: {result_arr}")
-                else:
-                    print(response_data)
-            # Reset backoff on successful iteration
-            current_delay = base_delay
-            # Sleep for 1 second
-            await asyncio.sleep(1)
-        except asyncio.CancelledError:
-            # Re-raise for graceful shutdown
-            raise
-        except Exception as e:
-            # Log the exception with context
-            logger.error(f"Error in worker iteration {idx}: {type(e).__name__}: {e}")
-            # Perform exponential backoff
-            logger.error(f"Retrying after {current_delay:.2f} seconds...")
-            await asyncio.sleep(current_delay)
-            # Double the delay for next time, up to max_delay
-            current_delay = min(current_delay * 2, max_delay)
+            response = client.infer(args.model, inputs=[input_tensor])
+
+            # Extract output
+            output_data = response.as_numpy("OUTPUT0")
+            print(f"Output shape: {output_data.shape}")
+            print(f"Output data:\n{output_data}")
+
+            # Verify identity model (output should equal input)
+            if np.array_equal(input_data, output_data):
+                print("✓ Identity verification passed")
+            else:
+                print("✗ Identity verification failed - output differs from input")
+
+        except InferenceServerException as e:
+            print(f"Inference failed: {e}")
+
+    print("\nDone.")
 
 
 if __name__ == "__main__":
-    uvloop.install()
-    asyncio.run(worker())
+    main()
