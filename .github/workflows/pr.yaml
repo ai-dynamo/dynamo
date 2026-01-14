@@ -281,19 +281,6 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: true
           no_load: false
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: ${{ steps.build-image.outputs.image_tag }}
-          push_tags: |
-            ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-${{ matrix.platform }}
-            ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform }}
-          conditional_tag: ${{ github.ref_name == 'main' && format('ai-dynamo/dynamo:main-{0}-cuda{1}-{2}', env.FRAMEWORK, matrix.cuda_version.major, matrix.platform) || '' }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   sglang-build:
     needs: [init]
@@ -313,7 +300,7 @@ jobs:
       FRAMEWORK: sglang
       NO_LOAD: false
       PUSH_IMAGE: true
-    steps: *runtime-container-build-push-test
+    steps: *runtime-container-build-push
 
   trtllm-build:
     needs: [init]
@@ -331,7 +318,7 @@ jobs:
       FRAMEWORK: trtllm
       NO_LOAD: false
       PUSH_IMAGE: true
-    steps: *runtime-container-build-push-test
+    steps: *runtime-container-build-push
 
   # ============================================================================
   # TEST
@@ -701,7 +688,7 @@ jobs:
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
-    steps: &deploy-test-steps
+    steps: *deploy-test-steps
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
@@ -720,7 +707,7 @@ jobs:
     name: deploy-test-sglang (${{ matrix.profile }})
     env:
       FRAMEWORK: sglang
-    steps: &deploy-test-steps
+    steps: *deploy-test-steps
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
@@ -741,7 +728,7 @@ jobs:
     name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
-    steps: &deploy-test-steps
+    steps: *deploy-test-steps
 
   # ============================================================================
   # CLEANUP JOBS
