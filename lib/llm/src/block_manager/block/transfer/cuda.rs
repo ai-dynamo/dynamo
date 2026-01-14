@@ -243,32 +243,32 @@ fn validate_transfer_addresses(
     dst_addresses: &[u64],
     layer_size: usize,
 ) -> Result<(), TransferError> {
-    tracing::info!("=== ADDRESS VALIDATION ===");
-    tracing::info!("Total address pairs: {}", src_addresses.len());
-    tracing::info!("Layer size: {} bytes", layer_size);
+    tracing::trace!("=== ADDRESS VALIDATION ===");
+    tracing::trace!("Total address pairs: {}", src_addresses.len());
+    tracing::trace!("Layer size: {} bytes", layer_size);
 
     // Print first 10 addresses
-    tracing::info!("First 10 src addresses:");
+    tracing::trace!("First 10 src addresses:");
     for (i, &addr) in src_addresses.iter().take(10).enumerate() {
-        tracing::info!("  [{:3}] src=0x{:016x}", i, addr);
+        tracing::trace!("  [{:3}] src=0x{:016x}", i, addr);
     }
 
-    tracing::info!("First 10 dst addresses:");
+    tracing::trace!("First 10 dst addresses:");
     for (i, &addr) in dst_addresses.iter().take(10).enumerate() {
-        tracing::info!("  [{:3}] dst=0x{:016x}", i, addr);
+        tracing::trace!("  [{:3}] dst=0x{:016x}", i, addr);
     }
 
     // Print last 5 addresses
     let len = src_addresses.len();
     if len > 10 {
-        tracing::info!("Last 5 src addresses:");
+        tracing::trace!("Last 5 src addresses:");
         for (i, &addr) in src_addresses.iter().skip(len - 5).enumerate() {
-            tracing::info!("  [{:3}] src=0x{:016x}", len - 5 + i, addr);
+            tracing::trace!("  [{:3}] src=0x{:016x}", len - 5 + i, addr);
         }
 
-        tracing::info!("Last 5 dst addresses:");
+        tracing::trace!("Last 5 dst addresses:");
         for (i, &addr) in dst_addresses.iter().skip(len - 5).enumerate() {
-            tracing::info!("  [{:3}] dst=0x{:016x}", len - 5 + i, addr);
+            tracing::trace!("  [{:3}] dst=0x{:016x}", len - 5 + i, addr);
         }
     }
 
@@ -354,15 +354,15 @@ fn validate_transfer_addresses(
     }
 
     // Statistical summary
-    tracing::info!("Address statistics:");
-    tracing::info!("  Null src: {}/{}", null_src, src_addresses.len());
-    tracing::info!("  Null dst: {}/{}", null_dst, dst_addresses.len());
-    tracing::info!("  Unaligned src: {}/{}", unaligned_src, src_addresses.len());
-    tracing::info!("  Unaligned dst: {}/{}", unaligned_dst, dst_addresses.len());
-    tracing::info!("  Suspicious src: {}/{}", suspicious_src, src_addresses.len());
-    tracing::info!("  Suspicious dst: {}/{}", suspicious_dst, dst_addresses.len());
+    tracing::trace!("Address statistics:");
+    tracing::trace!("  Null src: {}/{}", null_src, src_addresses.len());
+    tracing::trace!("  Null dst: {}/{}", null_dst, dst_addresses.len());
+    tracing::trace!("  Unaligned src: {}/{}", unaligned_src, src_addresses.len());
+    tracing::trace!("  Unaligned dst: {}/{}", unaligned_dst, dst_addresses.len());
+    tracing::trace!("  Suspicious src: {}/{}", suspicious_src, src_addresses.len());
+    tracing::trace!("  Suspicious dst: {}/{}", suspicious_dst, dst_addresses.len());
 
-    tracing::info!("=== END ADDRESS VALIDATION ===");
+    tracing::trace!("=== END ADDRESS VALIDATION ===");
 
     Ok(())
 }
@@ -396,37 +396,11 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    // DEBUGGING: Run ONLY legacy path with detailed logging
-    tracing::warn!("=== LEGACY PATH ONLY - DETAILED DEBUGGING ===");
-    tracing::warn!("Transfer: {} blocks", sources.len());
-    tracing::warn!("Total address pairs: {}", src_addresses.len());
-    tracing::warn!("Buffer size needed: {} bytes", size);
-    tracing::warn!("Source type: {}", std::any::type_name::<Source::StorageType>());
-    tracing::warn!("Destination type: {}", std::any::type_name::<Destination::StorageType>());
-
-    // Log first 10 and last 5 addresses from the collected arrays
-    tracing::warn!("First 10 src addresses collected:");
-    for (i, &addr) in src_addresses.iter().take(10).enumerate() {
-        tracing::warn!("  src[{}] = 0x{:016x}", i, addr);
-    }
-
-    tracing::warn!("First 10 dst addresses collected:");
-    for (i, &addr) in dst_addresses.iter().take(10).enumerate() {
-        tracing::warn!("  dst[{}] = 0x{:016x}", i, addr);
-    }
-
-    if src_addresses.len() > 10 {
-        let start = src_addresses.len().saturating_sub(5);
-        tracing::warn!("Last 5 src addresses collected:");
-        for (i, &addr) in src_addresses.iter().skip(start).enumerate() {
-            tracing::warn!("  src[{}] = 0x{:016x}", start + i, addr);
-        }
-
-        tracing::warn!("Last 5 dst addresses collected:");
-        for (i, &addr) in dst_addresses.iter().skip(start).enumerate() {
-            tracing::warn!("  dst[{}] = 0x{:016x}", start + i, addr);
-        }
-    }
+    // Address collection debugging (trace level)
+    tracing::trace!("Transfer: {} blocks, {} address pairs", sources.len(), src_addresses.len());
+    tracing::trace!("Buffer size: {} bytes", size);
+    tracing::trace!("Source type: {}", std::any::type_name::<Source::StorageType>());
+    tracing::trace!("Destination type: {}", std::any::type_name::<Destination::StorageType>());
 
     if false && ctx.cuda_mem_pool().is_some() {
         tracing::warn!("=== TESTING cuPointerGetAttribute THEORY ===");
@@ -638,44 +612,60 @@ where
             tracing::info!("Falling back to DEVICE pool path due to verification failure");
         }
     }
-    if ctx.cuda_mem_pool().is_some() {  // CUDA pool path (HOST_NUMA - no H2D memcpy needed!)
+    if ctx.cuda_mem_pool().is_some() {  // CUDA pool path (DEVICE memory with H2D memcpy)
         let pool = ctx.cuda_mem_pool().unwrap();
-        tracing::info!("🚀 Using CUDA memory pool (HOST NUMA with GPU access - direct CPU writes, no H2D memcpy!)");
+        tracing::trace!("CUDA pool path: DEVICE memory with H2D memcpy ({} addresses)", src_addresses.len());
 
-        // Allocate HOST NUMA memory from pool (stream-ordered, GPU-accessible)
+        // Allocate DEVICE memory from pool (stream-ordered)
         let src_buffer = pool.alloc_async(size, stream.cu_stream())
             .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
         let dst_buffer = pool.alloc_async(size, stream.cu_stream())
             .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
 
-        tracing::info!(
-            "✅ Allocated HOST NUMA buffers: src=0x{:x}, dst=0x{:x} ({} bytes each)",
+        tracing::trace!(
+            "Allocated DEVICE buffers from pool: src=0x{:x}, dst=0x{:x} ({} bytes each)",
             src_buffer,
             dst_buffer,
             size
         );
 
-        // HOST NUMA pool returns CPU-writable, GPU-readable unified memory
-        // Write addresses directly from CPU - NO H2D memcpy needed!
-        tracing::info!("📝 Writing {} address pairs directly from CPU to HOST NUMA memory", src_addresses.len());
+        // Copy address buffers from host to device using stream-ordered H2D memcpy
+        // This provides proper memory visibility guarantees
+        tracing::debug!("Copying {} address pairs to device via H2D memcpy", src_addresses.len());
 
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                src_addresses.as_ptr(),
-                src_buffer as *mut u64,
-                src_addresses.len(),
-            );
-            std::ptr::copy_nonoverlapping(
-                dst_addresses.as_ptr(),
-                dst_buffer as *mut u64,
-                dst_addresses.len(),
-            );
+        use cudarc::driver::sys::{cuMemcpyHtoDAsync_v2, CUresult};
+
+        let result_src = unsafe {
+            cuMemcpyHtoDAsync_v2(
+                src_buffer,
+                src_addresses.as_ptr() as *const std::ffi::c_void,
+                size,
+                stream.cu_stream(),
+            )
+        };
+        if result_src != CUresult::CUDA_SUCCESS {
+            return Err(TransferError::ExecutionError(format!(
+                "H2D memcpy for src buffer failed: {:?}",
+                result_src
+            )));
         }
 
-        tracing::info!(
-            "✅ CPU write completed: {} address pairs written to HOST NUMA memory (GPU can now read)",
-            src_addresses.len()
-        );
+        let result_dst = unsafe {
+            cuMemcpyHtoDAsync_v2(
+                dst_buffer,
+                dst_addresses.as_ptr() as *const std::ffi::c_void,
+                size,
+                stream.cu_stream(),
+            )
+        };
+        if result_dst != CUresult::CUDA_SUCCESS {
+            return Err(TransferError::ExecutionError(format!(
+                "H2D memcpy for dst buffer failed: {:?}",
+                result_dst
+            )));
+        }
+
+        tracing::debug!("H2D memcpy completed (stream-ordered)");
 
         // Validate addresses before launching kernel
         validate_transfer_addresses(
@@ -695,7 +685,7 @@ where
             )?;
         }
 
-        tracing::info!("🚀 Kernel launched successfully - reading from HOST NUMA memory (no PCIe transfer overhead!)");
+        tracing::debug!("Kernel launched - reading from DEVICE memory");
 
         // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
         pool.free_async(src_buffer, stream.cu_stream())
@@ -703,11 +693,11 @@ where
         pool.free_async(dst_buffer, stream.cu_stream())
             .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
 
-        tracing::info!("✅ HOST NUMA buffers freed (stream-ordered - will execute after kernel completes)");
+        tracing::trace!("CUDA pool path complete: DEVICE buffers freed (stream-ordered)");
         Ok(None)  // No guard needed - stream ordering handles cleanup
     } else {
-        // PRIMARY PATH: Use legacy TransferResources pool
-        tracing::info!("Using LEGACY TransferResources pool (PRIMARY PATH)");
+        // LEGACY PATH: Use TransferResources pool (fallback when CUDA pool not available)
+        tracing::warn!("LEGACY PATH: CUDA pool not available, using TransferResources fallback ({} addresses)", src_addresses.len());
 
         let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
             ctx,
@@ -723,59 +713,7 @@ where
             src_addresses.len()
         );
 
-        // Read back addresses from legacy buffers to verify what was written
-        tracing::warn!("Reading back addresses from LEGACY buffers to verify...");
-        let mut readback_src = vec![0u64; src_addresses.len()];
-        let mut readback_dst = vec![0u64; dst_addresses.len()];
-
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                resources.src_ptr() as *const u64,
-                readback_src.as_mut_ptr(),
-                src_addresses.len(),
-            );
-            std::ptr::copy_nonoverlapping(
-                resources.dst_ptr() as *const u64,
-                readback_dst.as_mut_ptr(),
-                dst_addresses.len(),
-            );
-        }
-
-        tracing::warn!("First 10 src addresses READ BACK from buffer:");
-        for (i, &addr) in readback_src.iter().take(10).enumerate() {
-            tracing::warn!("  buffer_src[{}] = 0x{:016x} (expected: 0x{:016x}) {}",
-                i, addr, src_addresses[i],
-                if addr == src_addresses[i] { "✅" } else { "❌ MISMATCH!" }
-            );
-        }
-
-        tracing::warn!("First 10 dst addresses READ BACK from buffer:");
-        for (i, &addr) in readback_dst.iter().take(10).enumerate() {
-            tracing::warn!("  buffer_dst[{}] = 0x{:016x} (expected: 0x{:016x}) {}",
-                i, addr, dst_addresses[i],
-                if addr == dst_addresses[i] { "✅" } else { "❌ MISMATCH!" }
-            );
-        }
-
-        // Check for mismatches
-        let src_mismatches: usize = src_addresses.iter().zip(readback_src.iter())
-            .filter(|(orig, readback)| *orig != *readback)
-            .count();
-        let dst_mismatches: usize = dst_addresses.iter().zip(readback_dst.iter())
-            .filter(|(orig, readback)| *orig != *readback)
-            .count();
-
-        if src_mismatches > 0 || dst_mismatches > 0 {
-            tracing::error!(
-                "❌ BUFFER VERIFICATION FAILED: {} src mismatches, {} dst mismatches",
-                src_mismatches, dst_mismatches
-            );
-            return Err(TransferError::ExecutionError(
-                format!("Buffer verification failed: {} src, {} dst mismatches", src_mismatches, dst_mismatches)
-            ));
-        } else {
-            tracing::warn!("✅ Buffer verification PASSED: all {} addresses match!", src_addresses.len());
-        }
+        tracing::trace!("Legacy buffers: src=0x{:x}, dst=0x{:x}", resources.src_ptr(), resources.dst_ptr());
 
         // Validate addresses before launching kernel (same validation as CUDA pool path)
         validate_transfer_addresses(
@@ -784,15 +722,7 @@ where
             dims.layer_size,
         )?;
 
-        // Kernel launch with detailed logging
-        tracing::warn!("=== LEGACY PATH: LAUNCHING KERNEL ===");
-        tracing::warn!("LAUNCHING KERNEL: {} pairs, src=0x{:x}, dst=0x{:x} (LEGACY - pinned host memory)",
-            src_addresses.len(),
-            resources.src_ptr(),
-            resources.dst_ptr()
-        );
-        tracing::warn!("  layer_size      = {} bytes", dims.layer_size);
-        tracing::warn!("  stream          = 0x{:x}", stream.cu_stream() as usize);
+        tracing::trace!("Legacy path: launching kernel with {} address pairs", src_addresses.len());
 
         unsafe {
             launch_copy_kernel_direct(
@@ -804,7 +734,7 @@ where
             )?;
         }
 
-        tracing::warn!("✅ LEGACY: Kernel launched successfully - waiting for completion in event worker");
+        tracing::debug!("Legacy path: Kernel launched, waiting for completion in event worker");
         Ok(None)
     }
 }
