@@ -718,8 +718,8 @@ struct HFConfig {
     /// in the config.json file
     architectures: Vec<String>,
 
-    /// general model type
-    model_type: String,
+    /// general model type - optional, can be inferred from architectures
+    model_type: Option<String>,
 
     text_config: Option<HFTextConfig>,
 
@@ -856,7 +856,13 @@ impl HFConfig {
 
 impl ModelInfo for HFConfig {
     fn model_type(&self) -> String {
-        self.model_type.clone()
+        // Use explicit model_type if available, otherwise fall back to first architecture
+        self.model_type.clone().unwrap_or_else(|| {
+            self.architectures
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string())
+        })
     }
 
     fn bos_token_id(&self) -> Option<TokenIdType> {
