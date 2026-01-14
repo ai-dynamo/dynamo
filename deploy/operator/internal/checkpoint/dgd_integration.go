@@ -255,7 +255,7 @@ func InjectCheckpointVolume(podSpec *corev1.PodSpec, pvcName string) {
 		VolumeSource: corev1.VolumeSource{
 			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 				ClaimName: pvcName,
-				ReadOnly:  true,
+				ReadOnly:  false, // CRIU needs write access during restore
 			},
 		},
 	})
@@ -277,7 +277,7 @@ func InjectCheckpointVolumeMount(container *corev1.Container, basePath string) {
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
 		Name:      consts.CheckpointVolumeName,
 		MountPath: basePath,
-		ReadOnly:  true,
+		ReadOnly:  false, // CRIU needs write access for restore.log and restore-criu.conf
 	})
 }
 
