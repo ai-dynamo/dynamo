@@ -3,13 +3,8 @@
 
 //! CUDA device memory storage.
 
-use crate::block_manager::DeviceStorage as V1DeviceStorage;
-use crate::block_manager::Storage as V1Storage;
-use crate::block_manager::storage::cuda::DeviceStorageType as V1DeviceStorageType;
-
 use super::{MemoryRegion, Result, StorageError, StorageKind};
 use cudarc::driver::CudaContext;
-use nixl_sys::NixlDescriptor;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -35,8 +30,6 @@ pub struct DeviceStorage {
     ptr: u64,
     device_id: u32,
     len: usize,
-    // TODO: This is a bit ugly. We need to translate our v1 device layout to v2.
-    device_storage_type: V1DeviceStorageType,
 }
 
 unsafe impl Send for DeviceStorage {}
@@ -64,7 +57,6 @@ impl DeviceStorage {
             ptr,
             device_id,
             len,
-            device_storage_type: V1DeviceStorageType::Owned,
         })
     }
 
@@ -77,51 +69,18 @@ impl DeviceStorage {
     pub fn device_id(&self) -> u32 {
         self.device_id
     }
-
-    pub fn from_v1(v1_storage: &V1DeviceStorage) -> Result<Self> {
-        let device_id = v1_storage.device_id() as u32;
-        let ctx = cuda_context(device_id)?;
-        let ptr;
-        unsafe {
-            ptr = v1_storage.as_ptr() as u64;
-        }
-
-        let len = v1_storage.size();
-
-        if !matches!(
-            v1_storage.device_storage_type(),
-            V1DeviceStorageType::Torch { .. }
-        ) {
-            return Err(StorageError::Unsupported(
-                "Unable to convert owned device tensors.".into(),
-            ));
-        }
-
-        Ok(Self {
-            ctx,
-            ptr,
-            device_id,
-            len,
-            device_storage_type: v1_storage.device_storage_type().clone(),
-        })
-    }
 }
 
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
-        match self.device_storage_type {
-            V1DeviceStorageType::Owned => {
-                if let Err(e) = self.ctx.bind_to_thread() {
-                    tracing::debug!("failed to bind CUDA context for free: {e}");
-                }
-                unsafe {
-                    if let Err(e) = cudarc::driver::result::free_sync(self.ptr) {
-                        tracing::debug!("failed to free device memory: {e}");
-                    }
-                }
-            }
-            V1DeviceStorageType::Torch { .. } => {} // Do nothing.
+        if let Err(e) = self.ctx.bind_to_thread() {
+            tracing::debug!("failed to bind CUDA context for free: {e}");
         }
+        unsafe {
+            if let Err(e) = cudarc::driver::result::free_sync(self.ptr) {
+                tracing::debug!("failed to free device memory: {e}");
+            }
+        };
     }
 }
 

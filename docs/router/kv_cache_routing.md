@@ -517,15 +517,11 @@ The `KvPushRouter` provides the following methods:
   - Without `request_id`: Query-only, doesn't update router state
   - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
 
-- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: **[DEPRECATED - use `best_worker()` instead]** Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
-  - Without `request_id`: Query-only, doesn't update router state
-  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
-
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
-- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
-- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
 - **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
 
@@ -603,9 +599,9 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 - **Router automatically**: Selects best worker, updates state, routes request, tracks lifecycle
 
 #### 2. Manual State Management (Advanced)
-Use `best_worker_id(request_id=...)` to select and track, then manage the request yourself:
+Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, overlap = await router.best_worker_id(tokens, request_id="req-123")
+worker_id, _dp_rank, overlap = await router.best_worker(tokens, request_id="req-123")
 response = await client.generate(tokens, request_id="req-123")
 # await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
@@ -621,8 +617,8 @@ await router.free("req-123")  # After completion
 Query without state updates, then route through a chosen router:
 ```python
 # Probe multiple routers without updating state
-worker_id_1, overlap_1 = await router_1.best_worker_id(tokens)  # No request_id
-worker_id_2, overlap_2 = await router_2.best_worker_id(tokens)
+worker_id_1, dp_rank, overlap_1 = await router_1.best_worker(tokens)  # No request_id
+worker_id_2, dp_rank, overlap_2 = await router_2.best_worker(tokens)
 
 # Pick the best router based on results
 chosen_router = router_1 if overlap_1 > overlap_2 else router_2
@@ -698,7 +694,7 @@ if __name__ == "__main__":
 This approach gives you complete control over routing decisions, allowing you to optimize for different metrics based on your specific requirements. As some examples:
 
 - **Minimize TTFT**: Select worker with lowest `potential_prefill_tokens`
-- **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
+- **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
 See [KV Router Architecture](../router/README.md) for performance tuning details.

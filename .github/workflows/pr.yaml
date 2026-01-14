@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Docker Build and Test
+name: PR
 
 
 # TODO before Merge:
@@ -17,8 +17,10 @@ on:
   push:
     branches:
       - ops-2438-ci # todo remove after development
+      - ops-2438-ci-alt # todo remove after development
       - main
-      - "pull-request/[0-9]+"
+      # uncomment after development, this duplicates builds
+      # - "pull-request/[0-9]+"
       - release/*.*.*
   workflow_dispatch:
     inputs:
@@ -88,19 +90,17 @@ jobs:
       - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd #v3.0.1
         timeout-minutes: 3
 
-
   backend-status-check:
     runs-on: ubuntu-slim
-    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+    needs: [init, operator, vllm-build, sglang-build, trtllm-build, vllm-test, sglang-test, trtllm-test]
     if: always()
     steps:
       - name: "Check all dependent jobs"
         run: |
           echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
-
   # ============================================================================
-  # Operator
+  # BUILD
   # ============================================================================
   operator:
     needs: [init]
@@ -108,10 +108,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
-          - { arch: amd64 }
-          - { arch: arm64  }
-    name: operator (${{ matrix.platform.arch }})
+        platform: [amd64, arm64]
+    name: operator-build (${{ matrix.platform }})
     runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
@@ -120,13 +118,13 @@ jobs:
         id: route-buildkit
         continue-on-error: true
         shell: bash
-        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform.arch }} --flavor general
+        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor general
       - name: Bootstrap Buildkit
         uses: ./.github/actions/bootstrap-buildkit
         with:
           builder_name: ${{ needs.init.outputs.builder_name }}
-          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform.arch)] }}
-          platform: linux/${{ matrix.platform.arch }}
+          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('general_{0}', matrix.platform)] }}
+          platform: linux/${{ matrix.platform }}
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
@@ -141,14 +139,14 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker buildx build --platform linux/${{ matrix.platform.arch }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/${{ matrix.platform }} --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Tester
         shell: bash
         working-directory: ./deploy/operator
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          docker buildx build --platform linux/${{ matrix.platform.arch }}  --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          docker buildx build --platform linux/${{ matrix.platform }}  --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       - name: Set up Go
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
@@ -168,7 +166,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           IMAGE_BASE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo
-          PLATFORM: ${{ matrix.platform.arch }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           EXTRA_TAGS=""
           NO_CACHE_FLAG=""
@@ -187,15 +185,261 @@ jobs:
               -t ${IMAGE_BASE}:${{ github.sha }}-dynamo-operator-${PLATFORM} \
               ${NO_CACHE_FLAG} ${EXTRA_TAGS} .
 
+  vllm-build:
+    needs: [init]
+    if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.init.outputs.core == 'true' || needs.init.outputs.vllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: vllm-build (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    runs-on: builder-cpu-amd-runner
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: vllm
+      NO_LOAD: false
+      PUSH_IMAGE: true
+    steps: &runtime-container-build-push
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          lfs: true
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Calculate extra tags with platform suffix
+        id: extra-tags
+        shell: bash
+        env:
+          EXTRA_TAGS: |
+            ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+            ${{ matrix.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+          PLATFORM: ${{ matrix.platform }}
+          CUDA_VERSION: ${{ matrix.cuda_version.major }}
+        run: |
+          RESULT=""
+          # This tag should be deprecated when moving to CUDA 13, this is used to keep things from breaking
+          if [[ ${CUDA_VERSION} == '12' ]]; then
+            RESULT+=${{ github.sha }}-${{ env.FRAMEWORK }}-${{ matrix.platform }}
+          fi
+          if [[ ${{ github.ref_name }} == 'main' ]]; then
+            RESULT+=main-${{ env.FRAMEWORK }}-cuda${CUDA_VERSION}-${{ matrix.platform }}
+          fi
+          echo "tags=$RESULT" >> $GITHUB_OUTPUT
+      - name: Route buildkit workers
+        id: route-buildkit
+        continue-on-error: true
+        shell: bash
+        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ env.FRAMEWORK }} --cuda ${{ matrix.cuda_version.major_minor }}
+      - name: Bootstrap Buildkit
+        uses: ./.github/actions/bootstrap-buildkit
+        with:
+          builder_name: ${{ env.BUILDER_NAME }}
+          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}_{1}', env.FRAMEWORK, matrix.platform)] }}
+          platform: linux/${{ matrix.platform }}
+      - name: Print Build Container inputs
+        run: |
+          echo "=== Build Container Inputs ==="
+          echo "image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform }}"
+          echo "framework: ${{ env.FRAMEWORK }}"
+          echo "target: runtime"
+          echo "platform: linux/${{ matrix.platform }}"
+          echo "cuda_version: ${{ matrix.cuda_version.major_minor }}"
+          echo "no_cache: ${{ github.ref_name == 'main' && true || false }}"
+          echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
+          echo "push_image: ${{ env.PUSH_IMAGE }}"
+          echo "no_load: ${{ env.NO_LOAD }}"
+      - name: Build Container
+        id: build-image
+        uses: ./.github/actions/docker-build
+        with:
+          image_tag: ${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform }}
+          framework: ${{ env.FRAMEWORK }}
+          target: runtime
+          platform: linux/${{ matrix.platform }}
+          cuda_version: ${{ matrix.cuda_version.major_minor }}
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          no_cache: ${{ github.ref_name == 'main' && true || false }}
+          extra_tags: ${{ steps.extra-tags.outputs.tags }}
+          push_image: true
+          no_load: false
+
+  sglang-build:
+    needs: [init]
+    if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.init.outputs.core == 'true' || needs.init.outputs.sglang == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: sglang-build (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    runs-on: builder-cpu-amd-runner
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: sglang
+      NO_LOAD: false
+      PUSH_IMAGE: true
+    steps: *runtime-container-build-push
+
+  trtllm-build:
+    needs: [init]
+    if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || needs.init.outputs.core == 'true' || needs.init.outputs.trtllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+    name: trtllm-build (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    runs-on: builder-cpu-amd-runner
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: trtllm
+      NO_LOAD: false
+      PUSH_IMAGE: true
+    steps: *runtime-container-build-push
+
+  # ============================================================================
+  # TEST
+  # ============================================================================
+  vllm-test:
+    needs: [init, vllm-build]
+    if: needs.init.outputs.core == 'true' || needs.init.outputs.vllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: vllm-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: vllm
+    steps: &runtime-container-test
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Pull relevant images
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          TEST_IMAGE=${ECR_HOSTNAME}/ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform.arch }}
+          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
+          docker pull ${TEST_IMAGE}
+          docker pull quay.io/minio/minio
+      - name: Run Sanity Check
+        shell: bash
+        run: |
+          echo "Running sanity check on image: ${{ steps.calculate-target-tag.outputs.test_image }}"
+
+          # Run the sanity check script inside the container
+          # The script is located in /workspace/deploy/sanity_check.py in runtime containers
+          export WORKSPACE=/workspace
+
+          set +e
+          docker run --rm "${{ steps.calculate-target-tag.outputs.test_image }}" python ${WORKSPACE}/deploy/sanity_check.py --runtime-check --no-gpu-check
+          SANITY_CHECK_EXIT_CODE=$?
+          set -e
+          if [ ${SANITY_CHECK_EXIT_CODE} -ne 0 ]; then
+            echo "ERROR: Sanity check failed - ai-dynamo packages not properly installed"
+            exit ${SANITY_CHECK_EXIT_CODE}
+          else
+            echo "✅ Sanity check passed"
+          fi
+      - name: Run tests
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.build-image.outputs.image_tag }}
+          # GH ARM runners have no GPUs, run CPU tests only on ARM
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
+          framework: ${{ env.FRAMEWORK }}
+          test_type: "pre_merge"
+          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
+
+  sglang-test:
+    needs: [init, sglang-build]
+    if: needs.init.outputs.core == 'true' || needs.init.outputs.sglang == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: sglang-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: sglang
+    steps: *runtime-container-test
+
+  trtllm-test:
+    needs: [init, trtllm-build]
+    if: needs.init.outputs.core == 'true' || needs.init.outputs.trtllm == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - { arch: amd64, runner: gpu-l40-amd64 }
+          # TODO: enable testing on ARM when these tests stop failing on collection on machines without GPUs:
+          #   components/src/dynamo/trtllm/tests/test_trtllm_autodeploy.py
+          #   components/src/dynamo/trtllm/tests/test_trtllm_unit.py
+          # - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+    name: trtllm-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 90
+    env:
+      FRAMEWORK: trtllm
+    steps: *runtime-container-test
+
+  # ============================================================================
+  # COPY TO ACR
+  # ============================================================================
   copy-operator-to-acr:
     needs: [operator]
     strategy:
       fail-fast: true
       matrix:
-        platform:
-          - { arch: amd64 }
-          - { arch: arm64 }
-    name: copy dynamo-operator-${{ matrix.platform.arch }}
+        platform: [amd64, arm64]
+    name: copy dynamo-operator (${{ matrix.platform }})
     runs-on: builder-cpu-amd-runner
     steps:
       - name: Checkout repository
@@ -211,10 +455,10 @@ jobs:
         with:
           source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
           source_image: ai-dynamo/dynamo
-          source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
+          source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform }}
           target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
           target_image: ai-dynamo/dynamo
-          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
+          target_tag: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform }}
           source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -223,65 +467,88 @@ jobs:
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
 
+  copy-vllm-to-acr:
+    needs: [vllm-build, vllm-test]
+    if: |
+      always() &&
+      needs.vllm-build.result == 'success' &&
+      (needs.vllm-test.result == 'success' || needs.vllm-test.result == 'skipped')
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [amd64, arm64]
+          # TODO: Uncomment when we can support ARM deploy tests
+          # - { arch: arm64 }
+        cuda_version:
+          # TODO: Uncomment when we run deploy tests on CUDA 13
+          # - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: copy-vllm (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    runs-on: builder-cpu-amd-runner
+    env:
+      FRAMEWORK: vllm
+    steps: &copy-framework-to-acr
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Copy image to target registry
+        uses: ./.github/actions/skopeo-copy
+        with:
+          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+          source_image: ai-dynamo/dynamo
+          source_tag: ${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform }}
+          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_image: ai-dynamo/dynamo
+          target_tag: ${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_version.major }}-${{ matrix.platform }}
+          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+  copy-sglang-to-acr:
+    needs: [sglang-build, sglang-test]
+    if: |
+      always() &&
+      needs.sglang-build.result == 'success' &&
+      (needs.sglang-test.result == 'success' || needs.sglang-test.result == 'skipped')
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [amd64, arm64]
+          # TODO: Uncomment when we can support ARM deploy tests
+          # - { arch: arm64 }
+        cuda_version:
+          # TODO: Uncomment when we run deploy tests on CUDA 13
+          # - { major_minor: '13.0', major: '13' }
+          - { major_minor: '12.9', major: '12' }
+    name: copy-sglang (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    runs-on: builder-cpu-amd-runner
+    env:
+      FRAMEWORK: sglang
+    steps: *copy-framework-to-acr
+
+  copy-trtllm-to-acr:
+    needs: [trtllm-build, trtllm-test]
+    if: |
+      always() &&
+      needs.trtllm-build.result == 'success' &&
+      (needs.trtllm-test.result == 'success' || needs.trtllm-test.result == 'skipped')
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [amd64, arm64]
+          # TODO: Uncomment when we can support ARM deploy tests
+          # - { arch: arm64 }
+        cuda_version:
+          - { major_minor: '13.0', major: '13' }
+    name: copy-trtllm (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform }})
+    runs-on: builder-cpu-amd-runner
+    env:
+      FRAMEWORK: trtllm
+    steps: *copy-framework-to-acr
 
   # ============================================================================
-  # FRAMEWORK PIPELINES (Build → Test → Copy)
-  # ============================================================================
-  vllm-pipeline:
-    needs: [init]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-    with:
-      framework: vllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      build_image: true
-      run_tests: false
-      copy_to_acr: true
-      push_image: true
-    secrets: inherit
-
-
-  sglang-pipeline:
-    needs: [init]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-    with:
-      framework: sglang
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      run_tests: false
-    secrets: inherit
-
-  trtllm-pipeline:
-    needs: [init]
-    uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-    with:
-      framework: trtllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9"]'
-      extra_tags: |
-        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-      builder_name: ${{ needs.init.outputs.builder_name }}
-      run_tests: false
-    secrets: inherit
-
-
-  # ============================================================================
-  # DEPLOYMENT JOBS
+  # OPERATOR DEPLOYMENT
   # Deploy operator and run end-to-end tests on Kubernetes cluster
   # ============================================================================
   deploy-operator:
@@ -356,18 +623,20 @@ jobs:
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   # ============================================================================
-  #
+  # DEPLOY TESTS
   # End-to-end tests for each framework with various deployment profiles
   # ============================================================================
   deploy-test-vllm:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [deploy-operator, copy-vllm-to-acr]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
+        platform: [amd64]
+        cuda_major: ["12"]
         profile:
           - agg
           - agg_router
@@ -376,7 +645,7 @@ jobs:
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
-    steps:
+    steps: &deploy-test-steps
       - name: Output Node Name
         run: echo ${K8S_NODE_NAME}
       - name: Checkout code
@@ -388,101 +657,65 @@ jobs:
           kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
           namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
           deployment_file: deploy/${{ matrix.profile }}.yaml
-          framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-pipeline.outputs.image_tag_amd64 }}
+          framework: ${{ env.FRAMEWORK }}
+          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ env.FRAMEWORK }}-cuda${{ matrix.cuda_major }}-${{ matrix.platform }}
           model_name: Qwen/Qwen3-0.6B
       - name: Upload Test Results
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
         if: always()
         with:
-          name: test-results-vllm-${{ matrix.profile }}-${{ github.run_id }}
+          name: test-results-${{ env.FRAMEWORK }}-${{ matrix.profile }}-${{ github.run_id }}
           path: ${{ steps.deploy-test.outputs.test_log_path }}
           retention-days: 7
 
   deploy-test-vllm-disagg-router:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [deploy-operator, vllm-pipeline]
+    needs: [deploy-operator, copy-vllm-to-acr]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
+        platform: [amd64]
+        cuda_major: ["12"]
         profile:
           - disagg_router
     name: deploy-test-vllm (${{ matrix.profile }})
     env:
       FRAMEWORK: vllm
-    steps:
-      - name: Output Node Name
-        run: echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: deploy/${{ matrix.profile }}.yaml
-          framework: vllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.vllm-pipeline.outputs.image_tag_amd64 }}
-          model_name: Qwen/Qwen3-0.6B
-      - name: Upload Test Results
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
-        if: always()
-        with:
-          name: test-results-vllm-${{ matrix.profile }}-${{ github.run_id }}
-          path: ${{ steps.deploy-test.outputs.test_log_path }}
-          retention-days: 7
+    steps: *deploy-test-steps
 
   deploy-test-sglang:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [deploy-operator, sglang-pipeline]
+    needs: [deploy-operator, copy-sglang-to-acr]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
+        platform: [amd64]
+        cuda_major: ["12"]
         profile:
           - agg
           - agg_router
     name: deploy-test-sglang (${{ matrix.profile }})
     env:
       FRAMEWORK: sglang
-    steps:
-      - name: Output Node Name
-        run: echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: deploy/${{ matrix.profile }}.yaml
-          framework: sglang
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.sglang-pipeline.outputs.image_tag_amd64 }}
-          model_name: Qwen/Qwen3-0.6B
-      - name: Upload Test Results
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
-        if: always()
-        with:
-          name: test-results-sglang-${{ matrix.profile }}-${{ github.run_id }}
-          path: ${{ steps.deploy-test.outputs.test_log_path }}
-          retention-days: 7
+    steps: *deploy-test-steps
 
   deploy-test-trtllm:
     runs-on: cpu-amd-m5-2xlarge
-    needs: [deploy-operator, trtllm-pipeline]
+    needs: [deploy-operator, copy-trtllm-to-acr]
     permissions:
       contents: read
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
+        platform: [amd64]
+        cuda_major: ["12"]
         profile:
           - agg
           - agg_router
@@ -491,28 +724,7 @@ jobs:
     name: deploy-test-trtllm (${{ matrix.profile }})
     env:
       FRAMEWORK: trtllm
-    steps:
-      - name: Output Node Name
-        run: echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Run Dynamo Deploy Test
-        id: deploy-test
-        uses: ./.github/actions/dynamo-deploy-test
-        with:
-          kubeconfig_base64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
-          namespace: ${{ needs.deploy-operator.outputs.NAMESPACE }}
-          deployment_file: deploy/${{ matrix.profile }}.yaml
-          framework: trtllm
-          framework_runtime_image: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ needs.trtllm-pipeline.outputs.image_tag_amd64 }}
-          model_name: Qwen/Qwen3-0.6B
-      - name: Upload Test Results
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f #v6
-        if: always()
-        with:
-          name: test-results-trtllm-${{ matrix.profile }}-${{ github.run_id }}
-          path: ${{ steps.deploy-test.outputs.test_log_path }}
-          retention-days: 7
+    steps: *deploy-test-steps
 
   # ============================================================================
   # CLEANUP JOBS
@@ -524,7 +736,7 @@ jobs:
     name: Clean K8s builder if exists
     runs-on: builder-cpu-amd-runner
     if: always()
-    needs: [init, operator, vllm-pipeline, sglang-pipeline, trtllm-pipeline]
+    needs: [init, operator, vllm-build, sglang-build, trtllm-build]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
