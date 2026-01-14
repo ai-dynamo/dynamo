@@ -19,15 +19,13 @@ This example shows how to run Triton Server models through Dynamo's distributed 
                               │                 │  │  (Python bindings)    │  │
                               ▼                 │  └───────────────────────┘  │
                     ┌─────────────────┐         └─────────────────────────────┘
-                    │   etcd + NATS   │
-                    │ (discovery/msg) │
+                    │    KV Store     │
                     └─────────────────┘
 ```
 
 ## Prerequisites
 
 - NVIDIA GPU with CUDA support
-- `etcd` and `nats-server` running (locally or in containers)
 - For local development: Python 3.10+ with Dynamo installed
 - For container deployment: Docker with NVIDIA Container Toolkit
 
@@ -38,10 +36,6 @@ This example shows how to run Triton Server models through Dynamo's distributed 
 This requires Dynamo to be installed locally.
 
 ```bash
-# Start etcd and nats (if not already running)
-etcd &
-nats-server -js &
-
 # From the dynamo repo root
 cd examples/backends/tritonserver
 
@@ -61,16 +55,7 @@ python launch/client.py
 
 ### Option 2: Container Deployment
 
-Run the Triton worker in a container with external etcd/nats.
-
-#### Step 1: Start etcd and NATS
-
-```bash
-# From the dynamo repo root
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-#### Step 2: Build Container Images
+#### Step 1: Build Container Images
 
 From the Dynamo repository root:
 
@@ -83,7 +68,7 @@ cd examples/backends/tritonserver
 docker build -t dynamo-triton:latest .
 ```
 
-#### Step 3: Run the Container
+#### Step 2: Run the Container
 
 ```bash
 docker run --rm -it --gpus all --network host \
@@ -91,7 +76,7 @@ docker run --rm -it --gpus all --network host \
   ./launch/agg.sh
 ```
 
-#### Step 4: Test the Deployment
+#### Step 3: Test the Deployment
 
 ```bash
 # Install client dependencies
@@ -133,16 +118,18 @@ Options:
   --model-repository <path>   Path to model repository
   --backend-directory <path>  Path to Triton backends
   --log-verbose <level>       Triton log verbosity 0-6 (default: 1)
+  --store-kv <backend>        KV store backend: file, etcd, mem (default: file)
 ```
 
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ETCD_ENDPOINTS` | etcd connection URL | `http://localhost:2379` |
-| `NATS_SERVER` | NATS connection URL | `nats://localhost:4222` |
+| `DYN_STORE_KV` | KV store backend: `file`, `etcd`, or `mem` | `file` |
 | `DYN_LOG` | Log level (debug, info, warn, error) | `info` |
 | `DYN_HTTP_PORT` | Frontend HTTP port | `8000` |
+| `ETCD_ENDPOINTS` | etcd connection URL (only when `--store-kv etcd`) | `http://localhost:2379` |
+| `NATS_SERVER` | NATS connection URL (only for distributed mode) | `nats://localhost:4222` |
 
 ## Adding Your Own Models
 
