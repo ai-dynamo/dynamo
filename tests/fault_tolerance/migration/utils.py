@@ -41,7 +41,7 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         )
 
 
-def start_request(frontend_port: int) -> tuple:
+def start_request(frontend_port: int, use_long_prompt: bool = False) -> tuple:
     """
     Start a long-running chat completion request in a separate thread.
 
@@ -50,6 +50,7 @@ def start_request(frontend_port: int) -> tuple:
 
     Args:
         frontend_port: Port where the frontend is running
+        use_long_prompt: Whether to use a long prompt (~8000 tokens)
 
     Returns:
         tuple: (request_thread, response_list) where response_list contains
@@ -59,6 +60,8 @@ def start_request(frontend_port: int) -> tuple:
 
     def send_request():
         prompt = "Tell me a long long long story about yourself?"
+        if use_long_prompt:
+            prompt += " Make sure it is" + " long" * 8000 + "!"
         max_tokens = 8000
         timeout = 240  # Extended timeout for long request
 

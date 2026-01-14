@@ -324,9 +324,9 @@ def test_request_migration_trtllm_prefill(
                 ) as prefill2:
                     logger.info(f"Prefill Worker 2 PID: {prefill2.get_pid()}")
 
-                    # Step 4: Send the request
+                    # Step 4: Send the request (long prompt to extend prefill time)
                     request_thread, response_list = start_request(
-                        frontend.frontend_port
+                        frontend.frontend_port, use_long_prompt=True
                     )
 
                     # Step 5: Determine which prefill worker received the request
