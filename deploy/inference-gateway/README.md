@@ -32,29 +32,12 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 ### 2. Deploy Inference Gateway ###
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
-You can use the script below or follow the steps manually.
-
-Script:
 
 ```bash
 ./install_gaie_crd_kgateway.sh
 ```
 
-Manual steps:
-
-a. Deploy the Gateway API CRDs:
-
-```bash
-GATEWAY_API_VERSION=v1.3.0
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
-```
-
-b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs)
-
-```bash
-INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
-```
+Verify installation:
 
 ```bash
 kubectl get gateway inference-gateway -n my-model
@@ -222,10 +205,6 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-```bash
-export GATEWAY_URL=<Gateway-URL>
-```
-
 To test the gateway in minikube, use the following command:
 a. User minikube tunnel to expose the gateway to the host
    This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
@@ -236,7 +215,7 @@ ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is no
 minikube tunnel & # start the tunnel
 
 # in second terminal where you want to send inference requests
-GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o yaml -o jsonpath='{.spec.clusterIP}')
+GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}')
 echo $GATEWAY_URL
 ```
 
