@@ -19,7 +19,8 @@ on:
       - ops-2438-ci # todo remove after development
       - ops-2438-ci-alt # todo remove after development
       - main
-      - "pull-request/[0-9]+"
+      # uncomment after development, this duplicates builds
+      # - "pull-request/[0-9]+"
       - release/*.*.*
   workflow_dispatch:
     inputs:
