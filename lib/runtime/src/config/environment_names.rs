@@ -40,9 +40,6 @@ pub mod logging {
     /// Enable span event logging (create/close events)
     pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
 
-    /// Dump metrics to log on shutdown
-    pub const DYN_LOGGING_DUMP_METRICS_ON_SHUTDOWN: &str = "DYN_LOGGING_DUMP_METRICS_ON_SHUTDOWN";
-
     /// OTLP (OpenTelemetry Protocol) tracing configuration
     pub mod otlp {
         /// Enable OTLP trace exporting (set to "1" to enable)

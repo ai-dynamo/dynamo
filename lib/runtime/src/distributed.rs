@@ -321,25 +321,7 @@ impl DistributedRuntime {
     }
 
     pub fn shutdown(&self) {
-        // Create a callback to dump metrics after in-flight requests complete
-        // but before disconnecting backend services
-        let metrics_callback = if crate::config::dump_metrics_on_shutdown() {
-            let drt = self.clone();
-            Some(move || {
-                match drt.metrics().prometheus_expfmt() {
-                    Ok(metrics) => {
-                        tracing::info!(target: "dynamo_runtime::metrics", metrics = %metrics, "Shutdown metrics dump");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to dump metrics on shutdown: {}", e);
-                    }
-                }
-            })
-        } else {
-            None
-        };
-
-        self.runtime.shutdown_with_pre_disconnect_callback(metrics_callback);
+        self.runtime.shutdown();
         self.store.shutdown();
     }
 

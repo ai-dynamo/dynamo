@@ -479,12 +479,6 @@ pub fn span_events_enabled() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOGGING_SPAN_EVENTS)
 }
 
-/// Check whether metrics should be dumped to log on shutdown
-/// Set the `DYN_LOGGING_DUMP_METRICS_ON_SHUTDOWN` environment variable to a [`is_truthy`] value
-pub fn dump_metrics_on_shutdown() -> bool {
-    env_is_truthy(environment_names::logging::DYN_LOGGING_DUMP_METRICS_ON_SHUTDOWN)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
