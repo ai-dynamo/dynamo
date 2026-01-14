@@ -348,6 +348,16 @@ func InjectCheckpointIntoPodSpec(
 	// hostIPC: Required for CRIU to access shared memory segments and IPC resources
 	podSpec.HostIPC = true
 
+	// Apply seccomp profile to match checkpoint environment
+	// This blocks io_uring syscalls required for CRIU compatibility
+	if podSpec.SecurityContext == nil {
+		podSpec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	podSpec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
+		Type:             corev1.SeccompProfileTypeLocalhost,
+		LocalhostProfile: ptr.To("profiles/block-iouring.json"),
+	}
+
 	// Apply container-level security context for CRIU restore
 	// Privileged mode is required for CRIU restore operations
 	if mainContainer.SecurityContext == nil {
