@@ -19,6 +19,7 @@
 {{- $resolvedDynNs := (include "dynamo-gaie.dynamoNamespace" .) | trim -}}
 {{- $ns           := ternary (required "set dynamoGraphDeploymentName when epp.useDynamo=true" $resolvedDynNs) "" $useDynamo -}}
 {{- $kv           := default "16" .Values.epp.dynamo.kvBlockSize -}}
+{{- $useEtcd      := default false .Values.epp.dynamo.useEtcd -}}
 {{- $std          := .Values.extension.standardImage -}}
 {{- $dyn          := .Values.extension.dynamoImage -}}
 {{- $fallback     := ternary $dyn $std .Values.epp.useDynamo -}}
@@ -99,11 +100,13 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: metadata.uid
-          # enable if you want to use ETCD instead of K8 discovery and remove DYN_DISCOVERY_BACKEND
-          # - name: ETCD_ENDPOINTS
-          #   value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
+          {{- if $useEtcd }}
+          - name: ETCD_ENDPOINTS
+            value: "{{ $platformName }}-etcd.{{ $platformNs }}:2379"
+          {{- else }}
           - name: DYN_DISCOVERY_BACKEND
-              value: "kubernetes"
+            value: "kubernetes"
+          {{- end }}
           - name: NATS_SERVER
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYNAMO_NAMESPACE
