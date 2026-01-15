@@ -188,7 +188,7 @@ jobs:
 
       - name: Install Coverage Tools
         run: |
-          pip install coverage[toml]==7.4.0 pytest-cov
+          pip install coverage[toml] pytest-cov
           echo "✅ Coverage tools installed"
 
       - name: Download All Coverage Artifacts

@@ -132,9 +132,10 @@ runs:
           COVERAGE_ENV=""
           if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
             echo "📊 Coverage collection enabled"
-            # Generate both XML report and save .coverage data file
+            # Only collect coverage during test run (don't generate reports yet)
             # The COVERAGE_FILE env var controls where the data file is saved
-            COVERAGE_FLAGS="--cov=components/src/dynamo --cov-report=term --cov-report=xml:/workspace/test-results/coverage.xml"
+            # We'll generate XML report from the .coverage file in a separate step
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov-report=term --cov-report="
             COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage"
           fi
 
@@ -169,10 +170,30 @@ runs:
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        # Debug: Check if coverage files were created
-        if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
-          echo "📊 Checking for coverage files..."
-          ls -lah "${TEST_RESULTS_DIR}/" | grep -E "coverage|\.coverage" || echo "⚠️ No coverage files found in test-results/"
+        # Generate XML report from .coverage data file
+        if [[ "${{ inputs.enable_coverage }}" == "true" && "${{ inputs.dry_run }}" != "true" ]]; then
+          echo "📊 Generating XML coverage report from .coverage data file..."
+
+          if [[ -f "${TEST_RESULTS_DIR}/.coverage" ]]; then
+            echo "✅ .coverage data file found, generating XML..."
+            # Run coverage xml inside the same container to generate the report
+            docker run ${GPU_FLAGS} --rm -w /workspace \
+              --env COVERAGE_FILE=/workspace/test-results/.coverage \
+              -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
+              ${{ inputs.image_tag }} \
+              bash -c "coverage xml -o /workspace/test-results/coverage.xml"
+
+            if [[ -f "${TEST_RESULTS_DIR}/coverage.xml" ]]; then
+              echo "✅ coverage.xml generated successfully"
+            else
+              echo "⚠️ Failed to generate coverage.xml"
+            fi
+          else
+            echo "⚠️ .coverage data file NOT found - cannot generate XML"
+          fi
+
+          echo "📁 Final files in test-results:"
+          ls -lah "${TEST_RESULTS_DIR}/"
         fi
 
         # Verify test results were written (only in normal mode)
