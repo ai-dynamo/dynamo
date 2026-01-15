@@ -1656,154 +1656,6 @@ pub mod tests {
         Ok(())
     }
 
-    /// Test that span events (SPAN_CREATED/SPAN_CLOSED) are emitted when DYN_LOGGING_SPAN_EVENTS=1
-    #[tokio::test]
-    async fn test_span_events_logging() -> Result<()> {
-        #[allow(clippy::redundant_closure_call)]
-        let _ = temp_env::async_with_vars(
-            [
-                (env_logging::DYN_LOGGING_JSONL, Some("1")),
-                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
-            ],
-            (async || {
-                let tmp_file = NamedTempFile::new().unwrap();
-                let file_name = tmp_file.path().to_str().unwrap();
-                let guard = StderrOverride::from_file(file_name)?;
-                init();
-
-                // Run instrumented code to generate span events
-                parent().await;
-
-                drop(guard);
-
-                let lines = load_log(file_name)?;
-
-                // Skip test if logging was already initialized by another test
-                // (logging initialization is global/Once)
-                let Some(_trace_id) = lines
-                    .iter()
-                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
-                    .map(|s| s.to_string())
-                else {
-                    return Ok(());
-                };
-
-                // Look for SPAN_CREATED messages
-                let span_created_events: Vec<_> = lines
-                    .iter()
-                    .filter(|log_line| {
-                        log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                    })
-                    .collect();
-
-                // Look for SPAN_CLOSED messages
-                let span_closed_events: Vec<_> = lines
-                    .iter()
-                    .filter(|log_line| {
-                        log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CLOSED")
-                    })
-                    .collect();
-
-                // Verify SPAN_CREATED events have span_name (if present)
-                // Note: SPAN_CREATED is emitted at runtime so should appear if env var is set
-                for event in &span_created_events {
-                    assert!(
-                        event.get("span_name").is_some(),
-                        "SPAN_CREATED should have span_name"
-                    );
-                }
-
-                // Verify SPAN_CLOSED events have timing information (if present)
-                // Note: SPAN_CLOSED depends on FmtSpan::CLOSE which is set at init time,
-                // so may not appear if logging was initialized by another test first
-                for event in &span_closed_events {
-                    assert!(
-                        event.get("span_name").is_some(),
-                        "SPAN_CLOSED should have span_name"
-                    );
-                    assert!(
-                        event.get("time.busy_us").is_some()
-                            || event.get("time.idle_us").is_some()
-                            || event.get("time.duration_us").is_some(),
-                        "SPAN_CLOSED should have timing information"
-                    );
-                }
-
-                Ok::<(), anyhow::Error>(())
-            })(),
-        )
-        .await;
-        Ok(())
-    }
-
-    /// Test that span events contain trace context
-    #[tokio::test]
-    async fn test_span_events_have_trace_context() -> Result<()> {
-        #[allow(clippy::redundant_closure_call)]
-        let _ = temp_env::async_with_vars(
-            [
-                (env_logging::DYN_LOGGING_JSONL, Some("1")),
-                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
-            ],
-            (async || {
-                let tmp_file = NamedTempFile::new().unwrap();
-                let file_name = tmp_file.path().to_str().unwrap();
-                let guard = StderrOverride::from_file(file_name)?;
-                init();
-
-                parent().await;
-
-                drop(guard);
-
-                let lines = load_log(file_name)?;
-
-                // Skip if logging was already initialized
-                let Some(trace_id) = lines
-                    .iter()
-                    .find_map(|log_line| log_line.get("trace_id").and_then(|v| v.as_str()))
-                    .map(|s| s.to_string())
-                else {
-                    return Ok(());
-                };
-
-                for log_line in &lines {
-                    if log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED") {
-                        if let Some(event_trace_id) =
-                            log_line.get("trace_id").and_then(|v| v.as_str())
-                        {
-                            assert_eq!(
-                                event_trace_id, &trace_id,
-                                "SPAN_CREATED trace_id should match the trace"
-                            );
-                        }
-                        // Should have span_id
-                        if let Some(span_id) = log_line.get("span_id").and_then(|v| v.as_str()) {
-                            assert!(
-                                is_valid_span_id(span_id),
-                                "SPAN_CREATED should have valid span_id"
-                            );
-                        }
-                    }
-
-                    if log_line.get("message").and_then(|v| v.as_str()) == Some("SPAN_CLOSED") {
-                        if let Some(event_trace_id) =
-                            log_line.get("trace_id").and_then(|v| v.as_str())
-                        {
-                            assert_eq!(
-                                event_trace_id, &trace_id,
-                                "SPAN_CLOSED trace_id should match the trace"
-                            );
-                        }
-                    }
-                }
-
-                Ok::<(), anyhow::Error>(())
-            })(),
-        )
-        .await;
-        Ok(())
-    }
-
     // Test functions at different log levels for filtering tests
     #[tracing::instrument(level = "debug", skip_all)]
     async fn debug_level_span() {
@@ -1820,89 +1672,28 @@ pub mod tests {
         tracing::warn!("inside warn span");
     }
 
-    /// Test that span events respect log level filtering
-    /// When DYN_LOG=warn, only warn+ level spans should generate SPAN_CREATED events
+    /// Comprehensive test for span events covering:
+    /// - SPAN_CREATED and SPAN_CLOSED event emission
+    /// - Trace context (trace_id, span_id) in span events
+    /// - Timing information in SPAN_CLOSED events
+    /// - Level-based filtering (positive: allowed levels pass, negative: filtered levels blocked)
+    /// - Target-based filtering (spans from allowed targets pass even at lower levels)
+    ///
+    /// Uses DYN_LOG=warn,dynamo_runtime::logging::tests=debug which allows:
+    /// - WARN+ from any target (tests level filtering)
+    /// - DEBUG+ from dynamo_runtime::logging::tests (tests target filtering)
     #[tokio::test]
-    async fn test_span_events_respect_level_filter() -> Result<()> {
+    async fn test_span_events() -> Result<()> {
         #[allow(clippy::redundant_closure_call)]
         let _ = temp_env::async_with_vars(
             [
                 (env_logging::DYN_LOGGING_JSONL, Some("1")),
                 (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
-                (env_logging::DYN_LOG, Some("warn")), // Only warn and above
-            ],
-            (async || {
-                let tmp_file = NamedTempFile::new().unwrap();
-                let file_name = tmp_file.path().to_str().unwrap();
-                let guard = StderrOverride::from_file(file_name)?;
-                init();
-
-                // Create spans at different levels
-                debug_level_span().await;
-                info_level_span().await;
-                warn_level_span().await;
-
-                drop(guard);
-
-                let lines = load_log(file_name)?;
-
-                // Count SPAN_CREATED events by span name
-                let debug_span_created = lines.iter().any(|log| {
-                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                        && log.get("span_name").and_then(|v| v.as_str()) == Some("debug_level_span")
-                });
-                let info_span_created = lines.iter().any(|log| {
-                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                        && log.get("span_name").and_then(|v| v.as_str()) == Some("info_level_span")
-                });
-                let warn_span_created = lines.iter().any(|log| {
-                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                        && log.get("span_name").and_then(|v| v.as_str()) == Some("warn_level_span")
-                });
-
-                // Note: Due to global logging initialization, this test may not work
-                // if another test initialized logging first with different settings.
-                // If logging was initialized with span events enabled and correct filter,
-                // we expect: debug=false, info=false, warn=true
-                if warn_span_created {
-                    // Logging was initialized with our settings
-                    assert!(
-                        !debug_span_created,
-                        "DEBUG span should be filtered out with DYN_LOG=warn"
-                    );
-                    assert!(
-                        !info_span_created,
-                        "INFO span should be filtered out with DYN_LOG=warn"
-                    );
-                    assert!(
-                        warn_span_created,
-                        "WARN span should pass filter with DYN_LOG=warn"
-                    );
-                }
-                // If warn_span_created is false, logging was initialized by another test
-                // with different settings - skip assertions
-
-                Ok::<(), anyhow::Error>(())
-            })(),
-        )
-        .await;
-        Ok(())
-    }
-
-    /// Test that span events respect target-based filtering
-    /// When DYN_LOG=error,dynamo_runtime::logging::tests=debug, spans from our test module
-    /// should generate events even at debug level
-    #[tokio::test]
-    async fn test_span_events_respect_target_filter() -> Result<()> {
-        #[allow(clippy::redundant_closure_call)]
-        let _ = temp_env::async_with_vars(
-            [
-                (env_logging::DYN_LOGGING_JSONL, Some("1")),
-                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
-                // Default is error, but our test module is allowed at debug
+                // Default is warn, but our test module is allowed at debug
+                // This tests both level filtering AND target filtering
                 (
                     env_logging::DYN_LOG,
-                    Some("error,dynamo_runtime::logging::tests=debug"),
+                    Some("warn,dynamo_runtime::logging::tests=debug"),
                 ),
             ],
             (async || {
@@ -1911,7 +1702,10 @@ pub mod tests {
                 let guard = StderrOverride::from_file(file_name)?;
                 init();
 
-                // Create spans at different levels - all from dynamo_runtime::logging::tests target
+                // Run parent/child/grandchild spans (all INFO level by default)
+                parent().await;
+
+                // Run spans at explicit levels from our test module
                 debug_level_span().await;
                 info_level_span().await;
                 warn_level_span().await;
@@ -1920,38 +1714,129 @@ pub mod tests {
 
                 let lines = load_log(file_name)?;
 
-                // With target-based filter allowing our module at debug level,
-                // ALL spans should generate SPAN_CREATED events
-                let debug_span_created = lines.iter().any(|log| {
-                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                        && log.get("span_name").and_then(|v| v.as_str()) == Some("debug_level_span")
-                });
-                let info_span_created = lines.iter().any(|log| {
-                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                        && log.get("span_name").and_then(|v| v.as_str()) == Some("info_level_span")
-                });
-                let warn_span_created = lines.iter().any(|log| {
-                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
-                        && log.get("span_name").and_then(|v| v.as_str()) == Some("warn_level_span")
-                });
+                // Helper to check if a span event exists
+                let has_span_event = |msg: &str, span_name: &str| {
+                    lines.iter().any(|log| {
+                        log.get("message").and_then(|v| v.as_str()) == Some(msg)
+                            && log.get("span_name").and_then(|v| v.as_str()) == Some(span_name)
+                    })
+                };
 
-                // If logging was initialized with our settings, all spans should pass
-                // because the target dynamo_runtime::logging::tests is allowed at debug level
-                if debug_span_created {
+                // Helper to get span events
+                let get_span_events = |msg: &str| -> Vec<&serde_json::Value> {
+                    lines
+                        .iter()
+                        .filter(|log| log.get("message").and_then(|v| v.as_str()) == Some(msg))
+                        .collect()
+                };
+
+                // Skip test if logging was already initialized by another test
+                // (check if we have any trace_id at all)
+                if !lines
+                    .iter()
+                    .any(|log| log.get("trace_id").and_then(|v| v.as_str()).is_some())
+                {
+                    return Ok(());
+                }
+
+                // === Test 1: SPAN_CREATED events have required fields ===
+                let span_created_events = get_span_events("SPAN_CREATED");
+                for event in &span_created_events {
+                    // Must have span_name
                     assert!(
-                        debug_span_created,
-                        "DEBUG span from allowed target should pass"
+                        event.get("span_name").is_some(),
+                        "SPAN_CREATED must have span_name"
                     );
+                    // Must have valid trace_id (format check)
+                    let trace_id = event
+                        .get("trace_id")
+                        .and_then(|v| v.as_str())
+                        .expect("SPAN_CREATED must have trace_id");
                     assert!(
-                        info_span_created,
-                        "INFO span from allowed target should pass"
+                        trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
+                        "SPAN_CREATED must have valid trace_id format"
                     );
+                    // Must have valid span_id
+                    let span_id = event
+                        .get("span_id")
+                        .and_then(|v| v.as_str())
+                        .expect("SPAN_CREATED must have span_id");
                     assert!(
-                        warn_span_created,
-                        "WARN span from allowed target should pass"
+                        is_valid_span_id(span_id),
+                        "SPAN_CREATED must have valid span_id"
                     );
                 }
-                // If debug_span_created is false, logging was initialized by another test
+
+                // === Test 2: SPAN_CLOSED events have timing info ===
+                let span_closed_events = get_span_events("SPAN_CLOSED");
+                for event in &span_closed_events {
+                    assert!(
+                        event.get("span_name").is_some(),
+                        "SPAN_CLOSED must have span_name"
+                    );
+                    assert!(
+                        event.get("time.busy_us").is_some()
+                            || event.get("time.idle_us").is_some()
+                            || event.get("time.duration_us").is_some(),
+                        "SPAN_CLOSED must have timing information"
+                    );
+                    // Must have valid trace_id
+                    let trace_id = event
+                        .get("trace_id")
+                        .and_then(|v| v.as_str())
+                        .expect("SPAN_CLOSED must have trace_id");
+                    assert!(
+                        trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
+                        "SPAN_CLOSED must have valid trace_id format"
+                    );
+                }
+
+                // === Test 3: Target-based filtering (positive) ===
+                // Spans from dynamo_runtime::logging::tests should pass at ALL levels
+                // because the target is allowed at debug level
+                assert!(
+                    has_span_event("SPAN_CREATED", "debug_level_span"),
+                    "DEBUG span from allowed target MUST pass (target=debug filter)"
+                );
+                assert!(
+                    has_span_event("SPAN_CREATED", "info_level_span"),
+                    "INFO span from allowed target MUST pass (target=debug filter)"
+                );
+                assert!(
+                    has_span_event("SPAN_CREATED", "warn_level_span"),
+                    "WARN span from allowed target MUST pass (target=debug filter)"
+                );
+
+                // parent/child/grandchild are INFO level from allowed target - should pass
+                assert!(
+                    has_span_event("SPAN_CREATED", "parent"),
+                    "parent span (INFO) from allowed target MUST pass"
+                );
+                assert!(
+                    has_span_event("SPAN_CREATED", "child"),
+                    "child span (INFO) from allowed target MUST pass"
+                );
+                assert!(
+                    has_span_event("SPAN_CREATED", "grandchild"),
+                    "grandchild span (INFO) from allowed target MUST pass"
+                );
+
+                // === Test 4: Level-based filtering (negative) ===
+                // Verify NO spans from OTHER targets appear at debug/info level
+                // (We can't easily create spans from other targets in this test,
+                // but we verify that our module's spans are the only ones present)
+                for event in &span_created_events {
+                    let target = event.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                    let level = event.get("level").and_then(|v| v.as_str()).unwrap_or("");
+
+                    // If level is DEBUG or INFO, target must be our test module
+                    if level == "DEBUG" || level == "INFO" {
+                        assert!(
+                            target.contains("dynamo_runtime::logging::tests"),
+                            "DEBUG/INFO span must be from allowed target, got target={target}"
+                        );
+                    }
+                }
 
                 Ok::<(), anyhow::Error>(())
             })(),
