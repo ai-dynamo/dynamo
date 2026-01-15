@@ -301,11 +301,75 @@ def test_request_migration_sglang_prefill(
                         receiving_pattern="New Request ID: ",
                         migration_limit=migration_limit,
                         immediate_kill=immediate_kill,
-                        use_long_prompt=True,
+                        # use_long_prompt=True,  # SGLang differ in max_tokens meaning
                     )
 
 
 @pytest.mark.skip(reason="KV cache transfer may fail")
+@pytest.mark.timeout(230)  # 3x average
+def test_request_migration_sglang_kv_transfer(
+    request,
+    runtime_services_dynamic_ports,
+    set_ucx_tls_no_mm,
+    predownload_models,
+    migration_limit,
+    immediate_kill,
+):
+    """
+    End-to-end test for request migration during KV transfer in disaggregated mode.
+
+    Setup: 1 prefill worker + 2 decode workers
+
+    Parameters:
+        immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
+        migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+    """
+
+    # Step 1: Start the frontend
+    with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
+        logger.info("Frontend started successfully")
+
+        # Step 2: Start prefill worker first
+        with DynamoWorkerProcess(
+            request,
+            "worker0",
+            frontend.frontend_port,
+            migration_limit=migration_limit,
+            disagg_mode="prefill",
+        ) as prefill_worker:
+            logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
+
+            # Step 3: Start 2 decode workers
+            with DynamoWorkerProcess(
+                request,
+                "worker1",
+                frontend.frontend_port,
+                migration_limit=migration_limit,
+                disagg_mode="decode",
+            ) as decode1:
+                logger.info(f"Decode Worker 1 PID: {decode1.get_pid()}")
+
+                with DynamoWorkerProcess(
+                    request,
+                    "worker2",
+                    frontend.frontend_port,
+                    migration_limit=migration_limit,
+                    disagg_mode="decode",
+                ) as decode2:
+                    logger.info(f"Decode Worker 2 PID: {decode2.get_pid()}")
+
+                    # Step 4: Run migration test
+                    run_migration_test(
+                        frontend,
+                        decode1,
+                        decode2,
+                        receiving_pattern="New Request ID: ",
+                        migration_limit=migration_limit,
+                        immediate_kill=immediate_kill,
+                        # use_long_prompt=True,  # SGLang differ in max_tokens meaning
+                    )
+
+
 @pytest.mark.timeout(230)  # 3x average
 def test_request_migration_sglang_decode(
     request,
