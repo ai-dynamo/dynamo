@@ -31,7 +31,6 @@ pub mod protocols;
 pub mod publisher;
 pub mod query_router;
 pub mod recorder;
-pub mod request_tokenizer;
 pub mod scheduler;
 pub mod sequence;
 pub mod subscriber;
@@ -41,7 +40,6 @@ pub use direct_router::DirectFromRequestRouter;
 use indexer::WorkerKvQueryResponse;
 pub use prefill_router::PrefillRouter;
 pub use query_router::{QueryRouter, RouteQueryResult};
-pub use request_tokenizer::{RequestTokenizer, TokenizedRequest};
 use worker_query::WorkerQueryClient;
 
 use crate::{
