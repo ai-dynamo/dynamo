@@ -127,7 +127,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
 
     tracing::info!(
         "WorkerKvQuery endpoint starting for worker {worker_id} on endpoint '{}'",
-        WORKER_KV_INDEXER_QUERY_SUBJECT
+        WORKER_KV_INDEXER_QUERY_ENDPOINT
     );
 
     if let Err(e) = component
