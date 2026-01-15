@@ -14,6 +14,7 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
+from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
@@ -155,8 +156,9 @@ sglang_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": SGLangConfig(
-        name="multimodal_agg_qwen",
+    "multimodal_epd_qwen": SGLangConfig(
+        # E/PD architecture: Encode worker (GPU 0) + Prefill/Decode worker (GPU 1)
+        name="multimodal_epd_qwen",
         directory=sglang_dir,
         script_name="multimodal_agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
@@ -181,6 +183,47 @@ sglang_configs = {
                 # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
+            )
+        ],
+    ),
+    "multimodal_agg_qwen": SGLangConfig(
+        # Tests single-process aggregated multimodal inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker)
+        name="multimodal_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+        ],
+        delayed_start=0,
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {
+                        "type": "text",
+                        "text": "What colors are in the following image? Respond only with the colors.",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["green"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),
@@ -264,6 +307,7 @@ def test_sglang_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
+    image_server,
 ):
     """Test SGLang deployment scenarios using common helpers"""
     assert (
