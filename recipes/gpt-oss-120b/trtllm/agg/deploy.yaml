@@ -14,8 +14,21 @@ data:
       enable_block_reuse: false
     stream_interval: 20
     moe_config:
-        backend: CUTLASS
+        backend: TRTLLM
 ---
+---
+
+apiVersion: resource.nvidia.com/v1beta1
+kind: ComputeDomain
+metadata:
+  name: gpt-oss-agg-compute-domain
+spec:
+  numNodes: 1
+  channel:
+    resourceClaimTemplate:
+      name: gpt-oss-agg-compute-domain-channel
+---
+
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
@@ -76,6 +89,9 @@ spec:
               --expert-parallel-size 4 \
               --max-batch-size 800 \
               --free-gpu-memory-fraction 0.9
+          resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: gpt-oss-agg-compute-domain-channel
           command:
           - /bin/sh
           - -c
