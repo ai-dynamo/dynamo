@@ -77,139 +77,6 @@ env:
 
 ############################## BUILD JOBS ##############################
 
-jobs:
-  build-amd64:
-    name: Build ${{ matrix.framework }} (amd64)
-    runs-on: cpu-amd-m5-4xlarge
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        framework: [vllm, trtllm, sglang]
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull existing images for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64" || echo "Runtime image not found in cache"
-          echo "Cache pull completed"
-      - name: Build Runtime Image
-        id: build_runtime
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ matrix.framework }}
-          target: runtime
-          platform: linux/amd64
-          base_image_tag: ''
-          runtime_image_tag: ''
-          cuda_version: ''
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
-      - name: Tag and Push Runtime Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64
-            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-amd64-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
-  build-arm64:
-    name: Build ${{ matrix.framework }} (arm64)
-    runs-on: cpu-arm-r8g-4xlarge
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - framework: vllm
-            base_image_tag: '25.06-cuda12.9-devel-ubuntu24.04'
-            runtime_image_tag: '12.9.0-runtime-ubuntu24.04'
-            cuda_version: '12.9'
-          - framework: trtllm
-            base_image_tag: '25.06-py3'
-            runtime_image_tag: ''
-            cuda_version: '12.9'
-          - framework: sglang
-            base_image_tag: ''
-            runtime_image_tag: ''
-            cuda_version: ''
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    steps:
-      - uses: actions/checkout@v4
-      - name: Login to Container Registries
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull existing images for cache
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "Attempting to pull existing images for layer caching..."
-          docker pull "${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64" || echo "Runtime image not found in cache"
-          echo "Cache pull completed"
-      - name: Build Runtime Image
-        id: build_runtime
-        uses: ./.github/actions/docker-build
-        with:
-          framework: ${{ matrix.framework }}
-          target: runtime
-          platform: linux/arm64
-          base_image_tag: ${{ matrix.base_image_tag }}
-          runtime_image_tag: ${{ matrix.runtime_image_tag }}
-          cuda_version: ${{ matrix.cuda_version }}
-          ci_token: ${{ secrets.CI_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
-      - name: Tag and Push Runtime Images
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
-          push_tags: |
-            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64
-            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-arm64-run-${{ github.run_id }}
-          aws_push: 'true'
-          azure_push: 'true'
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-
 ############################## TEST JOBS ##############################
 
   unit-tests:
@@ -332,7 +199,14 @@ jobs:
       - name: List Downloaded Artifacts
         run: |
           echo "📦 Downloaded coverage artifacts:"
-          find coverage-artifacts/ -type f -name "*.xml" -o -name ".coverage*" | sort
+          echo "==== Directory structure ===="
+          ls -R coverage-artifacts/
+          echo ""
+          echo "==== Coverage files found ===="
+          find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
+          echo ""
+          echo "==== Specifically looking for .coverage files ===="
+          find coverage-artifacts/ -name ".coverage" -type f
 
       - name: Merge All Coverage Data
         run: |

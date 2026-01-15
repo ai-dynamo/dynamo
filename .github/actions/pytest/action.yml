@@ -132,7 +132,9 @@ runs:
           COVERAGE_ENV=""
           if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
             echo "📊 Coverage collection enabled"
-            COVERAGE_FLAGS="--cov=components/src/dynamo --cov-report=xml:/workspace/test-results/coverage.xml --cov-report=term --cov-report=term-missing --cov-report="
+            # Generate both XML report and save .coverage data file
+            # The COVERAGE_FILE env var controls where the data file is saved
+            COVERAGE_FLAGS="--cov=components/src/dynamo --cov-report=term --cov-report=xml:/workspace/test-results/coverage.xml"
             COVERAGE_ENV="--env COVERAGE_FILE=/workspace/test-results/.coverage"
           fi
 
@@ -158,7 +160,7 @@ runs:
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           ${COVERAGE_ENV} \
-          --name ${{ env.CONTAINER_ID }}_pytest \
+          --name ${{ env.CONTAINER_ID}}_pytest \
           -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
           ${{ inputs.image_tag }} \
           bash -c "${PYTEST_CMD}"
@@ -166,6 +168,12 @@ runs:
         TEST_EXIT_CODE=$?
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
+
+        # Debug: Check if coverage files were created
+        if [[ "${{ inputs.enable_coverage }}" == "true" ]]; then
+          echo "📊 Checking for coverage files..."
+          ls -lah "${TEST_RESULTS_DIR}/" | grep -E "coverage|\.coverage" || echo "⚠️ No coverage files found in test-results/"
+        fi
 
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
