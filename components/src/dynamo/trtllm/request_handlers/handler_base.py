@@ -330,7 +330,11 @@ class HandlerBase:
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         # Use processed_input['prompt'] (from process_openai_request) which is the actual
         # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
-        if processed_input and isinstance(processed_input, dict) and processed_input.get("prompt"):
+        if (
+            processed_input
+            and isinstance(processed_input, dict)
+            and processed_input.get("prompt")
+        ):
             prefill_metadata["_prefill_prompt"] = processed_input["prompt"]
         elif res.prompt:
             prefill_metadata["_prefill_prompt"] = res.prompt
@@ -438,19 +442,21 @@ class HandlerBase:
         # DECODE mode: Use prefill metadata to skip re-processing multimodal content
         # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
         has_prefill_metadata = epd_metadata and (
-            epd_metadata.get("_prefill_prompt") or epd_metadata.get("_epd_processed_prompt")
+            epd_metadata.get("_prefill_prompt")
+            or epd_metadata.get("_epd_processed_prompt")
         )
 
-        if self.disaggregation_mode == DisaggregationMode.DECODE and has_prefill_metadata:
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and has_prefill_metadata
+        ):
             # Use prompt/token_ids from PREFILL, skip image re-processing
-            prefill_prompt = (
-                epd_metadata.get("_prefill_prompt")
-                or epd_metadata.get("_epd_processed_prompt")
+            prefill_prompt = epd_metadata.get("_prefill_prompt") or epd_metadata.get(
+                "_epd_processed_prompt"
             )
-            prefill_token_ids = (
-                epd_metadata.get("_prefill_prompt_token_ids")
-                or epd_metadata.get("_epd_prompt_token_ids")
-            )
+            prefill_token_ids = epd_metadata.get(
+                "_prefill_prompt_token_ids"
+            ) or epd_metadata.get("_epd_prompt_token_ids")
 
             # Build input without multimodal data (already in KV cache)
             # Use the SAME multimodal key that PREFILL used:
@@ -458,7 +464,7 @@ class HandlerBase:
             # - Simple P→D (image URL): PREFILL used multi_modal_data → DECODE uses multi_modal_data: None
             # Check which key was used based on metadata source
             is_epd_flow = epd_metadata.get("_epd_processed_prompt") is not None
-            
+
             processed_input = {
                 "prompt": prefill_prompt,
                 "prompt_token_ids": prefill_token_ids,
