@@ -287,6 +287,16 @@ def test_request_migration_vllm_prefill(
                     )
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Migration reuses the same request_id for vLLM, but the prefill worker's "
+        "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
+        "With chat completions API, prefix cache hits on chat template tokens cause "
+        "an assertion error in vLLM's KV cache manager (save_new_computed_blocks expects "
+        "no new computed blocks for existing requests)."
+    ),
+)
 @pytest.mark.timeout(350)  # 3x average
 def test_request_migration_vllm_kv_transfer(
     request,
@@ -351,6 +361,16 @@ def test_request_migration_vllm_kv_transfer(
                     )
 
 
+@pytest.mark.xfail(
+    strict=False,
+    reason=(
+        "Migration reuses the same request_id for vLLM, but the prefill worker's "
+        "KV cache still holds the request due to delay_free_blocks in disaggregated mode. "
+        "With chat completions API, prefix cache hits on chat template tokens cause "
+        "an assertion error in vLLM's KV cache manager (save_new_computed_blocks expects "
+        "no new computed blocks for existing requests)."
+    ),
+)
 @pytest.mark.timeout(350)  # 3x average
 def test_request_migration_vllm_decode(
     request,
