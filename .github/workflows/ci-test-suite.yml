@@ -397,9 +397,8 @@ jobs:
             --integration coverage-by-type/integration-report.txt \
             --output coverage-incremental-summary.txt \
             --json-output coverage-data.json
+          # --e2e coverage-by-type/all-report.txt  # Add this when e2e coverage is ready
 
-
-           ## --e2e coverage-by-type/all-report.txt \
 
       - name: Create Combined Report
         run: |
