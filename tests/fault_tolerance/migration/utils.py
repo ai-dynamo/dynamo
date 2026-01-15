@@ -275,11 +275,18 @@ def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
         frontend_process: The frontend process to check logs for
     """
     log_path = frontend_process.log_path
-    try:
-        with open(log_path, "r") as f:
-            log_content = f.read()
-    except Exception as e:
-        pytest.fail(f"Could not read frontend log file {log_path}: {e}")
+    log_content = ""
+    for i in range(10):
+        try:
+            with open(log_path, "r") as f:
+                log_content = f.read()
+        except Exception as e:
+            pytest.fail(f"Could not read frontend log file {log_path}: {e}")
+        # Make sure this message is captured if any with the polling
+        if "Cannot recreate stream: " in log_content:
+            break
+        time.sleep(0.005)
+
     assert (
         "Stream disconnected... recreating stream..." in log_content
     ), "'Stream disconnected... recreating stream...' message not found in logs"
