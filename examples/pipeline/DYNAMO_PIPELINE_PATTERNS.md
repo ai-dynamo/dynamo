@@ -107,41 +107,41 @@ Stages can also be called in parallel and their results combined:
 
 ```
                       ┌────────┐
-                 ┌──► │ Stage2 │ ──┐
+                 ┌──► │ Stage1 │ ──┐
 ┌────────┐      │    └────────┘    │      ┌────────┐
-│ Client │ ──── │                  │ ──── │ Stage1 │
+│ Client │ ──── │                  │ ──── │ Stage3 │
 └────────┘      │    ┌────────┐    │      └────────┘
-                 └──► │ Stage3 │ ──┘
+                 └──► │ Stage2 │ ──┘
                       └────────┘
 ```
 
 ```python
-class Stage1:
+class Stage3:
     def __init__(self, runtime):
         self.runtime = runtime
 
     async def initialize(self):
         # Connect to both stages
+        endpoint1 = self.runtime.namespace("pipeline").component("stage1").endpoint("generate")
         endpoint2 = self.runtime.namespace("pipeline").component("stage2").endpoint("generate")
-        endpoint3 = self.runtime.namespace("pipeline").component("stage3").endpoint("generate")
+        self.stage1_client = await endpoint1.client()
         self.stage2_client = await endpoint2.client()
-        self.stage3_client = await endpoint3.client()
+        await self.stage1_client.wait_for_instances()
         await self.stage2_client.wait_for_instances()
-        await self.stage3_client.wait_for_instances()
 
     async def generate(self, request, context):
-        # Call stage2 and stage3 in parallel
+        # Call stage1 and stage2 in parallel
+        stream1 = await self.stage1_client.generate(request, context=context)
         stream2 = await self.stage2_client.generate(request, context=context)
-        stream3 = await self.stage3_client.generate(request, context=context)
 
         # Gather results from both
+        result1 = None
         result2 = None
-        result3 = None
+        async for response in stream1:
+            result1 = response.data()
         async for response in stream2:
             result2 = response.data()
-        async for response in stream3:
-            result3 = response.data()
 
         # Return combined result
-        yield {"stage2": result2, "stage3": result3}
+        yield {"stage1": result1, "stage2": result2}
 ```
