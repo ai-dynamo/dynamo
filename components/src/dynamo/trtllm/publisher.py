@@ -322,9 +322,7 @@ class Publisher:
         if self.metrics_publisher is None:
             logging.error("KV metrics publisher not initialized!")
             return
-        await self.metrics_publisher.create_endpoint(
-            self.component, self.metrics_labels
-        )
+        await self.metrics_publisher.create_endpoint(self.component)
 
     def initialize(self):
         # Setup the metrics publisher

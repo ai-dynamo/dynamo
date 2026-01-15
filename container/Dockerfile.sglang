@@ -22,7 +22,7 @@
 # DEVELOPMENT PATHS THAT MUST BE GROUP-WRITABLE (for virtualenv containers):
 #   /workspace            - Users create/modify project files
 #   /home/dynamo          - Users create config/cache files
-#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.10/site-packages for pip install
+#   /home/dynamo/.local   - SGLang uses $HOME/.local/lib/python3.12/site-packages for pip install
 #
 # HOW TO ACHIEVE GROUP-WRITABLE PERMISSIONS:
 # 1. SHELL + /etc/profile.d - Login shell sources umask 002 globally for all RUN commands (775/664)
@@ -41,7 +41,7 @@ ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 ARG RUNTIME_IMAGE="lmsysorg/sglang"
-ARG RUNTIME_IMAGE_TAG="v0.5.6.post2-runtime"
+ARG RUNTIME_IMAGE_TAG="v0.5.7-runtime"
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -212,7 +212,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
@@ -356,8 +356,16 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
+    git checkout ${NIXL_REF} && \
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
+    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
+        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
+        exit 1; \
+    fi && \
+    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
@@ -387,7 +395,7 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
         export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
     fi && \
     cd /workspace/nixl && \
-    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -466,7 +474,13 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-USER dynamo
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # required for verification of GPG keys
+        gnupg2 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
@@ -481,15 +495,19 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+# Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}
 
-# Install common and test dependencies
+# Install common and test dependencies as root
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
@@ -497,14 +515,22 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages --no-cache . && \
+    #TODO: Temporary change until upstream sglang runtime image is updated
+    pip install --no-cache-dir --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages that are needed for DeepEP to work properly
-    # This is done in the upstream runtime image too, but we overrode these packages earlier
-    pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
-        nvidia-nccl-cu12==2.28.3 \
-        nvidia-cudnn-cu12==9.16.0.29 \
-        nvidia-cutlass-dsl==4.3.0
+    CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
+    if [ "$CUDA_MAJOR" = "12" ]; then \
+        # Install NVIDIA packages that are needed for DeepEP to work properly
+        # This is done in the upstream runtime image too, but these packages are overridden in earlier commands
+        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+            nvidia-nccl-cu12==2.28.3 \
+            nvidia-cudnn-cu12==9.16.0.29 \
+            nvidia-cutlass-dsl==4.3.0; \
+    fi
+
+# Switch back to dynamo user after package installations
+USER dynamo
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -528,131 +554,13 @@ USER root
 
 # Fix directory permissions: COPY --chmod only affects contents, not the directory itself
 RUN chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
-RUN ln -s /workspace /sgl-workspace/dynamo
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
+    ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
-ENV PATH=/home/dynamo/.local/bin:$PATH
-# PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
-ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
-
-###########################################################
-########## Development (run.sh, runs as root user) ########
-###########################################################
-#
-# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
-#
-# This stage runs as root and provides:
-# - Development tools and utilities for local debugging
-# - Support for vscode/cursor development outside the Dev Container plug-in
-#
-# Use this stage if you need a full-featured development environment with extra tools,
-# but do not use it with the Dev Container plug-in.
-
-FROM runtime AS dev
-
-# Don't want ubuntu to be editable, just change uid and gid.
-ARG WORKSPACE_DIR=/workspace
-
-USER root
-# Install utilities as root
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-    # Install utilities
-    nvtop \
-    wget \
-    tmux \
-    vim \
-    git \
-    openssh-client \
-    iproute2 \
-    rsync \
-    zip \
-    unzip \
-    htop \
-    # Build Dependencies
-    autoconf \
-    automake \
-    cmake \
-    libtool \
-    meson \
-    net-tools \
-    pybind11-dev \
-    # Rust build dependencies
-    clang \
-    libclang-dev \
-    protobuf-compiler \
-    pkg-config && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set umask for group-writable files in dev stage (runs as root)
-RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    PATH=/usr/local/cargo/bin:$PATH
-
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
-
-ARG ARCH
-ARG ARCH_ALT
-
-# Copy UCX and NIXL libraries for dev stage compilation
-# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
-# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
-# wheels, but dev stage needs it for maturin develop and cargo build from source.
-COPY --from=wheel_builder /usr/local/ucx /usr/local/ucx
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/
-
-# Set NIXL environment variables for compilation
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
-    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-
-# Update LD_LIBRARY_PATH to include NIXL libraries for the linker
-ENV LD_LIBRARY_PATH=\
-${NIXL_LIB_DIR}:\
-${NIXL_PLUGIN_DIR}:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-${LD_LIBRARY_PATH}
-
-# Create virtual environment for maturin develop (required by maturin develop command)
-# Use --system-site-packages to inherit sglang, torch, etc. from upstream
-RUN mkdir -p /opt/dynamo/venv && \
-    python3 -m venv --system-site-packages /opt/dynamo/venv
-
-ENV VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH="/opt/dynamo/venv/bin:${PATH}"
-
-# Copy all packages from runtime stage user site-packages into venv
-# This includes ai-dynamo-runtime, kubernetes, and all other dependencies
-# Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
-RUN cp -r --no-preserve=mode /home/dynamo/.local/lib/python3.12/site-packages/* \
-          /opt/dynamo/venv/lib/python3.12/site-packages/
-
-# Install maturin and uv into venv for development
-# Uninstall broken maturin from upstream, then reinstall properly into venv
-COPY --from=dynamo_base /bin/uv /opt/dynamo/venv/bin/uv
-RUN pip install --ignore-installed maturin[patchelf]
-
-# Editable install of dynamo components
-COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
-RUN pip install --no-deps -e .
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
+

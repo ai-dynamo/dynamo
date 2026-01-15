@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+use anyhow::Context as _;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -191,9 +192,11 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,

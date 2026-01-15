@@ -38,7 +38,25 @@ class DistributedRuntime:
     The runtime object for dynamo applications
     """
 
-    ...
+    def __new__(
+        cls,
+        event_loop: Any,
+        store_kv: str,
+        request_plane: str,
+        enable_nats: Optional[bool] = None,
+    ) -> "DistributedRuntime":
+        """
+        Create a new DistributedRuntime.
+
+        Args:
+            event_loop: The asyncio event loop
+            store_kv: Key-value store backend ("etcd", "file", or "mem")
+            request_plane: Request plane transport ("tcp", "http", or "nats")
+            enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                        If request_plane is "nats", NATS is always enabled.
+                        Pass False to disable NATS initialization (e.g., for approximate routing).
+        """
+        ...
 
     def namespace(self, name: str) -> Namespace:
         """
@@ -448,16 +466,12 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    def create_endpoint(self, component: Component) -> None:
         """
         Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
-            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
-
-        .. deprecated::
-            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -1088,6 +1102,7 @@ class KvRouterConfig:
         use_kv_events: bool = True,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
+        router_assume_kv_reuse: bool = True,
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
         router_ttl_secs: float = 120.0,
@@ -1103,6 +1118,8 @@ class KvRouterConfig:
             use_kv_events: Whether to use KV events from workers (default: True)
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
+                When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
             router_reset_states: Reset router state on startup (default: False)
             router_ttl_secs: TTL for blocks in seconds when not using KV events (default: 120.0)
@@ -1516,34 +1533,6 @@ class KvPushRouter:
                 - worker_id: The ID of the best matching worker
                 - dp_rank: The data parallel rank of the selected worker
                 - overlap_blocks: The number of overlapping blocks found
-        """
-        ...
-
-    async def best_worker_id(
-        self,
-        token_ids: List[int],
-        router_config_override: Optional[JsonLike] = None,
-        request_id: Optional[str] = None,
-    ) -> Tuple[int, int]:
-        """
-        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
-
-        Find the best matching worker for the given tokens.
-
-        Args:
-            token_ids: List of token IDs to find matches for
-            router_config_override: Optional router configuration override
-            request_id: Optional request ID. If provided, router states will be updated
-                       to track this request (active blocks, lifecycle events). If not
-                       provided, this is a query-only operation that doesn't affect state.
-
-        Returns:
-            A tuple of (worker_id, overlap_blocks) where:
-                - worker_id: The ID of the best matching worker
-                - overlap_blocks: The number of overlapping blocks found
-
-        .. deprecated::
-            Use :meth:`best_worker` instead which also returns dp_rank.
         """
         ...
 

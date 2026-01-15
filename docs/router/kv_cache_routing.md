@@ -31,6 +31,8 @@ The main KV-aware routing arguments:
 
 - `--no-track-active-blocks`: Disables tracking of active blocks (blocks being used for ongoing generation/decode phases). By default, the router tracks active blocks for load balancing. Disable this when routing to workers that only perform prefill (no decode phase), as tracking decode load is not relevant. This reduces router overhead and simplifies state management.
 
+- `--no-assume-kv-reuse`: When tracking active blocks, disables the assumption of KV cache reuse. By default (`router_assume_kv_reuse=true`), the router computes actual block hashes for sequence tracking to deduplicate blocks and optimize load balancing. When disabled via this flag, the router generates random hashes for sequence blocks, treating each request's blocks as unique. This is useful in disaggregated setups where prefill transfers blocks to decode workers that may already have those blocks cached, but the engine cannot coordinate transfers to avoid duplication. Without this flag, the router's load balancing heuristics would undercount decode blocks when duplicates exist.
+
 - `--active-decode-blocks-threshold`: Initial threshold (0.0-1.0) for determining when a worker is considered busy based on KV cache block utilization. When a worker's KV cache active blocks exceed this percentage of total blocks, it will be marked as busy and excluded from routing. If not set, blocks-based busy detection is disabled. This feature works with all routing modes (`--router-mode kv|round-robin|random`) as long as backend engines emit `ForwardPassMetrics`. The threshold can be dynamically updated at runtime via the `/busy_threshold` HTTP endpoint (see [Dynamic Threshold Configuration](#dynamic-threshold-configuration)).
 
 - `--active-prefill-tokens-threshold`: Literal token count threshold for determining when a worker is considered busy based on prefill token utilization. When active prefill tokens exceed this threshold, the worker is marked as busy. If not set, tokens-based busy detection is disabled.
@@ -49,10 +51,15 @@ The main KV-aware routing arguments:
 >
 > **Request plane is independent of KV event transport.**
 > `DYN_REQUEST_PLANE` controls how **requests** are sent (TCP/HTTP/NATS), but KV-aware routing still uses **NATS** for KV events in both JetStream and NATS Core + Local Indexer modes.
-> If you run with `DYN_REQUEST_PLANE=tcp` (or `http`) and KV events enabled (default), you must also configure NATS, e.g. `NATS_SERVER=nats://...`.
-> Only `--no-kv-events` removes the NATS requirement.
+> When KV events are enabled (default), NATS is automatically initialized. You can optionally set `NATS_SERVER=nats://...` to specify a custom NATS server; otherwise, it defaults to `localhost:4222`.
+> Use `--no-kv-events` to disable KV events and remove the NATS requirement entirely (with request plane being `tcp` or `http`).
 >
-> When `--kv-overlap-score-weight` is set to 0, no KvIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KvIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning. In both cases, it's recommended to disable your backend workers from publishing events through `KvEventPublisher` to avoid event accumulation in JetStream. WIP to enable disabling publishing of KV events completely in these cases.
+> When `--kv-overlap-score-weight` is set to 0, no KvIndexer is created and prefix matching is disabled (pure load balancing). When `--no-kv-events` is set, a KvIndexer is still created but no event subscriber is launched to consume KV events from workers. Instead, the router predicts cache state based on its own routing decisions with TTL-based expiration and pruning.
+>
+> **Backend Configuration:** When using `--no-kv-events`, configure your backend workers to disable KV event publishing:
+> - **vLLM**: Use `--kv-events-config '{"enable_kv_cache_events": false}'`
+> - **SGLang**: Do not use `--kv-events-config`
+> - **TRT-LLM**: Do not use `--publish-events-and-metrics`
 >
 > The cli args `--router-ttl`, `--router-max-tree-size`, and `--router-prune-target-ratio` control local cache management when the router operates without receiving events from workers. When KV events are enabled (default), the router relies on worker-side eviction events and these parameters are ignored.
 
@@ -74,7 +81,7 @@ For basic model registration without KV routing, you can use `--router-mode roun
 
 ## Disaggregated Serving (Prefill and Decode)
 
-Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md#model-types)), the frontend automatically detects them and activates an internal prefill router.
+Dynamo supports disaggregated serving where prefill (prompt processing) and decode (token generation) are handled by separate worker pools. When you register workers with `ModelType.Prefill` (see [Backend Guide](../development/backend-guide.md)), the frontend automatically detects them and activates an internal prefill router.
 
 ### Automatic Prefill Router Activation
 
@@ -510,15 +517,11 @@ The `KvPushRouter` provides the following methods:
   - Without `request_id`: Query-only, doesn't update router state
   - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
 
-- **`best_worker_id(token_ids, router_config_override=None, request_id=None)`**: **[DEPRECATED - use `best_worker()` instead]** Query which worker would be selected for given tokens. Returns `(worker_id, overlap_blocks)`.
-  - Without `request_id`: Query-only, doesn't update router state
-  - With `request_id`: Updates router state to track the request. **Note**: If used with `request_id`, you must call `mark_prefill_complete()` and `free()` at the appropriate lifecycle points to maintain accurate load tracking
-
 - **`get_potential_loads(token_ids)`**: Get detailed load information for all workers, including potential prefill tokens and active decode blocks. Returns a list of load dictionaries.
 
-- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`mark_prefill_complete(request_id)`**: Signal that a request has completed its prefill phase. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
-- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker_id()` for manual routing instead of `generate()`.
+- **`free(request_id)`**: Signal that a request has completed and its resources should be released. Only used for [manual lifecycle management](#2-manual-state-management-advanced) when using `best_worker()` for manual routing instead of `generate()`.
 
 - **`dump_events()`**: Dump all KV cache events from the router's indexer as a JSON string. Useful for debugging and analysis.
 
@@ -596,9 +599,9 @@ stream = await router.generate(token_ids=tokens, model="model-name")
 - **Router automatically**: Selects best worker, updates state, routes request, tracks lifecycle
 
 #### 2. Manual State Management (Advanced)
-Use `best_worker_id(request_id=...)` to select and track, then manage the request yourself:
+Use `best_worker(request_id=...)` to select and track, then manage the request yourself:
 ```python
-worker_id, overlap = await router.best_worker_id(tokens, request_id="req-123")
+worker_id, _dp_rank, overlap = await router.best_worker(tokens, request_id="req-123")
 response = await client.generate(tokens, request_id="req-123")
 # await anext(response)  # Get first token
 await router.mark_prefill_complete("req-123")  # After first token
@@ -614,8 +617,8 @@ await router.free("req-123")  # After completion
 Query without state updates, then route through a chosen router:
 ```python
 # Probe multiple routers without updating state
-worker_id_1, overlap_1 = await router_1.best_worker_id(tokens)  # No request_id
-worker_id_2, overlap_2 = await router_2.best_worker_id(tokens)
+worker_id_1, dp_rank, overlap_1 = await router_1.best_worker(tokens)  # No request_id
+worker_id_2, dp_rank, overlap_2 = await router_2.best_worker(tokens)
 
 # Pick the best router based on results
 chosen_router = router_1 if overlap_1 > overlap_2 else router_2
@@ -691,7 +694,7 @@ if __name__ == "__main__":
 This approach gives you complete control over routing decisions, allowing you to optimize for different metrics based on your specific requirements. As some examples:
 
 - **Minimize TTFT**: Select worker with lowest `potential_prefill_tokens`
-- **Maximize cache reuse**: Use `best_worker_id()` which considers both prefill and decode loads
+- **Maximize cache reuse**: Use `best_worker()` which considers both prefill and decode loads
 - **Balance load**: Consider both `potential_prefill_tokens` and `potential_decode_blocks` together
 
 See [KV Router Architecture](../router/README.md) for performance tuning details.

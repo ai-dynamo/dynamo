@@ -75,26 +75,12 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component, metrics_labels = None))]
-    #[allow(unused_variables)]
+    #[pyo3(signature = (component))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        metrics_labels: Option<Vec<(String, String)>>, // TODO: fully remove this
     ) -> PyResult<Bound<'p, PyAny>> {
-        // Emit deprecation warning if metrics_labels is provided
-        if metrics_labels.is_some() {
-            let warnings = py.import("warnings")?;
-            warnings.call_method1(
-                "warn",
-                (
-                    "The 'metrics_labels' parameter is deprecated and no longer used. It will be removed in a future version.",
-                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
-                ),
-            )?;
-        }
-
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1354,52 +1340,6 @@ impl KvPushRouter {
                 .map_err(to_pyerr)?;
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
-        })
-    }
-
-    /// Deprecated: Use `best_worker()` instead which returns (worker_id, dp_rank, overlap_blocks)
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
-    fn best_worker_id<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
-        request_id: Option<String>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        // Issue deprecation warning
-        let warnings = py.import("warnings")?;
-        warnings.call_method1(
-            "warn",
-            (
-                "best_worker_id() is deprecated. Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks)",
-                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
-            ),
-        )?;
-
-        let router_config_override = if let Some(obj) = router_config_override {
-            let override_config: llm_rs::kv_router::RouterConfigOverride =
-                depythonize(obj.bind(py)).map_err(to_pyerr)?;
-            Some(override_config)
-        } else {
-            None
-        };
-
-        let chooser = self.inner.chooser.clone();
-        let update_states = request_id.is_some();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
-                    request_id.as_deref(),
-                    &token_ids,
-                    router_config_override.as_ref(),
-                    update_states,
-                )
-                .await
-                .map_err(to_pyerr)?;
-
-            // Return only worker_id and overlap_blocks for backward compatibility
-            Ok((best_worker.worker_id, overlap_blocks))
         })
     }
 
