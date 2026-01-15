@@ -59,12 +59,6 @@ class ProcessMixIn(ProcessMixInRequired):
     Mixin for pre and post processing for vLLM
     """
 
-    engine_args: AsyncEngineArgs
-    chat_processor: "ChatProcessor | None"
-    completions_processor: "CompletionsProcessor | None"
-    model_config: ModelConfig
-    default_sampling_params: SamplingParams
-
     def __init__(self):
         pass
 

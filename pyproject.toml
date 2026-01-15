@@ -189,6 +189,11 @@ filterwarnings = [
     ################################################################################################
     # TRT-LLM
     ################################################################################################
+    # torchao sometimes emits SyntaxWarning from docstrings (e.g. invalid escape sequences) at import
+    # time; our global `error` policy would otherwise fail test collection. Do not rely on module=
+    # matching here because these can be raised during compilation where the module field may not
+    # match as expected.
+    "ignore:.*invalid escape sequence.*:SyntaxWarning",
     # torchao deprecation warnings for import path changes (see https://github.com/pytorch/ao/issues/2752)
     "ignore:Importing.*torchao\\.dtypes.*:DeprecationWarning",
     # nvidia-modelopt warning about transformers version incompatibility
