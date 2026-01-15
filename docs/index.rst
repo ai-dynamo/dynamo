@@ -64,6 +64,7 @@ Quickstart
    Tuning Disaggregated Performance <performance/tuning.md>
    Writing Python Workers in Dynamo <development/backend-guide.md>
    Observability (Local) <_sections/observability>
+   Fault Tolerance <_sections/fault_tolerance>
    Glossary <reference/glossary.md>
 
 .. toctree::
@@ -71,6 +72,7 @@ Quickstart
    :caption: Components
 
    Backends <_sections/backends>
+   Frontends <_sections/frontends>
    Router <router/README>
    Planner <planner/planner_intro>
    KVBM <kvbm/kvbm_intro>
@@ -83,3 +85,5 @@ Quickstart
    Architecture Flow <design_docs/dynamo_flow.md>
    Disaggregated Serving <design_docs/disagg_serving.md>
    Distributed Runtime <design_docs/distributed_runtime.md>
+   Request Plane <design_docs/request_plane.md>
+   Event Plane <design_docs/event_plane.md>

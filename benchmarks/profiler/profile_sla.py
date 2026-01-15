@@ -284,7 +284,9 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(prefill_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready()
+                    await client.wait_for_deployment_ready(
+                        timeout=getattr(args, "deployment_timeout", 1800)
+                    )
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -387,7 +389,9 @@ async def run_profile(args):
                     deployment_clients.append(client)  # Track for cleanup
                     await client.create_deployment(decode_config_fn)
                     logger.info("Waiting for deployment to be ready...")
-                    await client.wait_for_deployment_ready()
+                    await client.wait_for_deployment_ready(
+                        timeout=getattr(args, "deployment_timeout", 1800)
+                    )
                     logger.info("Deployment is ready")
 
                     logger.info("Getting deployment logs...")
@@ -603,7 +607,9 @@ async def run_profile(args):
             await client.create_deployment(prefill_config_fn)
             logger.info("Waiting for deployment to be ready...")
             try:
-                await client.wait_for_deployment_ready()
+                await client.wait_for_deployment_ready(
+                    timeout=getattr(args, "deployment_timeout", 1800)
+                )
                 logger.info("Deployment is ready")
 
                 skip_profile = False
