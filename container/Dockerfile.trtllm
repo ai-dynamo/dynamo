@@ -561,7 +561,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        # TRTLLM 1.2.0rc6 has issues installing from pypi with uv, installing from direct wheel link works best
+        # TRTLLM 1.2.0rc6.post1 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
@@ -679,6 +679,8 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ninja-build \
         git \
         git-lfs \
+        # required for verification of GPG keys
+        gnupg2 \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
@@ -695,6 +697,7 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         libibumad3 \
         libibverbs1 \
         libnuma1 \
+        numactl \
         librdmacm1 \
         rdma-core \
         # OpenMPI dependencies
@@ -823,83 +826,4 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-###########################################################
-########## Development (run.sh, runs as root user) ########
-###########################################################
-#
-# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
-#
-# This stage runs as root and provides:
-# - Development tools and utilities for local debugging
-# - Support for vscode/cursor development outside the Dev Container plug-in
-#
-# Use this stage if you need a full-featured development environment with extra tools,
-# but do not use it with the Dev Container plug-in.
-
-FROM runtime AS dev
-
-# Don't want ubuntu to be editable, just change uid and gid.
-ARG WORKSPACE_DIR=/workspace
-
-# Switch to root for system package installation
-USER root
-
-# Install utilities as root
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-        # Install utilities
-        nvtop \
-        wget \
-        tmux \
-        vim \
-        git \
-        iproute2 \
-        rsync \
-        zip \
-        unzip \
-        htop \
-        # Build Dependencies
-        autoconf \
-        automake \
-        cmake \
-        libtool \
-        meson \
-        net-tools \
-        pybind11-dev \
-        # Rust build dependencies
-        clang \
-        libclang-dev \
-        protobuf-compiler \
-        pkg-config && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set umask for group-writable files in dev stage (runs as root)
-RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/usr/local/cargo/bin:$PATH
-
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
-
-# Install maturin, for maturin develop
-RUN uv pip install --no-cache maturin[patchelf]
-
-# Editable install of dynamo
-COPY --chown=dynamo:0 --chmod=664 pyproject.toml README.md hatch_build.py /workspace/
-RUN uv pip install --no-cache --no-deps -e .
-
 CMD []

@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: sglang-agg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -19,7 +18,6 @@ spec:
           value: kv
     decode:
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-agg-router
       componentType: worker
       replicas: 1
       resources:

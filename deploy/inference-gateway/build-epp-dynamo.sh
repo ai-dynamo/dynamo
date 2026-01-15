@@ -97,6 +97,14 @@ fi
 
 # Step 6: Build the EPP image
 echo "Building the custom EPP image for GAIE..."
-make dynamo-image-local-load
+
+# Build make args - pass DOCKER_PROXY if set (e.g., from ECR_HOSTNAME)
+MAKE_ARGS=""
+if [[ -n "${DOCKER_PROXY}" ]]; then
+    echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
+    MAKE_ARGS+="DOCKER_PROXY=${DOCKER_PROXY} "
+fi
+
+make ${MAKE_ARGS} dynamo-image-local-load
 
 echo "EPP image with Dynamo KV routing built"

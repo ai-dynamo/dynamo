@@ -6,18 +6,12 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 # Default values
 MODEL_NAME="llava-hf/llava-1.5-7b-hf"
-PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
-PROVIDED_PROMPT_TEMPLATE=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --model)
             MODEL_NAME=$2
-            shift 2
-            ;;
-        --prompt-template)
-            PROVIDED_PROMPT_TEMPLATE=$2
             shift 2
             ;;
         -h|--help)
@@ -27,7 +21,6 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --model <model_name>          Specify the VLM model to use (default: $MODEL_NAME)"
-            echo "  --prompt-template <template>  Specify the multi-modal prompt template to use"
             echo "                                LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates"
             echo "  -h, --help                    Show this help message"
             echo ""
@@ -46,27 +39,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Set PROMPT_TEMPLATE based on the MODEL_NAME
-if [[ -n "$PROVIDED_PROMPT_TEMPLATE" ]]; then
-    PROMPT_TEMPLATE="$PROVIDED_PROMPT_TEMPLATE"
-elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    PROMPT_TEMPLATE="USER: <image>\n<prompt> ASSISTANT:"
-elif [[ "$MODEL_NAME" == "microsoft/Phi-3.5-vision-instruct" ]]; then
-    PROMPT_TEMPLATE="<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
-elif [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    PROMPT_TEMPLATE="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
-else
-    echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
-    echo "Please provide a prompt template using --prompt-template option."
-    echo "Example: --prompt-template 'USER: <image>\n<prompt> ASSISTANT:'"
-    exit 1
-fi
 
 echo "=================================================="
 echo "Disaggregated Multimodal Serving"
 echo "=================================================="
 echo "Model: $MODEL_NAME"
-echo "Prompt Template: $PROMPT_TEMPLATE"
 echo "=================================================="
 
 
@@ -77,7 +54,7 @@ python -m dynamo.frontend &
 
 # Start processor
 echo "Starting processor..."
-python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
+python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME &
 
 EXTRA_ARGS=""
 
