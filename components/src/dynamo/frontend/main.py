@@ -218,6 +218,12 @@ def parse_args():
         help="Enforce disaggregated prefill-decode. When set, unactivated prefill router will return an error instead of falling back to decode-only mode.",
     )
     parser.add_argument(
+        "--direct-route",
+        action="store_true",
+        default=False,
+        help="Require worker IDs in requests. When set, requests without decode_worker_id/prefill_worker_id will error instead of using router selection. Used for EPP integration where worker selection is done externally.",
+    )
+    parser.add_argument(
         "--active-decode-blocks-threshold",
         type=float,
         default=None,
@@ -378,6 +384,7 @@ async def async_main():
             active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
             active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
             enforce_disagg=flags.enforce_disagg,
+            require_worker_ids=flags.direct_route,
         ),
     }
 
