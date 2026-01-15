@@ -187,26 +187,16 @@ struct PendingDistributedTraceContext {
 }
 
 /// Macro to emit a tracing event at a dynamic level with a custom target.
-/// Checks if the target/level is enabled before emitting to avoid unnecessary work.
 macro_rules! emit_at_level {
-    ($level:expr, target: $target:expr, $($arg:tt)*) => {{
-        let should_emit = match $level {
-            &tracing::Level::ERROR => tracing::enabled!(target: $target, tracing::Level::ERROR),
-            &tracing::Level::WARN => tracing::enabled!(target: $target, tracing::Level::WARN),
-            &tracing::Level::INFO => tracing::enabled!(target: $target, tracing::Level::INFO),
-            &tracing::Level::DEBUG => tracing::enabled!(target: $target, tracing::Level::DEBUG),
-            &tracing::Level::TRACE => tracing::enabled!(target: $target, tracing::Level::TRACE),
-        };
-        if should_emit {
-            match $level {
-                &tracing::Level::ERROR => tracing::error!(target: $target, $($arg)*),
-                &tracing::Level::WARN => tracing::warn!(target: $target, $($arg)*),
-                &tracing::Level::INFO => tracing::info!(target: $target, $($arg)*),
-                &tracing::Level::DEBUG => tracing::debug!(target: $target, $($arg)*),
-                &tracing::Level::TRACE => tracing::trace!(target: $target, $($arg)*),
-            }
+    ($level:expr, target: $target:expr, $($arg:tt)*) => {
+        match $level {
+            &tracing::Level::ERROR => tracing::error!(target: $target, $($arg)*),
+            &tracing::Level::WARN => tracing::warn!(target: $target, $($arg)*),
+            &tracing::Level::INFO => tracing::info!(target: $target, $($arg)*),
+            &tracing::Level::DEBUG => tracing::debug!(target: $target, $($arg)*),
+            &tracing::Level::TRACE => tracing::trace!(target: $target, $($arg)*),
         }
-    }};
+    };
 }
 
 impl DistributedTraceContext {
@@ -1524,14 +1514,15 @@ pub mod tests {
                         span_ids_seen.insert(span_id_str.to_string());
                     }
 
-                    // Validate timestamp format and track first timestamp for each span
+                    // Validate timestamp format and track span timestamps
                     if let Some(time_str) = log_line.get("time").and_then(|v| v.as_str()) {
                         let timestamp = DateTime::parse_from_rfc3339(time_str)
                             .expect("All timestamps should be valid RFC3339 format")
                             .with_timezone(&Utc);
 
+                        // Track timestamp for each span_name
                         if let Some(span_name) = log_line.get("span_name").and_then(|v| v.as_str()) {
-                            span_timestamps.entry(span_name.to_string()).or_insert(timestamp);
+                            span_timestamps.insert(span_name.to_string(), timestamp);
                         }
                     }
                 }
