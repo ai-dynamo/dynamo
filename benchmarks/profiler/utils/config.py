@@ -40,6 +40,7 @@ class Container(BaseModel):
     workingDir: Optional[str] = None
     command: Optional[list[str]] = None
     args: Optional[list[str]] = None
+    resources: Optional[dict] = None  # For RDMA/custom resources
     model_config = {"extra": "allow"}
 
 
