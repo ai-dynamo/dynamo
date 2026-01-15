@@ -1688,167 +1688,197 @@ pub mod tests {
     /// - Level-based filtering (positive: allowed levels pass, negative: filtered levels blocked)
     /// - Target-based filtering (spans from allowed targets pass even at lower levels)
     ///
-    /// Uses DYN_LOG=warn,dynamo_runtime::logging::tests=debug which allows:
-    /// - WARN+ from any target (tests level filtering)
-    /// - DEBUG+ from dynamo_runtime::logging::tests (tests target filtering)
+    /// This test runs in a subprocess to ensure logging is initialized with our specific
+    /// filter settings (DYN_LOG=warn,dynamo_runtime::logging::tests=debug), avoiding
+    /// interference from other tests that may have initialized logging first.
+    #[test]
+    fn test_span_events() {
+        use std::process::Command;
+
+        // Run cargo test for the subprocess test with specific env vars
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "test_span_events_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_LOGGING_JSONL", "1")
+            .env("DYN_LOGGING_SPAN_EVENTS", "1")
+            .env("DYN_LOG", "warn,dynamo_runtime::logging::tests=debug")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        // Print output for debugging
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    /// Subprocess test that performs the actual span event validation.
+    /// This is called by test_span_events in a separate process with controlled env vars.
     #[tokio::test]
-    async fn test_span_events() -> Result<()> {
-        #[allow(clippy::redundant_closure_call)]
-        let _ = temp_env::async_with_vars(
-            [
-                (env_logging::DYN_LOGGING_JSONL, Some("1")),
-                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
-                // Default is warn, but our test module is allowed at debug
-                // This tests both level filtering AND target filtering
-                (
-                    env_logging::DYN_LOG,
-                    Some("warn,dynamo_runtime::logging::tests=debug"),
-                ),
-            ],
-            (async || {
-                let tmp_file = NamedTempFile::new().unwrap();
-                let file_name = tmp_file.path().to_str().unwrap();
-                let guard = StderrOverride::from_file(file_name)?;
-                init();
+    async fn test_span_events_subprocess() -> Result<()> {
+        // Skip if not running as subprocess (env vars not set)
+        if std::env::var("DYN_LOGGING_SPAN_EVENTS").is_err() {
+            return Ok(());
+        }
 
-                // Run parent/child/grandchild spans (all INFO level by default)
-                parent().await;
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
 
-                // Run spans at explicit levels from our test module
-                debug_level_span().await;
-                info_level_span().await;
-                warn_level_span().await;
+        // Run parent/child/grandchild spans (all INFO level by default)
+        parent().await;
 
-                // Run span from different target (should be filtered out)
-                other_target_info_span().await;
+        // Run spans at explicit levels from our test module
+        debug_level_span().await;
+        info_level_span().await;
+        warn_level_span().await;
 
-                drop(guard);
+        // Run span from different target (should be filtered out)
+        other_target_info_span().await;
 
-                let lines = load_log(file_name)?;
+        drop(guard);
 
-                // Helper to check if a span event exists
-                let has_span_event = |msg: &str, span_name: &str| {
-                    lines.iter().any(|log| {
-                        log.get("message").and_then(|v| v.as_str()) == Some(msg)
-                            && log.get("span_name").and_then(|v| v.as_str()) == Some(span_name)
-                    })
-                };
+        let lines = load_log(file_name)?;
 
-                // Helper to get span events
-                let get_span_events = |msg: &str| -> Vec<&serde_json::Value> {
-                    lines
-                        .iter()
-                        .filter(|log| log.get("message").and_then(|v| v.as_str()) == Some(msg))
-                        .collect()
-                };
+        // Helper to check if a span event exists
+        let has_span_event = |msg: &str, span_name: &str| {
+            lines.iter().any(|log| {
+                log.get("message").and_then(|v| v.as_str()) == Some(msg)
+                    && log.get("span_name").and_then(|v| v.as_str()) == Some(span_name)
+            })
+        };
 
-                // === Test 1: SPAN_CREATED events have required fields ===
-                let span_created_events = get_span_events("SPAN_CREATED");
-                for event in &span_created_events {
-                    // Must have span_name
-                    assert!(
-                        event.get("span_name").is_some(),
-                        "SPAN_CREATED must have span_name"
-                    );
-                    // Must have valid trace_id (format check)
-                    let trace_id = event
-                        .get("trace_id")
-                        .and_then(|v| v.as_str())
-                        .expect("SPAN_CREATED must have trace_id");
-                    assert!(
-                        trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
-                        "SPAN_CREATED must have valid trace_id format"
-                    );
-                    // Must have valid span_id
-                    let span_id = event
-                        .get("span_id")
-                        .and_then(|v| v.as_str())
-                        .expect("SPAN_CREATED must have span_id");
-                    assert!(
-                        is_valid_span_id(span_id),
-                        "SPAN_CREATED must have valid span_id"
-                    );
-                }
+        // Helper to get span events
+        let get_span_events = |msg: &str| -> Vec<&serde_json::Value> {
+            lines
+                .iter()
+                .filter(|log| log.get("message").and_then(|v| v.as_str()) == Some(msg))
+                .collect()
+        };
 
-                // === Test 2: SPAN_CLOSED events have timing info ===
-                let span_closed_events = get_span_events("SPAN_CLOSED");
-                for event in &span_closed_events {
-                    assert!(
-                        event.get("span_name").is_some(),
-                        "SPAN_CLOSED must have span_name"
-                    );
-                    assert!(
-                        event.get("time.busy_us").is_some()
-                            || event.get("time.idle_us").is_some()
-                            || event.get("time.duration_us").is_some(),
-                        "SPAN_CLOSED must have timing information"
-                    );
-                    // Must have valid trace_id
-                    let trace_id = event
-                        .get("trace_id")
-                        .and_then(|v| v.as_str())
-                        .expect("SPAN_CLOSED must have trace_id");
-                    assert!(
-                        trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
-                        "SPAN_CLOSED must have valid trace_id format"
-                    );
-                }
+        // === Test 1: SPAN_CREATED events have required fields ===
+        let span_created_events = get_span_events("SPAN_CREATED");
+        for event in &span_created_events {
+            // Must have span_name
+            assert!(
+                event.get("span_name").is_some(),
+                "SPAN_CREATED must have span_name"
+            );
+            // Must have valid trace_id (format check)
+            let trace_id = event
+                .get("trace_id")
+                .and_then(|v| v.as_str())
+                .expect("SPAN_CREATED must have trace_id");
+            assert!(
+                trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
+                "SPAN_CREATED must have valid trace_id format"
+            );
+            // Must have valid span_id
+            let span_id = event
+                .get("span_id")
+                .and_then(|v| v.as_str())
+                .expect("SPAN_CREATED must have span_id");
+            assert!(
+                is_valid_span_id(span_id),
+                "SPAN_CREATED must have valid span_id"
+            );
+        }
 
-                // === Test 3: Target-based filtering (positive) ===
-                // Spans from dynamo_runtime::logging::tests should pass at ALL levels
-                // because the target is allowed at debug level
+        // === Test 2: SPAN_CLOSED events have timing info ===
+        let span_closed_events = get_span_events("SPAN_CLOSED");
+        for event in &span_closed_events {
+            assert!(
+                event.get("span_name").is_some(),
+                "SPAN_CLOSED must have span_name"
+            );
+            assert!(
+                event.get("time.busy_us").is_some()
+                    || event.get("time.idle_us").is_some()
+                    || event.get("time.duration_us").is_some(),
+                "SPAN_CLOSED must have timing information"
+            );
+            // Must have valid trace_id
+            let trace_id = event
+                .get("trace_id")
+                .and_then(|v| v.as_str())
+                .expect("SPAN_CLOSED must have trace_id");
+            assert!(
+                trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
+                "SPAN_CLOSED must have valid trace_id format"
+            );
+        }
+
+        // === Test 3: Target-based filtering (positive) ===
+        // Spans from dynamo_runtime::logging::tests should pass at ALL levels
+        // because the target is allowed at debug level
+        assert!(
+            has_span_event("SPAN_CREATED", "debug_level_span"),
+            "DEBUG span from allowed target MUST pass (target=debug filter)"
+        );
+        assert!(
+            has_span_event("SPAN_CREATED", "info_level_span"),
+            "INFO span from allowed target MUST pass (target=debug filter)"
+        );
+        assert!(
+            has_span_event("SPAN_CREATED", "warn_level_span"),
+            "WARN span from allowed target MUST pass (target=debug filter)"
+        );
+
+        // parent/child/grandchild are INFO level from allowed target - should pass
+        assert!(
+            has_span_event("SPAN_CREATED", "parent"),
+            "parent span (INFO) from allowed target MUST pass"
+        );
+        assert!(
+            has_span_event("SPAN_CREATED", "child"),
+            "child span (INFO) from allowed target MUST pass"
+        );
+        assert!(
+            has_span_event("SPAN_CREATED", "grandchild"),
+            "grandchild span (INFO) from allowed target MUST pass"
+        );
+
+        // === Test 4: Level-based filtering (negative) ===
+        // Verify spans from OTHER targets at debug/info level are filtered out
+        assert!(
+            !has_span_event("SPAN_CREATED", "other_target_info_span"),
+            "INFO span from non-allowed target (other_module) MUST be filtered out"
+        );
+
+        // Also verify no spans from other targets appear at debug/info level
+        for event in &span_created_events {
+            let target = event.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let level = event.get("level").and_then(|v| v.as_str()).unwrap_or("");
+
+            // If level is DEBUG or INFO, target must be our test module
+            if level == "DEBUG" || level == "INFO" {
                 assert!(
-                    has_span_event("SPAN_CREATED", "debug_level_span"),
-                    "DEBUG span from allowed target MUST pass (target=debug filter)"
+                    target.contains("dynamo_runtime::logging::tests"),
+                    "DEBUG/INFO span must be from allowed target, got target={target}"
                 );
-                assert!(
-                    has_span_event("SPAN_CREATED", "info_level_span"),
-                    "INFO span from allowed target MUST pass (target=debug filter)"
-                );
-                assert!(
-                    has_span_event("SPAN_CREATED", "warn_level_span"),
-                    "WARN span from allowed target MUST pass (target=debug filter)"
-                );
+            }
+        }
 
-                // parent/child/grandchild are INFO level from allowed target - should pass
-                assert!(
-                    has_span_event("SPAN_CREATED", "parent"),
-                    "parent span (INFO) from allowed target MUST pass"
-                );
-                assert!(
-                    has_span_event("SPAN_CREATED", "child"),
-                    "child span (INFO) from allowed target MUST pass"
-                );
-                assert!(
-                    has_span_event("SPAN_CREATED", "grandchild"),
-                    "grandchild span (INFO) from allowed target MUST pass"
-                );
-
-                // === Test 4: Level-based filtering (negative) ===
-                // Verify spans from OTHER targets at debug/info level are filtered out
-                assert!(
-                    !has_span_event("SPAN_CREATED", "other_target_info_span"),
-                    "INFO span from non-allowed target (other_module) MUST be filtered out"
-                );
-
-                // Also verify no spans from other targets appear at debug/info level
-                for event in &span_created_events {
-                    let target = event.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                    let level = event.get("level").and_then(|v| v.as_str()).unwrap_or("");
-
-                    // If level is DEBUG or INFO, target must be our test module
-                    if level == "DEBUG" || level == "INFO" {
-                        assert!(
-                            target.contains("dynamo_runtime::logging::tests"),
-                            "DEBUG/INFO span must be from allowed target, got target={target}"
-                        );
-                    }
-                }
-
-                Ok::<(), anyhow::Error>(())
-            })(),
-        )
-        .await;
         Ok(())
     }
 }
