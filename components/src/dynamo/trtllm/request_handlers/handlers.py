@@ -179,10 +179,6 @@ class PrefillHandler(HandlerBase):
                             # Reconstruct DisaggregatedParams object from dict
                             ep_disaggregated_params = DisaggregatedParams(**params_dict)
                             ep_disaggregated_params.request_type = "context_only"
-                            logging.info(
-                                f"[EPD PREFILL] Received ep_disaggregated_params from encoder, "
-                                f"has_handles={ep_disaggregated_params.multimodal_embedding_handles is not None}"
-                            )
 
                             # Get the processed prompt from encoder (includes <image> tokens)
                             # Store it in the request so multimodal_processor can access it
