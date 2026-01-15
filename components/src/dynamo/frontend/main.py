@@ -221,7 +221,7 @@ def parse_args():
         "--direct-route",
         action="store_true",
         default=False,
-        help="Require worker IDs in requests. When set, requests without decode_worker_id/prefill_worker_id will error instead of using router selection. Used for EPP integration where worker selection is done externally.",
+        help="Require worker IDs in requests. When set, requests without decode_worker_id/prefill_worker_id will error instead of using router selection. Used when worker selection is done externally.",
     )
     parser.add_argument(
         "--active-decode-blocks-threshold",
