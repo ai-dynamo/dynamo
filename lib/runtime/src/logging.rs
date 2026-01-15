@@ -826,11 +826,6 @@ where
                 panic!("span_id is not set in on_enter - OtelData may not be properly initialized");
             }
 
-            // Clone values needed for SPAN_CREATED event before moving into context
-            let trace_id_val = trace_id.clone().expect("Trace ID must be set");
-            let span_id_val = span_id.clone().expect("Span ID must be set");
-            let parent_id_val = parent_id.clone();
-            let span_name = span.name().to_string();
             let span_level = span.metadata().level();
 
             // Re-acquire mutable borrow to insert the finalized context
@@ -851,25 +846,10 @@ where
             drop(extensions);
 
             // Emit SPAN_CREATED event at the span's log level (if span events enabled)
-            // This replaces FmtSpan::ENTER to avoid re-entry overhead
-            // Note: The formatter will override the target to match the span's target
+            // The formatter will add trace context fields from DistributedTraceContext
+            // and override the target to match the span's target
             if span_events_enabled() {
-                if let Some(ref pid) = parent_id_val {
-                    emit_at_level!(span_level, target: "span_event",
-                        message = "SPAN_CREATED",
-                        span_name = %span_name,
-                        trace_id = %trace_id_val,
-                        span_id = %span_id_val,
-                        parent_id = %pid
-                    );
-                } else {
-                    emit_at_level!(span_level, target: "span_event",
-                        message = "SPAN_CREATED",
-                        span_name = %span_name,
-                        trace_id = %trace_id_val,
-                        span_id = %span_id_val
-                    );
-                }
+                emit_at_level!(span_level, target: "span_event", message = "SPAN_CREATED");
             }
         }
     }
