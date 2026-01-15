@@ -204,8 +204,6 @@ jobs:
           echo "==== Directory structure (including hidden files) ===="
           ls -Ra coverage-artifacts/
 
-          echo "==== Directory structure  ===="
-          pwd
           echo ""
           echo "==== Coverage files found ===="
           find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
@@ -213,40 +211,16 @@ jobs:
           echo "==== Specifically looking for .coverage files ===="
           find coverage-artifacts/ -name ".coverage" -type f
           echo ""
-          echo "==== Checking if .coverage files exist ===="
-          if find coverage-artifacts/ -name ".coverage" -type f | grep -q .; then
-            echo "✅ .coverage files found!"
-            find coverage-artifacts/ -name ".coverage" -type f -exec ls -lh {} \;
-          else
-            echo "❌ NO .coverage files found!"
-          fi
 
       - name: Merge All Coverage Data
         run: |
           set -x
           echo "📊 Merging all test coverage..."
 
-          # Debug: Show current directory and source code structure
-          echo "Current directory: $(pwd)"
-          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
-          echo "Source code structure:"
-          ls -la components/src/dynamo/ 2>/dev/null | head -20 || echo "components/src/dynamo not found"
-
-          # Create a .coveragerc file with path remapping
-          cat > .coveragerc << 'EOF'
-          [paths]
-          dynamo =
-              components/src/dynamo
-              /workspace/components/src/dynamo
-              $GITHUB_WORKSPACE/components/src/dynamo
-          [run]
-          parallel = True
-          EOF
-
           # Expand $GITHUB_WORKSPACE in the config
           sed -i "s|\$GITHUB_WORKSPACE|${GITHUB_WORKSPACE}|g" .coveragerc
 
-          echo "Created .coveragerc with path remapping:"
+          echo "Updated .coveragerc with path remapping:"
           cat .coveragerc
 
           # Find all .coverage files and copy them with unique names
@@ -269,17 +243,8 @@ jobs:
             echo "Running coverage combine with path remapping..."
             set +e  # Don't exit on error
             COVERAGE_RCFILE=../.coveragerc coverage combine --keep  .coverage.* 2>&1 | tee ../combine.log
-            COMBINE_EXIT=$?
             set -e
 
-            if [ $COMBINE_EXIT -ne 0 ]; then
-              echo "⚠️ Warning: coverage combine had issues (exit code: $COMBINE_EXIT)"
-              echo "Combine log:"
-              cat ../combine.log
-              # Try without --keep flag
-              echo "Retrying without --keep flag..."
-              COVERAGE_RCFILE=../.coveragerc coverage combine .coverage.* 2>&1 || echo "Second attempt also failed"
-            fi
 
             if [ -f .coverage ]; then
               echo "✅ Combined .coverage file created"
@@ -289,21 +254,10 @@ jobs:
               # Generate reports (continue even if some fail)
               echo "📊 Generating coverage reports..."
               set +e
-              COVERAGE_RCFILE=.coveragerc coverage report --show-missing --data-file=.coverage 2>&1 | tee coverage-report.txt
-              REPORT_EXIT=$?
               COVERAGE_RCFILE=.coveragerc coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
               COVERAGE_RCFILE=.coveragerc coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
               set -e
 
-              if [ $REPORT_EXIT -eq 0 ]; then
-                # Extract total coverage percentage
-                TOTAL_COVERAGE=$(grep "TOTAL" coverage-report.txt | awk '{print $NF}')
-                echo "📈 Total Coverage: ${TOTAL_COVERAGE}"
-                echo "TOTAL_COVERAGE=${TOTAL_COVERAGE}" >> $GITHUB_ENV
-              else
-                echo "⚠️ Coverage report generation had issues"
-                echo "TOTAL_COVERAGE=unknown" >> $GITHUB_ENV
-              fi
             else
               echo "❌ Failed to create combined .coverage file"
               cd ..
@@ -364,7 +318,7 @@ jobs:
           retention-days: 30
 
       - name: Store Daily Snapshot to Branch
-        if: github.event_name == 'schedule'
+        if: false && github.event_name == 'schedule' # disable this for now, to enable, we also need to give nightly-ci write permissions.
         run: |
           set -x
           git config user.name "github-actions[bot]"
@@ -405,65 +359,6 @@ jobs:
           git add snapshots/
           git commit -m "Coverage snapshot: $DATE [run: ${{ github.run_id }}]" || echo "No changes to commit"
           git push origin coverage-snapshots || git push --set-upstream origin coverage-snapshots
-
-  ############################## RESULTS SUMMARY ##############################
-  results-summary:
-    name: Results Summary
-    runs-on: ubuntu-latest
-    if: always()
-    needs: [unit-tests]
-    # needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Gather job metadata
-        id: gather
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PIPELINE_TYPE: ${{ inputs.pipeline_type }}
-        run: |
-          set +x -e
-          echo "# ${PIPELINE_TYPE^} CI Results Summary" > results.md
-          echo "" >> results.md
-          echo "| Stage | Status | Runner | Duration (min) | Artifacts |" >> results.md
-          echo "|-------|--------|--------|----------------|-----------|" >> results.md
-
-          curl -s -S -L --fail-with-body \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100" \
-            2>/dev/null | jq -c '.jobs[] | {id, name, runner_name, conclusion, started_at, completed_at}' > jobs.jsonl
-
-          while read job_entry; do
-            job_id=$(echo "$job_entry" | jq -r '.id')
-            name=$(echo "$job_entry" | jq -r '.name')
-            runner=$(echo "$job_entry" | jq -r '.runner_name')
-            status=$(echo "$job_entry" | jq -r '.conclusion')
-            started=$(echo "$job_entry" | jq -r '.started_at')
-            completed=$(echo "$job_entry" | jq -r '.completed_at')
-            minutes="N/A"
-            if [[ "$started" != "null" && "$completed" != "null" ]]; then
-              start_epoch=$(date -d "$started" +%s)
-              end_epoch=$(date -d "$completed" +%s)
-              minutes=$(( (end_epoch - start_epoch)/60 ))
-            fi
-            artifact_link="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#job-$job_id"
-            printf "| %s | %s | %s | %s | [Log & Artifacts](%s) |\n" "$name" "$status" "$runner" "$minutes" "$artifact_link" >> results.md
-          done < jobs.jsonl
-
-          echo "" >> results.md
-          echo "---" >> results.md
-      - name: Display workflow summary
-        run: cat results.md
-      - name: Upload results summary as job summary
-        run: cat results.md >> $GITHUB_STEP_SUMMARY
-      - name: Upload results as artifact
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: ${{ inputs.pipeline_type }}-results-summary
-          path: results.md
-          retention-days: 7
 
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:

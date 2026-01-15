@@ -1,0 +1,7 @@
+[paths]
+dynamo =
+    components/src/dynamo
+    /workspace/components/src/dynamo
+    $GITHUB_WORKSPACE/components/src/dynamo
+[run]
+parallel = True

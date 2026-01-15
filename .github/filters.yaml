@@ -83,7 +83,6 @@ core:
   - '*.py'
   - '*.rs'
   - 'scripts/report_pytest_markers.py'
-  - 'scripts/coverage_analysis.py'
   - '!**/*.md'
   - '!**/*.rst'
   - '!**/*.txt'
