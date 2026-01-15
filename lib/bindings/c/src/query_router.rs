@@ -197,16 +197,7 @@ pub unsafe extern "C" fn query_router_is_disaggregated(handle: QueryRouterHandle
     }
 
     let router = unsafe { &*handle };
-
-    // Get runtime to execute async check
-    let runtime = match Runtime::from_settings() {
-        Ok(rt) => rt,
-        Err(_) => return false,
-    };
-
-    runtime
-        .secondary()
-        .block_on(async { router.is_disaggregated().await })
+    router.is_disaggregated()
 }
 
 /// Mark prefill as completed for a request

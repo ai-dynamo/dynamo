@@ -447,6 +447,59 @@ impl PrefillRouter {
         // No phase permit needed - we wait for completion before changing phase
         Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
     }
+
+    // =========================================================================
+    // Query-only methods for EPP integration (no request execution)
+    // =========================================================================
+
+    /// Check if disaggregated mode is currently active (prefill router activated)
+    pub fn is_activated(&self) -> bool {
+        self.prefill_router.get().is_some()
+    }
+
+    /// Query optimal prefill worker ID without executing a request.
+    ///
+    /// This is used by the EPP/QueryRouter to determine prefill routing.
+    /// For decode worker, the caller should use KvRouter directly.
+    ///
+    /// # Arguments
+    /// * `token_ids` - Token IDs from the tokenized request
+    /// * `update_states` - Whether to update router state (set false for query-only)
+    ///
+    /// # Returns
+    /// * `Ok((worker_id, dp_rank))` - Prefill worker ID and DP rank
+    /// * `Err` - If routing fails or not activated
+    pub async fn query_prefill_worker(
+        &self,
+        token_ids: &[u32],
+        update_states: bool,
+    ) -> Result<(u64, u32)> {
+        let prefill_router = self
+            .prefill_router
+            .get()
+            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+
+        if self.router_mode.is_kv_routing() {
+            let kv_router = match prefill_router {
+                InnerPrefillRouter::KvRouter(r) => r,
+                _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
+            };
+            let (worker, _overlap) = kv_router
+                .chooser
+                .find_best_match(None, token_ids, None, update_states)
+                .await?;
+            Ok((worker.worker_id, worker.dp_rank))
+        } else {
+            // Non-KV mode: use PushRouter's selection
+            let worker_id = if update_states {
+                prefill_router.select_next_worker()
+            } else {
+                prefill_router.peek_next_worker()
+            }
+            .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+            Ok((worker_id, 0))
+        }
+    }
 }
 
 impl Drop for PrefillRouter {

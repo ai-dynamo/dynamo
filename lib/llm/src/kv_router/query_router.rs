@@ -7,20 +7,20 @@
 //! to query optimal worker IDs without sending the actual request.
 //!
 //! The QueryRouter supports both aggregated and disaggregated modes:
-//! - Aggregated: Returns a single decode_worker_id
-//! - Disaggregated: Returns prefill_worker_id + decode_worker_id (when prefill workers available)
+//! - Aggregated: Returns a single decode_worker_id (uses KvRouter directly)
+//! - Disaggregated: Returns prefill_worker_id + decode_worker_id (uses PrefillRouter + KvRouter)
 
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tokio::sync::RwLock;
 
 use dynamo_runtime::DistributedRuntime;
 
 use crate::{
     discovery::ModelManager,
-    kv_router::{KvRouter, KvRouterConfig, RouterConfigOverride},
+    kv_router::{KvRouter, KvRouterConfig, PrefillRouter, RouterConfigOverride},
 };
+use dynamo_runtime::pipeline::RouterMode;
 
 /// Result of a routing query
 #[derive(Debug, Clone, Default)]
@@ -37,13 +37,17 @@ pub struct RouteQueryResult {
 ///
 /// This router only queries for optimal worker IDs without sending requests.
 /// It supports both aggregated and disaggregated modes based on prefill worker availability.
+///
+/// Internally uses:
+/// - `PrefillRouter` for prefill worker selection (reuses existing logic)
+/// - `KvRouter` for decode worker selection
 pub struct QueryRouter {
     /// KV-aware router for decode workers (also handles aggregated mode)
     decode_router: Arc<KvRouter>,
 
-    /// Optional KV-aware router for prefill workers (None = aggregated mode)
-    /// This is lazily activated when prefill workers are discovered
-    prefill_router: Arc<RwLock<Option<Arc<KvRouter>>>>,
+    /// PrefillRouter for prefill worker selection (reuses pipeline logic)
+    /// None until prefill workers are discovered
+    prefill_router: Arc<PrefillRouter>,
 
     /// Whether to enforce disaggregated mode (fail if prefill unavailable)
     enforce_disagg: bool,
@@ -78,47 +82,27 @@ impl QueryRouter {
             .await
             .context("Failed to create decode router")?;
 
-        // Register for prefill worker discovery
-        let prefill_rx = model_manager.register_prefill_router(model_name.to_string());
+        // Create PrefillRouter (reuses existing activation logic)
+        // It will auto-activate when prefill workers are discovered
+        let prefill_router = model_manager
+            .register_prefill_router(model_name.to_string())
+            .map(|rx| {
+                // Create prefill-specific config
+                let mut prefill_config = kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
 
-        let prefill_router: Arc<RwLock<Option<Arc<KvRouter>>>> = Arc::new(RwLock::new(None));
-
-        // Spawn background task to activate prefill router when workers discovered
-        if let Some(rx) = prefill_rx {
-            let prefill_router_clone = prefill_router.clone();
-            let model_manager_clone = model_manager.clone();
-            let kv_config = kv_router_config.clone();
-
-            tokio::spawn(async move {
-                match rx.await {
-                    Ok(endpoint) => {
-                        tracing::info!("Prefill workers discovered, activating disaggregated mode");
-
-                        // Create prefill-specific config
-                        let mut prefill_config = kv_config;
-                        prefill_config.router_track_active_blocks = false;
-
-                        // Create KV router for prefill workers
-                        match model_manager_clone
-                            .kv_chooser_for(&endpoint, block_size, Some(prefill_config))
-                            .await
-                        {
-                            Ok(new_prefill_router) => {
-                                let mut guard = prefill_router_clone.write().await;
-                                *guard = Some(new_prefill_router);
-                                tracing::info!("Disaggregated mode activated");
-                            }
-                            Err(e) => {
-                                tracing::error!(error = %e, "Failed to create prefill router");
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        tracing::debug!("Prefill router activation channel closed");
-                    }
-                }
+                PrefillRouter::new(
+                    rx,
+                    model_manager.clone(),
+                    RouterMode::KV, // Use KV routing for prefill
+                    block_size,
+                    Some(prefill_config),
+                    enforce_disagg,
+                )
+            })
+            .unwrap_or_else(|| {
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
             });
-        }
 
         Ok(Self {
             decode_router,
@@ -141,22 +125,19 @@ impl QueryRouter {
         token_ids: &[u32],
         update_states: bool,
     ) -> Result<RouteQueryResult> {
-        // Check if disaggregated mode is available
-        let prefill_router_guard = self.prefill_router.read().await;
-        let is_disaggregated = prefill_router_guard.is_some();
+        // Check if disaggregated mode is available (prefill router activated)
+        let is_disaggregated = self.prefill_router.is_activated();
 
         if self.enforce_disagg && !is_disaggregated {
             anyhow::bail!("Disaggregated mode enforced but no prefill workers available");
         }
 
         if is_disaggregated {
-            let prefill_router = prefill_router_guard.as_ref().unwrap().clone();
-            drop(prefill_router_guard); // Release lock before async operations
-
             // Disaggregated mode: query both prefill and decode routers
-            // Query prefill worker
-            let (prefill_worker, _prefill_overlap) = prefill_router
-                .find_best_match(request_id, token_ids, None, update_states)
+            // Use PrefillRouter's query method (reuses existing logic)
+            let (prefill_worker_id, _dp_rank) = self
+                .prefill_router
+                .query_prefill_worker(token_ids, update_states)
                 .await
                 .context("Failed to query prefill worker")?;
 
@@ -172,13 +153,11 @@ impl QueryRouter {
                 .context("Failed to query decode worker")?;
 
             Ok(RouteQueryResult {
-                prefill_worker_id: prefill_worker.worker_id,
+                prefill_worker_id,
                 decode_worker_id: decode_worker.worker_id,
                 is_disaggregated: true,
             })
         } else {
-            drop(prefill_router_guard); // Release lock
-
             // Aggregated mode: query decode router only
             let (worker, _overlap) = self
                 .decode_router
@@ -195,8 +174,8 @@ impl QueryRouter {
     }
 
     /// Check if disaggregated mode is currently active
-    pub async fn is_disaggregated(&self) -> bool {
-        self.prefill_router.read().await.is_some()
+    pub fn is_disaggregated(&self) -> bool {
+        self.prefill_router.is_activated()
     }
 
     /// Mark prefill as completed for a request (for state tracking)
