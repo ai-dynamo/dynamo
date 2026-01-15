@@ -178,9 +178,9 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_router::RouterEvent;
     use crate::kv_router::indexer::KvIndexerMetrics;
     use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
-    use crate::kv_router::RouterEvent;
     use tokio_stream::StreamExt;
     use tokio_util::sync::CancellationToken;
 
