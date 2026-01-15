@@ -159,7 +159,7 @@ sglang_configs = {
         # E/PD architecture: Encode worker (GPU 0) + Prefill/Decode worker (GPU 1)
         name="multimodal_epd_qwen",
         directory=sglang_dir,
-        script_name="multimodal_agg.sh",
+        script_name="multimodal_epd.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,

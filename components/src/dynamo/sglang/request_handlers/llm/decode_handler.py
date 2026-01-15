@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict
 
 import sglang as sgl
 
@@ -12,22 +12,6 @@ from dynamo._core import Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
-
-
-def _extract_image_url(request: Dict[str, Any]) -> Optional[str]:
-    """Extract image URL from multimodal request data."""
-    mm_data = request.get("multi_modal_data")
-    if not mm_data:
-        return None
-    image_urls = mm_data.get("image_url", [])
-    if not image_urls:
-        return None
-    item = image_urls[0]
-    if isinstance(item, dict) and "Url" in item:
-        return item["Url"]
-    if isinstance(item, str):
-        return item
-    return None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -118,7 +102,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
-        image_data = None
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -158,12 +141,19 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            # For multimodal requests, pass image URL directly to SGLang.
-            # SGLang's mm_data_processor handles image loading/preprocessing,
-            # and the scheduler performs token expansion and vision encoding.
-            image_url = _extract_image_url(request)
-            if image_url:
-                image_data = [image_url]
+            # Extract image URLs for multimodal requests. SGLang's mm_data_processor
+            # handles loading/preprocessing, and the scheduler does vision encoding.
+            image_data = None
+            image_items = request.get("multi_modal_data", {}).get("image_url")
+            if image_items:
+                image_data = []
+                for item in image_items:
+                    if isinstance(item, str):
+                        image_data.append(item)
+                    elif isinstance(item, dict) and "Url" in item:
+                        image_data.append(item["Url"])
+                image_data = image_data or None
+
             trace_header = (
                 self._get_trace_header(context) if self.enable_trace else None
             )
