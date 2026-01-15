@@ -306,9 +306,13 @@ class EncodeHelper:
                 media=image_urls[0],
             )
             # Log encoder input
-            input_keys = list(inputs[0].keys()) if inputs and isinstance(inputs[0], dict) else "N/A"
+            input_keys = (
+                list(inputs[0].keys())
+                if inputs and isinstance(inputs[0], dict)
+                else "N/A"
+            )
             logging.info(f"[EPD ENCODE] MultimodalEncoder input keys: {input_keys}")
-            
+
             # engine.llm is the MultimodalEncoder instance
             # MultimodalEncoder.generate() returns a list of GenerationResult objects
             if engine is None:
@@ -336,9 +340,15 @@ class EncodeHelper:
                 hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
                 and ep_disaggregated_params.multimodal_embedding_handles
             )
-            num_handles = len(ep_disaggregated_params.multimodal_embedding_handles) if has_handles else 0
-            logging.info(f"[EPD ENCODE] MultimodalEncoder output: multimodal_embedding_handles={num_handles}")
-            
+            num_handles = (
+                len(ep_disaggregated_params.multimodal_embedding_handles)
+                if has_handles
+                else 0
+            )
+            logging.info(
+                f"[EPD ENCODE] MultimodalEncoder output: multimodal_embedding_handles={num_handles}"
+            )
+
             if not has_handles:
                 logging.warning(
                     "ENCODE WORKER: ep_disaggregated_params has no multimodal_embedding_handles"

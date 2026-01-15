@@ -198,7 +198,9 @@ class MultimodalRequestProcessor:
         if embeddings is not None:
             # EPD flow - embeddings received from encode worker via NIXL
             loader_kwargs["mm_embeddings"] = [embeddings]
-            logging.info(f"Using NIXL embeddings: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}")
+            logging.info(
+                f"Using NIXL embeddings: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+            )
         elif image_urls:
             # Image-only flow
             loader_kwargs["media"] = [image_urls]

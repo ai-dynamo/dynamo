@@ -328,20 +328,28 @@ class HandlerBase:
         prefill_metadata = {}
 
         # Check if PREFILL had pre-computed embeddings (EPD handles OR NIXL transfer)
-        input_handles = getattr(disaggregated_params, "multimodal_embedding_handles", None) if disaggregated_params else None
+        input_handles = (
+            getattr(disaggregated_params, "multimodal_embedding_handles", None)
+            if disaggregated_params
+            else None
+        )
         has_embedding_handles = input_handles is not None
-        
+
         # DECODE can skip re-processing if PREFILL received pre-computed embeddings
         # This happens in: EPD flow (handles) OR P→D+Embeddings flow (NIXL)
         can_skip_decode_reprocess = has_embedding_handles or had_precomputed_embeddings
-        
+
         if can_skip_decode_reprocess and res.prompt:
             # Pack prompt info for DECODE to use instead of re-processing
             prefill_metadata["_prefill_prompt"] = res.prompt
             if res.prompt_token_ids:
-                prefill_metadata["_prefill_prompt_token_ids"] = list(res.prompt_token_ids)
+                prefill_metadata["_prefill_prompt_token_ids"] = list(
+                    res.prompt_token_ids
+                )
             prefill_metadata["_had_precomputed_embeddings"] = True
-            logging.debug("PREFILL: Packing metadata for DECODE optimization (pre-computed embeddings)")
+            logging.debug(
+                "PREFILL: Packing metadata for DECODE optimization (pre-computed embeddings)"
+            )
 
         # EPD-specific: use encoder's prompt if available
         if "_epd_processed_prompt" in request and res.prompt:
@@ -447,17 +455,29 @@ class HandlerBase:
         # - P→D+Embeddings flow (via NIXL transfer)
         # For simple P→D (image URL, no pre-computed embeddings), DECODE must re-process
         can_skip_decode_reprocess = (
-            epd_metadata and 
-            epd_metadata.get("_had_precomputed_embeddings") and
-            (epd_metadata.get("_prefill_prompt") or epd_metadata.get("_epd_processed_prompt"))
+            epd_metadata
+            and epd_metadata.get("_had_precomputed_embeddings")
+            and (
+                epd_metadata.get("_prefill_prompt")
+                or epd_metadata.get("_epd_processed_prompt")
+            )
         )
-        
-        if self.disaggregation_mode == DisaggregationMode.DECODE and can_skip_decode_reprocess:
+
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and can_skip_decode_reprocess
+        ):
             # Pre-computed embeddings flow - safe to skip re-processing
-            prefill_prompt = epd_metadata.get("_prefill_prompt") or epd_metadata.get("_epd_processed_prompt")
-            prefill_token_ids = epd_metadata.get("_prefill_prompt_token_ids") or epd_metadata.get("_epd_prompt_token_ids")
-            
-            logging.info(f"[DECODE] Using prefill metadata (pre-computed embeddings): prompt_len={len(prefill_prompt) if prefill_prompt else 0}, token_ids_len={len(prefill_token_ids) if prefill_token_ids else 0}")
+            prefill_prompt = epd_metadata.get("_prefill_prompt") or epd_metadata.get(
+                "_epd_processed_prompt"
+            )
+            prefill_token_ids = epd_metadata.get(
+                "_prefill_prompt_token_ids"
+            ) or epd_metadata.get("_epd_prompt_token_ids")
+
+            logging.info(
+                f"[DECODE] Using prefill metadata (pre-computed embeddings): prompt_len={len(prefill_prompt) if prefill_prompt else 0}, token_ids_len={len(prefill_token_ids) if prefill_token_ids else 0}"
+            )
             # Build input without multimodal data (already in KV cache)
             processed_input = {
                 "prompt": prefill_prompt,
@@ -469,10 +489,8 @@ class HandlerBase:
             # PREFILL, ENCODE, or DECODE mode - process multimodal content
             # For DECODE: TRT-LLM needs the SAME input structure as PREFILL
             # The disaggregated_params.request_type="generation_only" tells TRT-LLM to use KV cache
-            processed_input = (
-                await self.multimodal_processor.process_openai_request(
-                    request, embeddings, ep_disaggregated_params
-                )
+            processed_input = await self.multimodal_processor.process_openai_request(
+                request, embeddings, ep_disaggregated_params
             )
             if not processed_input:
                 # Fallback to text-only if no multimodal content
@@ -569,11 +587,19 @@ class HandlerBase:
         )
 
         # Log engine input for debugging P->D and EPD flows
-        input_keys = list(processed_input.keys()) if isinstance(processed_input, dict) else type(processed_input).__name__
-        request_type = getattr(disaggregated_params, 'request_type', None) if disaggregated_params else None
+        input_keys = (
+            list(processed_input.keys())
+            if isinstance(processed_input, dict)
+            else type(processed_input).__name__
+        )
+        request_type = (
+            getattr(disaggregated_params, "request_type", None)
+            if disaggregated_params
+            else None
+        )
         has_mm_handles = (
             disaggregated_params is not None
-            and hasattr(disaggregated_params, 'multimodal_embedding_handles')
+            and hasattr(disaggregated_params, "multimodal_embedding_handles")
             and disaggregated_params.multimodal_embedding_handles
         )
         logging.info(
@@ -629,8 +655,11 @@ class HandlerBase:
                         # Return the disaggregated params only when operating in prefill mode.
                         # Pass had_precomputed_embeddings=True if PREFILL received embeddings via NIXL
                         params_dict = self._encode_and_pack_disaggregated_params(
-                            output, disaggregated_params, request, res,
-                            had_precomputed_embeddings=(embeddings is not None)
+                            output,
+                            disaggregated_params,
+                            request,
+                            res,
+                            had_precomputed_embeddings=(embeddings is not None),
                         )
                         if params_dict is not None:
                             out["disaggregated_params"] = params_dict
