@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+spec:
+  backoffLimit: 3
+  completions: 1
+  parallelism: 1
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: model-download
+          image: python:3.12-slim
+          command: ["sh", "-c"]
+          env:
+            - name: HF_TOKEN
+              value: "hf_api_key"  # update if needed
+            - name: MODEL_NAME
+              value: "nvidia/Llama-3_1-Nemotron-Ultra-253B-v1"
+            - name: HF_HOME
+              value: /model-store
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "0"
+            - name: HF_HUB_DISABLE_PROGRESS_BARS
+              value: "1"
+          args:
+            - |
+              set -eux
+              pip install --no-cache-dir huggingface_hub
+              python3 -c "
+              from huggingface_hub import snapshot_download
+              import os
+              snapshot_download(
+                  '$MODEL_NAME',
+                  local_dir='/model-store/nemotron-253b',
+                  token=os.environ['HF_TOKEN']
+              )
+              print('Download complete!')
+              "
+          volumeMounts:
+            - name: model-cache
+              mountPath: /model-store
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: nemotron-253b-model-cache
+
