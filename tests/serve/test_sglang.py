@@ -14,7 +14,6 @@ from tests.serve.common import (
     params_with_model_mark,
     run_serve_deployment,
 )
-from tests.serve.conftest import MULTIMODAL_IMG_URL
 from tests.utils.constants import DefaultPort
 from tests.utils.engine_process import EngineConfig
 from tests.utils.payload_builder import (
@@ -211,17 +210,16 @@ sglang_configs = {
         request_payloads=[
             chat_payload(
                 [
-                    {
-                        "type": "text",
-                        "text": "What colors are in the following image? Respond only with the colors.",
-                    },
+                    {"type": "text", "text": "What is in this image?"},
                     {
                         "type": "image_url",
-                        "image_url": {"url": MULTIMODAL_IMG_URL},
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
                     },
                 ],
                 repeat_count=1,
-                expected_response=["green"],
+                expected_response=["image"],
                 temperature=0.0,
                 max_tokens=100,
             )
@@ -307,7 +305,6 @@ def test_sglang_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
-    image_server,
 ):
     """Test SGLang deployment scenarios using common helpers"""
     assert (

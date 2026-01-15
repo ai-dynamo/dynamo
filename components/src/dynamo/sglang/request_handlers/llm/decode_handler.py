@@ -40,6 +40,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             publisher,
         )
         self._multimodal_helper: MultimodalHelper | None = None
+
+        # SGLang checks HF config.architectures for VLM patterns
+        is_multimodal = engine.tokenizer_manager.model_config.is_multimodal
+        if is_multimodal and config.server_args.chat_template:
+            self._multimodal_helper = MultimodalHelper.from_config(config)
+            logging.info("MultimodalHelper initialized (multimodal model detected)")
+        elif is_multimodal:
+            logging.warning(
+                "Multimodal model detected but --chat-template not provided. "
+                "Multimodal requests will fail."
+            )
+
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -149,11 +161,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if "token_ids" not in request:
                     raise ValueError("Multimodal requests require pre-tokenized input.")
                 if not self._multimodal_helper:
-                    if not self.config.server_args.chat_template:
-                        raise ValueError(
-                            "Multimodal requests require --chat-template to be specified."
-                        )
-                    self._multimodal_helper = MultimodalHelper.from_config(self.config)
+                    raise ValueError(
+                        "Multimodal requests require --chat-template to be specified."
+                    )
                 (
                     expanded_token_ids,
                     mm_item,
