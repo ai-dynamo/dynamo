@@ -201,7 +201,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-32b-fp8-disagg
       extraPodSpec:
         affinity:
           podAntiAffinity:
@@ -224,7 +223,6 @@ spec:
     TrtllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
-      dynamoNamespace: qwen3-32b-fp8-disagg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
@@ -285,7 +283,6 @@ spec:
     TrtllmDecodeWorker:
       componentType: worker
       subComponentType: decode
-      dynamoNamespace: qwen3-32b-fp8-disagg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache

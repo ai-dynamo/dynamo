@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-planner
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     Planner:
-      dynamoNamespace: vllm-disagg-planner
       componentType: planner
       replicas: 1
       extraPodSpec:
@@ -42,7 +40,6 @@ spec:
               # See docs/planner/sla_planner_quickstart.md for more details
               name: planner-profile-data
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -62,7 +59,6 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

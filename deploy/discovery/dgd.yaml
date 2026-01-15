@@ -14,14 +14,12 @@ spec:
     value: "debug"
   services:
     Frontend:
-      dynamoNamespace: dynamo
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: ${IMAGE}
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg
       componentType: decode
       replicas: 1
       resources:
@@ -40,7 +38,6 @@ spec:
             - --model
             - Qwen/Qwen3-0.6B
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg
       componentType: prefill
       replicas: 1
       resources:

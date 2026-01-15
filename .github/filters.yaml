@@ -69,6 +69,7 @@ core:
   - 'container/build.sh'
   - 'container/Dockerfile'
   - '.dockerignore'
+  - 'container/dev/**'
   - 'container/deps/*'
   - '.cargo/config.toml'
   - 'lib/**'

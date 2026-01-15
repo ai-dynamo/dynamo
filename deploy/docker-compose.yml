@@ -11,9 +11,12 @@ networks:
 services:
   nats-server:
     image: nats:2.11.4
-    # max_payload set to 15MB to accommodate 10MB decoded embeddings
-    # Base64 encoding: 10MB → ~13.3MB, 15MB provides ~1.7MB buffer for metadata
-    command: [ "-js", "--trace", "-m", "8222", "--max_payload", "15728640" ]
+    command: [ "-c", "/etc/nats/nats-server.conf" ]
+    volumes:
+      # max_payload set to 15MB to accommodate 10MB decoded embeddings
+      # Base64 encoding: 10MB → ~13.3MB, 15MB provides ~1.7MB buffer for metadata
+      # max_payload must be configured via configuration file (does not exist as a CLI flag)
+      - ./nats-server.conf:/etc/nats/nats-server.conf:ro
     ports:
       - 4222:4222
       - 6222:6222

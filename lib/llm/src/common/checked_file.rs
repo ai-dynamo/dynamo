@@ -116,7 +116,15 @@ impl CheckedFile {
                     *path = new_path;
                 }
             }
-            Either::Right(_) => tracing::warn!("Cannot update directory on URL"),
+            Either::Right(url) => {
+                let Some(filename) = url.path().split('/').next_back().filter(|s| !s.is_empty())
+                else {
+                    tracing::warn!(%url, "Cannot update directory on invalid URL");
+                    return;
+                };
+                let p = dir.join(filename);
+                self.path = Either::Left(p);
+            }
         }
     }
 }

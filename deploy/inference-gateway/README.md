@@ -8,7 +8,7 @@ When integrating Dynamo with the Inference Gateway you could either use the defa
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
-EPP’s default kv-routing approach is token-aware only `by approximation` because the prompt is tokenized with a generic tokenizer unaware of the model deployed. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+EPP’s default kv-routing approach is not token-aware because the prompt is hashed without tokenization. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -32,29 +32,12 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 ### 2. Deploy Inference Gateway ###
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
-You can use the script below or follow the steps manually.
-
-Script:
 
 ```bash
 ./install_gaie_crd_kgateway.sh
 ```
 
-Manual steps:
-
-a. Deploy the Gateway API CRDs:
-
-```bash
-GATEWAY_API_VERSION=v1.3.0
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
-```
-
-b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs)
-
-```bash
-INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
-```
+Verify installation:
 
 ```bash
 kubectl get gateway inference-gateway -n my-model
@@ -117,6 +100,12 @@ export EPP_IMAGE=<the-epp-image-you-built>
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
+```
+
+By default, the Kubernetes discovery mechanism is used. If you prefer etcd, please use the `--set epp.dynamo.useEtcd=true` flag below.
+
+```bash
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE --set epp.dynamo.useEtcd=true
 ```
 
 Key configurations include:
@@ -216,10 +205,6 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-```bash
-export GATEWAY_URL=<Gateway-URL>
-```
-
 To test the gateway in minikube, use the following command:
 a. User minikube tunnel to expose the gateway to the host
    This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
@@ -230,7 +215,7 @@ ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is no
 minikube tunnel & # start the tunnel
 
 # in second terminal where you want to send inference requests
-GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o yaml -o jsonpath='{.spec.clusterIP}')
+GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}')
 echo $GATEWAY_URL
 ```
 

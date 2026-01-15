@@ -17,15 +17,26 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: pod-read
 rules:
+# Gateway API inference resources
 - apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferencepools"]
   verbs: ["get", "watch", "list"]
 - apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferencemodels"]
   verbs: ["get", "watch", "list"]
+# Core resources for pod discovery
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
+# Dynamo k8s service discovery - endpointslices
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+# Dynamo k8s service discovery - worker metadata CRs
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamoworkermetadatas"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+# Authentication/authorization
 - apiGroups:
   - authentication.k8s.io
   resources:

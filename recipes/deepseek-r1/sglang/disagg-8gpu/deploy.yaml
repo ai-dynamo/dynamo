@@ -14,7 +14,6 @@ spec:
       create: false
   services:
     Frontend:
-      dynamoNamespace: sgl-dsr1-8gpu
       componentType: frontend
       replicas: 1
       volumeMounts:
@@ -24,7 +23,6 @@ spec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
     decode:
-      dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
       subComponentType: decode
       replicas: 1
@@ -67,7 +65,6 @@ spec:
             - 0.0.0.0
             - --prefill-round-robin-balance
     prefill:
-      dynamoNamespace: sgl-dsr1-8gpu
       componentType: worker
       subComponentType: prefill
       replicas: 1

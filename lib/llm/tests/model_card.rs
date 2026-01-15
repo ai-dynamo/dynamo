@@ -11,7 +11,7 @@ async fn test_model_info_from_hf_like_local_repo() {
     let mdc = ModelDeploymentCard::load_from_disk(HF_PATH, None).unwrap();
     let info = mdc.model_info.unwrap().get_model_info().unwrap();
     assert_eq!(info.model_type(), "llama");
-    assert_eq!(info.bos_token_id(), 1);
+    assert_eq!(info.bos_token_id(), Some(1));
     assert_eq!(info.eos_token_ids(), vec![2]);
     assert_eq!(info.max_position_embeddings(), Some(2048));
     assert_eq!(info.vocab_size(), Some(32000));

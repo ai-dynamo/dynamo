@@ -20,6 +20,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -307,6 +309,21 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// GetDynamoNamespace returns the Dynamo namespace for this component.
+func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
+	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
+}
+
+// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
+// If globalDynamoNamespace is true, returns "dynamo" (global constant).
+// Otherwise, returns {k8sNamespace}-{dgdName}.
+func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
+	if globalDynamoNamespace {
+		return commonconsts.GlobalDynamoNamespace
+	}
+	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
 }
 
 // ModelReference identifies a model served by this component

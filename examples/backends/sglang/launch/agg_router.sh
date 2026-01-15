@@ -13,16 +13,22 @@ trap cleanup EXIT INT TERM
 
 # Parse command line arguments
 ENABLE_OTEL=false
+APPROX_MODE=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --enable-otel)
             ENABLE_OTEL=true
             shift
             ;;
+        --approx)
+            APPROX_MODE=true
+            shift
+            ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  --approx             Enable approximate KV routing (no KV events)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Note: System metrics are enabled by default on ports 8081 (worker-1), 8082 (worker-2)"
@@ -47,11 +53,23 @@ fi
 
 # run ingress
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+FRONTEND_ARGS=(--router-mode kv)
+if [ "$APPROX_MODE" = true ]; then
+    FRONTEND_ARGS+=(--no-kv-events)
+fi
 OTEL_SERVICE_NAME=dynamo-frontend \
-python3 -m dynamo.frontend --router-mode kv &
+python3 -m dynamo.frontend "${FRONTEND_ARGS[@]}" &
 DYNAMO_PID=$!
 
 # run worker
+# Build KV events args conditionally (only when not in approx mode)
+KV_EVENTS_ARGS_1=()
+KV_EVENTS_ARGS_2=()
+if [ "$APPROX_MODE" = false ]; then
+    KV_EVENTS_ARGS_1=(--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}')
+    KV_EVENTS_ARGS_2=(--kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}')
+fi
+
 OTEL_SERVICE_NAME=dynamo-worker-1 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT_WORKER1:-8081} \
 python3 -m dynamo.sglang \
   --model-path Qwen/Qwen3-0.6B \
@@ -59,7 +77,7 @@ python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5557"}' \
+  "${KV_EVENTS_ARGS_1[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
 WORKER_PID=$!
@@ -71,6 +89,6 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
   --page-size 16 \
   --tp 1 \
   --trust-remote-code \
-  --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:5558"}' \
+  "${KV_EVENTS_ARGS_2[@]}" \
   --enable-metrics \
   "${TRACE_ARGS[@]}"

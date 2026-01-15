@@ -28,7 +28,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: gpt-oss-agg
       extraPodSpec:
         affinity:
           podAntiAffinity:
@@ -50,7 +49,6 @@ spec:
       replicas: 1
     TrtllmWorker:
       componentType: main
-      dynamoNamespace: gpt-oss-agg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache

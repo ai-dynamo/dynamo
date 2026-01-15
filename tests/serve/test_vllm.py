@@ -296,7 +296,9 @@ vllm_configs = {
                     },
                 ],
                 repeat_count=1,
-                expected_response=["purple"],
+                # With proper prompt templating, the model actually only returns "green",
+                # verified behavior with native vLLM.
+                expected_response=["green"],
                 temperature=0.0,
                 max_tokens=100,
             )

@@ -13,7 +13,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: disagg-router-6p-2d
       envs:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
@@ -38,7 +37,6 @@ spec:
       subComponentType: null
     VllmDecodeWorker:
       componentType: worker
-      dynamoNamespace: disagg-router-6p-2d
       envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
@@ -86,7 +84,6 @@ spec:
         useAsCompilationCache: true
     VllmPrefillWorker:
       componentType: worker
-      dynamoNamespace: disagg-router-6p-2d
       envFromSecret: hf-token-secret
       extraPodMetadata:
         annotations:

@@ -65,7 +65,7 @@ jobs:
       - name: Define Image Tag
         id: define_image_tag
         run: |
-          echo "image_tag=dynamo:latest" >> $GITHUB_OUTPUT
+          echo "image_tag=dynamo:latest-dev" >> $GITHUB_OUTPUT
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}

@@ -261,7 +261,6 @@ def generate_dgd_config_with_planner(
     # add the planner service
     planner_config = DgdPlannerServiceConfig()
     frontend_service = config.spec.services["Frontend"]
-    planner_config.dynamoNamespace = getattr(frontend_service, "dynamoNamespace", "dynamo")  # type: ignore[attr-defined]
     frontend_image: Optional[str] = None
     if frontend_service.extraPodSpec and frontend_service.extraPodSpec.mainContainer:
         frontend_image = frontend_service.extraPodSpec.mainContainer.image
@@ -275,8 +274,6 @@ def generate_dgd_config_with_planner(
 
     # Override profiling-specific arguments with results from profiling
     # Remove and re-add to ensure correct values from profiling context
-    # Note: --namespace is NOT added here; planner gets it from DYN_NAMESPACE env var
-    # which is automatically injected by the operator based on dynamoNamespace
     planner_args = [
         arg
         for arg in planner_args
@@ -510,17 +507,6 @@ def _generate_mocker_config_with_planner(
 
     # Add planner service (reuse the same planner config but with mocker backend)
     mocker_planner_dict = copy.deepcopy(planner_dict)
-
-    # Get the mocker's dynamoNamespace from Frontend service
-    mocker_namespace = (
-        mocker_config.get("spec", {})
-        .get("services", {})
-        .get("Frontend", {})
-        .get("dynamoNamespace", "mocker-disagg")
-    )
-
-    # Update planner's dynamoNamespace to match mocker's namespace
-    mocker_planner_dict["dynamoNamespace"] = mocker_namespace
 
     # Planner args use --key=value format, so we need to find and replace
     planner_main_container = mocker_planner_dict.get("extraPodSpec", {}).get(

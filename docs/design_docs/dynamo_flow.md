@@ -17,15 +17,17 @@ limitations under the License.
 
 # Dynamo Architecture Flow
 
-This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/backends/vllm](../../examples/backends/vllm). Color-coded flows indicate different types of operations:
+This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/backends/vllm](../../examples/backends/vllm). Color-coded flows indicate different types of operations.
+
+> **Note**: The "Processor" shown in the diagram represents the request processing logic (tokenization, chat template application, routing) that runs within the Frontend component. It is not a separate deployment—the Frontend handles both HTTP serving and request preprocessing via the `make_engine` function.
 
 ## 🔵 Main Request Flow (Blue)
 The primary user journey through the system:
 
 1. **Discovery (S1)**: Client discovers the service endpoint
 2. **Request (S2)**: HTTP client sends API request to Frontend (OpenAI-compatible server on port 8000)
-3. **Validate (S3)**: Frontend forwards request to Processor for validation and routing
-4. **Route (S3)**: Processor routes the validated request to appropriate Decode Worker
+3. **Validate (S3)**: Frontend preprocesses the request (applies chat template, tokenizes) and validates it
+4. **Route (S3)**: Frontend routes the validated request to appropriate Decode Worker
 
 ## 🟠 Decision and Allocation Flow (Orange)
 The system's intelligent routing and resource allocation:
@@ -48,18 +50,22 @@ The response generation and delivery:
 
 11. **Notify (S11)**: PrefillWorker sends completion notification to Decode Worker
 12. **Decode (S12)**: Decode Worker decodes from its local KV cache containing prefilled data
-13. **Response (S13)**: The system sends the generated response to the Processor for post-processing, then through the Frontend to the Client
+13. **Response (S13)**: The generated response flows back through the Frontend for post-processing (detokenization) and delivery to the Client
 
 ## 🔗 Infrastructure Connections (Dotted lines)
 Coordination and messaging support:
 
-### ETCD Connections (Gray, dotted)
-- **Frontend, Processor, Planner**: Service discovery and registration
-- **Decode Worker, PrefillWorker**: NIXL metadata storage for GPU communication setup
+### Service Discovery
+- **On Kubernetes** (default): Uses native K8s resources (DynamoWorkerMetadata CRD, EndpointSlices). No etcd required.
+- **On bare metal**: Uses etcd for service discovery and endpoint registration.
 
-### NATS Connections (Teal, dotted)
-- **PrefillQueue**: JetStream consumer group for reliable work distribution
-- **Processor**: Load balancing across workers
+### Request Plane
+- **TCP** (default): Direct TCP connections between Frontend and Workers for request/response transport.
+- **HTTP/NATS**: Alternative transports configurable via `DYN_REQUEST_PLANE`.
+
+### NATS Connections (Optional, for KV routing)
+- **PrefillQueue**: JetStream consumer group for reliable work distribution in disaggregated serving
+- **KV Events**: Cache state events for KV-aware routing (can be disabled with `--no-kv-events`)
 
 ### Planning Connections (Gold, dotted)
 - **Frontend → Planner**: Metrics collection for auto-scaling decisions

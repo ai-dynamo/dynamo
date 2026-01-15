@@ -8,6 +8,7 @@ use futures::StreamExt;
 use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 use dynamo_runtime::{
     component::Endpoint,
@@ -265,10 +266,14 @@ impl PrefillRouter {
                 InnerPrefillRouter::KvRouter(r) => r,
                 _ => return None,
             };
-            match kv_router
-                .chooser
-                .find_best_match(None, &req.token_ids, None, false)
-                .await
+            match async {
+                kv_router
+                    .chooser
+                    .find_best_match(None, &req.token_ids, None, false)
+                    .await
+            }
+            .instrument(tracing::info_span!("kv_find_best_match"))
+            .await
             {
                 Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
                 Err(_) => return None,
@@ -405,19 +410,29 @@ impl PrefillRouter {
         phase_permit: OwnedSemaphorePermit,
     ) {
         let router = self.prefill_router.get().cloned();
+        // Capture current span to propagate trace context to the spawned task
+        let span = tracing::Span::current();
 
-        tokio::spawn(async move {
-            match Self::execute_prefill(router, prefill_request, target_worker, Some(phase_permit))
+        tokio::spawn(
+            async move {
+                match Self::execute_prefill(
+                    router,
+                    prefill_request,
+                    target_worker,
+                    Some(phase_permit),
+                )
                 .await
-            {
-                Ok(_) => {
-                    tracing::debug!("Prefill background task completed");
-                }
-                Err(e) => {
-                    tracing::warn!("Prefill background task error: {e:?}");
+                {
+                    Ok(_) => {
+                        tracing::debug!("Prefill background task completed");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Prefill background task error: {e:?}");
+                    }
                 }
             }
-        });
+            .instrument(span),
+        );
     }
 
     /// Call the prefill router and extract structured prefill result and worker ID.
@@ -491,47 +506,51 @@ impl
             .as_ref()
             .and_then(|r| r.prefill_worker_id);
 
-        let prefill_result = if let Some((worker_id, dp_rank, bootstrap_info)) = self
-            .build_bootstrap_info(&prefill_req, preselected_worker)
-            .await
-        {
-            // Bootstrap optimization path: spawn prefill in background
-            // We successfully used the peeked worker, so we must now advance the router state
-            // to ensure the next request gets a different worker.
-            if !self.router_mode.is_kv_routing()
-                && let Some(router) = self.prefill_router.get()
-            {
-                router.select_next_worker();
-            }
-
-            let routing = prefill_req.routing_mut();
-            routing.prefill_worker_id = Some(worker_id);
-            routing.dp_rank = Some(dp_rank);
-            prefill_req.bootstrap_info = Some(bootstrap_info.clone());
-
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
-
-            // Pass phase permit to spawned task - it drops after first output (record_worker complete)
-            // This allows set_phase(Decode) below to proceed only after prefill routing is done
-            self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
-
-            Ok((None, Some(worker_id), Some(bootstrap_info)))
-        } else {
-            // Original prefill path: wait for prefill to complete
-            tracing::debug!("Using original prefill path");
-
-            // Drop the phase permit before calling call_prefill - we wait for completion
-            // so there's no race with set_phase(Decode) below
-            drop(prefill_phase_permit);
-
-            let prefill_context = Context::with_id(prefill_req, request_id.clone());
-            engine_ctx.link_child(prefill_context.context());
-
-            self.call_prefill(prefill_context)
+        let prefill_result = async {
+            if let Some((worker_id, dp_rank, bootstrap_info)) = self
+                .build_bootstrap_info(&prefill_req, preselected_worker)
                 .await
-                .map(|(result, worker_id)| (Some(result), worker_id, None))
-        };
+            {
+                // Bootstrap optimization path: spawn prefill in background
+                // We successfully used the peeked worker, so we must now advance the router state
+                // to ensure the next request gets a different worker.
+                if !self.router_mode.is_kv_routing()
+                    && let Some(router) = self.prefill_router.get()
+                {
+                    router.select_next_worker();
+                }
+
+                let routing = prefill_req.routing_mut();
+                routing.prefill_worker_id = Some(worker_id);
+                routing.dp_rank = Some(dp_rank);
+                prefill_req.bootstrap_info = Some(bootstrap_info.clone());
+
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
+
+                // Pass phase permit to spawned task - it drops after first output (record_worker complete)
+                // This allows set_phase(Decode) below to proceed only after prefill routing is done
+                self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
+
+                Ok((None, Some(worker_id), Some(bootstrap_info)))
+            } else {
+                // Original prefill path: wait for prefill to complete
+                tracing::debug!("Using original prefill path");
+
+                // Drop the phase permit before calling call_prefill - we wait for completion
+                // so there's no race with set_phase(Decode) below
+                drop(prefill_phase_permit);
+
+                let prefill_context = Context::with_id(prefill_req, request_id.clone());
+                engine_ctx.link_child(prefill_context.context());
+
+                self.call_prefill(prefill_context)
+                    .await
+                    .map(|(result, worker_id)| (Some(result), worker_id, None))
+            }
+        }
+        .instrument(tracing::info_span!("prefill_routing"))
+        .await;
 
         // Abort if cancelled during prefill
         if engine_ctx.is_stopped() || engine_ctx.is_killed() {

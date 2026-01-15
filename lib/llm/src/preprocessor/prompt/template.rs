@@ -42,8 +42,12 @@ impl PromptFormatter {
                         mdc.display_name
                     );
                 };
-                let contents = std::fs::read_to_string(file)
-                    .with_context(|| format!("fs:read_to_string '{}'", file.display()))?;
+                let contents = std::fs::read_to_string(file).with_context(|| {
+                    format!(
+                        "PromptFormatter.from_mdc fs:read_to_string '{}'",
+                        file.display()
+                    )
+                })?;
                 let mut config: ChatTemplate =
                     serde_json::from_str(&contents).inspect_err(|err| {
                         crate::log_json_err(&file.display().to_string(), &contents, err)
@@ -53,8 +57,9 @@ impl PromptFormatter {
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                if let Some(PromptFormatterArtifact::HfChatTemplate(checked_file)) =
-                    mdc.chat_template_file.as_ref()
+                if let Some(PromptFormatterArtifact::HfChatTemplate {
+                    file: checked_file, ..
+                }) = mdc.chat_template_file.as_ref()
                 {
                     let Some(chat_template_file) = checked_file.path() else {
                         anyhow::bail!(
@@ -77,7 +82,7 @@ impl PromptFormatter {
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
                 )
             }
-            PromptFormatterArtifact::HfChatTemplate(_) => Err(anyhow::anyhow!(
+            PromptFormatterArtifact::HfChatTemplate { .. } => Err(anyhow::anyhow!(
                 "prompt_formatter should not have type HfChatTemplate"
             )),
         }

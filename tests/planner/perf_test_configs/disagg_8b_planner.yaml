@@ -11,7 +11,6 @@ spec:
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:8000"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-planner
       componentType: main
       replicas: 1
       livenessProbe:
@@ -49,7 +48,6 @@ spec:
           args:
             - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128 --router-mode kv --kv-overlap-score-weight 0.0 --router-temperature 0.0 --no-kv-events"
     Planner:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
@@ -94,7 +92,6 @@ spec:
               --prometheus-port=9085
               --no-correction
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -149,7 +146,6 @@ spec:
             - --block-size
             - "128"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

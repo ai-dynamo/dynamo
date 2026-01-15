@@ -12,7 +12,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-router-kv-approx
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -31,7 +30,6 @@ spec:
           value: kv
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-router-kv-approx
       componentType: worker
       replicas: 2
       resources:

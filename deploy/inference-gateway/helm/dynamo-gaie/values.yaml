@@ -73,6 +73,9 @@ epp:
   configFile: "/etc/epp/epp-config-dynamo.yaml"
   dynamo:
     kvBlockSize: "16"
+    # Use ETCD for discovery instead of Kubernetes (default: false)
+    # Set to true via --set epp.dynamo.useEtcd=true to enable ETCD discovery
+    useEtcd: false
 
 # Platform configuration (for Dynamo mode)
 platformReleaseName: dynamo-platform

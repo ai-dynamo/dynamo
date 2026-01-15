@@ -41,7 +41,7 @@ diff --git a/Makefile b/Makefile
 index dee7e99..d3f9ec7 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -170,6 +170,48 @@ verify-all:
+@@ -170,6 +170,49 @@ verify-all:
  
  ##@ Build
  
@@ -67,6 +67,7 @@ index dee7e99..d3f9ec7 100644
 +dynamo-image-build: ## Build the Dynamo EPP image using Docker Buildx with CGO support.
 +	$(IMAGE_BUILD_CMD) -f Dockerfile.dynamo -t $(IMAGE_TAG) \
 +		--platform=$(PLATFORMS) \
++		--build-arg DOCKER_PROXY=$(DOCKER_PROXY) \
 +		--build-arg BASE_IMAGE=ubuntu:24.04 \
 +		--build-arg BUILDER_IMAGE=$(BUILDER_IMAGE) \
 +		--build-arg COMMIT_SHA=${GIT_COMMIT_SHA} \

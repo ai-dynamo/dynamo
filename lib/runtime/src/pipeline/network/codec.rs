@@ -15,8 +15,10 @@ use tokio_util::{
 };
 
 mod two_part;
+pub mod zero_copy_decoder;
 
 pub use two_part::{TwoPartCodec, TwoPartMessage, TwoPartMessageType};
+pub use zero_copy_decoder::{TcpRequestMessageZeroCopy, ZeroCopyTcpDecoder};
 
 /// TCP request plane protocol message with endpoint routing and trace headers
 ///

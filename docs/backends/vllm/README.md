@@ -56,13 +56,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Pull or build container
 

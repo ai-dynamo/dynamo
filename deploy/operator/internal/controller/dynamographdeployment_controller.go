@@ -154,6 +154,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Reconciliation done")
 	}()
 
+	// Handle finalizer
+	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+	if err != nil {
+		logger.Error(err, "failed to handle the finalizer")
+		reason = "failed_to_handle_the_finalizer"
+		return ctrl.Result{}, err
+	}
+	if deleted {
+		return ctrl.Result{}, nil
+	}
+
 	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
@@ -176,15 +187,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
-	if err != nil {
-		logger.Error(err, "failed to handle the finalizer")
-		reason = "failed_to_handle_the_finalizer"
-		return ctrl.Result{}, err
-	}
-	if deleted {
-		return ctrl.Result{}, nil
-	}
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
 
 	state = reconcileResult.State

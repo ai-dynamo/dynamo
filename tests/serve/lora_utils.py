@@ -16,12 +16,15 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import boto3
 import requests
 from botocore.client import Config
 from botocore.exceptions import ClientError
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3.client import S3Client
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +82,7 @@ class MinioService:
         self.config = config
         self._logger = logging.getLogger(self.__class__.__name__)
         self._temp_download_dir: Optional[str] = None
-        self._s3_client = None
+        self._s3_client: Optional["S3Client"] = None
         self._owns_container: bool = False
 
     def _get_s3_client(self):
@@ -265,15 +268,15 @@ class MinioService:
         )
 
         s3_client = self._get_s3_client()
-        local_path = Path(local_path)
+        local_path_obj = Path(local_path)
 
-        for file_path in local_path.rglob("*"):
+        for file_path in local_path_obj.rglob("*"):
             if not file_path.is_file():
                 continue
             if ".git" in file_path.parts:
                 continue
 
-            relative_path = file_path.relative_to(local_path).as_posix()
+            relative_path = file_path.relative_to(local_path_obj).as_posix()
             s3_key = f"{self.config.lora_name}/{relative_path}"
 
             try:

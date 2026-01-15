@@ -84,6 +84,7 @@ def create_profiler_parser() -> argparse.Namespace:
             serviceName: String (service name, default: "")
             model: String (served model name)
             dgdImage: String (container image to use for DGD components (frontend, planner, workers), overrides images in config file)
+            deploymentTimeout: Int (maximum time to wait for deployment to become ready in seconds, default: 1800)
             modelCache:
                 pvcName: String (name of the PVC to mount the model cache,
                     if not provided, model must be HF name and will download from HF, default: "")
@@ -174,6 +175,12 @@ def create_profiler_parser() -> argparse.Namespace:
         type=str,
         default=_get(deployment_cfg, "dgdImage", "dgd_image", ""),
         help="Container image to use for DGD components (frontend, planner, workers). Overrides images in config file.",
+    )
+    parser.add_argument(
+        "--deployment-timeout",
+        type=int,
+        default=_get(deployment_cfg, "deploymentTimeout", "deployment_timeout", 1800),
+        help="Maximum time to wait for deployment to become ready in seconds (default: 1800)",
     )
 
     parser.add_argument(
