@@ -295,6 +295,46 @@ impl ActiveSequences {
         self.active_blocks()
     }
 
+    /// Add an output block with a random hash and optional fractional decay weight.
+    ///
+    /// This is used during generation to track output blocks as they are created.
+    /// The decay_fraction (if provided) represents how "temporary" the block is:
+    /// - 1.0 means fully counted (early in generation)
+    /// - 0.0 means not counted (near end of expected output)
+    /// - Computed as: 1 - (current_osl / expected_output_tokens)
+    ///
+    /// Returns true if the block was added, false if the request was not found.
+    pub fn add_output_block(
+        &mut self,
+        request_id: &RequestId,
+        decay_fraction: Option<f64>,
+    ) -> bool {
+        // Check if request exists first (immutable borrow)
+        if !self.active_seqs.contains_key(request_id) {
+            tracing::warn!("Request {request_id} not found for add_output_block");
+            return false;
+        }
+
+        // Generate a random block hash using UUID
+        let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
+
+        // Touch the block (adds to unique_blocks)
+        let rc = self.touch_block(&random_hash);
+
+        // Now we can safely get_mut and push
+        self.active_seqs
+            .get_mut(request_id)
+            .unwrap()
+            .push((random_hash, rc));
+
+        // Apply fractional decay if provided
+        if let Some(frac) = decay_fraction {
+            self.fractional_blocks.insert(random_hash, frac);
+        }
+
+        true
+    }
+
     /// Force expiry of stale requests if the timer has elapsed
     /// Returns the set of expired request IDs that were removed
     pub fn force_expiry(&mut self) -> HashSet<RequestId> {
@@ -333,6 +373,11 @@ enum UpdateSequences {
     },
     MarkPrefillCompleted {
         request_id: RequestId,
+    },
+    AddOutputBlock {
+        request_id: RequestId,
+        decay_fraction: Option<f64>,
+        resp_tx: tokio::sync::oneshot::Sender<bool>,
     },
     NewBlocks {
         token_sequence: Arc<Vec<SequenceHash>>,
@@ -486,6 +531,14 @@ impl ActiveSequencesMultiWorker {
                                 }
                                 UpdateSequences::MarkPrefillCompleted { request_id } => {
                                     active_sequences.mark_prefill_completed(&request_id);
+                                }
+                                UpdateSequences::AddOutputBlock {
+                                    request_id,
+                                    decay_fraction,
+                                    resp_tx,
+                                } => {
+                                    let success = active_sequences.add_output_block(&request_id, decay_fraction);
+                                    let _ = resp_tx.send(success);
                                 }
                                 UpdateSequences::NewBlocks {
                                     token_sequence,
@@ -850,6 +903,59 @@ impl ActiveSequencesMultiWorker {
                 request_id: request_id.clone(),
             })
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        // Publish ActiveLoad metrics for this worker
+        self.publish_active_load_for_worker(worker).await;
+
+        Ok(())
+    }
+
+    /// Add an output block with optional fractional decay weight
+    ///
+    /// This is used during generation to track output blocks as they are created.
+    /// The decay_fraction represents how "temporary" the block is based on generation progress.
+    pub async fn add_output_block(
+        &self,
+        request_id: &RequestId,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        // Verify worker still exists
+        if !self.senders.contains_key(&worker) {
+            return Err(SequenceError::WorkerNotFound { worker });
+        }
+
+        // Create response channel
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+
+        // Send command to worker
+        self.senders
+            .get(&worker)
+            .unwrap()
+            .send(UpdateSequences::AddOutputBlock {
+                request_id: request_id.clone(),
+                decay_fraction,
+                resp_tx,
+            })
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        // Wait for response
+        let success = resp_rx
+            .await
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        if !success {
+            return Err(SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            });
+        }
 
         // Publish ActiveLoad metrics for this worker
         self.publish_active_load_for_worker(worker).await;
