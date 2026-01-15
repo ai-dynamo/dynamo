@@ -41,20 +41,55 @@ class DynamoFrontendProcess(BaseDynamoFrontendProcess):
         )
 
 
-def start_request(frontend_port: int, use_long_prompt: bool = False) -> tuple:
+def _parse_completion_sse_content(line: str) -> str | Exception | None:
     """
-    Start a long-running chat completion request in a separate thread.
+    Parse an SSE line from the completions API and extract the text content.
 
-    Logs each streamed chunk as (response_string | None | Exception, timestamp) tuple to
-    response_list. First entry is (None, start_time) to mark when request was sent.
+    Args:
+        line: Raw SSE line string
+
+    Returns:
+        str: The text content if found
+        Exception: If error event or parse error
+        None: If no content (e.g., [DONE] or empty)
+    """
+    if line.startswith("event: error"):
+        return Exception(f"SSE error event received: {line}")
+
+    if not line.startswith("data: "):
+        return None  # Skip non-data lines
+
+    data_str = line[6:]  # Remove "data: " prefix
+    if data_str == "[DONE]":
+        return None
+
+    try:
+        chunk = json.loads(data_str)
+        text = chunk["choices"][0].get("text")
+        return text  # May be None if no text content
+    except Exception as e:
+        return Exception(f"Error parsing response chunk: {e}")
+
+
+def start_completion_request(
+    frontend_port: int, stream: bool, use_long_prompt: bool = False
+) -> tuple:
+    """
+    Start a long-running completion request in a separate thread.
+
+    Responses are processed internally to extract content. First entry is (None, start_time)
+    to mark when request was sent. Subsequent entries contain extracted content or exceptions.
 
     Args:
         frontend_port: Port where the frontend is running
+        stream: Whether to use streaming responses
         use_long_prompt: Whether to use a long prompt (~8000 tokens)
 
     Returns:
         tuple: (request_thread, response_list) where response_list contains
-               (str | None | Exception, float) tuples
+               (str | None | Exception, float) tuples.
+               - For streaming: each entry is (content_word, timestamp)
+               - For non-streaming: single entry is (full_content, timestamp)
     """
     response_list: list[tuple[str | None | Exception, float]] = []
 
@@ -62,35 +97,32 @@ def start_request(frontend_port: int, use_long_prompt: bool = False) -> tuple:
         prompt = "Tell me a long long long story about yourself?"
         if use_long_prompt:
             prompt += " Make sure it is" + " long" * 8000 + "!"
-        max_tokens = 8000
         timeout = 240  # Extended timeout for long request
 
         payload = {
             "model": FAULT_TOLERANCE_MODEL_NAME,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "stream": True,
+            "prompt": prompt,
+            "stream": stream,
         }
         headers = {"Content-Type": "application/json"}
 
         logger.info(
-            f"Sending chat completion request with prompt: '{prompt[:50]}...' and max_tokens: {max_tokens}"
+            f"Sending completion request (stream={stream}) with prompt: '{prompt[:50]}...'"
         )
 
         response_list.append((None, time.time()))  # start timestamp
 
         try:
             with requests.post(
-                f"http://localhost:{frontend_port}/v1/chat/completions",
+                f"http://localhost:{frontend_port}/v1/completions",
                 headers=headers,
                 json=payload,
                 timeout=timeout,
-                stream=True,
+                stream=stream,
             ) as response:
                 logger.info(
-                    f"Received response stream with status code: {response.status_code}"
+                    f"Received response with status code: {response.status_code}"
                 )
-
                 if response.status_code != 200:
                     response_list.append(
                         (
@@ -102,9 +134,142 @@ def start_request(frontend_port: int, use_long_prompt: bool = False) -> tuple:
                     )
                     return
 
-                for line in response.iter_lines():
-                    if line:
-                        response_list.append((line.decode("utf-8"), time.time()))
+                if stream:
+                    for line in response.iter_lines():
+                        if line:
+                            content = _parse_completion_sse_content(
+                                line.decode("utf-8")
+                            )
+                            if content is not None:
+                                response_list.append((content, time.time()))
+                else:
+                    try:
+                        content = response.json()["choices"][0]["text"]
+                        response_list.append((content, time.time()))
+                    except Exception as e:
+                        response_list.append(
+                            (Exception(f"Error parsing response: {e}"), time.time())
+                        )
+
+        except Exception as e:
+            logger.error(f"Request failed with error: {e}")
+            response_list.append((e, time.time()))
+
+    request_thread = threading.Thread(target=send_request, daemon=True)
+    request_thread.start()
+
+    return request_thread, response_list
+
+
+def _parse_chat_completion_sse_content(line: str) -> str | Exception | None:
+    """
+    Parse an SSE line and extract the content.
+
+    Args:
+        line: Raw SSE line string
+
+    Returns:
+        str: The content delta if found
+        Exception: If error event or parse error
+        None: If no content (e.g., [DONE] or empty delta)
+    """
+    if line.startswith("event: error"):
+        return Exception(f"SSE error event received: {line}")
+
+    if not line.startswith("data: "):
+        return None  # Skip non-data lines
+
+    data_str = line[6:]  # Remove "data: " prefix
+    if data_str == "[DONE]":
+        return None
+
+    try:
+        chunk = json.loads(data_str)
+        content = chunk["choices"][0]["delta"].get("content")
+        return content  # May be None if delta has no content
+    except Exception as e:
+        return Exception(f"Error parsing response chunk: {e}")
+
+
+def start_chat_completion_request(
+    frontend_port: int, stream: bool, use_long_prompt: bool = False
+) -> tuple:
+    """
+    Start a long-running chat completion request in a separate thread.
+
+    Responses are processed internally to extract content. First entry is (None, start_time)
+    to mark when request was sent. Subsequent entries contain extracted content or exceptions.
+
+    Args:
+        frontend_port: Port where the frontend is running
+        stream: Whether to use streaming responses
+        use_long_prompt: Whether to use a long prompt (~8000 tokens)
+
+    Returns:
+        tuple: (request_thread, response_list) where response_list contains
+               (str | None | Exception, float) tuples.
+               - For streaming: each entry is (content_word, timestamp)
+               - For non-streaming: single entry is (full_content, timestamp)
+    """
+    response_list: list[tuple[str | None | Exception, float]] = []
+
+    def send_request():
+        prompt = "Tell me a long long long story about yourself?"
+        if use_long_prompt:
+            prompt += " Make sure it is" + " long" * 8000 + "!"
+        timeout = 240  # Extended timeout for long request
+
+        payload = {
+            "model": FAULT_TOLERANCE_MODEL_NAME,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": stream,
+        }
+        headers = {"Content-Type": "application/json"}
+
+        logger.info(
+            f"Sending chat completion request (stream={stream}) with prompt: '{prompt[:50]}...'"
+        )
+
+        response_list.append((None, time.time()))  # start timestamp
+
+        try:
+            with requests.post(
+                f"http://localhost:{frontend_port}/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                stream=stream,
+            ) as response:
+                logger.info(
+                    f"Received response with status code: {response.status_code}"
+                )
+                if response.status_code != 200:
+                    response_list.append(
+                        (
+                            Exception(
+                                f"Request failed with status {response.status_code}: {response.text}"
+                            ),
+                            time.time(),
+                        )
+                    )
+                    return
+
+                if stream:
+                    for line in response.iter_lines():
+                        if line:
+                            content = _parse_chat_completion_sse_content(
+                                line.decode("utf-8")
+                            )
+                            if content is not None:
+                                response_list.append((content, time.time()))
+                else:
+                    try:
+                        content = response.json()["choices"][0]["message"]["content"]
+                        response_list.append((content, time.time()))
+                    except Exception as e:
+                        response_list.append(
+                            (Exception(f"Error parsing response: {e}"), time.time())
+                        )
 
         except Exception as e:
             logger.error(f"Request failed with error: {e}")
@@ -218,14 +383,17 @@ def wait_for_response(
 def validate_response(
     request_thread: threading.Thread,
     response_list: list[tuple[str | None | Exception, float]],
+    validate_delay: bool = True,
 ) -> None:
     """
-    Wait for and validate the streaming response after migration.
+    Wait for and validate the response after migration.
     Checks that delay before each response is reasonable (covers both TTFT and TPOT).
 
     Args:
         request_thread: The thread running the request
-        response_list: List of (response_string | None | Exception, timestamp) tuples
+        response_list: List of (content_string | None | Exception, timestamp) tuples.
+                       Content is already parsed - no SSE format parsing needed.
+        validate_delay: Whether to validate delay before each response.
     """
     request_thread.join(timeout=240)
     assert not request_thread.is_alive(), "Request did not complete within 240 seconds"
@@ -237,8 +405,8 @@ def validate_response(
     response_words: list[str] = []
     for res, timestamp in response_list[1:]:
         delay = timestamp - prev_timestamp
-        # Cold workers can take longer on first token - only warn but don't fail
-        if delay > 2.0:
+        if delay > 2.0 and validate_delay:
+            # Cold workers can take longer on first token - only warn but don't fail
             logger.warning(f"Delay before response: {delay:.3f} secs")
             # Capture cases like migration is blocked by engine graceful shutdown
             assert delay <= 6.0, f"Delay before response > 6 secs, got {delay:.3f} secs"
@@ -247,23 +415,12 @@ def validate_response(
         assert res is not None, "Response entry should not be None"
         if isinstance(res, Exception):
             raise res
-        if res.startswith("event: error"):
-            raise AssertionError(f"SSE error event received: {res}")
 
-        assert res.startswith("data: "), f"Unexpected SSE line: {res}"
-        data_str = res[6:]  # Remove "data: " prefix
-        if data_str == "[DONE]":
-            continue
-        try:
-            chunk = json.loads(data_str)
-            content = chunk["choices"][0]["delta"].get("content")
-            if content:
-                response_words.append(content)
-        except Exception as e:
-            raise AssertionError(f"Error parsing response chunk: {e}") from e
+        # Content is already parsed - just collect it
+        response_words.append(res)
 
     logger.info(
-        f"Received {len(response_words)} responses: {''.join(response_words)[:100]}..."
+        f"Received {len(response_words)} response(s): {''.join(response_words)[:100]}..."
     )
 
 
@@ -386,6 +543,8 @@ def run_migration_test(
     receiving_pattern: str,
     migration_limit: int,
     immediate_kill: bool,
+    use_chat_completion: bool,
+    stream: bool,
     use_long_prompt: bool = False,
     wait_for_new_response_before_stop: bool = False,
 ) -> None:
@@ -399,13 +558,20 @@ def run_migration_test(
         receiving_pattern: Log pattern to identify which worker received the request
         migration_limit: Migration limit setting (0 = disabled)
         immediate_kill: True for immediate kill, False for graceful shutdown
+        use_chat_completion: Whether to use chat completion API (True) or completion API (False)
+        stream: Whether to use streaming responses
         use_long_prompt: Whether to use long prompt (for prefill tests)
         wait_for_new_response_before_stop: Whether to wait for response before stopping (for decode tests)
     """
     # Step 1: Send the request
-    request_thread, response_list = start_request(
-        frontend.frontend_port, use_long_prompt=use_long_prompt
-    )
+    if use_chat_completion:
+        request_thread, response_list = start_chat_completion_request(
+            frontend.frontend_port, stream=stream, use_long_prompt=use_long_prompt
+        )
+    else:
+        request_thread, response_list = start_completion_request(
+            frontend.frontend_port, stream=stream, use_long_prompt=use_long_prompt
+        )
 
     # Step 2: Determine which worker received the request
     worker, worker_name = determine_request_receiving_worker(
@@ -428,17 +594,22 @@ def run_migration_test(
 
     # Step 5: Validate response based on migration setting
     if migration_limit > 0:
-        validate_response(request_thread, response_list)
+        validate_response(request_thread, response_list, validate_delay=stream)
         verify_migration_occurred(frontend)
         verify_migration_metrics(
             frontend.frontend_port, expected_ongoing_request_count=1
         )
     else:
         try:
-            validate_response(request_thread, response_list)
+            validate_response(request_thread, response_list, validate_delay=stream)
             pytest.fail("Request succeeded unexpectedly when migration was disabled")
-        except AssertionError as e:
-            assert "SSE error event received: " in str(e), f"Unexpected error: {e}"
+        except Exception as e:
+            # Request failed as expected - verify it's a known error type
+            error_str = str(e)
+            assert (
+                "SSE error event received:" in error_str
+                or "Request failed with status" in error_str
+            ), f"Unexpected error: {e}"
 
         try:
             verify_migration_occurred(frontend)

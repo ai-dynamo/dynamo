@@ -46,6 +46,27 @@ pytestmark = [
             ),
         ],
     ),
+    pytest.mark.parametrize(
+        "request_api",
+        [
+            pytest.param("chat"),
+            pytest.param(
+                "completion",
+                marks=pytest.mark.skip(reason="Behavior unverified yet"),
+            ),
+        ],
+    ),
+    pytest.mark.parametrize(
+        "stream",
+        [
+            pytest.param(True, id="stream"),
+            pytest.param(
+                False,
+                id="unary",
+                marks=pytest.mark.skip(reason="Behavior unverified yet"),
+            ),
+        ],
+    ),
     pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
@@ -188,6 +209,8 @@ def test_request_migration_trtllm_aggregated(
     predownload_models,
     migration_limit,
     immediate_kill,
+    request_api,
+    stream,
 ):
     """
     End-to-end test for aggregated worker request migration.
@@ -195,6 +218,8 @@ def test_request_migration_trtllm_aggregated(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+        request_api: "chat" for chat completion API, "completion" for completion API
+        stream: True for streaming, False for non-streaming
     """
 
     # Step 1: Start the frontend
@@ -223,6 +248,8 @@ def test_request_migration_trtllm_aggregated(
                     receiving_pattern="New Request ID: ",
                     migration_limit=migration_limit,
                     immediate_kill=immediate_kill,
+                    use_chat_completion=(request_api == "chat"),
+                    stream=stream,
                 )
 
 
@@ -235,6 +262,8 @@ def test_request_migration_trtllm_prefill(
     predownload_models,
     migration_limit,
     immediate_kill,
+    request_api,
+    stream,
 ):
     """
     End-to-end test for prefill worker request migration in disaggregated mode.
@@ -244,6 +273,8 @@ def test_request_migration_trtllm_prefill(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+        request_api: "chat" for chat completion API, "completion" for completion API
+        stream: True for streaming, False for non-streaming
     """
 
     # Step 1: Start the frontend
@@ -287,6 +318,8 @@ def test_request_migration_trtllm_prefill(
                         receiving_pattern="Prefill Request ID: ",
                         migration_limit=migration_limit,
                         immediate_kill=immediate_kill,
+                        use_chat_completion=(request_api == "chat"),
+                        stream=stream,
                         use_long_prompt=True,
                     )
 
@@ -300,6 +333,8 @@ def test_request_migration_trtllm_kv_transfer(
     predownload_models,
     migration_limit,
     immediate_kill,
+    request_api,
+    stream,
 ):
     """
     End-to-end test for request migration during KV transfer in disaggregated mode.
@@ -309,6 +344,8 @@ def test_request_migration_trtllm_kv_transfer(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+        request_api: "chat" for chat completion API, "completion" for completion API
+        stream: True for streaming, False for non-streaming
     """
 
     # Step 1: Start the frontend
@@ -352,6 +389,8 @@ def test_request_migration_trtllm_kv_transfer(
                         receiving_pattern="Decode Request ID: ",
                         migration_limit=migration_limit,
                         immediate_kill=immediate_kill,
+                        use_chat_completion=(request_api == "chat"),
+                        stream=stream,
                         use_long_prompt=True,
                     )
 
@@ -364,6 +403,8 @@ def test_request_migration_trtllm_decode(
     predownload_models,
     migration_limit,
     immediate_kill,
+    request_api,
+    stream,
 ):
     """
     End-to-end test for decode worker request migration in disaggregated mode.
@@ -373,7 +414,13 @@ def test_request_migration_trtllm_decode(
     Parameters:
         immediate_kill: True for abrupt kill (SIGKILL), False for graceful shutdown (SIGTERM)
         migration_limit: > 0 to verify migration succeeds, 0 to verify request fails
+        request_api: "chat" for chat completion API, "completion" for completion API
+        stream: True for streaming, False for non-streaming
     """
+    if not stream:
+        pytest.skip(
+            "Decode test requires streaming to wait for response before stopping worker"
+        )
 
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request, enforce_disagg=True) as frontend:
@@ -416,5 +463,7 @@ def test_request_migration_trtllm_decode(
                         receiving_pattern="Decode Request ID: ",
                         migration_limit=migration_limit,
                         immediate_kill=immediate_kill,
+                        use_chat_completion=(request_api == "chat"),
+                        stream=stream,
                         wait_for_new_response_before_stop=True,
                     )
