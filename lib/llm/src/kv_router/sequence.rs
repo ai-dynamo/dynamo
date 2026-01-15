@@ -327,9 +327,9 @@ impl ActiveSequences {
             .unwrap()
             .push((random_hash, rc));
 
-        // Apply fractional decay if provided
+        // Apply fractional decay to all single-ref blocks in this request if provided
         if let Some(frac) = decay_fraction {
-            self.fractional_blocks.insert(random_hash, frac);
+            self.set_single_ref_blocks_as_fractional(request_id, frac);
         }
 
         true
