@@ -263,13 +263,31 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 		},
 	})
 
+	// Compute the signal file path - unique per checkpoint hash
+	signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash + ".done"
+
+	// Add initContainer to clean up any leftover signal file from previous runs
+	// This ensures a fresh start for each checkpoint job without affecting the checkpoint itself
+	// InitContainers complete before the main container starts, so they don't appear in the checkpoint
+	podTemplate.Spec.InitContainers = append(podTemplate.Spec.InitContainers, corev1.Container{
+		Name:  "cleanup-signal-file",
+		Image: "busybox:latest",
+		Command: []string{
+			"sh",
+			"-c",
+			fmt.Sprintf("rm -f %s || true; echo 'Signal file cleanup complete'", signalFilePath),
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      consts.CheckpointSignalVolumeName,
+				MountPath: consts.CheckpointSignalMountPath,
+			},
+		},
+	})
+
 	// Add checkpoint env vars and volume mounts to main container
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
-
-		// Compute the signal file path - unique per checkpoint hash
-		// The pod waits for this file (written by DaemonSet), then exits successfully
-		signalFilePath := consts.CheckpointSignalMountPath + "/" + ckpt.Status.IdentityHash + ".done"
 
 		// Add checkpoint-related env vars
 		mainContainer.Env = append(mainContainer.Env,
