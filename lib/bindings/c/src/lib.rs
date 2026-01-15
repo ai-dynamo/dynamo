@@ -931,7 +931,13 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         };
 
         kv_router
-            .add_request(request_id_clone.clone(), &tokens, overlap_blocks, None, worker)
+            .add_request(
+                request_id_clone.clone(),
+                &tokens,
+                overlap_blocks,
+                None,
+                worker,
+            )
             .await;
 
         tracing::debug!(
