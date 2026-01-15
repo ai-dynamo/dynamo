@@ -13,6 +13,23 @@ spec:
       labels:
         app: model-download
     spec:
+      tolerations:
+        - key: "dedicated"
+          operator: "Equal"
+          value: "user-workload"
+          effect: "NoSchedule"
+        - key: "dedicated"
+          operator: "Equal"
+          value: "user-workload"
+          effect: "NoExecute"
+        - key: "dedicated"
+          operator: "Equal"
+          value: "system-workload"
+          effect: "NoSchedule"
+        - key: "dedicated"
+          operator: "Equal"
+          value: "system-workload"
+          effect: "NoExecute"
       restartPolicy: Never
       containers:
         - name: model-download

@@ -1,0 +1,34 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: model-cache-debug
+spec:
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "user-workload"
+      effect: "NoSchedule"
+    - key: "dedicated"
+      operator: "Equal"
+      value: "user-workload"
+      effect: "NoExecute"
+    - key: "dedicated"
+      operator: "Equal"
+      value: "system-workload"
+      effect: "NoSchedule"
+    - key: "dedicated"
+      operator: "Equal"
+      value: "system-workload"
+      effect: "NoExecute"
+  containers:
+    - name: debug
+      image: alpine:3.19
+      command: ["sleep", "3600"]
+      volumeMounts:
+        - name: model-cache
+          mountPath: /model
+  volumes:
+    - name: model-cache
+      persistentVolumeClaim:
+        claimName: model-cache
+  restartPolicy: Never

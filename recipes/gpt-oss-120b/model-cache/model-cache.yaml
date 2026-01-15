@@ -10,4 +10,4 @@ spec:
   resources:
     requests:
       storage: 100Gi
-  storageClassName: "your-storage-class-name"
+  storageClassName: "dgxc-enterprise-file"

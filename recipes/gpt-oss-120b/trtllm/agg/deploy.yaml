@@ -42,6 +42,25 @@ spec:
     Frontend:
       componentType: frontend
       extraPodSpec:
+        imagePullSecrets:
+          - name: ngc-staging
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoSchedule"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoExecute"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "system-workload"
+            effect: "NoSchedule"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "system-workload"
+            effect: "NoExecute"
         affinity:
           podAntiAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -58,7 +77,10 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:0.8.0rc5-arm64
+          securityContext:
+            privileged: true
+            runAsUser: 0
       replicas: 1
     TrtllmWorker:
       componentType: main
@@ -69,6 +91,25 @@ spec:
       sharedMemory:
         size: 80Gi
       extraPodSpec:
+        imagePullSecrets:
+          - name: ngc-staging
+        tolerations:
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoSchedule"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "user-workload"
+            effect: "NoExecute"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "system-workload"
+            effect: "NoSchedule"
+          - key: "dedicated"
+            operator: "Equal"
+            value: "system-workload"
+            effect: "NoExecute"
         affinity:
           nodeAffinity:
             requiredDuringSchedulingIgnoredDuringExecution:
@@ -78,6 +119,9 @@ spec:
                   operator: In
                   values:
                   - "true"
+        resourceClaims:
+          - name: compute-domain-channel
+            resourceClaimTemplateName: gpt-oss-agg-compute-domain-channel
         mainContainer:
           args:
           - |
@@ -88,14 +132,15 @@ spec:
               --tensor-parallel-size 4 \
               --expert-parallel-size 4 \
               --max-batch-size 800 \
-              --free-gpu-memory-fraction 0.9
-          resourceClaims:
-          - name: compute-domain-channel
-            resourceClaimTemplateName: gpt-oss-agg-compute-domain-channel
+              --free-gpu-memory-fraction 0.9 || \
+              (dmesg | grep -i nvidia; while true; do sleep 1000; done)
           command:
           - /bin/sh
           - -c
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvstaging/ai-dynamo/tensorrtllm-runtime:0.8.0rc5-arm64
+          securityContext:
+            privileged: true
+            runAsUser: 0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
