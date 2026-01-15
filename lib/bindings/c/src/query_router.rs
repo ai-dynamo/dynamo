@@ -5,17 +5,22 @@
 //!
 //! This module provides C FFI bindings for query-only routing operations.
 //! It directly manages PrefillRouter and KvRouter handles, delegating routing
-//! logic to `PrefillRouter.query_route()`.
+//! logic to `PrefillRouter.query_worker_ids()`.
 
 use std::ffi::CStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use libc::c_char;
 
 use dynamo_llm::discovery::ModelManager;
+use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
 use dynamo_llm::kv_router::{KvRouter, KvRouterConfig, PrefillRouter, RouteQueryResult};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
+
+/// Default timeout for bookkeeping operations (30 seconds)
+const BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
 
 /// C-compatible result of a routing query
 #[repr(C)]
@@ -213,7 +218,7 @@ pub unsafe extern "C" fn router_handles_query(
     let result = runtime.secondary().block_on(async {
         handles
             .prefill_router
-            .query_route(&handles.decode_router, tokens, update_states)
+            .query_worker_ids(&handles.decode_router, tokens, update_states)
             .await
     });
 
@@ -247,7 +252,97 @@ pub unsafe extern "C" fn router_handles_is_disaggregated(handle: RouterHandlesPt
     handles.prefill_router.is_activated()
 }
 
-/// Mark prefill as completed for a request
+/// Add a request to the router's bookkeeping after worker selection.
+///
+/// This registers the request with the KvRouter's scheduler for tracking active blocks
+/// and managing prefill/decode lifecycle. Call this after `router_handles_query` returns
+/// worker IDs and before sending the request to the worker.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_id` must be a valid null-terminated C string
+/// - `token_ids` must point to at least `token_count` valid u32 values
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_add_request(
+    handle: RouterHandlesPtr,
+    request_id: *const c_char,
+    token_ids: *const u32,
+    token_count: usize,
+    worker_id: u64,
+    dp_rank: u32,
+) -> QueryRouterResult {
+    if handle.is_null() || request_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+    let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+
+    let tokens: Vec<u32> = if token_count > 0 && !token_ids.is_null() {
+        unsafe { std::slice::from_raw_parts(token_ids, token_count) }.to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let runtime = match Runtime::from_settings() {
+        Ok(rt) => rt,
+        Err(_) => return QueryRouterResult::ErrQueryFailed,
+    };
+
+    let decode_router = handles.decode_router.clone();
+    let request_id_owned = request_id_str.to_string();
+
+    let result = runtime.secondary().block_on(async {
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
+
+        tokio::time::timeout(timeout_duration, async {
+            let worker = WorkerWithDpRank::new(worker_id, dp_rank);
+
+            // Compute overlap_blocks using the public method
+            let overlap_blocks = match decode_router.get_overlap_blocks(&tokens, worker).await {
+                Ok(overlap) => overlap,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "Failed to compute overlap, using 0");
+                    0
+                }
+            };
+
+            decode_router
+                .add_request(request_id_owned.clone(), &tokens, overlap_blocks, worker)
+                .await;
+
+            tracing::debug!(
+                request_id = %request_id_owned,
+                worker_id = worker_id,
+                dp_rank = dp_rank,
+                overlap_blocks = overlap_blocks,
+                token_count = tokens.len(),
+                "router_handles_add_request completed"
+            );
+        })
+        .await
+    });
+
+    match result {
+        Ok(()) => QueryRouterResult::Ok,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id_str,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
+                "router_handles_add_request timed out"
+            );
+            // Return OK to avoid blocking the caller - the operation may still complete
+            QueryRouterResult::Ok
+        }
+    }
+}
+
+/// Mark prefill as completed for a request.
+///
+/// Call this when the first token is generated to release prefill tokens from tracking.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
@@ -262,7 +357,7 @@ pub unsafe extern "C" fn router_handles_mark_prefill_complete(
     }
 
     let handles = unsafe { &*handle };
-    let request_id = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+    let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s,
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
@@ -272,20 +367,45 @@ pub unsafe extern "C" fn router_handles_mark_prefill_complete(
         Err(_) => return QueryRouterResult::ErrQueryFailed,
     };
 
-    let result = runtime
-        .secondary()
-        .block_on(async { handles.decode_router.mark_prefill_completed(request_id).await });
+    let decode_router = handles.decode_router.clone();
+    let request_id_owned = request_id_str.to_string();
+
+    let result = runtime.secondary().block_on(async {
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
+
+        tokio::time::timeout(timeout_duration, async {
+            if let Err(e) = decode_router.mark_prefill_completed(&request_id_owned).await {
+                tracing::warn!(
+                    request_id = %request_id_owned,
+                    error = %e,
+                    "Failed to mark prefill complete"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = %request_id_owned,
+                    "router_handles_mark_prefill_complete completed"
+                );
+            }
+        })
+        .await
+    });
 
     match result {
-        Ok(_) => QueryRouterResult::Ok,
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to mark prefill complete");
-            QueryRouterResult::ErrQueryFailed
+        Ok(()) => QueryRouterResult::Ok,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id_str,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
+                "router_handles_mark_prefill_complete timed out"
+            );
+            QueryRouterResult::Ok
         }
     }
 }
 
-/// Free a request (release resources)
+/// Free a request from the router's bookkeeping.
+///
+/// Call this when the stream is closed (completed or cancelled) to release all resources.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
@@ -300,7 +420,7 @@ pub unsafe extern "C" fn router_handles_free_request(
     }
 
     let handles = unsafe { &*handle };
-    let request_id = match unsafe { CStr::from_ptr(request_id) }.to_str() {
+    let request_id_str = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s,
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
@@ -310,15 +430,38 @@ pub unsafe extern "C" fn router_handles_free_request(
         Err(_) => return QueryRouterResult::ErrQueryFailed,
     };
 
-    let result = runtime
-        .secondary()
-        .block_on(async { handles.decode_router.free(request_id).await });
+    let decode_router = handles.decode_router.clone();
+    let request_id_owned = request_id_str.to_string();
+
+    let result = runtime.secondary().block_on(async {
+        let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
+
+        tokio::time::timeout(timeout_duration, async {
+            if let Err(e) = decode_router.free(&request_id_owned).await {
+                tracing::warn!(
+                    request_id = %request_id_owned,
+                    error = %e,
+                    "Failed to free request"
+                );
+            } else {
+                tracing::debug!(
+                    request_id = %request_id_owned,
+                    "router_handles_free_request completed"
+                );
+            }
+        })
+        .await
+    });
 
     match result {
-        Ok(_) => QueryRouterResult::Ok,
-        Err(e) => {
-            tracing::error!(error = ?e, "Failed to free request");
-            QueryRouterResult::ErrQueryFailed
+        Ok(()) => QueryRouterResult::Ok,
+        Err(_elapsed) => {
+            tracing::warn!(
+                request_id = %request_id_str,
+                timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
+                "router_handles_free_request timed out"
+            );
+            QueryRouterResult::Ok
         }
     }
 }

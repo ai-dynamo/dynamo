@@ -502,7 +502,7 @@ impl PrefillRouter {
     /// # Returns
     /// * In disaggregated mode: both prefill_worker_id and decode_worker_id
     /// * In aggregated mode (not activated): decode_worker_id only
-    pub async fn query_route(
+    pub async fn query_worker_ids(
         &self,
         decode_router: &super::KvRouter,
         token_ids: &[u32],
