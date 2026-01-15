@@ -17,7 +17,7 @@ enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format | `false` | `true` |
-| `DYN_LOGGING_SPAN_EVENTS` | Enable span create/close event logging (`SPAN_CREATED`, `SPAN_CLOSED` messages) | `false` | `true` |
+| `DYN_LOGGING_SPAN_EVENTS` | Enable span entry/close event logging (`SPAN_FIRST_ENTRY`, `SPAN_CLOSED` messages) | `false` | `true` |
 | `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `info` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
 | `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps (default is UTC) | `false` | `true` |
 | `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |

@@ -839,10 +839,10 @@ where
 
             drop(extensions);
 
-            // Emit SPAN_CREATED event. This only runs if the span passed the layer's filter
+            // Emit SPAN_FIRST_ENTRY event. This only runs if the span passed the layer's filter
             // (on_enter is not called for filtered-out spans), so no additional check needed.
             if span_events_enabled() {
-                emit_at_level!(span_level, target: "span_event", message = "SPAN_CREATED");
+                emit_at_level!(span_level, target: "span_event", message = "SPAN_FIRST_ENTRY");
             }
         }
     }
@@ -1010,7 +1010,7 @@ fn filters(config: LoggingConfig) -> EnvFilter {
     }
 
     // When span events are enabled, allow "span_event" target at all levels
-    // This ensures SPAN_CREATED events pass the filter when emitted from on_enter
+    // This ensures SPAN_FIRST_ENTRY events pass the filter when emitted from on_enter
     if span_events_enabled() {
         filter_layer = filter_layer.add_directive("span_event=trace".parse().unwrap());
     }
@@ -1193,7 +1193,7 @@ where
                 );
             }
 
-            let is_span_created = message.as_str() == Some("SPAN_CREATED");
+            let is_span_created = message.as_str() == Some("SPAN_FIRST_ENTRY");
             let is_span_closed = message.as_str() == Some("close");
             if is_span_created || is_span_closed {
                 target_override = Some(span.metadata().target().to_string());
@@ -1682,7 +1682,7 @@ pub mod tests {
     }
 
     /// Comprehensive test for span events covering:
-    /// - SPAN_CREATED and SPAN_CLOSED event emission
+    /// - SPAN_FIRST_ENTRY and SPAN_CLOSED event emission
     /// - Trace context (trace_id, span_id) in span events
     /// - Timing information in SPAN_CLOSED events
     /// - Level-based filtering (positive: allowed levels pass, negative: filtered levels blocked)
@@ -1776,31 +1776,31 @@ pub mod tests {
                 .collect()
         };
 
-        // === Test 1: SPAN_CREATED events have required fields ===
-        let span_created_events = get_span_events("SPAN_CREATED");
+        // === Test 1: SPAN_FIRST_ENTRY events have required fields ===
+        let span_created_events = get_span_events("SPAN_FIRST_ENTRY");
         for event in &span_created_events {
             // Must have span_name
             assert!(
                 event.get("span_name").is_some(),
-                "SPAN_CREATED must have span_name"
+                "SPAN_FIRST_ENTRY must have span_name"
             );
             // Must have valid trace_id (format check)
             let trace_id = event
                 .get("trace_id")
                 .and_then(|v| v.as_str())
-                .expect("SPAN_CREATED must have trace_id");
+                .expect("SPAN_FIRST_ENTRY must have trace_id");
             assert!(
                 trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
-                "SPAN_CREATED must have valid trace_id format"
+                "SPAN_FIRST_ENTRY must have valid trace_id format"
             );
             // Must have valid span_id
             let span_id = event
                 .get("span_id")
                 .and_then(|v| v.as_str())
-                .expect("SPAN_CREATED must have span_id");
+                .expect("SPAN_FIRST_ENTRY must have span_id");
             assert!(
                 is_valid_span_id(span_id),
-                "SPAN_CREATED must have valid span_id"
+                "SPAN_FIRST_ENTRY must have valid span_id"
             );
         }
 
@@ -1832,36 +1832,36 @@ pub mod tests {
         // Spans from dynamo_runtime::logging::tests should pass at ALL levels
         // because the target is allowed at debug level
         assert!(
-            has_span_event("SPAN_CREATED", "debug_level_span"),
+            has_span_event("SPAN_FIRST_ENTRY", "debug_level_span"),
             "DEBUG span from allowed target MUST pass (target=debug filter)"
         );
         assert!(
-            has_span_event("SPAN_CREATED", "info_level_span"),
+            has_span_event("SPAN_FIRST_ENTRY", "info_level_span"),
             "INFO span from allowed target MUST pass (target=debug filter)"
         );
         assert!(
-            has_span_event("SPAN_CREATED", "warn_level_span"),
+            has_span_event("SPAN_FIRST_ENTRY", "warn_level_span"),
             "WARN span from allowed target MUST pass (target=debug filter)"
         );
 
         // parent/child/grandchild are INFO level from allowed target - should pass
         assert!(
-            has_span_event("SPAN_CREATED", "parent"),
+            has_span_event("SPAN_FIRST_ENTRY", "parent"),
             "parent span (INFO) from allowed target MUST pass"
         );
         assert!(
-            has_span_event("SPAN_CREATED", "child"),
+            has_span_event("SPAN_FIRST_ENTRY", "child"),
             "child span (INFO) from allowed target MUST pass"
         );
         assert!(
-            has_span_event("SPAN_CREATED", "grandchild"),
+            has_span_event("SPAN_FIRST_ENTRY", "grandchild"),
             "grandchild span (INFO) from allowed target MUST pass"
         );
 
         // === Test 4: Level-based filtering (negative) ===
         // Verify spans from OTHER targets at debug/info level are filtered out
         assert!(
-            !has_span_event("SPAN_CREATED", "other_target_info_span"),
+            !has_span_event("SPAN_FIRST_ENTRY", "other_target_info_span"),
             "INFO span from non-allowed target (other_module) MUST be filtered out"
         );
 
