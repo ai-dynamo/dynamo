@@ -2,27 +2,34 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use dynamo_runtime::component::Component;
-use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::EventPublisher;
-use tokio::sync::watch;
+use dynamo_runtime::pipeline::{
+    AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouter, ResponseStream, RouterMode,
+    SingleIn, async_trait, network::Ingress,
+};
+use dynamo_runtime::protocols::maybe_error::MaybeError;
+use tokio::sync::{OnceCell, watch};
+use tokio_stream::StreamExt;
 
-use crate::kv_router::WORKER_KV_INDEXER_QUERY_SUBJECT;
-use crate::kv_router::indexer::{WorkerKvQueryRequest, WorkerKvQueryResponse};
+use crate::kv_router::WORKER_KV_INDEXER_QUERY_ENDPOINT;
+use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
 use crate::kv_router::protocols::WorkerId;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use dynamo_runtime::stream;
 
 /// Router-side client for querying worker local KV indexers
 ///
-/// Performs request/reply communication with workers via NATS.
+/// Performs request/reply communication with workers via request plane endpoint routing.
 /// (Only queries workers that have `enable_local_indexer=true` in their MDC user_data)
 /// The client is spawned by KvRouter; it watches same discovery stream as the router.
 pub struct WorkerQueryClient {
     component: Component,
     /// Watch receiver for enable_local_indexer state per worker
     model_runtime_config_rx: watch::Receiver<HashMap<WorkerId, ModelRuntimeConfig>>,
+    router: OnceCell<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
 }
 
 impl WorkerQueryClient {
@@ -34,6 +41,7 @@ impl WorkerQueryClient {
         Self {
             component,
             model_runtime_config_rx,
+            router: OnceCell::new(),
         }
     }
 
@@ -61,38 +69,183 @@ impl WorkerQueryClient {
             );
         }
 
-        // Match worker's subscribe format
-        let subject_str = format!("{}.{worker_id}", WORKER_KV_INDEXER_QUERY_SUBJECT); // see publisher.rs/start_worker_kv_query_service()
-        let subject = format!("{}.{subject_str}", self.component.subject());
+        let router = self
+            .router
+            .get_or_try_init(|| async {
+                let endpoint = self.component.endpoint(WORKER_KV_INDEXER_QUERY_ENDPOINT);
+                let client = endpoint.client().await?;
+                let router = PushRouter::from_client(client, RouterMode::RoundRobin).await?;
+                Ok::<_, anyhow::Error>(Arc::new(router))
+            })
+            .await?;
 
-        tracing::debug!(
-            "Router sending query request to worker {worker_id} on NATS subject: {subject}"
-        );
-
-        // Create and serialize request
         let request = WorkerKvQueryRequest {
             worker_id,
             start_event_id,
             end_event_id,
         };
-        let request_bytes =
-            serde_json::to_vec(&request).context("Failed to serialize WorkerKvQueryRequest")?;
-
-        // Send NATS request with timeout using DRT helper
-        let timeout = tokio::time::Duration::from_secs(1);
-        let response_msg = self
-            .component
-            .drt()
-            .kv_router_nats_request(subject.clone(), request_bytes.into(), timeout)
+        let mut stream = router
+            .direct(SingleIn::new(request), worker_id)
             .await
             .with_context(|| {
-                format!("Failed to send request to worker {worker_id} on subject {subject}")
+                format!("Failed to send worker KV query request to worker {worker_id} via endpoint")
             })?;
 
-        // Deserialize response
-        let response: WorkerKvQueryResponse = serde_json::from_slice(&response_msg.payload)
-            .context("Failed to deserialize WorkerKvQueryResponse")?;
+        let response = stream
+            .next()
+            .await
+            .context("Worker KV query returned an empty response stream")?;
+
+        if let Some(err) = response.err() {
+            return Err(err).context("Worker KV query response error");
+        }
 
         Ok(response)
+    }
+}
+
+// Worker-side endpoint registration for Router -> LocalKvIndexer query service
+pub(crate) async fn start_worker_kv_query_endpoint(
+    component: Component,
+    worker_id: u64,
+    local_indexer: Arc<LocalKvIndexer>,
+) {
+    let engine = Arc::new(WorkerKvQueryEngine {
+        worker_id,
+        local_indexer,
+    });
+
+    let ingress = match Ingress::for_engine(engine) {
+        Ok(ingress) => ingress,
+        Err(e) => {
+            tracing::error!(
+                "Failed to build WorkerKvQuery endpoint handler for worker {worker_id}: {e}"
+            );
+            return;
+        }
+    };
+
+    tracing::info!(
+        "WorkerKvQuery endpoint starting for worker {worker_id} on endpoint '{}'",
+        WORKER_KV_INDEXER_QUERY_ENDPOINT
+    );
+
+    if let Err(e) = component
+        .endpoint(WORKER_KV_INDEXER_QUERY_ENDPOINT)
+        .endpoint_builder()
+        .handler(ingress)
+        .graceful_shutdown(true)
+        .start()
+        .await
+    {
+        tracing::error!("WorkerKvQuery endpoint failed for worker {worker_id}: {e}");
+    }
+}
+
+struct WorkerKvQueryEngine {
+    worker_id: u64,
+    local_indexer: Arc<LocalKvIndexer>,
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>, anyhow::Error>
+    for WorkerKvQueryEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<WorkerKvQueryRequest>,
+    ) -> anyhow::Result<ManyOut<WorkerKvQueryResponse>> {
+        let (request, ctx) = request.into_parts();
+
+        tracing::debug!(
+            "Received query request for worker {}: {:?}",
+            self.worker_id,
+            request
+        );
+
+        // This is a sanity check to ensure the request is for the correct worker.
+        // In production, this should never happen since the router should only
+        // send requests to the worker it is associated with.
+        if request.worker_id != self.worker_id {
+            let error_message = format!(
+                "WorkerKvQueryEngine::generate worker_id mismatch: request.worker_id={} this.worker_id={}",
+                request.worker_id, self.worker_id
+            );
+            let response = WorkerKvQueryResponse::Error(error_message);
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter(vec![response])),
+                ctx.context(),
+            ));
+        }
+
+        let response = self
+            .local_indexer
+            .get_events_in_id_range(request.start_event_id, request.end_event_id)
+            .await;
+
+        Ok(ResponseStream::new(
+            Box::pin(stream::iter(vec![response])),
+            ctx.context(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kv_router::RouterEvent;
+    use crate::kv_router::indexer::KvIndexerMetrics;
+    use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
+    use tokio_stream::StreamExt;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn test_worker_kv_query_engine_returns_buffered_events() {
+        let worker_id = 7u64;
+        let token = CancellationToken::new();
+        let metrics = Arc::new(KvIndexerMetrics::new_unregistered());
+        let local_indexer = Arc::new(LocalKvIndexer::new(token, 4, metrics, 32));
+
+        let event = RouterEvent::new(
+            worker_id,
+            KvCacheEvent {
+                event_id: 1,
+                data: KvCacheEventData::Cleared,
+                dp_rank: 0,
+            },
+        );
+        local_indexer
+            .apply_event_with_buffer(event)
+            .await
+            .expect("apply_event_with_buffer should succeed");
+
+        let engine = WorkerKvQueryEngine {
+            worker_id,
+            local_indexer,
+        };
+
+        let request = WorkerKvQueryRequest {
+            worker_id,
+            start_event_id: Some(1),
+            end_event_id: Some(1),
+        };
+
+        let mut stream = engine
+            .generate(SingleIn::new(request))
+            .await
+            .expect("generate should succeed");
+
+        let response = stream
+            .next()
+            .await
+            .expect("response stream should yield one item");
+
+        match response {
+            WorkerKvQueryResponse::Events(events) => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].event.event_id, 1);
+            }
+            other => panic!("Unexpected response: {other:?}"),
+        }
     }
 }

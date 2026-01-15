@@ -232,6 +232,9 @@ pub async fn recover_from_worker(
         WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
             anyhow::bail!("Invalid range: end_id ({end_id}) < start_id ({start_id})");
         }
+        WorkerKvQueryResponse::Error(message) => {
+            anyhow::bail!("Worker {worker_id} query failed: {message}");
+        }
     };
 
     let events_count = events.len();

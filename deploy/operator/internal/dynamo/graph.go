@@ -567,10 +567,24 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			Protocol:   corev1.ProtocolTCP,
 		}
 	}
+
+	// Start with user-defined labels from component.Labels
+	labels := make(map[string]string)
+	for k, v := range component.Labels {
+		labels[k] = v
+	}
+
+	// Add k8s discovery labels (these take precedence over user labels)
+	if isK8sDiscoveryEnabled {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
 			Namespace: dynamoDeployment.Namespace,
+			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
@@ -579,12 +593,6 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
-	}
-	if isK8sDiscoveryEnabled {
-		service.Labels = map[string]string{
-			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
-			commonconsts.KubeLabelDynamoDiscoveryEnabled: commonconsts.KubeLabelValueTrue,
-		}
 	}
 	return service, nil
 }

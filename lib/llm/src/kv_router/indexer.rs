@@ -35,6 +35,7 @@ use async_trait::async_trait;
 use dynamo_runtime::{
     component::Component,
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
+    protocols::maybe_error::MaybeError,
 };
 use prometheus::{IntCounterVec, Opts};
 use serde::{Deserialize, Serialize};
@@ -142,6 +143,21 @@ pub enum WorkerKvQueryResponse {
     },
     /// Invalid range: end_id < start_id
     InvalidRange { start_id: u64, end_id: u64 },
+    /// Query failed on worker (serialized error)
+    Error(String),
+}
+
+impl MaybeError for WorkerKvQueryResponse {
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        WorkerKvQueryResponse::Error(err.to_string())
+    }
+
+    fn err(&self) -> Option<anyhow::Error> {
+        match self {
+            WorkerKvQueryResponse::Error(msg) => Some(anyhow::Error::msg(msg.clone())),
+            _ => None,
+        }
+    }
 }
 
 /// A block in the Radix Tree.
