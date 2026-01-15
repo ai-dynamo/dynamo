@@ -205,7 +205,7 @@ jobs:
           ls -Ra coverage-artifacts/
 
           echo "==== Directory structure  ===="
-          find . maxdepth 2
+          pwd
           echo ""
           echo "==== Coverage files found ===="
           find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
