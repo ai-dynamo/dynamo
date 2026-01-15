@@ -22,7 +22,7 @@ use crate::request_template::RequestTemplate;
 
 pub mod runtime_config;
 
-use runtime_config::ModelRuntimeConfig;
+pub use runtime_config::ModelRuntimeConfig;
 
 /// What we call a model if the user didn't provide a name. Usually this means the name
 /// is invisible, for example in a text chat.
@@ -60,6 +60,7 @@ pub struct LocalModelBuilder {
     custom_backend_metrics_polling_interval: Option<f64>,
     media_decoder: Option<MediaDecoder>,
     media_fetcher: Option<MediaFetcher>,
+    has_tokenize_endpoint: bool,
 }
 
 impl Default for LocalModelBuilder {
@@ -89,6 +90,7 @@ impl Default for LocalModelBuilder {
             custom_backend_metrics_polling_interval: Default::default(),
             media_decoder: Default::default(),
             media_fetcher: Default::default(),
+            has_tokenize_endpoint: false,
         }
     }
 }
@@ -219,6 +221,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn has_tokenize_endpoint(&mut self, has_tokenize_endpoint: bool) -> &mut Self {
+        self.has_tokenize_endpoint = has_tokenize_endpoint;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -290,6 +297,7 @@ impl LocalModelBuilder {
             card.runtime_config = self.runtime_config.clone();
             card.media_decoder = self.media_decoder.clone();
             card.media_fetcher = self.media_fetcher.clone();
+            card.has_tokenize_endpoint = self.has_tokenize_endpoint;
 
             return Ok(LocalModel {
                 card,
@@ -344,6 +352,7 @@ impl LocalModelBuilder {
         card.runtime_config = self.runtime_config.clone();
         card.media_decoder = self.media_decoder.clone();
         card.media_fetcher = self.media_fetcher.clone();
+        card.has_tokenize_endpoint = self.has_tokenize_endpoint;
 
         Ok(LocalModel {
             card,

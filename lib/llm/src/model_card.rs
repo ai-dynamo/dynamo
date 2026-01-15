@@ -245,6 +245,12 @@ pub struct ModelDeploymentCard {
     #[serde(default)]
     pub media_fetcher: Option<MediaFetcher>,
 
+    /// Whether this model exposes a tokenize endpoint for KV-aware routing.
+    /// When true, the frontend can call the tokenize endpoint (same component, "tokenize" name)
+    /// to tokenize text before making routing decisions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_tokenize_endpoint: bool,
+
     #[serde(skip, default)]
     checksum: OnceLock<String>,
 }
@@ -655,6 +661,7 @@ impl ModelDeploymentCard {
             runtime_config: ModelRuntimeConfig::default(),
             media_decoder: None,
             media_fetcher: None,
+            has_tokenize_endpoint: false,
             checksum: OnceLock::new(),
         })
     }

@@ -219,6 +219,9 @@ def _set_parser(
     Raises:
         ValueError: If parser name is not valid.
     """
+    # TODO
+    if not dynamo_str:
+        return None
     # If both are present, give preference to dynamo_str
     if sglang_str is not None and dynamo_str is not None:
         logging.warning(
@@ -491,16 +494,9 @@ async def parse_args(args: list[str]) -> Config:
     # contain code to download a model, it should only parse the args.
     server_args = ServerArgs.from_cli_args(parsed_args)
 
-    if parsed_args.use_sglang_tokenizer:
-        logging.info(
-            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
-        )
-        server_args.skip_tokenizer_init = False
-    else:
-        logging.info(
-            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
-        )
-        server_args.skip_tokenizer_init = True
+    # Always initialize the tokenizer to support both text and token endpoints
+    logging.info("Initializing SGLang tokenizer (skip_tokenizer_init=False)")
+    server_args.skip_tokenizer_init = False
 
     # Derive use_kv_events from server_args.kv_events_config
     # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)

@@ -4,7 +4,7 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
@@ -23,6 +23,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        reasoning_parser_type: Optional[str] = None,
+        tool_call_parser_type: Optional[str] = None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -31,6 +33,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            reasoning_parser_type: Type of reasoning parser (e.g., "deepseek-r1", "qwen3").
+            tool_call_parser_type: Type of tool call parser (e.g., "qwen", "llama3").
         """
         super().__init__(
             component,
@@ -38,6 +42,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
         )
+        self.reasoning_parser_type = reasoning_parser_type
+        self.tool_call_parser_type = tool_call_parser_type
+        if reasoning_parser_type:
+            logging.info(f"Reasoning parser enabled: {reasoning_parser_type}")
+        if tool_call_parser_type:
+            logging.info(f"Tool call parser enabled: {tool_call_parser_type}")
+
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -134,11 +145,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
             )
 
-            if self.skip_tokenizer_init:
+            # Use token stream if input was token_ids, otherwise use text stream
+            use_token_stream = self.skip_tokenizer_init or "token_ids" in request
+            if use_token_stream:
                 async for out in self._process_token_stream(decode, context):
                     yield out
             else:
-                async for out in self._process_text_stream(decode, context):
+                async for out in self._process_text_stream(decode, context, request):
                     yield out
         else:
             trace_header = (
@@ -152,11 +165,13 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
             )
-            if self.skip_tokenizer_init:
+            # Use token stream if input was token_ids, otherwise use text stream
+            use_token_stream = self.skip_tokenizer_init or "token_ids" in request
+            if use_token_stream:
                 async for out in self._process_token_stream(agg, context):
                     yield out
             else:
-                async for out in self._process_text_stream(agg, context):
+                async for out in self._process_text_stream(agg, context, request):
                     yield out
 
     async def _process_token_stream(
@@ -222,21 +237,69 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if not context.is_stopped():
                     yield out
 
+    def _generate_tool_call_id(self) -> str:
+        """Generate a unique tool call ID."""
+        import uuid
+
+        return f"call_{uuid.uuid4().hex[:24]}"
+
     async def _process_text_stream(
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
         context: Context,
+        request: Optional[Dict[str, Any]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process text-based stream output in OpenAI format.
 
         Args:
             stream_source: Async generator from engine.async_generate.
             context: Context object for cancellation handling.
+            request: Optional request dict for reasoning/tool call parser settings.
 
         Yields:
             OpenAI-formatted chat completion chunk dicts.
         """
         count = 0
+
+        # Initialize reasoning parser if configured and requested
+        reasoning_parser = None
+        separate_reasoning = (
+            request.get("separate_reasoning", True) if request else True
+        )
+        stream_reasoning = request.get("stream_reasoning", True) if request else True
+
+        if self.reasoning_parser_type and separate_reasoning:
+            try:
+                from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+                reasoning_parser = ReasoningParser(
+                    model_type=self.reasoning_parser_type,
+                    stream_reasoning=stream_reasoning,
+                )
+                logging.debug(
+                    f"Initialized streaming reasoning parser: {self.reasoning_parser_type}"
+                )
+            except Exception as e:
+                logging.warning(f"Failed to initialize reasoning parser: {e}")
+
+        # Initialize tool call parser if configured and tools are provided
+        tool_call_parser = None
+        tools = request.get("tools") if request else None
+        tool_choice = request.get("tool_choice", "auto") if request else "auto"
+        has_tool_calls = False
+
+        if self.tool_call_parser_type and tools and tool_choice != "none":
+            try:
+                from sglang.srt.function_call.function_call_parser import (
+                    FunctionCallParser,
+                )
+
+                tool_call_parser = FunctionCallParser(tools, self.tool_call_parser_type)
+                logging.debug(
+                    f"Initialized streaming tool call parser: {self.tool_call_parser_type}"
+                )
+            except Exception as e:
+                logging.warning(f"Failed to initialize tool call parser: {e}")
 
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
@@ -263,9 +326,71 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 next_count = len(text)
                 delta = text[count:]
 
+                # Apply reasoning parser if enabled
+                reasoning_content = None
+                content_delta = delta
+                if reasoning_parser and delta:
+                    try:
+                        (
+                            reasoning_content,
+                            content_delta,
+                        ) = reasoning_parser.parse_stream_chunk(delta)
+                    except Exception as e:
+                        logging.warning(f"Reasoning parser error: {e}")
+                        content_delta = delta
+
+                # Apply tool call parser if enabled
+                tool_calls_delta = None
+                if tool_call_parser and content_delta:
+                    try:
+                        # parse_stream_chunk returns (normal_text, tool_calls_list)
+                        (
+                            normal_text,
+                            tool_calls_list,
+                        ) = tool_call_parser.parse_stream_chunk(content_delta)
+                        content_delta = normal_text
+
+                        if tool_calls_list:
+                            has_tool_calls = True
+                            tool_calls_delta = []
+                            for tc in tool_calls_list:
+                                # ToolCallItem has: tool_index, name (Optional), parameters (str)
+                                tool_call_data = {
+                                    "index": tc.tool_index,
+                                    "type": "function",
+                                }
+                                # Add id only for new tool calls (when name is present)
+                                if tc.name:
+                                    tool_call_data["id"] = self._generate_tool_call_id()
+                                    tool_call_data["function"] = {
+                                        "name": tc.name,
+                                        "arguments": tc.parameters or "",
+                                    }
+                                else:
+                                    # Incremental arguments update
+                                    tool_call_data["function"] = {
+                                        "arguments": tc.parameters or "",
+                                    }
+                                tool_calls_delta.append(tool_call_data)
+                    except Exception as e:
+                        logging.warning(f"Tool call parser error: {e}")
+
+                # Build delta message with optional reasoning_content and tool_calls
+                delta_message = {"role": "assistant"}
+                if reasoning_content:
+                    delta_message["reasoning_content"] = reasoning_content
+                if content_delta:
+                    delta_message["content"] = content_delta
+                if tool_calls_delta:
+                    delta_message["tool_calls"] = tool_calls_delta
+
+                # Update finish_reason to "tool_calls" if tool calls were detected
+                if finish_reason_type == "stop" and has_tool_calls:
+                    finish_reason_type = "tool_calls"
+
                 choice_data = {
                     "index": index,
-                    "delta": {"role": "assistant", "content": delta},
+                    "delta": delta_message,
                     "finish_reason": finish_reason_type,
                 }
 

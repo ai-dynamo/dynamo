@@ -1147,14 +1147,21 @@ async def register_llm(
     custom_template_path: Optional[str] = None,
     lora_name: Optional[str] = None,
     base_model_path: Optional[str] = None,
+    has_tokenize_endpoint: bool = False,
 ) -> None:
     """
     Attach the model at path to the given endpoint, and advertise it as model_type.
+
     LoRA Registration:
         The `lora_name` and `base_model_path` parameters must be provided together or not at all.
         Providing only one of these parameters will raise a ValueError.
         - `lora_name`: The served model name for the LoRA model
         - `base_model_path`: Path to the base model that the LoRA extends
+
+    Tokenize Endpoint:
+        For ModelInput.Text models that expose a tokenize endpoint, set `has_tokenize_endpoint=True`
+        to enable KV-aware routing. The frontend will call the tokenize endpoint (same component,
+        "tokenize" name) to tokenize text before making routing decisions.
 
     For TensorBased models (using ModelInput.Tensor), HuggingFace downloads are skipped
     and a minimal model card is registered directly. Use model_path as the display name

@@ -25,7 +25,7 @@ use crate::{
     backend::Backend,
     entrypoint::{self, EngineFactoryCallback, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::PrefillRouter,
+    kv_router::{PrefillRouter, TextKvRouter},
     model_card::ModelDeploymentCard,
     model_type::{ModelInput, ModelType},
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, prompt::PromptFormatter},
@@ -386,6 +386,16 @@ impl ModelWatcher {
 
             let endpoint = component.endpoint(&mcid.endpoint);
             let kv_chooser = if self.router_config.router_mode == RouterMode::KV {
+                // Validate kv_cache_block_size for KV routing
+                if card.kv_cache_block_size < 2 {
+                    anyhow::bail!(
+                        "KV routing requires kv_cache_block_size >= 2, but model '{}' has \
+                        kv_cache_block_size={}. Ensure kv_cache_block_size is set when registering \
+                        the model (e.g., via page_size in SGLang or block_size in vLLM).",
+                        card.name(),
+                        card.kv_cache_block_size
+                    );
+                }
                 Some(
                     self.manager
                         .kv_chooser_for(
@@ -526,18 +536,96 @@ impl ModelWatcher {
                 .add_embeddings_model(card.name(), checksum, engine)?;
         } else if card.model_input == ModelInput::Text && card.model_type.supports_chat() {
             // Case 3: Text + Chat
-            let push_router = PushRouter::<
-                NvCreateChatCompletionRequest,
-                Annotated<NvCreateChatCompletionStreamResponse>,
-            >::from_client_with_threshold(
-                client, self.router_config.router_mode, None, None
-            )
-            .await?;
-            let engine = Arc::new(push_router);
-            self.manager
-                .add_chat_completions_model(card.name(), checksum, engine)?;
+            if self.router_config.router_mode == RouterMode::KV {
+                // KV routing for Text models requires a tokenize endpoint
+                if !card.has_tokenize_endpoint {
+                    anyhow::bail!(
+                        "KV routing for ModelInput::Text requires has_tokenize_endpoint=true. \
+                        Model '{}' does not expose a tokenize endpoint. Either set \
+                        has_tokenize_endpoint=True when registering the model, or use a \
+                        different router mode (e.g., RoundRobin).",
+                        card.name()
+                    );
+                }
+
+                // Text + Chat + KV routing: use TextKvRouter with remote tokenization
+                let endpoint = component.endpoint(&mcid.endpoint);
+
+                // Validate kv_cache_block_size for KV routing
+                if card.kv_cache_block_size < 2 {
+                    anyhow::bail!(
+                        "KV routing requires kv_cache_block_size >= 2, but model '{}' has \
+                        kv_cache_block_size={}. Ensure kv_cache_block_size is set when registering \
+                        the model (e.g., via page_size in SGLang).",
+                        card.name(),
+                        card.kv_cache_block_size
+                    );
+                }
+
+                // Create the KV chooser for routing decisions
+                let kv_chooser = self
+                    .manager
+                    .kv_chooser_for(
+                        &endpoint,
+                        card.kv_cache_block_size,
+                        Some(self.router_config.kv_router_config),
+                    )
+                    .await?;
+
+                // Create a client for the tokenize endpoint (same component, "tokenize" name)
+                let tokenize_endpoint = component.endpoint("tokenize");
+                let tokenize_client = tokenize_endpoint.client().await?;
+
+                // Create the PushRouter for forwarding requests
+                // Use RoundRobin mode since TextKvRouter will handle KV routing via direct()
+                let push_router = PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(
+                    client.clone(),
+                    RouterMode::RoundRobin,
+                    None,
+                    None,
+                )
+                .await?;
+
+                // Create the TextKvRouter that does remote tokenization for KV routing
+                let text_kv_router = TextKvRouter::new(push_router, kv_chooser, tokenize_client).await?;
+                let engine = Arc::new(text_kv_router);
+
+                self.manager
+                    .add_chat_completions_model(card.name(), checksum, engine)?;
+                tracing::info!(
+                    "Text + Chat + KV routing enabled for model '{}' with remote tokenization",
+                    card.name()
+                );
+            } else {
+                let push_router = PushRouter::<
+                    NvCreateChatCompletionRequest,
+                    Annotated<NvCreateChatCompletionStreamResponse>,
+                >::from_client_with_threshold(
+                    client, self.router_config.router_mode, None, None
+                )
+                .await?;
+                let engine = Arc::new(push_router);
+                self.manager
+                    .add_chat_completions_model(card.name(), checksum, engine)?;
+            }
         } else if card.model_input == ModelInput::Text && card.model_type.supports_completions() {
             // Case 2: Text + Completions
+            if self.router_config.router_mode == RouterMode::KV {
+                // KV routing for Text + Completions is not yet supported.
+                // The tokenize endpoint expects chat messages, not a prompt string.
+                // For now, only Text + Chat supports KV routing with remote tokenization.
+                anyhow::bail!(
+                    "KV routing for ModelInput::Text + Completions is not yet supported. \
+                    Model '{}' uses the completions endpoint which has a prompt string, but \
+                    the tokenize endpoint expects chat messages. Use /v1/chat/completions \
+                    for KV routing with Text models, or use ModelInput::Tokens.",
+                    card.name()
+                );
+            }
+
             let push_router = PushRouter::<
                 NvCreateCompletionRequest,
                 Annotated<NvCreateCompletionResponse>,

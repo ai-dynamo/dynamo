@@ -233,7 +233,7 @@ fn lora_name_to_id(lora_name: &str) -> i32 {
 /// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
 /// Providing only one of them will result in an error.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None, has_tokenize_endpoint=false))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -253,6 +253,7 @@ fn register_llm<'p>(
     media_fetcher: Option<MediaFetcher>,
     lora_name: Option<&str>,
     base_model_path: Option<&str>,
+    has_tokenize_endpoint: bool,
 ) -> PyResult<Bound<'p, PyAny>> {
     // Validate Prefill model type requirements
     if model_type.inner == llm_rs::model_type::ModelType::Prefill {
@@ -330,6 +331,7 @@ fn register_llm<'p>(
             card.model_type = model_type_obj;
             card.model_input = model_input;
             card.user_data = user_data_json;
+            card.has_tokenize_endpoint = has_tokenize_endpoint;
 
             if let Some(cfg) = runtime_config {
                 card.runtime_config = cfg.inner;
@@ -375,7 +377,8 @@ fn register_llm<'p>(
             .user_data(user_data_json)
             .custom_template_path(custom_template_path_owned)
             .media_decoder(media_decoder.map(|m| m.inner))
-            .media_fetcher(media_fetcher.map(|m| m.inner));
+            .media_fetcher(media_fetcher.map(|m| m.inner))
+            .has_tokenize_endpoint(has_tokenize_endpoint);
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         local_model

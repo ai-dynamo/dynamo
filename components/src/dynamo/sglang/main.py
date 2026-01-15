@@ -116,7 +116,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         dynamo_args.component
     )
 
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    # Create endpoints for text input, token input, and tokenization
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)  # text input
+    generate_tokens_endpoint = component.endpoint("generate_tokens")  # token input
+    tokenize_endpoint = component.endpoint("tokenize")  # tokenize endpoint
+    detokenize_endpoint = component.endpoint("detokenize")  # detokenize endpoint
 
     # Handle non-leader nodes (multi-node parallelism)
     # Non-leader nodes only run scheduler processes and expose metrics
@@ -124,7 +128,17 @@ async def init(runtime: DistributedRuntime, config: Config):
         await _handle_non_leader_node(engine, generate_endpoint)
         return
 
-    # Register engine routes for profiling
+    # Initialize reasoning parser from CLI args (set once at startup)
+    reasoning_parser = None
+    if server_args.reasoning_parser:
+        from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+        reasoning_parser = ReasoningParser(
+            model_type=server_args.reasoning_parser, stream_reasoning=False
+        )
+        logging.info(f"Initialized reasoning parser: {server_args.reasoning_parser}")
+
+    # Register engine routes for profiling and tokenization
     async def start_profile_handler(body: dict) -> dict:
         """Handle /engine/start_profile requests"""
         await engine.tokenizer_manager.start_profile(**body)
@@ -135,11 +149,111 @@ async def init(runtime: DistributedRuntime, config: Config):
         await engine.tokenizer_manager.stop_profile()
         return {"status": "ok", "message": "Profiling stopped"}
 
+    async def tokenize_handler(body: dict) -> dict:
+        """Handle /engine/tokenize requests.
+
+        Takes a chat completion request with messages and returns token IDs.
+        """
+        tokenizer = engine.tokenizer_manager.tokenizer
+        if tokenizer is None:
+            return {"status": "error", "message": "Tokenizer not available"}
+
+        messages = body.get("messages")
+        if not messages:
+            return {
+                "status": "error",
+                "message": "No 'messages' field found in request",
+            }
+
+        token_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True
+        )
+        return {"status": "ok", "token_ids": token_ids}
+
+    async def detokenize_handler(body: dict) -> dict:
+        """Handle /engine/detokenize requests.
+
+        Takes token IDs and returns decoded text, with optional parsing for
+        reasoning content and tool calls based on CLI args.
+        """
+        tokenizer = engine.tokenizer_manager.tokenizer
+        if tokenizer is None:
+            return {"status": "error", "message": "Tokenizer not available"}
+
+        token_ids = body.get("token_ids")
+        if token_ids is None:
+            return {
+                "status": "error",
+                "message": "No 'token_ids' field found in request",
+            }
+
+        text = tokenizer.decode(token_ids)
+        response = {"status": "ok", "text": text}
+
+        # Parse reasoning if parser was configured via --reasoning-parser
+        if reasoning_parser:
+            reasoning_content, normal_content = reasoning_parser.parse_non_stream(text)
+            response["reasoning_content"] = reasoning_content or ""
+            response["normal_content"] = normal_content or ""
+
+        return response
+
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
+    runtime.register_engine_route("tokenize", tokenize_handler)
+    runtime.register_engine_route("detokenize", detokenize_handler)
     logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
+        "/engine/tokenize, /engine/detokenize"
     )
+
+    # Component endpoint handlers for tokenize/detokenize (streaming interface)
+    async def tokenize_endpoint_handler(request):
+        """Handle tokenize requests via dynamo component endpoint."""
+        tokenizer = engine.tokenizer_manager.tokenizer
+        if tokenizer is None:
+            yield {"status": "error", "message": "Tokenizer not available"}
+            return
+
+        messages = request.get("messages")
+        if not messages:
+            yield {"status": "error", "message": "No 'messages' field found in request"}
+            return
+
+        token_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True
+        )
+        yield {"status": "ok", "token_ids": token_ids}
+
+    async def detokenize_endpoint_handler(request):
+        """Handle detokenize requests via dynamo component endpoint.
+
+        Takes token IDs and returns decoded text, with optional parsing for
+        reasoning content and tool calls based on CLI args.
+        """
+        tokenizer = engine.tokenizer_manager.tokenizer
+        if tokenizer is None:
+            yield {"status": "error", "message": "Tokenizer not available"}
+            return
+
+        token_ids = request.get("token_ids")
+        if token_ids is None:
+            yield {
+                "status": "error",
+                "message": "No 'token_ids' field found in request",
+            }
+            return
+
+        text = tokenizer.decode(token_ids)
+        response = {"status": "ok", "text": text}
+
+        # Parse reasoning if parser was configured via --reasoning-parser
+        if reasoning_parser:
+            reasoning_content, normal_content = reasoning_parser.parse_non_stream(text)
+            response["reasoning_content"] = reasoning_content or ""
+            response["normal_content"] = normal_content or ""
+
+        yield response
 
     # publisher instantiates the metrics and kv event publishers
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
@@ -153,10 +267,22 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(component, engine, config, publisher)
+    handler = DecodeWorkerHandler(
+        component,
+        engine,
+        config,
+        publisher,
+        reasoning_parser_type=server_args.reasoning_parser,
+        tool_call_parser_type=server_args.tool_call_parser,
+    )
     print(f"Config: {config}")
-    health_check_payload = SglangHealthCheckPayload(
-        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+
+    # Health check payloads for text and token endpoints
+    text_health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=True
+    ).to_dict()
+    tokens_health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=False
     ).to_dict()
 
     logging.info(
@@ -172,24 +298,62 @@ async def init(runtime: DistributedRuntime, config: Config):
         )
 
     try:
-        # Start endpoint immediately and register model concurrently
-        # Requests queue until ready_event is set (TODO: Part of new PR)
-        await asyncio.gather(
+        # Start all endpoints - use asyncio.gather but only for endpoints that
+        # need to run concurrently. Register LLM separately to avoid metrics conflicts.
+
+        # First, start serving endpoints concurrently
+        # Note: No metrics_labels passed to avoid Prometheus label conflicts between endpoints
+        endpoint_tasks = [
+            # Text input endpoint (generate)
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
-                metrics_labels=metrics_labels,
-                health_check_payload=health_check_payload,
+                health_check_payload=text_health_check_payload,
             ),
+            # Token input endpoint (generate_tokens) - no custom metrics
+            generate_tokens_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                health_check_payload=tokens_health_check_payload,
+            ),
+            # Tokenize endpoint
+            tokenize_endpoint.serve_endpoint(
+                tokenize_endpoint_handler,
+                graceful_shutdown=True,
+            ),
+            # Detokenize endpoint
+            detokenize_endpoint.serve_endpoint(
+                detokenize_endpoint_handler,
+                graceful_shutdown=True,
+            ),
+        ]
+
+        # Register model endpoints (these may register metrics)
+        registration_tasks = [
+            # Register for text input (ModelInput.Text)
             register_llm_with_readiness_gate(
                 engine,
                 generate_endpoint,
                 server_args,
                 dynamo_args,
+                input_type=ModelInput.Text,
+                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                readiness_gate=ready_event,
+                has_tokenize_endpoint=True,
+            ),
+            # Register for token input (ModelInput.Tokens)
+            register_llm_with_readiness_gate(
+                engine,
+                generate_tokens_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Tokens,
                 output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
                 readiness_gate=ready_event,
             ),
-        )
+        ]
+
+        await asyncio.gather(*endpoint_tasks, *registration_tasks)
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -216,7 +380,9 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         dynamo_args.component
     )
 
-    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+    # Create endpoints for both text and token input
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)  # text input
+    generate_tokens_endpoint = component.endpoint("generate_tokens")  # token input
 
     # Handle non-leader nodes (multi-node tensor parallelism)
     # Non-leader nodes only run scheduler processes and expose metrics
@@ -224,7 +390,17 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         await _handle_non_leader_node(engine, generate_endpoint)
         return
 
-    # Register engine routes for profiling
+    # Initialize reasoning parser from CLI args (set once at startup)
+    reasoning_parser = None
+    if server_args.reasoning_parser:
+        from sglang.srt.parser.reasoning_parser import ReasoningParser
+
+        reasoning_parser = ReasoningParser(
+            model_type=server_args.reasoning_parser, stream_reasoning=False
+        )
+        logging.info(f"Initialized reasoning parser: {server_args.reasoning_parser}")
+
+    # Register engine routes for profiling and tokenization
     async def start_profile_handler(body: dict) -> dict:
         """Handle /engine/start_profile requests"""
         await engine.tokenizer_manager.start_profile(**body)
@@ -235,10 +411,62 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         await engine.tokenizer_manager.stop_profile()
         return {"status": "ok", "message": "Profiling stopped"}
 
+    async def tokenize_handler(body: dict) -> dict:
+        """Handle /engine/tokenize requests.
+
+        Takes a chat completion request with messages and returns token IDs.
+        """
+        tokenizer = engine.tokenizer_manager.tokenizer
+        if tokenizer is None:
+            return {"status": "error", "message": "Tokenizer not available"}
+
+        messages = body.get("messages")
+        if not messages:
+            return {
+                "status": "error",
+                "message": "No 'messages' field found in request",
+            }
+
+        token_ids = tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True
+        )
+        return {"status": "ok", "token_ids": token_ids}
+
+    async def detokenize_handler(body: dict) -> dict:
+        """Handle /engine/detokenize requests.
+
+        Takes token IDs and returns decoded text, with optional parsing for
+        reasoning content and tool calls based on CLI args.
+        """
+        tokenizer = engine.tokenizer_manager.tokenizer
+        if tokenizer is None:
+            return {"status": "error", "message": "Tokenizer not available"}
+
+        token_ids = body.get("token_ids")
+        if token_ids is None:
+            return {
+                "status": "error",
+                "message": "No 'token_ids' field found in request",
+            }
+
+        text = tokenizer.decode(token_ids)
+        response = {"status": "ok", "text": text}
+
+        # Parse reasoning if parser was configured via --reasoning-parser
+        if reasoning_parser:
+            reasoning_content, normal_content = reasoning_parser.parse_non_stream(text)
+            response["reasoning_content"] = reasoning_content or ""
+            response["normal_content"] = normal_content or ""
+
+        return response
+
     runtime.register_engine_route("start_profile", start_profile_handler)
     runtime.register_engine_route("stop_profile", stop_profile_handler)
+    runtime.register_engine_route("tokenize", tokenize_handler)
+    runtime.register_engine_route("detokenize", detokenize_handler)
     logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
+        "Registered engine routes: /engine/start_profile, /engine/stop_profile, "
+        "/engine/tokenize, /engine/detokenize"
     )
 
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit
@@ -262,18 +490,35 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     try:
-        # Start endpoint immediately and register model concurrently
-        # Registration publishes runtime_config with bootstrap endpoint for optimization
+        # Start both endpoints and register model for both text and token input
         await asyncio.gather(
+            # Text input endpoint (generate)
             generate_endpoint.serve_endpoint(
                 handler.generate,
                 graceful_shutdown=True,
                 metrics_labels=metrics_labels,
                 health_check_payload=health_check_payload,
             ),
+            # Token input endpoint (generate_tokens)
+            generate_tokens_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                health_check_payload=health_check_payload,
+            ),
+            # Register for text input (ModelInput.Text)
             register_llm_with_readiness_gate(
                 engine,
                 generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Text,
+                output_type=ModelType.Prefill,
+                readiness_gate=ready_event,
+            ),
+            # Register for token input (ModelInput.Tokens)
+            register_llm_with_readiness_gate(
+                engine,
+                generate_tokens_endpoint,
                 server_args,
                 dynamo_args,
                 input_type=ModelInput.Tokens,

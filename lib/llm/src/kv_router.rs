@@ -12,7 +12,7 @@ use dynamo_runtime::{
     discovery::{DiscoveryQuery, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
-        SingleIn, async_trait,
+        RouterMode, SingleIn, async_trait,
     },
     protocols::EndpointId,
     protocols::annotated::Annotated,
@@ -51,6 +51,9 @@ use crate::{
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
         subscriber::{start_kv_router_background, start_kv_router_background_nats_core},
+    },
+    protocols::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -976,5 +979,193 @@ impl Drop for KvRouter {
     fn drop(&mut self) {
         tracing::info!("Dropping KvRouter - cancelling background tasks");
         self.cancellation_token.cancel();
+    }
+}
+
+/// Router for Text + KV routing that calls a remote tokenize endpoint
+/// to get token IDs for KV-aware routing decisions, then forwards the
+/// original text request to the selected worker.
+pub struct TextKvRouter {
+    /// The PushRouter for forwarding chat requests to workers
+    inner: PushRouter<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>,
+    /// The KV router for making routing decisions based on token IDs
+    pub chooser: Arc<KvRouter>,
+    /// PushRouter for calling the tokenize endpoint
+    tokenize_router: PushRouter<TokenizeRequest, Annotated<TokenizeResponse>>,
+}
+
+/// Request format for the tokenize endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenizeRequest {
+    pub messages: serde_json::Value,
+}
+
+/// Response format from the tokenize endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenizeResponse {
+    pub status: String,
+    #[serde(default)]
+    pub token_ids: Vec<u32>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl TextKvRouter {
+    pub async fn new(
+        inner: PushRouter<NvCreateChatCompletionRequest, Annotated<NvCreateChatCompletionStreamResponse>>,
+        chooser: Arc<KvRouter>,
+        tokenize_client: Client,
+    ) -> anyhow::Result<Self> {
+        // Create a PushRouter for the tokenize endpoint using RoundRobin
+        // (any worker can tokenize, no special routing needed)
+        let tokenize_router = PushRouter::<TokenizeRequest, Annotated<TokenizeResponse>>::from_client_with_threshold(
+            tokenize_client,
+            RouterMode::RoundRobin,
+            None,
+            None,
+        )
+        .await?;
+
+        Ok(TextKvRouter {
+            inner,
+            chooser,
+            tokenize_router,
+        })
+    }
+
+    /// Call the tokenize endpoint to get token IDs for the given messages.
+    async fn tokenize(&self, messages: serde_json::Value) -> anyhow::Result<Vec<u32>> {
+        let request = TokenizeRequest { messages };
+
+        // Create a simple request with a new context for the tokenize call
+        let tokenize_request = SingleIn::from(request);
+
+        // Call the tokenize endpoint using the PushRouter
+        let mut stream = self.tokenize_router.generate(tokenize_request).await?;
+
+        // Get the response (tokenize returns a single response)
+        let response = stream
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Tokenize endpoint returned no response"))?;
+
+        let response_data = response.data.ok_or_else(|| anyhow::anyhow!("Tokenize response missing data"))?;
+
+        if response_data.status != "ok" {
+            anyhow::bail!(
+                "Tokenize endpoint returned error: {}",
+                response_data.message.unwrap_or_else(|| "unknown error".to_string())
+            );
+        }
+
+        Ok(response_data.token_ids)
+    }
+
+    /// Select the best worker based on token IDs using KV routing.
+    async fn select_worker(&self, context_id: &str, token_ids: &[u32]) -> anyhow::Result<(WorkerWithDpRank, u32)> {
+        // Use the KV router to find the best worker based on token overlap
+        // Pass update_states=false since we'll call add_request separately
+        let (best_worker, overlap_blocks) = self
+            .chooser
+            .find_best_match(Some(context_id), token_ids, None, false)
+            .await?;
+
+        Ok((best_worker, overlap_blocks))
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<NvCreateChatCompletionRequest>, ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error>
+    for TextKvRouter
+{
+    /// Generate method that:
+    /// 1. Extracts messages from the chat request
+    /// 2. Calls the tokenize endpoint to get token IDs
+    /// 3. Uses KV routing to select the best worker
+    /// 4. Forwards the original request to that worker
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let context_id = request.context().id().to_string();
+
+        // Extract messages from the request for tokenization
+        let messages = serde_json::to_value(&request.inner.messages)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize messages: {}", e))?;
+
+        // Call tokenize endpoint to get token IDs (with timing)
+        let tokenize_start = std::time::Instant::now();
+        let token_ids = self.tokenize(messages).await.map_err(|e| {
+            tracing::error!(request_id = %context_id, "Tokenization failed: {}", e);
+            e
+        })?;
+        let tokenize_latency_ms = tokenize_start.elapsed().as_secs_f64() * 1000.0;
+
+        tracing::info!(
+            request_id = %context_id,
+            token_count = token_ids.len(),
+            tokenize_latency_ms = format!("{:.3}", tokenize_latency_ms),
+            "Remote tokenization completed"
+        );
+
+        // Select worker based on token IDs (with timing)
+        let select_start = std::time::Instant::now();
+        let (best_worker, overlap_blocks) = self.select_worker(&context_id, &token_ids).await.map_err(|e| {
+            tracing::error!(request_id = %context_id, "Worker selection failed: {}", e);
+            e
+        })?;
+        let select_latency_ms = select_start.elapsed().as_secs_f64() * 1000.0;
+
+        let instance_id = best_worker.worker_id;
+        let dp_rank = best_worker.dp_rank;
+
+        tracing::info!(
+            request_id = %context_id,
+            worker_id = instance_id,
+            dp_rank = dp_rank,
+            overlap_blocks = overlap_blocks,
+            select_latency_ms = format!("{:.3}", select_latency_ms),
+            total_routing_latency_ms = format!("{:.3}", tokenize_latency_ms + select_latency_ms),
+            "KV routing worker selection completed"
+        );
+
+        // Register the request with the KV router for tracking
+        self.chooser
+            .add_request(context_id.clone(), &token_ids, overlap_blocks, best_worker)
+            .await;
+
+        // Forward the original request to the selected worker
+        let chooser = self.chooser.clone();
+        let mut response_stream = self.inner.direct(request, instance_id).await?;
+        let stream_context = response_stream.context();
+        let context_for_monitoring = stream_context.clone();
+
+        // Wrap stream with lifecycle management (free on completion)
+        let wrapped_stream = Box::pin(async_stream::stream! {
+            loop {
+                tokio::select! {
+                    biased;
+
+                    _ = context_for_monitoring.stopped() => {
+                        tracing::debug!("Request {context_id} cancelled, ending stream");
+                        break;
+                    }
+
+                    item = response_stream.next() => {
+                        let Some(item) = item else {
+                            break;
+                        };
+                        yield item;
+                    }
+                }
+            }
+
+            // Free the request from KV tracking
+            if let Err(e) = chooser.free(&context_id).await {
+                tracing::warn!("Failed to free request {context_id}: {e}");
+            }
+        });
+
+        Ok(ResponseStream::new(wrapped_stream, stream_context))
     }
 }

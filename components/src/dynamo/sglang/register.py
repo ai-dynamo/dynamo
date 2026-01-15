@@ -22,6 +22,7 @@ async def _register_llm_with_runtime_config(
     dynamo_args: DynamoArgs,
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
+    has_tokenize_endpoint: bool = False,
 ) -> bool:
     """Register LLM with the Dynamo runtime.
 
@@ -32,6 +33,7 @@ async def _register_llm_with_runtime_config(
         dynamo_args: Dynamo-specific configuration.
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
+        has_tokenize_endpoint: Whether a tokenize endpoint exists (enables KV routing for Text models).
 
     Returns:
         True if registration succeeded, False otherwise.
@@ -44,6 +46,8 @@ async def _register_llm_with_runtime_config(
             "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
         )
         input_type = ModelInput.Text
+        # When overriding to Text input, enable tokenize endpoint for KV routing
+        has_tokenize_endpoint = True
         # Only override output_type for chat models, not for embeddings
         if output_type != ModelType.Embedding:
             output_type = ModelType.Chat
@@ -59,6 +63,7 @@ async def _register_llm_with_runtime_config(
             migration_limit=dynamo_args.migration_limit,
             runtime_config=runtime_config,
             custom_template_path=dynamo_args.custom_jinja_template,
+            has_tokenize_endpoint=has_tokenize_endpoint,
         )
         logging.info("Successfully registered LLM with runtime config")
         return True
@@ -185,6 +190,7 @@ async def register_llm_with_readiness_gate(
     input_type: Optional[ModelInput] = ModelInput.Tokens,
     output_type: Optional[ModelType] = ModelType.Chat | ModelType.Completions,
     readiness_gate: Optional[asyncio.Event] = None,
+    has_tokenize_endpoint: bool = False,
 ) -> None:
     """Wrapper function to register LLM with the Dynamo runtime and use optional readiness gate to signal success.
 
@@ -196,6 +202,7 @@ async def register_llm_with_readiness_gate(
         input_type: Expected model input type. Defaults to ModelInput.Tokens.
         output_type: Expected model output type. Defaults to ModelType.Chat | ModelType.Completions.
         readiness_gate: Optional event to signal when registration completes.
+        has_tokenize_endpoint: Whether a tokenize endpoint exists (enables KV routing for Text models).
 
     Raises:
         RuntimeError: If model registration fails.
@@ -207,6 +214,7 @@ async def register_llm_with_readiness_gate(
         dynamo_args,
         input_type,
         output_type,
+        has_tokenize_endpoint,
     )
     if not registration_success:
         logging.error("Model registration failed; shutting down")
