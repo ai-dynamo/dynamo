@@ -1672,6 +1672,13 @@ pub mod tests {
         tracing::warn!("inside warn span");
     }
 
+    // Span from a different target - should be FILTERED OUT at info level
+    // because the filter is warn,dynamo_runtime::logging::tests=debug
+    #[tracing::instrument(level = "info", target = "other_module", skip_all)]
+    async fn other_target_info_span() {
+        tracing::info!(target: "other_module", "inside other target span");
+    }
+
     /// Comprehensive test for span events covering:
     /// - SPAN_CREATED and SPAN_CLOSED event emission
     /// - Trace context (trace_id, span_id) in span events
@@ -1710,6 +1717,9 @@ pub mod tests {
                 info_level_span().await;
                 warn_level_span().await;
 
+                // Run span from different target (should be filtered out)
+                other_target_info_span().await;
+
                 drop(guard);
 
                 let lines = load_log(file_name)?;
@@ -1729,15 +1739,6 @@ pub mod tests {
                         .filter(|log| log.get("message").and_then(|v| v.as_str()) == Some(msg))
                         .collect()
                 };
-
-                // Skip test if logging was already initialized by another test
-                // (check if we have any trace_id at all)
-                if !lines
-                    .iter()
-                    .any(|log| log.get("trace_id").and_then(|v| v.as_str()).is_some())
-                {
-                    return Ok(());
-                }
 
                 // === Test 1: SPAN_CREATED events have required fields ===
                 let span_created_events = get_span_events("SPAN_CREATED");
@@ -1822,9 +1823,13 @@ pub mod tests {
                 );
 
                 // === Test 4: Level-based filtering (negative) ===
-                // Verify NO spans from OTHER targets appear at debug/info level
-                // (We can't easily create spans from other targets in this test,
-                // but we verify that our module's spans are the only ones present)
+                // Verify spans from OTHER targets at debug/info level are filtered out
+                assert!(
+                    !has_span_event("SPAN_CREATED", "other_target_info_span"),
+                    "INFO span from non-allowed target (other_module) MUST be filtered out"
+                );
+
+                // Also verify no spans from other targets appear at debug/info level
                 for event in &span_created_events {
                     let target = event.get("target").and_then(|v| v.as_str()).unwrap_or("");
                     let level = event.get("level").and_then(|v| v.as_str()).unwrap_or("");
