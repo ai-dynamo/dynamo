@@ -84,22 +84,22 @@ export MAX_JOBS=$MAX_JOBS
 
 echo "=== Installing prerequisites ==="
 
-echo "\n=== Configuration Summary ==="
+echo "=== Configuration Summary ==="
 echo "  VLLM_REF=$VLLM_REF | EDITABLE=$EDITABLE | ARCH=$ARCH"
 echo "  MAX_JOBS=$MAX_JOBS"
 echo "  INSTALLATION_DIR=$INSTALLATION_DIR | VLLM_GIT_URL=$VLLM_GIT_URL"
 
-echo "\n=== Cloning vLLM repository ==="
+echo "=== Cloning vLLM repository ==="
 # We need to clone to install dependencies
 cd $INSTALLATION_DIR
 git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
-echo "\n=== Applying custom modifications ==="
+echo "=== Applying custom modifications ==="
 git apply --ignore-whitespace /tmp/vllm-xpu.patch
 
-echo "\n=== Installing vLLM"
+echo "=== Installing vLLM"
 uv pip install -r requirements/xpu.txt --index-strategy unsafe-best-match
 
 if [ "$EDITABLE" = "true" ]; then
@@ -110,7 +110,7 @@ fi
 
 echo "✓ vLLM installation completed"
 
-echo "\n=== Installing LMCache ==="
+echo "=== Installing LMCache ==="
 if [ "$ARCH" = "amd64" ]; then
     # LMCache origin & license:
     #   Origin: PyPI package 'lmcache' (https://pypi.org/project/lmcache/)

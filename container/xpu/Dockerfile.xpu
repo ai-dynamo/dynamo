@@ -306,7 +306,7 @@ RUN set -eux; \
       aarch64) PROTOC_ZIP="protoc-${PROTOC_VERSION}-linux-aarch_64.zip" ;; \
       *) echo "Unsupported architecture: ${ARCH_ALT}" >&2; exit 1 ;; \
     esac; \
-    wget --no-check-certificate --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
+    wget --tries=3 --waitretry=5 -O /tmp/protoc.zip "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/${PROTOC_ZIP}"; \
     rm -f /usr/local/bin/protoc /usr/bin/protoc; \
     unzip -o /tmp/protoc.zip -d /usr/local bin/protoc include/*; \
     chmod +x /usr/local/bin/protoc; \
