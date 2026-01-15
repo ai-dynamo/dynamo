@@ -350,6 +350,7 @@ mod tests {
             logging::DYN_LOGGING_JSONL,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
+            logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
