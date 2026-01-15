@@ -14,7 +14,7 @@ use dynamo_runtime::protocols::maybe_error::MaybeError;
 use tokio::sync::{OnceCell, watch};
 use tokio_stream::StreamExt;
 
-use crate::kv_router::WORKER_KV_INDEXER_QUERY_SUBJECT;
+use crate::kv_router::WORKER_KV_INDEXER_QUERY_ENDPOINT;
 use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
 use crate::kv_router::protocols::WorkerId;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
@@ -72,7 +72,7 @@ impl WorkerQueryClient {
         let router = self
             .router
             .get_or_try_init(|| async {
-                let endpoint = self.component.endpoint(WORKER_KV_INDEXER_QUERY_SUBJECT);
+                let endpoint = self.component.endpoint(WORKER_KV_INDEXER_QUERY_ENDPOINT);
                 let client = endpoint.client().await?;
                 let router = PushRouter::from_client(client, RouterMode::RoundRobin).await?;
                 Ok::<_, anyhow::Error>(Arc::new(router))
@@ -131,7 +131,7 @@ pub(crate) async fn start_worker_kv_query_endpoint(
     );
 
     if let Err(e) = component
-        .endpoint(WORKER_KV_INDEXER_QUERY_SUBJECT)
+        .endpoint(WORKER_KV_INDEXER_QUERY_ENDPOINT)
         .endpoint_builder()
         .handler(ingress)
         .graceful_shutdown(true)
