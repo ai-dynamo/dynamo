@@ -85,6 +85,10 @@ class MultimodalHelper:
     def expand_image_tokens(
         self, token_ids: List[int], num_image_tokens: int
     ) -> List[int]:
+        if self.image_token_id not in token_ids:
+            raise ValueError(
+                f"Image token ID {self.image_token_id} not found in token_ids."
+            )
         idx = token_ids.index(self.image_token_id)
         return (
             token_ids[:idx]
@@ -122,7 +126,7 @@ class MultimodalHelper:
         mm_item = {
             "format": "processor_output",
             "modality": "IMAGE",
-            "image_grid_thw": torch.tensor(image_grid_thw),
+            "image_grid_thw": torch.tensor(image_grid_thw) if image_grid_thw else None,
             "precomputed_embeddings": embeddings,
         }
         return expanded_token_ids, mm_item

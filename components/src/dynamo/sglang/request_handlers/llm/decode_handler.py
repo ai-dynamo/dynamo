@@ -146,6 +146,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         else:
             image_url = extract_image_url(request)
             if image_url:
+                if "token_ids" not in request:
+                    raise ValueError("Multimodal requests require pre-tokenized input.")
                 if not self._multimodal_helper:
                     if not self.config.server_args.chat_template:
                         raise ValueError(
