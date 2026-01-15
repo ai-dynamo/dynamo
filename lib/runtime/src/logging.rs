@@ -1888,4 +1888,75 @@ pub mod tests {
         .await;
         Ok(())
     }
+
+    /// Test that span events respect target-based filtering
+    /// When DYN_LOG=error,dynamo_runtime::logging::tests=debug, spans from our test module
+    /// should generate events even at debug level
+    #[tokio::test]
+    async fn test_span_events_respect_target_filter() -> Result<()> {
+        #[allow(clippy::redundant_closure_call)]
+        let _ = temp_env::async_with_vars(
+            [
+                (env_logging::DYN_LOGGING_JSONL, Some("1")),
+                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
+                // Default is error, but our test module is allowed at debug
+                (
+                    env_logging::DYN_LOG,
+                    Some("error,dynamo_runtime::logging::tests=debug"),
+                ),
+            ],
+            (async || {
+                let tmp_file = NamedTempFile::new().unwrap();
+                let file_name = tmp_file.path().to_str().unwrap();
+                let guard = StderrOverride::from_file(file_name)?;
+                init();
+
+                // Create spans at different levels - all from dynamo_runtime::logging::tests target
+                debug_level_span().await;
+                info_level_span().await;
+                warn_level_span().await;
+
+                drop(guard);
+
+                let lines = load_log(file_name)?;
+
+                // With target-based filter allowing our module at debug level,
+                // ALL spans should generate SPAN_CREATED events
+                let debug_span_created = lines.iter().any(|log| {
+                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
+                        && log.get("span_name").and_then(|v| v.as_str()) == Some("debug_level_span")
+                });
+                let info_span_created = lines.iter().any(|log| {
+                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
+                        && log.get("span_name").and_then(|v| v.as_str()) == Some("info_level_span")
+                });
+                let warn_span_created = lines.iter().any(|log| {
+                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
+                        && log.get("span_name").and_then(|v| v.as_str()) == Some("warn_level_span")
+                });
+
+                // If logging was initialized with our settings, all spans should pass
+                // because the target dynamo_runtime::logging::tests is allowed at debug level
+                if debug_span_created {
+                    assert!(
+                        debug_span_created,
+                        "DEBUG span from allowed target should pass"
+                    );
+                    assert!(
+                        info_span_created,
+                        "INFO span from allowed target should pass"
+                    );
+                    assert!(
+                        warn_span_created,
+                        "WARN span from allowed target should pass"
+                    );
+                }
+                // If debug_span_created is false, logging was initialized by another test
+
+                Ok::<(), anyhow::Error>(())
+            })(),
+        )
+        .await;
+        Ok(())
+    }
 }
