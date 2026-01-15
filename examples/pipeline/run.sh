@@ -48,12 +48,4 @@ python3 stage1.py &
 PIDS+=($!)
 sleep 1
 
-echo ""
-echo "=== Running Client ==="
-echo ""
-
-# Run client
-python3 client.py
-
-echo ""
-echo "=== Complete ==="
+wait

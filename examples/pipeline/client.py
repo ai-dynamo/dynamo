@@ -13,7 +13,7 @@ from dynamo._core import Context, DistributedRuntime
 async def main():
     """Connect to the pipeline and send a request"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "file", "nats")
+    runtime = DistributedRuntime(loop, "file", "tcp")
 
     # Connect to Stage 1 (entry point of the pipeline)
     endpoint = runtime.namespace("pipeline").component("stage1").endpoint("process")
@@ -27,7 +27,7 @@ async def main():
     input_text = "hello"
 
     print(f"[Client] Sending: {input_text}")
-    stream = await client.process(input_text, context=context)
+    stream = await client.generate(input_text, context=context)
 
     # Receive results
     async for response in stream:

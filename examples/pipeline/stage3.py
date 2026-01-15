@@ -15,20 +15,17 @@ class Stage3:
 
     async def process(self, request, context):
         """Receive input, transform it, yield result"""
+        print("[Stage3] start")
         input_text = request
-        print(f"[Stage3] Input: {input_text}")
-
-        # Simple transformation: add suffix
         output_text = f"{input_text} -> stage3_done"
-        print(f"[Stage3] Output: {output_text}")
-
         yield output_text
+        print("[Stage3] end")
 
 
 async def main():
     """Start Stage 3 server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "file", "nats")
+    runtime = DistributedRuntime(loop, "file", "tcp")
 
     component = runtime.namespace("pipeline").component("stage3")
     endpoint = component.endpoint("process")

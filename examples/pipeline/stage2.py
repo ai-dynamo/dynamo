@@ -28,25 +28,21 @@ class Stage2:
 
     async def process(self, request, context):
         """Receive input, transform, call Stage 3, yield combined result"""
+        print("[Stage2] start")
         input_text = request
-        print(f"[Stage2] Input: {input_text}")
-
-        # Transform: add our marker
         transformed = f"{input_text} -> stage2"
-        print(f"[Stage2] Transformed: {transformed}")
 
-        # Call Stage 3
-        stream = await self.stage3_client.process(transformed, context=context)
+        stream = await self.stage3_client.generate(transformed, context=context)
         async for response in stream:
             output_text = response.data()
-            print(f"[Stage2] Output: {output_text}")
             yield output_text
+        print("[Stage2] end")
 
 
 async def main():
     """Start Stage 2 server"""
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, "file", "nats")
+    runtime = DistributedRuntime(loop, "file", "tcp")
 
     handler = Stage2(runtime)
     await handler.initialize()
