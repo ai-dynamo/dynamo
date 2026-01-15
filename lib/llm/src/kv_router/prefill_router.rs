@@ -260,7 +260,7 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let _ = self.prefill_router.get()?; // Ensure activated
+        let prefill_router = self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -487,7 +487,6 @@ impl PrefillRouter {
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
     }
-
 
     /// Query optimal worker IDs without executing a request.
     ///
