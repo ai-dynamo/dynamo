@@ -235,10 +235,12 @@ jobs:
           # Create a .coveragerc file with path remapping
           cat > .coveragerc << 'EOF'
           [paths]
-          source =
-              /workspace/components/src/dynamo
+          dynamo =
               components/src/dynamo
+              /workspace/components/src/dynamo
               $GITHUB_WORKSPACE/components/src/dynamo
+          [run]
+          parallel = True
           EOF
 
           # Expand $GITHUB_WORKSPACE in the config
