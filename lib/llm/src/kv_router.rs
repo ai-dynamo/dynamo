@@ -688,7 +688,7 @@ pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
     /// If true, require worker IDs in request. Error if missing instead of using router selection.
-    direct_route: bool,
+    require_worker_ids: bool,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -706,13 +706,13 @@ impl KvPushRouter {
         KvPushRouter {
             inner,
             chooser,
-            direct_route: false,
+            require_worker_ids: false,
         }
     }
 
-    /// Enable direct routing mode - require worker IDs in requests
-    pub fn with_direct_route(mut self, direct_route: bool) -> Self {
-        self.direct_route = direct_route;
+    /// Enable require_worker_ids mode - error if worker IDs missing in requests
+    pub fn with_require_worker_ids(mut self, require_worker_ids: bool) -> Self {
+        self.require_worker_ids = require_worker_ids;
         self
     }
 
@@ -741,10 +741,10 @@ impl KvPushRouter {
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
         }) else {
             // No preselected worker ID found
-            if self.direct_route {
-                // Direct routing mode: worker IDs are required
+            if self.require_worker_ids {
+                // require_worker_ids mode: worker IDs are required
                 anyhow::bail!(
-                    "Direct routing enabled (--direct-route) but no worker ID found in request for phase {:?}. \
+                    "Worker IDs required (--direct-route) but none found in request for phase {:?}. \
                      Expected decode_worker_id, prefill_worker_id, or backend_instance_id to be set by external orchestrator (e.g., EPP).",
                     phase
                 );

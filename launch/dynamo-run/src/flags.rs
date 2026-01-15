@@ -88,12 +88,12 @@ pub struct Flags {
     #[arg(long)]
     pub router_track_active_blocks: Option<bool>,
 
-    /// Direct routing mode for EPP integration.
+    /// Require worker IDs in requests (for EPP integration).
     /// When enabled, requests MUST include worker IDs (decode_worker_id, prefill_worker_id).
     /// Requests without worker IDs will error instead of using router selection.
     /// Use this when an external orchestrator (EPP) handles worker selection.
-    #[arg(long)]
-    pub direct_route: bool,
+    #[arg(long = "direct-route")]
+    pub require_worker_ids: bool,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -202,7 +202,7 @@ impl Flags {
                 None,
             ),
         )
-        .with_direct_route(self.direct_route)
+        .with_require_worker_ids(self.require_worker_ids)
     }
 
     /// Load extra engine arguments from a JSON file

@@ -42,7 +42,7 @@ pub struct RouterConfig {
     /// If true, require worker IDs in request (decode_worker_id, prefill_worker_id).
     /// Requests without worker IDs will error instead of using router selection.
     /// Used for EPP integration where worker selection is done externally.
-    pub direct_route: bool,
+    pub require_worker_ids: bool,
 }
 
 impl RouterConfig {
@@ -53,7 +53,7 @@ impl RouterConfig {
             active_decode_blocks_threshold: None,
             active_prefill_tokens_threshold: None,
             enforce_disagg: false,
-            direct_route: false,
+            require_worker_ids: false,
         }
     }
 
@@ -72,8 +72,8 @@ impl RouterConfig {
         self
     }
 
-    pub fn with_direct_route(mut self, direct_route: bool) -> Self {
-        self.direct_route = direct_route;
+    pub fn with_require_worker_ids(mut self, require_worker_ids: bool) -> Self {
+        self.require_worker_ids = require_worker_ids;
         self
     }
 }

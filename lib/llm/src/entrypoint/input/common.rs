@@ -180,7 +180,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
-    direct_route: bool,
+    require_worker_ids: bool,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -209,7 +209,7 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
-        direct_route,
+        require_worker_ids,
         metrics,
     )
     .await
@@ -227,7 +227,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
-    direct_route: bool,
+    require_worker_ids: bool,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -280,7 +280,8 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser).with_direct_route(direct_route);
+            let kv_push_router =
+                KvPushRouter::new(router, chooser).with_require_worker_ids(require_worker_ids);
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }
     };
