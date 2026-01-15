@@ -778,17 +778,13 @@ class BaseWorkerHandler(ABC):
 
         # Process image_url entries
         images = []
+        image_futures = []
         for item in mm_map.get(IMAGE_URL_KEY, []):
             if isinstance(item, dict) and URL_VARIANT_KEY in item:
                 url = item[URL_VARIANT_KEY]
-                try:
-                    # ImageLoader supports both data: and http(s): URLs with caching
-                    image = await self.image_loader.load_image(url)
-                    images.append(image)
-                    logger.debug(f"Loaded image from URL: {url[:80]}...")
-                except Exception:
-                    logger.exception(f"Failed to load image from {url[:80]}...")
-                    raise
+                # Gather image fetch work
+                image_futures.append(self.image_loader.load_image(url))
+                logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
                 # Will contain NIXL metadata for direct memory access
@@ -796,6 +792,13 @@ class BaseWorkerHandler(ABC):
                 logger.warning(
                     "Decoded multimodal data not yet supported in standard worker"
                 )
+
+        try:
+            images = await asyncio.gather(*image_futures)
+            logger.debug(f"Loaded {len(images)} image(s) from URLs")
+        except Exception:
+            logger.exception(f"Failed to load image from {url[:80]}...")
+            raise
 
         if images:
             # vLLM expects single image or list
