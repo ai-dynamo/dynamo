@@ -199,6 +199,11 @@ def main():
         default=0,
         help="Random seed for reproducibility (default: 0)",
     )
+    parser.add_argument(
+        "--use-expected-osl",
+        action="store_true",
+        help="Pass expected_output_tokens to nvext for router tracking",
+    )
 
     args = parser.parse_args()
 
@@ -223,12 +228,38 @@ def main():
         or args.max_osl is not None
     )
 
-    if not needs_synthesis:
-        # No synthesis needed, use original dataset
+    if not needs_synthesis and not args.use_expected_osl:
+        # No synthesis or modification needed, use original dataset
         trace_dataset_path = args.input_dataset
         logger.info(
             f"Using original trace dataset (no synthesis parameters modified): {trace_dataset_path}"
         )
+    elif not needs_synthesis and args.use_expected_osl:
+        # Only inject expected_output_tokens into nvext, no other synthesis
+        logger.info("Injecting expected_output_tokens into original trace dataset...")
+
+        # Read original dataset
+        requests = []
+        with open(args.input_dataset, "r") as f:
+            for line in f:
+                requests.append(json.loads(line.strip()))
+
+        # Inject expected_output_tokens into nvext for each request
+        for request in requests:
+            osl = request.get("output_tokens", 0)
+            if "nvext" not in request:
+                request["nvext"] = {}
+            request["nvext"]["expected_output_tokens"] = osl
+
+        # Write modified data to output directory
+        trace_dataset_path = os.path.join(
+            args.output_dir, "trace_with_expected_osl.jsonl"
+        )
+        with open(trace_dataset_path, "w") as f:
+            for request in requests:
+                f.write(json.dumps(request) + "\n")
+
+        logger.info(f"Modified trace data saved to: {trace_dataset_path}")
     else:
         # Generate synthetic data based on input dataset
         logger.info("Generating synthetic trace data...")
@@ -289,6 +320,17 @@ def main():
         # Save synthetic data to a permanent file in output directory
         synthetic_trace_filename = "synthetic_trace.jsonl"
         trace_dataset_path = os.path.join(args.output_dir, synthetic_trace_filename)
+
+        # Optionally inject expected_output_tokens into nvext for each request
+        if args.use_expected_osl:
+            for request in requests:
+                # Get the output_tokens (OSL) for this request
+                osl = request.get("output_tokens", 0)
+                # Initialize or update nvext with expected_output_tokens
+                if "nvext" not in request:
+                    request["nvext"] = {}
+                request["nvext"]["expected_output_tokens"] = osl
+            logger.info("Injected expected_output_tokens into nvext for each request")
 
         # Write synthetic data to file
         with open(trace_dataset_path, "w") as f:
