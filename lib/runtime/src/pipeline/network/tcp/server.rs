@@ -660,6 +660,27 @@ mod tests {
             Err(Error::LocalIpAddressNotFound)
         }
     }
+    #[test]
+    fn test_can_fetch_local_ipv6() {
+        // Try to get the local IPv6 address on this machine.
+        // This test passes if we can fetch an IPv6 address or
+        // returns LocalIpAddressNotFound (e.g., no IPv6 config).
+        // Any other error is a test failure.
+        match local_ipv6() {
+            Ok(ip) => {
+                assert!(ip.is_ipv6(), "Returned address is not IPv6: {:?}", ip);
+                println!("Fetched local IPv6 address: {}", ip);
+            }
+            Err(Error::LocalIpAddressNotFound) => {
+                // Acceptable, machine may not have a non-loopback IPv6 address
+                println!("No local IPv6 address found on this machine.");
+            }
+            Err(e) => {
+                println!("Unexpected error fetching local IPv6 address: {:?}", e);
+                assert!(false, "Unexpected error fetching local IPv6 address: {:?}", e);
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_tcp_stream_server_default_behavior() {
