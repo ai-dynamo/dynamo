@@ -451,6 +451,13 @@ impl WorkerSelector for DefaultWorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
+        let worker_id_list: Vec<_> = workers.keys().collect();
+        tracing::info!(
+            "Available worker ids ({}): {:?}",
+            worker_id_list.len(),
+            worker_id_list
+        );
+
         if workers.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }

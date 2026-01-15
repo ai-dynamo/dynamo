@@ -47,7 +47,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:a3ca6d81a6c0ed2c300d2dcb5bcdd92c670048d6a2429f7dc8de9a3bf7fcfa8b
+          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:5b6abed53a4fbd4d834da22d157e4d28119a391604a0d6e5c069a95af8276f92
           command:
             - /bin/bash
             - -c
@@ -85,7 +85,7 @@ spec:
           value: "9090"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:a3ca6d81a6c0ed2c300d2dcb5bcdd92c670048d6a2429f7dc8de9a3bf7fcfa8b
+          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:5b6abed53a4fbd4d834da22d157e4d28119a391604a0d6e5c069a95af8276f92
           command:
             - python
             - -m

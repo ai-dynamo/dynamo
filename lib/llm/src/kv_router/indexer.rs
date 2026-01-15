@@ -297,7 +297,7 @@ impl RadixTree {
         // Construct WorkerWithDpRank from worker_id and dp_rank from the event
         let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
 
-        tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
+        tracing::trace!(id, "RadixTree::apply_event: worker_id={}, Store operation: {:?}", worker_id, op);
 
         let worker_lookup = self.lookup.entry(worker).or_default();
 
