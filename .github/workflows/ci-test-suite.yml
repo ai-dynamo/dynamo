@@ -223,13 +223,23 @@ jobs:
           set -x
           echo "📊 Merging all test coverage..."
 
+          # Debug: Show current directory and source code structure
+          echo "Current directory: $(pwd)"
+          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
+          echo "Source code structure:"
+          ls -la components/src/dynamo/ 2>/dev/null | head -20 || echo "components/src/dynamo not found"
+
           # Create a .coveragerc file with path remapping
           cat > .coveragerc << 'EOF'
           [paths]
           source =
               /workspace/components/src/dynamo
               components/src/dynamo
+              $GITHUB_WORKSPACE/components/src/dynamo
           EOF
+
+          # Expand $GITHUB_WORKSPACE in the config
+          sed -i "s|\$GITHUB_WORKSPACE|${GITHUB_WORKSPACE}|g" .coveragerc
 
           echo "Created .coveragerc with path remapping:"
           cat .coveragerc
