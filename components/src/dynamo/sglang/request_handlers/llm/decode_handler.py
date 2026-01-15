@@ -4,15 +4,30 @@
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Dict, Optional
 
 import sglang as sgl
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
-from dynamo.sglang.multimodal_utils import MultimodalHelper, extract_image_url
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
+
+
+def _extract_image_url(request: Dict[str, Any]) -> Optional[str]:
+    """Extract image URL from multimodal request data."""
+    mm_data = request.get("multi_modal_data")
+    if not mm_data:
+        return None
+    image_urls = mm_data.get("image_url", [])
+    if not image_urls:
+        return None
+    item = image_urls[0]
+    if isinstance(item, dict) and "Url" in item:
+        return item["Url"]
+    if isinstance(item, str):
+        return item
+    return None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -39,19 +54,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
         )
-        self._multimodal_helper: MultimodalHelper | None = None
-
-        # SGLang checks HF config.architectures for VLM patterns
-        is_multimodal = engine.tokenizer_manager.model_config.is_multimodal
-        if is_multimodal and config.server_args.chat_template:
-            self._multimodal_helper = MultimodalHelper.from_config(config)
-            logging.info("MultimodalHelper initialized (multimodal model detected)")
-        elif is_multimodal:
-            logging.warning(
-                "Multimodal model detected but --chat-template not provided. "
-                "Multimodal requests will fail."
-            )
-
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -156,22 +158,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            image_url = extract_image_url(request)
+            # For multimodal requests, pass image URL directly to SGLang.
+            # SGLang's mm_data_processor handles image loading/preprocessing,
+            # and the scheduler performs token expansion and vision encoding.
+            image_url = _extract_image_url(request)
             if image_url:
-                if "token_ids" not in request:
-                    raise ValueError("Multimodal requests require pre-tokenized input.")
-                if not self._multimodal_helper:
-                    raise ValueError(
-                        "Multimodal requests require --chat-template to be specified."
-                    )
-                (
-                    expanded_token_ids,
-                    mm_item,
-                ) = await self._multimodal_helper.prepare_multimodal_inputs(
-                    request["token_ids"], image_url
-                )
-                input_param = {"input_ids": expanded_token_ids}
-                image_data = [mm_item]
+                image_data = [image_url]
             trace_header = (
                 self._get_trace_header(context) if self.enable_trace else None
             )
