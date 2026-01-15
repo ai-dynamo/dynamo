@@ -1448,6 +1448,7 @@ pub async fn create_worker_selection_pipeline_chat(
         active_decode_blocks_threshold: busy_threshold,
         active_prefill_tokens_threshold: None,
         enforce_disagg,
+        direct_route: false, // C bindings use normal routing; EPP uses query_router bindings
     };
     // Create metrics for migration tracking (not exposed via /metrics in C bindings)
     let metrics = Arc::new(Metrics::new());
@@ -1561,6 +1562,7 @@ pub async fn create_worker_selection_pipeline_chat(
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        false, // direct_route: C bindings use normal routing; EPP flow uses query_router instead
         metrics,
     )
     .await?;

@@ -24,7 +24,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub mod approx;
-pub mod direct_router;
 pub mod indexer;
 pub mod prefill_router;
 pub mod protocols;
@@ -35,7 +34,6 @@ pub mod sequence;
 pub mod subscriber;
 pub mod worker_query;
 
-pub use direct_router::DirectFromRequestRouter;
 use indexer::WorkerKvQueryResponse;
 pub use prefill_router::{PrefillRouter, RouteQueryResult};
 use worker_query::WorkerQueryClient;
@@ -689,6 +687,8 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 pub struct KvPushRouter {
     inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     pub chooser: Arc<KvRouter>,
+    /// If true, require worker IDs in request. Error if missing instead of using router selection.
+    direct_route: bool,
 }
 
 /// Result of worker selection containing instance ID, dp_rank, and overlap amount.
@@ -703,7 +703,17 @@ impl KvPushRouter {
         inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
-        KvPushRouter { inner, chooser }
+        KvPushRouter {
+            inner,
+            chooser,
+            direct_route: false,
+        }
+    }
+
+    /// Enable direct routing mode - require worker IDs in requests
+    pub fn with_direct_route(mut self, direct_route: bool) -> Self {
+        self.direct_route = direct_route;
+        self
     }
 
     /// Select a worker for the request, either using a preselected worker or finding the best match.
@@ -730,7 +740,17 @@ impl KvPushRouter {
             }
             RequestPhase::Aggregated => routing.and_then(|r| r.backend_instance_id),
         }) else {
-            // No preselected worker - find the best match
+            // No preselected worker ID found
+            if self.direct_route {
+                // Direct routing mode: worker IDs are required
+                anyhow::bail!(
+                    "Direct routing enabled (--direct-route) but no worker ID found in request for phase {:?}. \
+                     Expected decode_worker_id, prefill_worker_id, or backend_instance_id to be set by external orchestrator (e.g., EPP).",
+                    phase
+                );
+            }
+
+            // Normal mode: find the best match using router
             // Don't update states if this is a query-only request
             let (best_worker, overlap_amount) = self
                 .chooser

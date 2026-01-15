@@ -9,7 +9,7 @@ use crate::{
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
     http::service::metrics::Metrics,
-    kv_router::{DirectFromRequestRouter, KvPushRouter, KvRouter, PrefillRouter},
+    kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::{OpenAIPreprocessor, prompt::PromptFormatter},
@@ -180,6 +180,7 @@ pub async fn build_routed_pipeline<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    direct_route: bool,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -208,6 +209,7 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        direct_route,
         metrics,
     )
     .await
@@ -225,6 +227,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    direct_route: bool,
     metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
@@ -277,7 +280,7 @@ where
             let Some(chooser) = chooser else {
                 anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
             };
-            let kv_push_router = KvPushRouter::new(router, chooser);
+            let kv_push_router = KvPushRouter::new(router, chooser).with_direct_route(direct_route);
             ServiceBackend::from_engine(Arc::new(kv_push_router))
         }
     };
@@ -295,59 +298,6 @@ where
         .link(prefill_op.forward_edge())?
         .link(service_backend)?
         .link(prefill_op.backward_edge())?
-        .link(backend.backward_edge())?
-        .link(migration.backward_edge())?
-        .link(preprocessor_op.backward_edge())?
-        .link(frontend)?;
-
-    Ok(engine)
-}
-
-/// Direct routing pipeline for pre-routed requests (EPP integration)
-///
-/// This pipeline is used when worker IDs are pre-determined by an external orchestrator
-/// (such as the Inference Gateway EPP). It skips the routing selection logic and routes
-/// directly to the worker specified in the request's routing hints.
-///
-/// Key differences from `build_routed_pipeline_with_preprocessor`:
-/// - No KvRouter or PrefillRouter - worker selection already done
-/// - Uses DirectFromRequest router that reads worker ID from request
-/// - Simpler pipeline without disaggregated routing complexity
-///
-/// The request must have `routing.decode_worker_id` or `routing.backend_instance_id` set.
-#[allow(clippy::too_many_arguments)]
-pub async fn build_direct_routed_pipeline<Req, Resp>(
-    card: &ModelDeploymentCard,
-    client: &Client,
-    preprocessor: Arc<OpenAIPreprocessor>,
-    hf_tokenizer: tokenizers::Tokenizer,
-    metrics: Arc<Metrics>,
-) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
-where
-    Req: Data,
-    Resp: Data,
-    OpenAIPreprocessor: Operator<
-            Context<Req>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-            Context<PreprocessedRequest>,
-            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
-        >,
-{
-    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
-    let preprocessor_op = preprocessor.into_operator();
-    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card, metrics).into_operator();
-
-    // Create DirectFromRequest router that reads worker ID from request
-    let direct_router = DirectFromRequestRouter::new(client.clone()).await?;
-    let service_backend = ServiceBackend::from_engine(Arc::new(direct_router));
-
-    // Simpler pipeline without PrefillRouter (disagg handled externally by EPP)
-    let engine = frontend
-        .link(preprocessor_op.forward_edge())?
-        .link(migration.forward_edge())?
-        .link(backend.forward_edge())?
-        .link(service_backend)?
         .link(backend.backward_edge())?
         .link(migration.backward_edge())?
         .link(preprocessor_op.backward_edge())?

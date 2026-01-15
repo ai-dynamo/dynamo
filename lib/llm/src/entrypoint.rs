@@ -39,6 +39,10 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens utilization (literal token count)
     pub active_prefill_tokens_threshold: Option<u64>,
     pub enforce_disagg: bool,
+    /// If true, require worker IDs in request (decode_worker_id, prefill_worker_id).
+    /// Requests without worker IDs will error instead of using router selection.
+    /// Used for EPP integration where worker selection is done externally.
+    pub direct_route: bool,
 }
 
 impl RouterConfig {
@@ -49,6 +53,7 @@ impl RouterConfig {
             active_decode_blocks_threshold: None,
             active_prefill_tokens_threshold: None,
             enforce_disagg: false,
+            direct_route: false,
         }
     }
 
@@ -64,6 +69,11 @@ impl RouterConfig {
 
     pub fn with_enforce_disagg(mut self, enforce_disagg: bool) -> Self {
         self.enforce_disagg = enforce_disagg;
+        self
+    }
+
+    pub fn with_direct_route(mut self, direct_route: bool) -> Self {
+        self.direct_route = direct_route;
         self
     }
 }
