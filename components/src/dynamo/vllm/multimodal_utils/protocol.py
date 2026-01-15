@@ -164,9 +164,10 @@ class VLLMNativeEncoderRequest(BaseModel):
 
     request_id: str
     prompt: str
-    multimodal_input: MultiModalInput
-    modality: Literal["image", "video", "audio"]
-    batch_items: Optional[List[MultiModalInput]] = None  # For future batch processing
+    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
+    modality: Optional[
+        Literal["image", "video", "audio"]
+    ] = None  # Can be inferred from inputs
 
 
 class VLLMNativeEncoderResponse(BaseModel):
