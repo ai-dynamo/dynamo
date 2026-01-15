@@ -55,6 +55,11 @@ impl ModelRuntimeConfig {
         self.inner.enable_local_indexer = enable_local_indexer;
     }
 
+    #[setter]
+    fn set_skip_multimodal_preprocessing(&mut self, skip_multimodal_preprocessing: bool) {
+        self.inner.skip_multimodal_preprocessing = skip_multimodal_preprocessing;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
@@ -112,6 +117,11 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn skip_multimodal_preprocessing(&self) -> bool {
+        self.inner.skip_multimodal_preprocessing
     }
 
     #[getter]

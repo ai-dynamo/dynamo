@@ -296,6 +296,24 @@ impl OpenAIPreprocessor {
     ) -> Result<()> {
         let messages = request.messages();
         let message_count = messages.len().unwrap_or(0);
+
+        // When skip_multimodal_preprocessing is enabled (e.g., for TRT-LLM backend),
+        // only preserve the original messages in extra_args without building multi_modal_data.
+        // This avoids expensive serialization overhead (~100ms) for backends that handle
+        // multimodal processing themselves.
+        if self.runtime_config.skip_multimodal_preprocessing {
+            // Check if there's any multimodal content to decide whether to set extra_args
+            let has_multimodal = self.has_multimodal_content(request)?;
+            if has_multimodal {
+                let messages_json = serde_json::to_value(&messages)?;
+                let extra_args = serde_json::json!({
+                    "messages": messages_json
+                });
+                builder.extra_args(Some(extra_args));
+            }
+            return Ok(());
+        }
+
         let mut media_map: MultimodalDataMap = HashMap::new();
         #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
@@ -379,6 +397,43 @@ impl OpenAIPreprocessor {
         }
 
         Ok(())
+    }
+
+    /// Helper function to check if the request contains any multimodal content
+    /// without building the full media map.
+    fn has_multimodal_content<R: OAIChatLikeRequest>(&self, request: &R) -> Result<bool> {
+        let messages = request.messages();
+        let message_count = messages.len().unwrap_or(0);
+
+        for idx in 0..message_count {
+            let msg = messages
+                .get_item_by_index(idx)
+                .map_err(|_| anyhow::Error::msg(format!("Cannot get message at index {idx}")))?;
+
+            let msg_json: serde_json::Value = serde_json::to_value(&msg)?;
+            let message: ChatCompletionRequestMessage = serde_json::from_value(msg_json)?;
+
+            let content_parts = match &message {
+                ChatCompletionRequestMessage::User(u) => match &u.content {
+                    ChatCompletionRequestUserMessageContent::Array(parts) => parts,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+
+            for content_part in content_parts {
+                match content_part {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(_)
+                    | ChatCompletionRequestUserMessageContentPart::VideoUrl(_)
+                    | ChatCompletionRequestUserMessageContentPart::AudioUrl(_) => {
+                        return Ok(true);
+                    }
+                    _ => continue,
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     pub fn gather_tokens<

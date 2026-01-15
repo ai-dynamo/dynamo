@@ -36,6 +36,14 @@ pub struct ModelRuntimeConfig {
     #[serde(default)]
     pub enable_local_indexer: bool,
 
+    /// Skip multimodal preprocessing in the Rust preprocessor.
+    /// When true, the preprocessor will not populate the `multi_modal_data` field,
+    /// only preserve messages in `extra_args` for backends that handle multimodal
+    /// processing themselves (e.g., TRT-LLM).
+    /// This can significantly reduce TTFT (~100ms) for multimodal models.
+    #[serde(default)]
+    pub skip_multimodal_preprocessing: bool,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
@@ -69,6 +77,7 @@ impl Default for ModelRuntimeConfig {
             reasoning_parser: None,
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: false,
+            skip_multimodal_preprocessing: false,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,
