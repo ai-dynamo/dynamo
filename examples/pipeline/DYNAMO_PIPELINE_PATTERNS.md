@@ -10,7 +10,7 @@ A stage is just a class with an async generator method:
 from dynamo._core import DistributedRuntime
 
 class MyStage:
-    async def process(self, request, context):
+    async def generate(self, request, context):
         # Do work with request
         result = transform(request)
         yield result
@@ -18,9 +18,9 @@ class MyStage:
 # Register and serve the endpoint
 runtime = DistributedRuntime(loop, "file", "tcp")
 component = runtime.namespace("my_app").component("my_stage")
-endpoint = component.endpoint("process")
+endpoint = component.endpoint("generate")
 
-await endpoint.serve_endpoint(MyStage().process)
+await endpoint.serve_endpoint(MyStage().generate)
 ```
 
 That's it. Your function is now a distributed service.
@@ -31,7 +31,7 @@ To call another stage, get a client and call the method:
 
 ```python
 # Connect to another stage
-endpoint = runtime.namespace("my_app").component("other_stage").endpoint("process")
+endpoint = runtime.namespace("my_app").component("other_stage").endpoint("generate")
 client = await endpoint.client()
 await client.wait_for_instances()
 
@@ -52,11 +52,11 @@ class MiddleStage:
 
     async def initialize(self):
         # Connect to the next stage
-        endpoint = self.runtime.namespace("app").component("next").endpoint("process")
+        endpoint = self.runtime.namespace("app").component("next").endpoint("generate")
         self.next_client = await endpoint.client()
         await self.next_client.wait_for_instances()
 
-    async def process(self, request, context):
+    async def generate(self, request, context):
         # Transform input
         transformed = do_something(request)
 
@@ -72,7 +72,7 @@ class MiddleStage:
 |---------|-------------|
 | **Namespace** | Logical grouping (e.g., `"my_app"`) |
 | **Component** | A service within a namespace (e.g., `"stage1"`) |
-| **Endpoint** | A callable method on a component (e.g., `"process"`) |
+| **Endpoint** | A callable method on a component (e.g., `"generate"`) |
 | **Context** | Carries request metadata, enables cancellation |
 
 ## Why This Matters
@@ -81,4 +81,4 @@ class MiddleStage:
 - **Automatic streaming**: `yield` becomes distributed streaming
 - **Flexible topology**: Connect stages however you want
 - **Context propagation**: Cancellation flows through the entire pipeline
-- **Scale independently**: Each stage runs as its own process
+- **Scale independently**: Each stage runs as its own generate
