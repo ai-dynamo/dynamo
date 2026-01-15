@@ -19,7 +19,7 @@ metadata:
 spec:
   envs:
     - name: DYN_LOG
-      value: "debug"
+      value: "info,dynamo_llm::kv_router=trace,dynamo_runtime::pipeline::network::egress::push_router=trace"
   services:
     Frontend:
       dynamoNamespace: scale-test-placeholder

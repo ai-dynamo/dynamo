@@ -345,12 +345,14 @@ class ScaleManager:
         self,
         output_dir: Optional[str] = None,
         duration_sec: Optional[int] = None,
+        log_filter: Optional[str] = None,
     ) -> Dict[str, str]:
         """Stream logs from all frontend pods to files in the background.
 
         Args:
             output_dir: Directory to save logs. Defaults to self._log_dir.
             duration_sec: How long to stream logs (optional, runs until cancelled).
+            log_filter: If provided, only keep log lines containing this substring.
 
         Returns:
             Dict mapping deployment name to log file path.
@@ -373,7 +375,7 @@ class ScaleManager:
             log_files[deployment_name] = log_file
 
             task = asyncio.create_task(
-                self._stream_pod_logs(pod_name, log_file, duration_sec)
+                self._stream_pod_logs(pod_name, log_file, duration_sec, log_filter)
             )
             tasks.append(task)
 
@@ -387,8 +389,16 @@ class ScaleManager:
         pod_name: str,
         log_file: str,
         duration_sec: Optional[int] = None,
+        log_filter: Optional[str] = None,
     ) -> None:
-        """Stream logs from a pod to a file."""
+        """Stream logs from a pod to a file.
+
+        Args:
+            pod_name: Name of the pod to stream logs from.
+            log_file: Path to write logs to.
+            duration_sec: How long to stream logs (optional, runs until cancelled).
+            log_filter: If provided, only keep log lines containing this substring.
+        """
         assert self._core_api is not None
 
         start_time = time.time()
@@ -418,10 +428,14 @@ class ScaleManager:
                         if logs:
                             # Write new lines (dedupe using hash)
                             for line in logs.split("\n"):
-                                if line and hash(line) not in seen_lines:
-                                    seen_lines.add(hash(line))
-                                    f.write(line + "\n")
-                                    f.flush()
+                                if line:
+                                    # Apply filter if specified
+                                    if log_filter and log_filter not in line:
+                                        continue
+                                    if hash(line) not in seen_lines:
+                                        seen_lines.add(hash(line))
+                                        f.write(line + "\n")
+                                        f.flush()
 
                         last_log_time = time.time()
 

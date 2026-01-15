@@ -7,6 +7,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+from typing import Optional
 
 from tests.scale_test.scale_manager import ScaleManager
 from tests.scale_test.utils import setup_logging
@@ -160,6 +161,12 @@ def create_parser() -> argparse.ArgumentParser:
         default=5,
         help="Seconds to wait after aiperf completes before collecting logs (default: 5). "
         "Allows frontend pod to flush buffered logs.",
+    )
+    aiperf_parser.add_argument(
+        "--log-filter",
+        type=str,
+        default=None,
+        help="Only keep log lines containing this substring (e.g., 'Selected worker:')",
     )
 
     return parser
@@ -571,8 +578,9 @@ async def cmd_aiperf_async(args: argparse.Namespace) -> int:
 
         # Start frontend log streaming if requested
         if args.collect_frontend_logs:
+            log_filter = getattr(args, "log_filter", None)
             log_streaming_task, log_file_path = await _start_frontend_log_streaming(
-                args, core_api
+                args, core_api, log_filter=log_filter
             )
 
         job = MultiTargetAIPerfJob(
@@ -660,8 +668,14 @@ async def _get_frontend_pod_names(
 async def _start_frontend_log_streaming(
     args: argparse.Namespace,
     core_api,  # kubernetes_asyncio.client.CoreV1Api
+    log_filter: Optional[str] = None,
 ) -> tuple:
     """Start streaming frontend logs to a file BEFORE the load test begins.
+
+    Args:
+        args: CLI arguments.
+        core_api: Kubernetes CoreV1Api client.
+        log_filter: If provided, only keep log lines containing this substring.
 
     Returns:
         Tuple of (streaming_task, log_file_path) or (None, None) if no pods found.
@@ -686,7 +700,10 @@ async def _start_frontend_log_streaming(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file_path = os.path.join(output_dir, f"{pod_name}_{timestamp}.log")
 
-    print(f"\nStarting log streaming from {pod_name} to {log_file_path}")
+    if log_filter:
+        print(f"\nStarting log streaming from {pod_name} to {log_file_path} (filter: '{log_filter}')")
+    else:
+        print(f"\nStarting log streaming from {pod_name} to {log_file_path}")
 
     # Create the streaming task
     task = asyncio.create_task(
@@ -695,6 +712,7 @@ async def _start_frontend_log_streaming(
             args.namespace,
             pod_name,
             log_file_path,
+            log_filter=log_filter,
         )
     )
 
@@ -709,8 +727,17 @@ async def _stream_pod_logs_to_file(
     namespace: str,
     pod_name: str,
     log_file_path: str,
+    log_filter: Optional[str] = None,
 ) -> None:
-    """Stream logs from a pod to a file continuously until cancelled."""
+    """Stream logs from a pod to a file continuously until cancelled.
+
+    Args:
+        core_api: Kubernetes CoreV1Api client.
+        namespace: Kubernetes namespace.
+        pod_name: Name of the pod to stream logs from.
+        log_file_path: Path to write logs to.
+        log_filter: If provided, only keep log lines containing this substring.
+    """
     from kubernetes_asyncio.client import exceptions
 
     logger.info(f"Starting log stream from {pod_name}")
@@ -745,6 +772,9 @@ async def _stream_pod_logs_to_file(
                         # Write only new lines we haven't seen
                         for line in logs.split("\n"):
                             if line:
+                                # Apply filter if specified
+                                if log_filter and log_filter not in line:
+                                    continue
                                 line_hash = hash(line)
                                 if line_hash not in last_lines_seen:
                                     last_lines_seen.add(line_hash)
