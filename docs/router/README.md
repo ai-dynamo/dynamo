@@ -251,3 +251,8 @@ The `router_temperature` parameter controls routing randomness:
    - To reduce TTFT: Increase the weight
    - To reduce ITL: Decrease the weight
 4. If you observe severe load imbalance, increase the temperature setting
+
+### 5. Routing hints
+Routing algorithm uses routing hints `backend_instance_id` (for aggregated serving), `decode_worker_id`, `prefill_worker_id` (for disaggregated serving) .
+They are read from the request headers `x-worker-instance-id`, `x-prefill-instance-id`, and, if not found there, then from the `nvExt` annotation.
+They are determined by the router during normal operations. If the routing is performed by an outside component, they have to be provided by this component and the FrontEnd must be launched with the `--direct-route` flag. In this case should those values be missing, Dynamo will report an error.

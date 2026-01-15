@@ -75,6 +75,11 @@ cd <dynamo-source-root>/examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
+When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
+You must enable the `--direct-route` flag in the FrontEnd cli.
+The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
+The flag makes sure that the routing respects this selection.
+
 Take a note of or change the DYNAMO_IMAGE in the model deployment file.
 
 Do not forget docker registry secret if needed.
