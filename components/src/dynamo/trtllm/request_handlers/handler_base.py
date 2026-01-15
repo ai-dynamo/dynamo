@@ -248,8 +248,8 @@ class HandlerBase:
 
         # In generation-only mode, multimodal embeddings are already processed and in KV cache
         # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
-        # NOTE: `hasattr` is used for TRT-LLM version compatibility: TBD
-        # may not have multimodal_embedding_handles/multimodal_hashes on DisaggregatedParams.
+        # NOTE: `hasattr` is used because multimodal_embedding_handles may not be present
+        # on DisaggregatedParams in all EPD flows (e.g., text-only requests or certain stages).
         if (
             hasattr(disaggregated_params, "multimodal_embedding_handles")
             and disaggregated_params.multimodal_embedding_handles

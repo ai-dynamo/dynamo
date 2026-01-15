@@ -4,9 +4,10 @@
 import enum
 import logging
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional, Union
+from typing import AsyncGenerator, Optional
 
 from tensorrt_llm import LLM, MultimodalEncoder
+from tensorrt_llm.llmapi.llm import BaseLLM
 
 from dynamo.trtllm.constants import DisaggregationMode
 
@@ -60,6 +61,8 @@ class TensorRTLLMEngine:
                     max_batch_size=max_batch_size,
                 )
             else:
+                # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
+                # (model path, backend settings, KV cache config, disaggregation settings, etc.)
                 self._llm = self._llm_cls(**self.engine_args)
 
     async def cleanup(self):
@@ -72,7 +75,7 @@ class TensorRTLLMEngine:
                 self._llm = None
 
     @property
-    def llm(self) -> Union[LLM, MultimodalEncoder]:
+    def llm(self) -> BaseLLM:
         if not self._llm:
             raise RuntimeError("Engine not initialized")
         return self._llm

@@ -250,7 +250,7 @@ class EncodeHelper:
             )
             # Handle both tensor and dictionary formats
             if isinstance(loaded_data, dict):
-                # Dictionary format (e.g., maverick_mm_embed_seashore_v3.pt)
+                # Dictionary format: contains 'mm_embeddings' key plus auxiliary data
                 encodings = loaded_data.get("mm_embeddings")
                 if encodings is None:
                     yield {"error": "Dictionary embeddings missing 'mm_embeddings' key"}
@@ -261,7 +261,7 @@ class EncodeHelper:
                     k: v for k, v in loaded_data.items() if k != "mm_embeddings"
                 }
             else:
-                # Tensor format (e.g., llava_next_mm_embed_seashore.pt)
+                # Tensor format: raw embeddings tensor
                 encodings = loaded_data
                 auxiliary_data = {}
             # Create readable operation with main embeddings tensor (works for both formats)
@@ -289,14 +289,17 @@ class EncodeHelper:
                 logging.debug("EncodeHelper completed readable operation.")
         elif image_urls and text_prompt:
             # Use trtllm MultimodalEncoder to generate embeddings
-            # NOTE: `default_multimodal_input_loader` needs `model_dir` / `model_type` to
-            # construct the correct multimodal input format and apply model-specific
-            # preprocessing. These are derived from Dynamo's multimodal processor config.
+            # NOTE: `default_multimodal_input_loader` requires `model_dir` to load the
+            # HuggingFace AutoProcessor (for chat template application) and as a fallback
+            # for tokenizer loading. `model_type` is needed to retrieve the correct
+            # multimodal placeholders and apply model-specific preprocessing.
             if model_dir is None or model_type is None:
                 yield {
                     "error": "model_dir and model_type are required for full EPD encode"
                 }
                 return
+            # Pass tokenizer to reuse the pre-initialized tokenizer instead of
+            # creating a new one per request
             inputs = default_multimodal_input_loader(
                 tokenizer=tokenizer,
                 model_dir=model_dir,
@@ -329,13 +332,9 @@ class EncodeHelper:
                 yield {"ep_disaggregated_params": None}
                 return
 
-            has_handles = (
-                hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
-                and ep_disaggregated_params.multimodal_embedding_handles
-            )
-            if not has_handles:
+            if ep_disaggregated_params.multimodal_embedding_handles is None:
                 logging.warning(
-                    "ENCODE WORKER: ep_disaggregated_params has no multimodal_embedding_handles"
+                    "ENCODE WORKER: ep_disaggregated_params.multimodal_embedding_handles is None"
                 )
             # Prepare for Network Transfer
             encoded_params = DisaggregatedParamsCodec.encode(ep_disaggregated_params)
