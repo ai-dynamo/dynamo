@@ -622,9 +622,18 @@ class Publisher:
             logging.error("No KV event publisher initialized (neither NATS nor ZMQ)!")
             return
 
-        events = self.engine.llm.get_kv_cache_events_async(timeout=5)
+        events = self.engine.llm.get_kv_cache_events_async(timeout=None)
         async for event in events:
             logging.debug(f"KV cache event received: {event}")
+            # DEBUG: Log raw event to see mm_keys
+            logging.info(f"[DEBUG] Raw KV event keys: {event.keys() if isinstance(event, dict) else type(event)}")
+            if isinstance(event, dict) and "data" in event:
+                data_for_log = event["data"]
+                if isinstance(data_for_log, dict) and data_for_log.get("type") == "stored":
+                    blocks_for_log = data_for_log.get("blocks", [])
+                    for i, blk in enumerate(blocks_for_log[:2]):  # Log first 2 blocks
+                        logging.info(f"[DEBUG] Block {i} keys: {blk.keys() if isinstance(blk, dict) else type(blk)}")
+                        logging.info(f"[DEBUG] Block {i} mm_keys: {blk.get('mm_keys', 'NOT_FOUND')}")
             # drop the events that is not emitted from the global attention layer.
             if self.should_drop_event(event):
                 continue
