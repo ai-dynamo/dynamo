@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod query_router;
+pub mod request_tokenizer;
+
 pub use query_router::*;
+pub use request_tokenizer::*;
 
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;

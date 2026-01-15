@@ -29,10 +29,6 @@ pub struct RouteQueryResult {
     pub prefill_worker_id: u64,
     /// Worker ID for decode phase (always valid)
     pub decode_worker_id: u64,
-    /// Data parallel rank for the decode worker
-    pub dp_rank: u32,
-    /// Number of KV cache blocks that overlap with the request
-    pub overlap_blocks: u32,
     /// True if disaggregated mode is active (prefill_worker_id is valid)
     pub is_disaggregated: bool,
 }
@@ -159,7 +155,7 @@ impl QueryRouter {
 
             // Disaggregated mode: query both prefill and decode routers
             // Query prefill worker
-            let (prefill_worker, prefill_overlap) = prefill_router
+            let (prefill_worker, _prefill_overlap) = prefill_router
                 .find_best_match(request_id, token_ids, None, update_states)
                 .await
                 .context("Failed to query prefill worker")?;
@@ -169,7 +165,7 @@ impl QueryRouter {
             let mut decode_override = RouterConfigOverride::default();
             decode_override.overlap_score_weight = Some(0.0);
 
-            let (decode_worker, decode_overlap) = self
+            let (decode_worker, _decode_overlap) = self
                 .decode_router
                 .find_best_match(request_id, token_ids, Some(&decode_override), update_states)
                 .await
@@ -178,15 +174,13 @@ impl QueryRouter {
             Ok(RouteQueryResult {
                 prefill_worker_id: prefill_worker.worker_id,
                 decode_worker_id: decode_worker.worker_id,
-                dp_rank: decode_worker.dp_rank,
-                overlap_blocks: prefill_overlap.max(decode_overlap),
                 is_disaggregated: true,
             })
         } else {
             drop(prefill_router_guard); // Release lock
 
             // Aggregated mode: query decode router only
-            let (worker, overlap) = self
+            let (worker, _overlap) = self
                 .decode_router
                 .find_best_match(request_id, token_ids, None, update_states)
                 .await
@@ -195,8 +189,6 @@ impl QueryRouter {
             Ok(RouteQueryResult {
                 prefill_worker_id: 0,
                 decode_worker_id: worker.worker_id,
-                dp_rank: worker.dp_rank,
-                overlap_blocks: overlap,
                 is_disaggregated: false,
             })
         }

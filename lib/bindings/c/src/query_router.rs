@@ -21,10 +21,6 @@ pub struct CRouteQueryResult {
     pub prefill_worker_id: u64,
     /// Worker ID for decode phase (always valid)
     pub decode_worker_id: u64,
-    /// Data parallel rank for the decode worker
-    pub dp_rank: u32,
-    /// Number of KV cache blocks that overlap with the request
-    pub overlap_blocks: u32,
     /// True if disaggregated mode is active (prefill_worker_id is valid)
     pub is_disaggregated: bool,
 }
@@ -34,8 +30,6 @@ impl From<RouteQueryResult> for CRouteQueryResult {
         Self {
             prefill_worker_id: result.prefill_worker_id,
             decode_worker_id: result.decode_worker_id,
-            dp_rank: result.dp_rank,
-            overlap_blocks: result.overlap_blocks,
             is_disaggregated: result.is_disaggregated,
         }
     }
