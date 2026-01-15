@@ -223,6 +223,17 @@ jobs:
           set -x
           echo "📊 Merging all test coverage..."
 
+          # Create a .coveragerc file with path remapping
+          cat > .coveragerc << 'EOF'
+          [paths]
+          source =
+              /workspace/components/src/dynamo
+              components/src/dynamo
+          EOF
+
+          echo "Created .coveragerc with path remapping:"
+          cat .coveragerc
+
           # Find all .coverage files and copy them with unique names
           mkdir -p coverage-combined
           find coverage-artifacts/ -name ".coverage" 2>/dev/null | while read -r file; do
@@ -240,9 +251,9 @@ jobs:
             cd coverage-combined
 
             # Combine all coverage data (ignore path errors)
-            echo "Running coverage combine..."
+            echo "Running coverage combine with path remapping..."
             set +e  # Don't exit on error
-            coverage combine .coverage.* --keep 2>&1 | tee ../combine.log
+            COVERAGE_RCFILE=../.coveragerc coverage combine .coverage.* --keep 2>&1 | tee ../combine.log
             COMBINE_EXIT=$?
             set -e
 
@@ -252,7 +263,7 @@ jobs:
               cat ../combine.log
               # Try without --keep flag
               echo "Retrying without --keep flag..."
-              coverage combine .coverage.* 2>&1 || echo "Second attempt also failed"
+              COVERAGE_RCFILE=../.coveragerc coverage combine .coverage.* 2>&1 || echo "Second attempt also failed"
             fi
 
             if [ -f .coverage ]; then
@@ -263,10 +274,10 @@ jobs:
               # Generate reports (continue even if some fail)
               echo "📊 Generating coverage reports..."
               set +e
-              coverage report --data-file=.coverage 2>&1 | tee coverage-report.txt
+              COVERAGE_RCFILE=.coveragerc coverage report --data-file=.coverage 2>&1 | tee coverage-report.txt
               REPORT_EXIT=$?
-              coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
-              coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
+              COVERAGE_RCFILE=.coveragerc coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
+              COVERAGE_RCFILE=.coveragerc coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
               set -e
 
               if [ $REPORT_EXIT -eq 0 ]; then
