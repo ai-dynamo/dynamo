@@ -186,10 +186,19 @@ struct PendingDistributedTraceContext {
     x_dynamo_request_id: Option<String>,
 }
 
-/// Marker to indicate this is the first entry into a span.
-/// Present after first on_enter, removed on subsequent entries.
-/// Used by formatter to emit SPAN_CREATED only on first entry.
-struct FirstEntryMarker;
+/// Macro to emit a tracing event at a dynamic level with a custom target.
+/// Used for SPAN_CREATED events to respect the span's actual log level and target.
+macro_rules! emit_at_level {
+    ($level:expr, target: $target:expr, $($arg:tt)*) => {
+        match $level {
+            &tracing::Level::ERROR => tracing::error!(target: $target, $($arg)*),
+            &tracing::Level::WARN => tracing::warn!(target: $target, $($arg)*),
+            &tracing::Level::INFO => tracing::info!(target: $target, $($arg)*),
+            &tracing::Level::DEBUG => tracing::debug!(target: $target, $($arg)*),
+            &tracing::Level::TRACE => tracing::trace!(target: $target, $($arg)*),
+        }
+    };
+}
 
 /// Trait for extracting trace context fields from either
 /// DistributedTraceContext or PendingDistributedTraceContext
@@ -818,10 +827,7 @@ where
             {
                 let extensions = span.extensions();
                 if extensions.get::<DistributedTraceContext>().is_some() {
-                    // Re-entry: remove FirstEntryMarker so formatter skips ENTER events
-                    drop(extensions);
-                    let mut extensions = span.extensions_mut();
-                    extensions.remove::<FirstEntryMarker>();
+                    // Re-entry: nothing to do, context already set
                     return;
                 }
             }
@@ -884,6 +890,13 @@ where
                 panic!("span_id is not set in on_enter - OtelData may not be properly initialized");
             }
 
+            // Clone values needed for SPAN_CREATED event before moving into context
+            let trace_id_val = trace_id.clone().expect("Trace ID must be set");
+            let span_id_val = span_id.clone().expect("Span ID must be set");
+            let parent_id_val = parent_id.clone();
+            let span_name = span.name().to_string();
+            let span_level = span.metadata().level();
+
             // Re-acquire mutable borrow to insert the finalized context
             let mut extensions = span.extensions_mut();
 
@@ -898,9 +911,30 @@ where
                 x_dynamo_request_id,
             });
 
-            // Insert marker for first entry - formatter will emit SPAN_CREATED
-            // Marker is removed on re-entry (above) so subsequent ENTER events are skipped
-            extensions.insert(FirstEntryMarker);
+            // Drop extensions before emitting event to avoid borrow conflicts
+            drop(extensions);
+
+            // Emit SPAN_CREATED event at the span's log level (if span events enabled)
+            // This replaces FmtSpan::ENTER to avoid re-entry overhead
+            // Note: The formatter will override the target to match the span's target
+            if span_events_enabled() {
+                if let Some(ref pid) = parent_id_val {
+                    emit_at_level!(span_level, target: "span_event",
+                        message = "SPAN_CREATED",
+                        span_name = %span_name,
+                        trace_id = %trace_id_val,
+                        span_id = %span_id_val,
+                        parent_id = %pid
+                    );
+                } else {
+                    emit_at_level!(span_level, target: "span_event",
+                        message = "SPAN_CREATED",
+                        span_name = %span_name,
+                        trace_id = %trace_id_val,
+                        span_id = %span_id_val
+                    );
+                }
+            }
         }
     }
 }
@@ -959,10 +993,10 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
-        // SPAN_CREATED uses FmtSpan::ENTER (first entry only, controlled by FirstEntryMarker)
+        // SPAN_CREATED is emitted manually in on_enter (avoids re-entry overhead)
         // SPAN_CLOSED uses FmtSpan::CLOSE for timing information
         let span_events = if span_events_enabled() {
-            FmtSpan::ENTER | FmtSpan::CLOSE
+            FmtSpan::CLOSE
         } else {
             FmtSpan::NONE
         };
@@ -1113,7 +1147,7 @@ struct JsonLog<'a> {
     file: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     line: Option<u32>,
-    target: &'a str,
+    target: String,
     message: serde_json::Value,
     #[serde(flatten)]
     fields: BTreeMap<String, serde_json::Value>,
@@ -1202,6 +1236,9 @@ where
             .remove("message")
             .unwrap_or(serde_json::Value::String("".to_string()));
 
+        // Track target override for span events (SPAN_CREATED/SPAN_CLOSED use span's target)
+        let mut target_override: Option<String> = None;
+
         let current_span = event
             .parent()
             .and_then(|id| ctx.span(id))
@@ -1245,26 +1282,17 @@ where
                 );
             }
 
-            // Handle span events:
-            // - "enter": Check FirstEntryMarker - if present emit SPAN_CREATED, else skip
-            // - "close": Always emit SPAN_CLOSED
-            // - "new": Transform to SPAN_CREATED (fallback, shouldn't happen with current config)
-            match message.as_str() {
-                Some("enter") => {
-                    // Only emit SPAN_CREATED on first entry (marker present)
-                    if ext.get::<FirstEntryMarker>().is_none() {
-                        // Re-entry: skip this event entirely
-                        return Ok(());
-                    }
-                    message = serde_json::Value::String("SPAN_CREATED".to_string());
-                }
-                Some("close") => {
+            // Handle span events - use span's target for both SPAN_CREATED and SPAN_CLOSED
+            // SPAN_CREATED is emitted manually in on_enter with target "span_event"
+            // SPAN_CLOSED comes from FmtSpan::CLOSE with message "close"
+            let is_span_created = message.as_str() == Some("SPAN_CREATED");
+            let is_span_closed = message.as_str() == Some("close");
+            if is_span_created || is_span_closed {
+                // Use the span's target instead of the event's target
+                target_override = Some(span.metadata().target().to_string());
+                if is_span_closed {
                     message = serde_json::Value::String("SPAN_CLOSED".to_string());
                 }
-                Some("new") => {
-                    message = serde_json::Value::String("SPAN_CREATED".to_string());
-                }
-                _ => {}
             }
 
             visitor.fields.insert(
@@ -1367,7 +1395,7 @@ where
             time,
             file: metadata.file(),
             line: metadata.line(),
-            target: metadata.target(),
+            target: target_override.unwrap_or_else(|| metadata.target().to_string()),
             message,
             fields: visitor.fields,
         };
