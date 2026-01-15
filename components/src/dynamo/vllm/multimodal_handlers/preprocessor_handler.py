@@ -8,10 +8,10 @@ import uuid
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Union
 
-from dynamo.runtime import Client
 from transformers import AutoTokenizer
-
 from vllm.engine.arg_utils import AsyncEngineArgs
+
+from dynamo.runtime import Client
 
 try:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -21,6 +21,7 @@ except ImportError:
         ChatCompletionRequest,
         CompletionRequest,
     )
+
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
