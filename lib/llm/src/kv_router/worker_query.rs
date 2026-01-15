@@ -163,6 +163,21 @@ impl AsyncEngine<SingleIn<WorkerKvQueryRequest>, ManyOut<WorkerKvQueryResponse>,
             request
         );
 
+        // This is a sanity check to ensure the request is for the correct worker.
+        // In production, this should never happen since the router should only
+        // send requests to the worker it is associated with.
+        if request.worker_id != self.worker_id {
+            let error_message = format!(
+                "WorkerKvQueryEngine::generate worker_id mismatch: request.worker_id={} this.worker_id={}",
+                request.worker_id, self.worker_id
+            );
+            let response = WorkerKvQueryResponse::Error(error_message);
+            return Ok(ResponseStream::new(
+                Box::pin(stream::iter(vec![response])),
+                ctx.context(),
+            ));
+        }
+
         let response = self
             .local_indexer
             .get_events_in_id_range(request.start_event_id, request.end_event_id)
