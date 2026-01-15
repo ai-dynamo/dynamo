@@ -17,8 +17,7 @@ class Stage1:
 
 # Register and serve the endpoint
 runtime = DistributedRuntime(loop, "file", "tcp")
-component = runtime.namespace("pipeline").component("stage1")
-endpoint = component.endpoint("generate")
+endpoint = runtime.namespace("pipeline").component("stage1").endpoint("generate")
 
 await endpoint.serve_endpoint(Stage1().generate)
 ```
