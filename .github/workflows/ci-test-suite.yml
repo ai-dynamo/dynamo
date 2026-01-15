@@ -203,6 +203,9 @@ jobs:
           echo "📦 Downloaded coverage artifacts:"
           echo "==== Directory structure (including hidden files) ===="
           ls -Ra coverage-artifacts/
+
+          echo "==== Directory structure  ===="
+          find . maxdepth 2
           echo ""
           echo "==== Coverage files found ===="
           find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
@@ -263,7 +266,7 @@ jobs:
             # Combine all coverage data (ignore path errors)
             echo "Running coverage combine with path remapping..."
             set +e  # Don't exit on error
-            COVERAGE_RCFILE=../.coveragerc coverage combine .coverage.* --keep 2>&1 | tee ../combine.log
+            COVERAGE_RCFILE=../.coveragerc coverage combine --keep  .coverage.* 2>&1 | tee ../combine.log
             COMBINE_EXIT=$?
             set -e
 
