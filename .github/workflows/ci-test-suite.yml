@@ -172,7 +172,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [unit-tests]
+    needs: [unit-tests, integration-tests]
     if: inputs.enable_coverage && always()
     permissions:
       contents: write
@@ -289,7 +289,7 @@ jobs:
               # Generate reports (continue even if some fail)
               echo "📊 Generating coverage reports..."
               set +e
-              COVERAGE_RCFILE=.coveragerc coverage report --data-file=.coverage 2>&1 | tee coverage-report.txt
+              COVERAGE_RCFILE=.coveragerc coverage report --show-missing --data-file=.coverage 2>&1 | tee coverage-report.txt
               REPORT_EXIT=$?
               COVERAGE_RCFILE=.coveragerc coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
               COVERAGE_RCFILE=.coveragerc coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
