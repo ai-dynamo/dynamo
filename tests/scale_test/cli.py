@@ -78,8 +78,8 @@ def create_parser() -> argparse.ArgumentParser:
     aiperf_parser.add_argument(
         "--image",
         type=str,
-        required=True,
-        help="Container image with AIPerf installed (e.g., Dynamo image)",
+        default=None,
+        help="Container image (default: python:3.12-slim with aiperf installed at runtime)",
     )
     # AIPerf parameters
     aiperf_parser.add_argument(
@@ -114,6 +114,27 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Number of distinct prefix prompts",
+    )
+    aiperf_parser.add_argument(
+        "--max-concurrency-per-pod",
+        type=int,
+        default=64000,
+        help="Max concurrency per AIPerf pod. High concurrency is split across multiple pods. "
+        "Default: 64000. Set higher if you have large memory nodes.",
+    )
+    aiperf_parser.add_argument(
+        "--workers-max",
+        type=int,
+        default=252,
+        help="Max aiperf worker processes. Constraint: workers_max * http_connection_limit < 63976. "
+        "Default: 252.",
+    )
+    aiperf_parser.add_argument(
+        "--http-connection-limit",
+        type=int,
+        default=252,
+        help="HTTP connection limit per worker. Constraint: workers_max * http_connection_limit < 63976. "
+        "Default: 252.",
     )
     aiperf_parser.add_argument(
         "--collect-frontend-logs",
@@ -325,6 +346,8 @@ async def cmd_run_async(args: argparse.Namespace) -> int:
                 request_count=getattr(args, "request_count", 0),
                 prefix_prompt_length=getattr(args, "prefix_prompt_length", 0),
                 num_prefix_prompts=getattr(args, "num_prefix_prompts", 0),
+                workers_max=getattr(args, "workers_max", 252),
+                http_connection_limit=getattr(args, "http_connection_limit", 252),
             )
 
             success = await manager.run_aiperf_load_generator(
@@ -443,6 +466,8 @@ async def cmd_load_async(args: argparse.Namespace) -> int:
                 request_count=getattr(args, "request_count", 0),
                 prefix_prompt_length=getattr(args, "prefix_prompt_length", 0),
                 num_prefix_prompts=getattr(args, "num_prefix_prompts", 0),
+                workers_max=getattr(args, "workers_max", 252),
+                http_connection_limit=getattr(args, "http_connection_limit", 252),
             )
 
             job = MultiTargetAIPerfJob(
@@ -492,6 +517,12 @@ async def cmd_aiperf_async(args: argparse.Namespace) -> int:
     """Run AIPerf directly against specified URL(s)."""
     from kubernetes_asyncio import client, config
 
+    from tests.scale_test.aiperf_load_generator_job import (
+        AIPerfConfig,
+        AIPerfLoadGeneratorJob,
+        MultiTargetAIPerfJob,
+    )
+
     k8s_client = None
     log_streaming_task = None
     log_file_path = None
@@ -511,25 +542,13 @@ async def cmd_aiperf_async(args: argparse.Namespace) -> int:
         for url in urls:
             print(f"  - {url}")
         print(f"\nConfiguration:")
-        print(f"  Duration: {args.duration}s")
         print(f"  Concurrency: {args.concurrency}")
+        print(f"  Request count: {args.request_count}")
         print(f"  ISL: {args.isl_mean} (stddev: {args.isl_stddev})")
         print(f"  OSL: {args.osl_mean} (stddev: {args.osl_stddev})")
         if args.prefix_prompt_length > 0:
             print(f"  Prefix: {args.prefix_prompt_length} tokens, {args.num_prefix_prompts} prompts")
         print()
-
-        # Start log streaming BEFORE the aiperf job begins
-        if getattr(args, "collect_frontend_logs", False):
-            log_streaming_task, log_file_path = await _start_frontend_log_streaming(
-                args, core_api
-            )
-
-        from tests.scale_test.aiperf_load_generator_job import (
-            AIPerfConfig,
-            AIPerfLoadGeneratorJob,
-            MultiTargetAIPerfJob,
-        )
 
         aiperf_config = AIPerfConfig(
             isl_mean=args.isl_mean,
@@ -540,51 +559,54 @@ async def cmd_aiperf_async(args: argparse.Namespace) -> int:
             request_count=args.request_count,
             prefix_prompt_length=args.prefix_prompt_length,
             num_prefix_prompts=args.num_prefix_prompts,
+            workers_max=args.workers_max,
+            http_connection_limit=args.http_connection_limit,
         )
 
-        if len(urls) == 1:
-            job = AIPerfLoadGeneratorJob(
-                namespace=args.namespace,
-                frontend_url=urls[0],
-                model=args.model,
-                duration_sec=args.duration,
-                config=aiperf_config,
-                image=args.image,
-                tokenizer=args.tokenizer,
+        # Use MultiTargetAIPerfJob which automatically splits high concurrency
+        max_per_pod = getattr(args, "max_concurrency_per_pod", 4000)
+        num_pods = max(1, (args.concurrency + max_per_pod - 1) // max_per_pod)
+        if num_pods > 1:
+            print(f"  Splitting across {num_pods} pods (max {max_per_pod} concurrency each)")
+
+        # Start frontend log streaming if requested
+        if args.collect_frontend_logs:
+            log_streaming_task, log_file_path = await _start_frontend_log_streaming(
+                args, core_api
             )
-        else:
-            job = MultiTargetAIPerfJob(
-                namespace=args.namespace,
-                frontend_urls=urls,
-                model=args.model,
-                duration_sec=args.duration,
-                config=aiperf_config,
-                image=args.image,
-                tokenizer=args.tokenizer,
-            )
+
+        job = MultiTargetAIPerfJob(
+            namespace=args.namespace,
+            frontend_urls=urls,
+            model=args.model,
+            duration_sec=args.duration,
+            config=aiperf_config,
+            image=args.image,
+            tokenizer=args.tokenizer,
+            max_concurrency_per_pod=max_per_pod,
+        )
 
         success = await job.create_and_wait(
-            batch_api, core_api, timeout=args.duration + 300
+            batch_api, core_api, timeout=args.duration + 600
         )
         await job.delete()
+
+        # Stop frontend log streaming if it was started
+        if log_streaming_task is not None:
+            await _stop_frontend_log_streaming(args, log_streaming_task, log_file_path)
 
         if not success:
             print("ERROR: AIPerf load generation failed")
             return 1
 
         print("\nAIPerf load generation complete.")
-
-        # Stop log streaming and finalize
-        if log_streaming_task is not None:
-            await _stop_frontend_log_streaming(args, log_streaming_task, log_file_path)
-
         return 0
 
     except KeyboardInterrupt:
         print("\nExiting...")
         return 0
     finally:
-        # Ensure log streaming is stopped on any exit
+        # Cancel log streaming on any exit path
         if log_streaming_task is not None and not log_streaming_task.done():
             log_streaming_task.cancel()
             try:

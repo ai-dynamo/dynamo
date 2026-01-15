@@ -19,7 +19,7 @@ metadata:
 spec:
   envs:
     - name: DYN_LOG
-      value: "info"
+      value: "debug"
   services:
     Frontend:
       dynamoNamespace: scale-test-placeholder
@@ -43,21 +43,18 @@ spec:
         failureThreshold: 6
       resources:
         requests:
-          cpu: "1"
-          memory: "1Gi"
-        limits:
           cpu: "4"
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:ad7c569b3b424311237d06477c7bb6c2efb58f831f0da944ec2c5e15c819a498
+          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:a3ca6d81a6c0ed2c300d2dcb5bcdd92c670048d6a2429f7dc8de9a3bf7fcfa8b
           command:
-            - python
-            - -m
-            - dynamo.frontend
-          args:
-            - --router-mode
-            - kv
+            - /bin/bash
+            - -c
+            - |
+              ulimit -n 1048576
+              ulimit -u 65536
+              exec python -m dynamo.frontend --router-mode kv
     MockerWorker:
       dynamoNamespace: scale-test-placeholder
       componentType: worker
@@ -88,7 +85,7 @@ spec:
           value: "9090"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:ad7c569b3b424311237d06477c7bb6c2efb58f831f0da944ec2c5e15c819a498
+          image: nvcr.io/nvidian/dynamo-dev/janellec-dynamo:a3ca6d81a6c0ed2c300d2dcb5bcdd92c670048d6a2429f7dc8de9a3bf7fcfa8b
           command:
             - python
             - -m
@@ -96,7 +93,5 @@ spec:
           args:
             - --model-path
             - TinyLlama/TinyLlama-1.1B-Chat-v1.0
-            - --speedup-ratio
-            - "10.0"
 
 

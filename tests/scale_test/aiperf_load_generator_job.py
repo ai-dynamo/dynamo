@@ -5,6 +5,7 @@ import asyncio
 import logging
 import shlex
 import time
+import yaml
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -13,9 +14,12 @@ from kubernetes_asyncio.client import exceptions
 
 logger = logging.getLogger(__name__)
 
-# Default to None - will be extracted from mocker deployment or must be provided
-# The Dynamo container image includes AIPerf
-DEFAULT_AIPERF_IMAGE: str | None = None
+
+# Default to python:3.12-slim - aiperf will be installed at runtime
+DEFAULT_AIPERF_IMAGE: str = "python:3.12-slim"
+
+# AIPerf git ref to install at runtime when using base python image
+AIPERF_GIT_REF: str = "4d3fa29403c8f75da22a14f1f7b3aeb27db9288f"
 
 
 @dataclass
@@ -52,6 +56,13 @@ class AIPerfConfig:
     # Extra inputs to pass to the model
     ignore_eos: bool = True
 
+    # Worker configuration for high concurrency
+    # Constraint: workers_max * http_connection_limit < num_ephemeral_ports
+    # With port range 1024-65000, we have ~63976 ports
+    # Default: 252 * 252 = 63504 < 63976
+    workers_max: int = 252
+    http_connection_limit: int = 252
+
 
 class AIPerfLoadGeneratorJob:
     """Manages a Kubernetes Job that runs AIPerf load generation inside the cluster.
@@ -70,24 +81,68 @@ class AIPerfLoadGeneratorJob:
         image: Optional[str] = None,
         tokenizer: Optional[str] = None,
     ):
-        if image is None:
-            raise ValueError(
-                "image is required for AIPerf load generator. "
-                "Use the Dynamo container image which has AIPerf installed, "
-                "or pass --aiperf-image to the CLI."
-            )
-
         self.namespace = namespace
         self.frontend_url = frontend_url
         self.model = model
         self.duration_sec = duration_sec
         self.config = config or AIPerfConfig()
         self.job_name = job_name
-        self.image = image
+        self.image = image or DEFAULT_AIPERF_IMAGE
         self.tokenizer = tokenizer or model
 
         self._batch_api: Optional[client.BatchV1Api] = None
         self._core_api: Optional[client.CoreV1Api] = None
+
+    def _compute_resources(self) -> dict:
+        """Compute container resources based on concurrency and request count.
+
+        Memory requirements come from two sources:
+        1. Connection state: ~100KB per concurrent connection
+        2. Profiling data: varies by ISL/OSL - tokens are stored as strings/lists
+
+        With Python overhead, multiply estimates by 3-4x for safety.
+        """
+        concurrency = self.config.concurrency
+        request_count = self.config.request_count
+        isl = self.config.isl_mean
+        osl = self.config.osl_mean
+
+        # Base memory for connections (MB)
+        connection_mem_mb = (concurrency * 100) // 1024  # 100KB per connection
+
+        # Memory for profiling data (MB)
+        # Each request stores: input tokens, output tokens, timing data, metadata
+        # Estimate ~4 bytes per token (token IDs) + overhead
+        # Plus Python object overhead (~100 bytes per object)
+        bytes_per_request = (isl + osl) * 4 + 500  # tokens + metadata
+        profiling_mem_mb = (request_count * bytes_per_request) // (1024 * 1024)
+
+        # Total memory with safety margin (4x for Python overhead + GC pressure)
+        total_mem_mb = connection_mem_mb + profiling_mem_mb
+        mem_gb = max(16, (total_mem_mb // 1024) * 4 + 8)  # 4x safety margin + 8GB base
+
+        # CPU based on concurrency
+        if concurrency <= 100:
+            cpu_req, cpu_lim = "2", "4"
+        elif concurrency <= 1000:
+            cpu_req, cpu_lim = "4", "8"
+        elif concurrency <= 10000:
+            cpu_req, cpu_lim = "8", "16"
+        else:
+            cpu_req, cpu_lim = "16", "32"
+
+        mem_req = f"{mem_gb}Gi"
+        mem_lim = f"{mem_gb * 2}Gi"
+
+        logger.info(
+            f"AIPerf resources for concurrency={concurrency}, requests={request_count}: "
+            f"CPU {cpu_req}/{cpu_lim}, memory {mem_req}/{mem_lim}"
+        )
+
+        return {
+            "requests": {"cpu": cpu_req, "memory": mem_req},
+            "limits": {"cpu": cpu_lim, "memory": mem_lim},
+        }
 
     def _build_aiperf_command(self) -> List[str]:
         """Build the AIPerf CLI command."""
@@ -116,6 +171,8 @@ class AIPerfLoadGeneratorJob:
         cmd = [
             "aiperf",
             "profile",
+            "--ui",
+            "simple",
             "--model",
             self.model,
             "--tokenizer",
@@ -170,6 +227,9 @@ class AIPerfLoadGeneratorJob:
             cmd.extend(["--prefix-prompt-length", str(cfg.prefix_prompt_length)])
             cmd.extend(["--num-prefix-prompts", str(cfg.num_prefix_prompts)])
 
+        # Worker configuration for high concurrency
+        cmd.extend(["--workers-max", str(cfg.workers_max)])
+
         return cmd
 
     def _build_job_manifest(self) -> dict:
@@ -180,6 +240,18 @@ class AIPerfLoadGeneratorJob:
         shell_script = f"""
 set -e
 echo "========================================"
+echo "AIPerf Load Generator - Setup"
+echo "========================================"
+
+# Install dependencies and aiperf
+echo "Installing dependencies..."
+apt-get update && apt-get install -y curl jq procps git && apt-get clean
+echo "Installing aiperf..."
+pip install git+https://github.com/ai-dynamo/aiperf.git@{AIPERF_GIT_REF}
+echo "aiperf installation completed"
+
+echo ""
+echo "========================================"
 echo "AIPerf Load Generator"
 echo "========================================"
 echo "Target: {self.frontend_url}"
@@ -188,17 +260,46 @@ echo "Duration: {self.duration_sec}s"
 echo "Concurrency: {self.config.concurrency}"
 echo "ISL: {self.config.isl_mean} (stddev: {self.config.isl_stddev})"
 echo "OSL: {self.config.osl_mean} (stddev: {self.config.osl_stddev})"
+echo ""
+sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+cat /proc/sys/net/ipv4/ip_local_port_range
+
+echo "System limits:"
+echo "  File descriptors (ulimit -n): $(ulimit -n)"
+echo "  Max processes (ulimit -u): $(ulimit -u)"
+echo "  Open files (soft): $(ulimit -Sn)"
+echo "  Open files (hard): $(ulimit -Hn)"
+echo ""
+echo "Memory info:"
+echo "  Container limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 'unknown')"
+free -h
 echo "========================================"
 echo ""
 echo "AIPerf command:"
 echo "{shlex.join(aiperf_cmd)}"
 echo ""
+
+# Start background memory monitor
+(
+  while true; do
+    MEM_USED=$(free -m | awk '/^Mem:/ {{print $3}}')
+    MEM_TOTAL=$(free -m | awk '/^Mem:/ {{print $2}}')
+    echo "[MEMMON] $(date '+%H:%M:%S') - ${{MEM_USED}}MB / ${{MEM_TOTAL}}MB used"
+    sleep 10
+  done
+) &
+MEMMON_PID=$!
+
 echo "========================================"
 echo "AIPerf Output"
 echo "========================================"
 
-# Run AIPerf (output goes to stdout)
-{shlex.join(aiperf_cmd)} 2>&1 || echo "AIPerf exited with code $?"
+{shlex.join(aiperf_cmd)}
+AIPERF_EXIT=$?
+if [ $AIPERF_EXIT -ne 0 ]; then
+    echo ""
+    echo "AIPerf exited with code $AIPERF_EXIT"
+fi
 
 echo ""
 echo "========================================"
@@ -325,9 +426,16 @@ echo "========================================"
                                 "name": "aiperf",
                                 "image": self.image,
                                 "command": ["bash", "-c", shell_script],
-                                "resources": {
-                                    "requests": {"cpu": "2", "memory": "4Gi"},
-                                    "limits": {"cpu": "4", "memory": "8Gi"},
+                                "env": [
+                                    {"name": "PYTHONUNBUFFERED", "value": "1"},
+                                    {
+                                        "name": "AIPERF_HTTP_CONNECTION_LIMIT",
+                                        "value": str(self.config.http_connection_limit),
+                                    },
+                                ],
+                                # "resources": self._compute_resources(),
+                                "securityContext": {
+                                    "privileged": True,
                                 },
                             }
                         ],
@@ -348,6 +456,8 @@ echo "========================================"
 
         logger.info(f"Creating AIPerf job: {self.job_name}")
         job_manifest = self._build_job_manifest()
+        with open("job_manifest.yaml", "w") as f:
+            yaml.dump(job_manifest, f)
 
         try:
             await self._batch_api.create_namespaced_job(
@@ -412,11 +522,41 @@ echo "========================================"
         return False
 
     async def _print_logs(self, pod_name: str) -> None:
-        """Print the pod logs."""
+        """Print the pod logs and status for debugging."""
         print("\n" + "=" * 70)
         print("AIPERF LOAD GENERATOR LOGS")
         print("=" * 70)
 
+        # Print pod status first for debugging
+        try:
+            pod = await self._core_api.read_namespaced_pod(
+                name=pod_name, namespace=self.namespace
+            )
+            phase = pod.status.phase
+            print(f"Pod status: {phase}")
+
+            # Print container status if available
+            if pod.status.container_statuses:
+                for cs in pod.status.container_statuses:
+                    if cs.state.terminated:
+                        t = cs.state.terminated
+                        print(
+                            f"Container '{cs.name}': terminated "
+                            f"(exit_code={t.exit_code}, reason={t.reason})"
+                        )
+                        if t.message:
+                            print(f"  Message: {t.message}")
+                    elif cs.state.waiting:
+                        print(
+                            f"Container '{cs.name}': waiting "
+                            f"(reason={cs.state.waiting.reason})"
+                        )
+
+            print("-" * 70)
+        except exceptions.ApiException as e:
+            logger.debug(f"Could not get pod status: {e}")
+
+        # Print logs
         try:
             logs = await self._core_api.read_namespaced_pod_log(
                 name=pod_name, namespace=self.namespace
@@ -447,10 +587,16 @@ echo "========================================"
 
 
 class MultiTargetAIPerfJob:
-    """Manages multiple AIPerf jobs targeting different frontends.
+    """Manages multiple AIPerf jobs targeting frontend(s).
+
+    Automatically splits high concurrency across multiple pods for better
+    resource utilization and fault isolation.
 
     Note: Requires a container image with AIPerf installed (e.g., the Dynamo container).
     """
+
+    # Default max concurrency per pod - keeps memory usage reasonable
+    DEFAULT_MAX_CONCURRENCY_PER_POD = 4000
 
     def __init__(
         self,
@@ -462,13 +608,8 @@ class MultiTargetAIPerfJob:
         job_name_prefix: str = "scale-test-aiperf",
         image: Optional[str] = None,
         tokenizer: Optional[str] = None,
+        max_concurrency_per_pod: Optional[int] = None,
     ):
-        if image is None:
-            raise ValueError(
-                "image is required for AIPerf load generator. "
-                "Use the Dynamo container image which has AIPerf installed, "
-                "or pass --aiperf-image to the CLI."
-            )
 
         self.namespace = namespace
         self.frontend_urls = frontend_urls
@@ -476,32 +617,55 @@ class MultiTargetAIPerfJob:
         self.duration_sec = duration_sec
         self.config = config or AIPerfConfig()
         self.job_name_prefix = job_name_prefix
-        self.image = image
+        self.image = image or DEFAULT_AIPERF_IMAGE
         self.tokenizer = tokenizer or model
+        self.max_concurrency_per_pod = (
+            max_concurrency_per_pod or self.DEFAULT_MAX_CONCURRENCY_PER_POD
+        )
 
         self._jobs: List[AIPerfLoadGeneratorJob] = []
 
     def _create_jobs(self) -> None:
-        """Create AIPerf job instances for each frontend."""
+        """Create AIPerf job instances, splitting high concurrency across pods."""
         self._jobs = []
 
-        # Distribute concurrency across frontends
-        base_concurrency = self.config.concurrency // len(self.frontend_urls)
-        remainder = self.config.concurrency % len(self.frontend_urls)
+        total_concurrency = self.config.concurrency
+        total_requests = self.config.request_count
 
-        for i, url in enumerate(self.frontend_urls):
-            # Distribute any remainder to first few jobs
-            job_concurrency = base_concurrency + (1 if i < remainder else 0)
-            if job_concurrency == 0:
-                job_concurrency = 1
+        # Calculate how many pods we need based on max concurrency per pod
+        num_pods = max(1, (total_concurrency + self.max_concurrency_per_pod - 1) // self.max_concurrency_per_pod)
+
+        # Distribute concurrency and requests across pods
+        base_concurrency = total_concurrency // num_pods
+        concurrency_remainder = total_concurrency % num_pods
+
+        base_requests = total_requests // num_pods if total_requests > 0 else 0
+        requests_remainder = total_requests % num_pods if total_requests > 0 else 0
+
+        logger.info(
+            f"Splitting concurrency={total_concurrency} across {num_pods} pods "
+            f"(max {self.max_concurrency_per_pod} per pod)"
+        )
+
+        for i in range(num_pods):
+            # Distribute concurrency (give remainder to first pods)
+            pod_concurrency = base_concurrency + (1 if i < concurrency_remainder else 0)
+            if pod_concurrency == 0:
+                continue
+
+            # Distribute requests proportionally
+            pod_requests = base_requests + (1 if i < requests_remainder else 0) if total_requests > 0 else 0
+
+            # Round-robin across frontend URLs
+            url = self.frontend_urls[i % len(self.frontend_urls)]
 
             job_config = AIPerfConfig(
                 isl_mean=self.config.isl_mean,
                 isl_stddev=self.config.isl_stddev,
                 osl_mean=self.config.osl_mean,
                 osl_stddev=self.config.osl_stddev,
-                concurrency=job_concurrency,
-                request_count=self.config.request_count,
+                concurrency=pod_concurrency,
+                request_count=pod_requests,
                 warmup_request_count=self.config.warmup_request_count,
                 prefix_prompt_length=self.config.prefix_prompt_length,
                 num_prefix_prompts=self.config.num_prefix_prompts,
@@ -521,6 +685,8 @@ class MultiTargetAIPerfJob:
                 tokenizer=self.tokenizer,
             )
             self._jobs.append(job)
+
+        logger.info(f"Created {len(self._jobs)} AIPerf jobs")
 
     async def create_and_wait(
         self,

@@ -43,6 +43,10 @@ class LoadConfig:
     ignore_eos: bool = True
     extra_inputs: Dict[str, Any] = field(default_factory=dict)
 
+    # Prefix caching simulation
+    prefix_prompt_length: int = 0
+    num_prefix_prompts: int = 0
+
     def __post_init__(self):
         if self.warmup_requests is None:
             self.warmup_requests = min(self.concurrency, 10)
@@ -71,6 +75,7 @@ class ManagedAIPerfDeployment:
     namespace: str
     job_name: str = "ai-perf-load-test"
     container_log_dir: str = "/tmp/aiperf"  # Directory inside container
+    image: Optional[str] = None  # Custom image with aiperf pre-installed
 
     # Internal state
     _core_api: Optional[client.CoreV1Api] = None
@@ -87,6 +92,36 @@ class ManagedAIPerfDeployment:
         self.local_output_dir = os.path.join(self.log_dir, "aiperf")
         os.makedirs(self.local_output_dir, exist_ok=True)
         self._logger.info(f"AI Perf results will be saved to: {self.local_output_dir}")
+
+    def _compute_resources(self) -> dict:
+        """Compute container resources based on concurrency level."""
+        concurrency = self.load_config.concurrency
+
+        if concurrency <= 100:
+            cpu_req, cpu_lim = "2", "4"
+            mem_req, mem_lim = "4Gi", "8Gi"
+        elif concurrency <= 1000:
+            cpu_req, cpu_lim = "4", "8"
+            mem_req, mem_lim = "8Gi", "16Gi"
+        elif concurrency <= 10000:
+            cpu_req, cpu_lim = "8", "16"
+            mem_req, mem_lim = "16Gi", "32Gi"
+        else:
+            # Very high concurrency (10k+)
+            mem_gb = max(32, (concurrency * 200) // (1024 * 1024) + 16)
+            cpu_req, cpu_lim = "16", "32"
+            mem_req = f"{mem_gb}Gi"
+            mem_lim = f"{mem_gb * 2}Gi"
+
+        self._logger.info(
+            f"AIPerf resources for concurrency={concurrency}: "
+            f"CPU {cpu_req}/{cpu_lim}, memory {mem_req}/{mem_lim}"
+        )
+
+        return {
+            "requests": {"cpu": cpu_req, "memory": mem_req},
+            "limits": {"cpu": cpu_lim, "memory": mem_lim},
+        }
 
     async def _init_kubernetes(self):
         """Initialize kubernetes client"""
@@ -175,6 +210,11 @@ class ManagedAIPerfDeployment:
         if self.load_config.request_rate:
             aiperf_args.extend(["--request-rate", str(self.load_config.request_rate)])
 
+        # Add prefix caching simulation parameters
+        if self.load_config.prefix_prompt_length > 0 and self.load_config.num_prefix_prompts > 0:
+            aiperf_args.extend(["--prefix-prompt-length", str(self.load_config.prefix_prompt_length)])
+            aiperf_args.extend(["--num-prefix-prompts", str(self.load_config.num_prefix_prompts)])
+
         # Add extra inputs
         extra_inputs = {
             "max_tokens": self.load_config.output_tokens_mean,
@@ -190,17 +230,32 @@ class ManagedAIPerfDeployment:
         for key, value in extra_inputs.items():
             aiperf_args.extend(["--extra-inputs", f"{key}:{value}"])
 
-        # Build the complete shell script that keeps container alive after completion
-        script = f"""#!/bin/bash
-set -e
+        # Determine if we need to install aiperf or if it's pre-installed in the image
+        if self.image:
+            # Custom image with aiperf pre-installed
+            setup_commands = """
+# Using pre-installed aiperf from custom image
+echo "Using aiperf from custom image"
 
+# Install minimal dependencies for the script
+which curl || (apt-get update && apt-get install -y curl && apt-get clean) || true
+which jq || (apt-get update && apt-get install -y jq && apt-get clean) || true
+"""
+        else:
+            # Base python image - need to install everything
+            setup_commands = """
 # Setup environment
 apt-get update && apt-get install -y curl jq procps git && apt-get clean
 pip install aiperf
 echo "aiperf installation completed"
+"""
 
-# Configure networking
-sysctl -w net.ipv4.ip_local_port_range="1024 65000"
+        # Build the complete shell script that keeps container alive after completion
+        script = f"""#!/bin/bash
+set -e
+{setup_commands}
+# Configure networking (may fail without privileged mode, that's ok)
+sysctl -w net.ipv4.ip_local_port_range="1024 65000" 2>/dev/null || true
 export COLUMNS=200
 export PYTHONUNBUFFERED=1
 
@@ -384,15 +439,17 @@ done
                         "containers": [
                             {
                                 "name": "aiperf",
-                                "image": "python:3.12-slim",
-                                "imagePullPolicy": "IfNotPresent",
+                                "image": self.image or "python:3.12-slim",
+                                "imagePullPolicy": "Always" if self.image else "IfNotPresent",
                                 "command": ["/bin/bash", "-c", script],
                                 "env": [
                                     {"name": "PYTHONUNBUFFERED", "value": "1"},
-                                    {
-                                        "name": "AIPERF_HTTP_CONNECTION_LIMIT",
-                                        "value": "200",
-                                    },
+                                    {"name": "AIPERF_HTTP_CONNECTION_LIMIT", "value": "200"},
+                                    # Disable TUI/Rich output
+                                    {"name": "TERM", "value": "dumb"},
+                                    {"name": "NO_COLOR", "value": "1"},
+                                    {"name": "CI", "value": "true"},
+                                    {"name": "COLUMNS", "value": "200"},
                                 ],
                                 "securityContext": {"privileged": True},
                                 "volumeMounts": [
@@ -402,6 +459,7 @@ done
                                     }
                                 ],
                                 "workingDir": "/workspace",
+                                "resources": self._compute_resources(),
                             }
                         ],
                         "volumes": [{"name": "perf-results", "emptyDir": {}}],

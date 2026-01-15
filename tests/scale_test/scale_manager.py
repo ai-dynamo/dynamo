@@ -44,6 +44,7 @@ class ScaleManager:
     _core_api: Optional[client.CoreV1Api] = None
     _log_dir: Optional[str] = None
     _initialized: bool = False
+    _start_id: int = 1  # Starting deployment ID (auto-detected to avoid conflicts)
 
     def __post_init__(self):
         self._log_dir = tempfile.mkdtemp(prefix="scale_test_logs_")
@@ -77,10 +78,60 @@ class ScaleManager:
         self._core_api = client.CoreV1Api(k8s_client)
         self._initialized = True
 
+    async def _find_next_available_start_id(self) -> int:
+        """Find the next available deployment ID by checking existing DGDs.
+
+        Scans existing DGDs with the same name prefix and returns the first
+        ID that would not conflict with any existing deployment.
+        """
+        assert self._custom_api is not None
+
+        try:
+            dgds = await self._custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.kubernetes_namespace,
+                plural="dynamographdeployments",
+            )
+        except exceptions.ApiException as e:
+            logger.warning(f"Could not list existing DGDs: {e}")
+            return 1
+
+        # Find all existing IDs with our prefix
+        existing_ids = set()
+        prefix_with_dash = f"{self.name_prefix}-"
+
+        for dgd in dgds.get("items", []):
+            name = dgd["metadata"]["name"]
+            if name.startswith(prefix_with_dash):
+                suffix = name[len(prefix_with_dash):]
+                try:
+                    deployment_id = int(suffix)
+                    existing_ids.add(deployment_id)
+                except ValueError:
+                    # Not a numeric suffix, ignore
+                    pass
+
+        if not existing_ids:
+            return 1
+
+        # Find the first ID that doesn't conflict with any of the IDs we need
+        # We need num_deployments consecutive-ish slots, but simpler: start after max
+        max_existing = max(existing_ids)
+        next_id = max_existing + 1
+
+        logger.info(
+            f"Found {len(existing_ids)} existing DGDs with prefix '{self.name_prefix}' "
+            f"(max ID: {max_existing}). Starting new deployments from ID {next_id}."
+        )
+
+        return next_id
+
     def _build_deployment_specs(self) -> List[DeploymentSpec]:
         specs = []
-        for i in range(1, self.num_deployments + 1):
-            builder = ScaleTestDGDBuilder(deployment_id=i, name_prefix=self.name_prefix)
+        for i in range(self.num_deployments):
+            deployment_id = self._start_id + i
+            builder = ScaleTestDGDBuilder(deployment_id=deployment_id, name_prefix=self.name_prefix)
             spec = (
                 builder.set_kubernetes_namespace(self.kubernetes_namespace)
                 .set_model(self.model_path)
@@ -95,6 +146,9 @@ class ScaleManager:
     async def deploy_dgds(self) -> None:
         if not self._initialized:
             await self._init_kubernetes()
+
+        # Find next available start ID to avoid conflicts with existing deployments
+        self._start_id = await self._find_next_available_start_id()
 
         logger.info(f"Building {self.num_deployments} DGD specifications...")
         self._deployment_specs = self._build_deployment_specs()
