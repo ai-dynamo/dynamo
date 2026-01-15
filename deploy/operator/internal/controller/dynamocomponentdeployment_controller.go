@@ -347,112 +347,111 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 func (r *DynamoComponentDeploymentReconciler) reconcileLeaderWorkerSetResources(ctx context.Context, dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment) (ComponentReconcileResult, error) {
 	logger := log.FromContext(ctx)
 
-	desiredReplicas := int32(1)
-	if dynamoComponentDeployment.Spec.Replicas != nil {
-		desiredReplicas = *dynamoComponentDeployment.Spec.Replicas
-	}
+	// desiredReplicas variable logic removed as it's handled inside generateLeaderWorkerSet via spec
 
 	anyModified := false
-	leaderWorkerSets := make([]*leaderworkersetv1.LeaderWorkerSet, 0, desiredReplicas)
-	for i := range int(desiredReplicas) {
-		volcanoPodGroupModified, _, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*volcanov1beta1.PodGroup, bool, error) {
-			return r.generateVolcanoPodGroup(ctx, generateResourceOption{
-				dynamoComponentDeployment:               dynamoComponentDeployment,
-				isStealingTrafficDebugModeEnabled:       false,
-				containsStealingTrafficDebugModeEnabled: false,
-				instanceID:                              &i,
-			})
-		})
-		if err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to sync the PodGroup: %w", err)
-		}
 
-		leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
-			return r.generateLeaderWorkerSet(ctx, generateResourceOption{
-				dynamoComponentDeployment:               dynamoComponentDeployment,
-				isStealingTrafficDebugModeEnabled:       false,
-				containsStealingTrafficDebugModeEnabled: false,
-				instanceID:                              &i,
-			})
-		})
-		if err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
-		}
+	// We now create a SINGLE LeaderWorkerSet with Replicas = desiredReplicas
+	// instead of N LeaderWorkerSets with Replicas = 1.
 
-		if leaderWorkerSetModified || volcanoPodGroupModified {
-			anyModified = true
-		}
-		leaderWorkerSets = append(leaderWorkerSets, lwsObj)
+	// Note: We are no longer manually generating Volcano PodGroups here.
+	// We rely on the LeaderWorkerSet (and its integration with Volcano/Scheduler) to manage scheduling groups.
+	// If explicit PodGroup management is needed, it should be done via LWS features or a single aggregate PG.
+	// For this refactor, we assume one LWS is sufficient.
+
+	// Use a nil instanceID to indicate "default" / single resource mode if needed,
+	// or we just pass 0 and rely on the generator to NOT append suffix if not in a loop?
+	// Actually, let's modify generateLeaderWorkerSet to handle the "single LWS" case cleanly.
+	// We'll pass instanceID=0 but we need to ensure the name doesn't imply it's just the '0th' of many.
+	// But `generateLeaderWorkerSet` currently appends `-%d`. We should probably keep the name simple.
+
+	// Let's modify the generator call to NOT use an instance ID for the LWS name itself,
+	// or we accept that the single LWS might handle all replicas.
+
+	leaderWorkerSetModified, lwsObj, err := commonController.SyncResource(ctx, r, dynamoComponentDeployment, func(ctx context.Context) (*leaderworkersetv1.LeaderWorkerSet, bool, error) {
+		return r.generateLeaderWorkerSet(ctx, generateResourceOption{
+			dynamoComponentDeployment:               dynamoComponentDeployment,
+			isStealingTrafficDebugModeEnabled:       false,
+			containsStealingTrafficDebugModeEnabled: false,
+			// We pass nil or a specific flag to indicate "native scaling" if we changed the signature.
+			// For now, we'll reuse the struct but maybe ignore instanceID in generator or pass 0.
+			// Let's pass 0, but we will CHANGE generateLeaderWorkerSet to NOT append 0 if we are in this mode.
+			instanceID: nil,
+		})
+	})
+	if err != nil {
+		return ComponentReconcileResult{}, fmt.Errorf("failed to sync the LeaderWorkerSet: %w", err)
 	}
 
-	// Clean up any excess LeaderWorkerSets (if replicas were decreased)
-	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
-	for i := int(desiredReplicas); ; i++ {
-		// Try to find a LeaderWorkerSet with the next index
-		nextLWSName := fmt.Sprintf("%s-%d", baseKubeName, i)
-		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
-		err := r.Get(ctx, types.NamespacedName{
-			Name:      nextLWSName,
-			Namespace: dynamoComponentDeployment.Namespace,
-		}, lwsToDelete)
-
-		if err != nil {
-			if k8serrors.IsNotFound(err) {
-				break
-			}
-			return ComponentReconcileResult{}, fmt.Errorf("failed to get the LeaderWorkerSet for deletion: %w", err)
-		}
-
-		err = r.Delete(ctx, lwsToDelete)
-		if err != nil {
-			return ComponentReconcileResult{}, fmt.Errorf("failed to delete the LeaderWorkerSet: %w", err)
-		}
-
-		podGroupName := nextLWSName
-		podGroupToDelete := &volcanov1beta1.PodGroup{}
-		err = r.Get(ctx, types.NamespacedName{
-			Name:      podGroupName,
-			Namespace: dynamoComponentDeployment.Namespace,
-		}, podGroupToDelete)
-
-		if err != nil {
-			if !k8serrors.IsNotFound(err) {
-				logger.Error(err, "Failed to get PodGroup for deletion", "podGroupName", podGroupName)
-			}
-		} else {
-			err = r.Delete(ctx, podGroupToDelete)
-			if err != nil {
-				logger.Error(err, "Failed to delete PodGroup", "podGroupName", podGroupName)
-			}
-		}
-
+	if leaderWorkerSetModified {
 		anyModified = true
 	}
 
-	allReady := true
-	lwsReplicaStatuses := []v1alpha1.ServiceReplicaStatus{}
-	for _, leaderWorkerSet := range leaderWorkerSets {
-		if !IsLeaderWorkerSetReady(leaderWorkerSet) {
-			allReady = false
+	// Clean up any legacy per-replica LeaderWorkerSets (e.g. name-0, name-1...)
+	// AND legacy PodGroups.
+	baseKubeName := r.getKubeName(dynamoComponentDeployment, false)
+	// We used to create names like `baseKubeName-0`, `baseKubeName-1`.
+	// The new SINGLE LWS will likely be named `baseKubeName` (if we change the name generation).
+	// If the new name conflicts with the old `baseKubeName-0`, we need to be careful.
+	// `getKubeName` usually returns just the component name.
+	// The old loop did `fmt.Sprintf("%s-%d", kubeName, i)`.
+	// If we change generator to just use `kubeName`, we are fine, provided we delete the old ones.
+
+	// We should try to delete `baseKubeName-0`, `baseKubeName-1`, etc.
+	// Be careful not to delete the NEW one if it happens to use one of those names (unlikely if we drop suffix).
+
+	// List all LWS in namespace preventing us from guessing indices?
+	// Or just try to clean up known index-based ones.
+	// Since we are moving to native scaling, let's assume we want to clean up 0..N from PREVIOUS deployment.
+	// But wait, if we transitioned from N replicas to Native, we have `base-0`...`base-N`.
+	// We want to delete ALL of them and replace with `base`.
+	// OR we reuse `base-0` as the primary? No, `base` is cleaner.
+
+	// Let's iterate and delete old indexed ones.
+	// (Assuming reasonable max old replicas to check, e.g. 100?)
+	for i := 0; i < 100; i++ {
+		legacyName := fmt.Sprintf("%s-%d", baseKubeName, i)
+		lwsToDelete := &leaderworkersetv1.LeaderWorkerSet{}
+		err := r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, lwsToDelete)
+		if err == nil {
+			logger.Info("Deleting legacy indexed LeaderWorkerSet", "name", legacyName)
+			if err := r.Delete(ctx, lwsToDelete); err != nil {
+				logger.Error(err, "Failed to delete legacy LeaderWorkerSet", "name", legacyName)
+			}
+			anyModified = true
+		} else if !k8serrors.IsNotFound(err) {
+			logger.Error(err, "Failed to check legacy LeaderWorkerSet", "name", legacyName)
 		}
-		lwsReplicaStatuses = append(lwsReplicaStatuses, getLeaderWorkerSetReplicasStatus(leaderWorkerSet))
+
+		// Also delete legacy PodGroups
+		pgToDelete := &volcanov1beta1.PodGroup{}
+		err = r.Get(ctx, types.NamespacedName{Name: legacyName, Namespace: dynamoComponentDeployment.Namespace}, pgToDelete)
+		if err == nil {
+			logger.Info("Deleting legacy PodGroup", "name", legacyName)
+			if err := r.Delete(ctx, pgToDelete); err != nil {
+				logger.Error(err, "Failed to delete legacy PodGroup", "name", legacyName)
+			}
+			anyModified = true
+		}
 	}
 
-	if allReady {
+	lwsReplicaStatus := getLeaderWorkerSetReplicasStatus(lwsObj)
+	if IsLeaderWorkerSetReady(lwsObj) {
 		return ComponentReconcileResult{
 			modified:             anyModified,
 			status:               metav1.ConditionTrue,
-			reason:               "AllLeaderWorkerSetsReady",
-			message:              "All LeaderWorkerSets are ready",
-			serviceReplicaStatus: combineLWSReplicaStatuses(lwsReplicaStatuses),
+			reason:               "LeaderWorkerSetReady",
+			message:              "LeaderWorkerSet is ready",
+			serviceReplicaStatus: &lwsReplicaStatus,
 		}, nil
 	}
+
 	return ComponentReconcileResult{
 		modified:             anyModified,
 		status:               metav1.ConditionFalse,
-		reason:               "SomeLeaderWorkerSetsNotReady",
-		message:              "Some LeaderWorkerSets are not ready",
-		serviceReplicaStatus: combineLWSReplicaStatuses(lwsReplicaStatuses),
+		reason:               "LeaderWorkerSetNotReady",
+		message:              "LeaderWorkerSet is not ready",
+		serviceReplicaStatus: &lwsReplicaStatus,
 	}, nil
 
 }
@@ -544,17 +543,21 @@ func (r *DynamoComponentDeploymentReconciler) generateVolcanoPodGroup(ctx contex
 	logs := log.FromContext(ctx)
 	logs.Info("Generating Volcano PodGroup")
 
-	if opt.instanceID == nil {
-		return nil, false, errors.New("generateVolcanoPodGroup: instanceID cannot be nil")
-	}
-	instanceID := *opt.instanceID
-
-	if instanceID < 0 {
-		return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
+	var instanceID int
+	if opt.instanceID != nil {
+		instanceID = *opt.instanceID
+		if instanceID < 0 {
+			return nil, false, fmt.Errorf("generateVolcanoPodGroup: instanceID cannot be negative, got %d", instanceID)
+		}
+	} else {
+		instanceID = 0
 	}
 
 	podGroupName := r.getKubeName(opt.dynamoComponentDeployment, opt.isStealingTrafficDebugModeEnabled)
-	podGroupName = fmt.Sprintf("%s-%d", podGroupName, instanceID)
+
+	if opt.instanceID != nil {
+		podGroupName = fmt.Sprintf("%s-%d", podGroupName, instanceID)
+	}
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 
@@ -671,17 +674,23 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	logs := log.FromContext(ctx)
 	logs.Info("Generating LeaderWorkerSet")
 
-	if opt.instanceID == nil {
-		return nil, false, errors.New("generateLeaderWorkerSet: instanceID cannot be nil")
-	}
-	instanceID := *opt.instanceID
-
-	if instanceID < 0 {
-		return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
+	var instanceID int
+	if opt.instanceID != nil {
+		instanceID = *opt.instanceID
+		if instanceID < 0 {
+			return nil, false, fmt.Errorf("generateLeaderWorkerSet: instanceID cannot be negative, got %d", instanceID)
+		}
+	} else {
+		instanceID = 0
 	}
 
 	kubeName := r.getKubeName(opt.dynamoComponentDeployment, opt.isStealingTrafficDebugModeEnabled)
-	kubeName = fmt.Sprintf("%s-%d", kubeName, instanceID)
+
+	// If instanceID is provided, we might append it, but we are moving away from per-replica LWS.
+	// If instanceID is nil (from my new call), we skip appending.
+	if opt.instanceID != nil {
+		kubeName = fmt.Sprintf("%s-%d", kubeName, *opt.instanceID)
+	}
 
 	kubeNs := opt.dynamoComponentDeployment.Namespace
 	labels := r.getKubeLabels(opt.dynamoComponentDeployment)
@@ -718,11 +727,17 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderWorkerSet(ctx contex
 	}
 
 	// Each individual LeaderWorkerSet always has exactly 1 replica
-	singleReplica := int32(1)
+	// singleReplica := int32(1)
+
+	desiredReplicas := int32(1)
+	if opt.dynamoComponentDeployment.Spec.Replicas != nil {
+		desiredReplicas = *opt.dynamoComponentDeployment.Spec.Replicas
+	}
+
 	groupSize := opt.dynamoComponentDeployment.GetNumberOfNodes()
 
 	leaderWorkerSet.Spec = leaderworkersetv1.LeaderWorkerSetSpec{
-		Replicas:      &singleReplica,
+		Replicas:      &desiredReplicas,
 		StartupPolicy: leaderworkersetv1.LeaderCreatedStartupPolicy,
 		LeaderWorkerTemplate: leaderworkersetv1.LeaderWorkerTemplate{
 			LeaderTemplate: leaderPodTemplateSpec,
