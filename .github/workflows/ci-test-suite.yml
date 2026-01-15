@@ -334,100 +334,77 @@ jobs:
           echo "📦 Downloaded coverage artifacts:"
           find coverage-artifacts/ -type f -name "*.xml" -o -name ".coverage*" | sort
 
-      - name: Merge Coverage by Test Type
+      - name: Merge All Coverage Data
         run: |
           set -x
-          mkdir -p coverage-by-type
+          echo "📊 Merging all test coverage..."
 
-          echo "📊 Processing unit test coverage..."
-          find coverage-artifacts/ -path "*-unit-*" -name ".coverage" 2>/dev/null | while read -r file; do
-            cp "$file" "coverage-by-type/.coverage.unit.$(basename $(dirname $file))"
-          done
-
-          if ls coverage-by-type/.coverage.unit.* 1> /dev/null 2>&1; then
-            cd coverage-by-type
-            coverage combine .coverage.unit.* --keep
-            mv .coverage .coverage.unit
-            coverage report --data-file=.coverage.unit > unit-report.txt || echo "No unit coverage data"
-            cat unit-report.txt
-            cd ..
-          else
-            echo "No unit test coverage found" > coverage-by-type/unit-report.txt
-          fi
-
-          echo "📊 Processing unit + integration test coverage..."
-          find coverage-artifacts/ -path "*-unit-*" -o -path "*-integration-*" | grep ".coverage$" 2>/dev/null | while read -r file; do
-            cp "$file" "coverage-by-type/.coverage.integration.$(basename $(dirname $file))"
-          done
-
-          if ls coverage-by-type/.coverage.integration.* 1> /dev/null 2>&1; then
-            cd coverage-by-type
-            coverage combine .coverage.integration.* --keep
-            mv .coverage .coverage.integration
-            coverage report --data-file=.coverage.integration > integration-report.txt || echo "No integration coverage data"
-            cat integration-report.txt
-            cd ..
-          else
-            echo "No integration test coverage found" > coverage-by-type/integration-report.txt
-          fi
-
-          echo "📊 Processing all test coverage (unit + integration + e2e)..."
+          # Find all .coverage files and copy them with unique names
+          mkdir -p coverage-combined
           find coverage-artifacts/ -name ".coverage" 2>/dev/null | while read -r file; do
-            cp "$file" "coverage-by-type/.coverage.all.$(basename $(dirname $file))"
+            unique_name=$(echo "$file" | tr '/' '_' | sed 's/coverage-artifacts_//')
+            cp "$file" "coverage-combined/.coverage.${unique_name}"
           done
 
-          if ls coverage-by-type/.coverage.all.* 1> /dev/null 2>&1; then
-            cd coverage-by-type
-            coverage combine .coverage.all.* --keep
-            mv .coverage .coverage.all
-            coverage report --data-file=.coverage.all > all-report.txt || echo "No coverage data"
-            coverage html --data-file=.coverage.all -d ../coverage-html/ || echo "Could not generate HTML"
-            coverage xml --data-file=.coverage.all -o ../coverage-merged.xml || echo "Could not generate XML"
-            cat all-report.txt
+          # Check if we have any coverage files
+          if ls coverage-combined/.coverage.* 1> /dev/null 2>&1; then
+            echo "✅ Found coverage files to merge"
+            cd coverage-combined
+
+            # Combine all coverage data
+            coverage combine .coverage.* --keep
+            mv .coverage ../
             cd ..
+
+            # Generate reports
+            echo "📊 Generating coverage reports..."
+            coverage report --data-file=.coverage | tee coverage-report.txt
+            coverage html --data-file=.coverage -d coverage-html/
+            coverage xml --data-file=.coverage -o coverage-merged.xml
+
+            # Extract total coverage percentage
+            TOTAL_COVERAGE=$(grep "TOTAL" coverage-report.txt | awk '{print $NF}')
+            echo "📈 Total Coverage: ${TOTAL_COVERAGE}"
+            echo "TOTAL_COVERAGE=${TOTAL_COVERAGE}" >> $GITHUB_ENV
           else
-            echo "No test coverage found" > coverage-by-type/all-report.txt
+            echo "⚠️  No coverage data found"
+            echo "No coverage data available" > coverage-report.txt
+            echo "TOTAL_COVERAGE=0%" >> $GITHUB_ENV
           fi
 
-      - name: Generate Incremental Coverage Analysis
-        run: |
-          echo "🔬 Generating incremental coverage analysis..."
-          python scripts/coverage_analysis.py \
-            --unit coverage-by-type/unit-report.txt \
-            --integration coverage-by-type/integration-report.txt \
-            --output coverage-incremental-summary.txt \
-            --json-output coverage-data.json
-          # --e2e coverage-by-type/all-report.txt  # Add this when e2e coverage is ready
 
-
-      - name: Create Combined Report
+      - name: Create Coverage Summary
         run: |
           DATE=$(date +"%Y-%m-%d %H:%M:%S UTC")
-          cat > coverage-full-summary.md << EOF
-          # 📊 Nightly Test Coverage Report
+          cat > coverage-summary.md << EOF
+          # 📊 Test Coverage Report
 
           **Date:** ${DATE}
           **Run ID:** ${{ github.run_id }}
           **Workflow:** ${{ github.workflow }}
+          **Total Coverage:** ${TOTAL_COVERAGE}
 
           ---
 
-          $(cat coverage-incremental-summary.txt)
+          ## Coverage Details
+
+          \`\`\`
+          $(cat coverage-report.txt 2>/dev/null || echo "No coverage data available")
+          \`\`\`
 
           ---
 
           ## 📁 Artifacts
           - Full HTML Report: Download \`coverage-reports-${{ github.run_id }}\` artifact
           - Coverage XML: \`coverage-merged.xml\`
-          - Historical Data: \`coverage-data.json\`
 
           EOF
 
-          echo "📄 Coverage report generated"
-          cat coverage-full-summary.md
+          echo "📄 Coverage summary generated"
+          cat coverage-summary.md
 
       - name: Post to Workflow Summary
-        run: cat coverage-full-summary.md >> $GITHUB_STEP_SUMMARY
+        run: cat coverage-summary.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Coverage Reports
         uses: actions/upload-artifact@v4
@@ -437,9 +414,9 @@ jobs:
           path: |
             coverage-html/
             coverage-merged.xml
-            coverage-incremental-summary.txt
-            coverage-full-summary.md
-            coverage-data.json
+            coverage-report.txt
+            coverage-summary.md
+            .coverage
           retention-days: 30
 
       - name: Store Daily Snapshot to Branch
@@ -464,8 +441,8 @@ jobs:
 
           # Copy coverage files to snapshot
           cp coverage-merged.xml snapshots/$DATE/ 2>/dev/null || echo "No XML file"
-          cp coverage-incremental-summary.txt snapshots/$DATE/ 2>/dev/null || echo "No summary file"
-          cp coverage-data.json snapshots/$DATE/ 2>/dev/null || echo "No JSON file"
+          cp coverage-report.txt snapshots/$DATE/ 2>/dev/null || echo "No report file"
+          cp coverage-summary.md snapshots/$DATE/ 2>/dev/null || echo "No summary file"
 
           # Create simple index
           cat > snapshots/INDEX.md << 'INDEXEOF'
