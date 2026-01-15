@@ -941,7 +941,7 @@ jobs:
   coverage-report:
     name: Generate Coverage Report
     runs-on: ubuntu-latest
-    needs: [unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests]
+    needs: [unit-tests]
     if: inputs.enable_coverage && always()
     permissions:
       contents: write
