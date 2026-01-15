@@ -20,10 +20,12 @@ from vllm.tokenizers import TokenizerLike as AnyTokenizer
 from ..multimodal_utils import (
     ChatProcessor,
     CompletionsProcessor,
+    MultiModalGroup,
     MultiModalInput,
     MultiModalRequest,
     MyRequestOutput,
     ProcessMixIn,
+    extract_user_text,
     vLLMMultimodalRequest,
 )
 
@@ -157,10 +159,7 @@ class ProcessorHandler(ProcessMixIn):
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
         # Safely extract user text
-        try:
-            user_text = raw_request.messages[0].content[0].text
-        except (IndexError, AttributeError) as e:
-            raise ValueError(f"Invalid message structure: {e}")
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 
@@ -265,6 +264,7 @@ class ECProcessorHandler(ProcessorHandler):
 
     @staticmethod
     def _create_encoder_request(
+        prompt: str,
         mm_item: Dict[str, Any],
         model: str,
         request_id: str,
@@ -283,6 +283,7 @@ class ECProcessorHandler(ProcessorHandler):
             raise ValueError(f"Unsupported multimodal type: {mm_item.get('type')}")
 
         return {
+            "prompt": prompt,
             "request_id": request_id,
             "multimodal_input": multimodal_input,
             "modality": modality,
@@ -290,6 +291,7 @@ class ECProcessorHandler(ProcessorHandler):
 
     async def _encode_multimodal_items(
         self,
+        prompt: str,
         mm_items: List[Dict[str, Any]],
         model: str,
         request_id: str,
@@ -313,6 +315,7 @@ class ECProcessorHandler(ProcessorHandler):
 
             # Build encoder request
             encoder_request = self._create_encoder_request(
+                prompt=prompt,
                 mm_item=mm_item,
                 model=model,
                 request_id=item_request_id,
@@ -422,6 +425,7 @@ class ECProcessorHandler(ProcessorHandler):
             )
             try:
                 await self._encode_multimodal_items(
+                    prompt=prompt,
                     mm_items=mm_items,
                     model=raw_request.model,
                     request_id=request_id,
@@ -454,7 +458,9 @@ class ECProcessorHandler(ProcessorHandler):
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
             request_id=request_id,
-            multimodal_input=multimodal_input,  # ✓ Keep this so vLLM can generate mm_hash
+            multimodal_inputs=[
+                MultiModalGroup(multimodal_input=multimodal_input)
+            ],  # ✓ Keep this so vLLM can generate mm_hash
         )
 
         logger.debug(

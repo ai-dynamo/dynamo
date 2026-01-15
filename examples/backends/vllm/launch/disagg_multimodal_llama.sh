@@ -49,7 +49,7 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     python -m dynamo.frontend &
 
     # run processor
-    python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "<|image|>\n<prompt>" &
+    python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME &
 
     # Llama 4 doesn't support image embedding input, so the prefill worker will also
     # handle image encoding inline.
