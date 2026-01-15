@@ -253,14 +253,14 @@ impl PrefillRouter {
 
     /// Build bootstrap_info for disaggregated serving
     /// If preselected_worker is provided (GAIE Stage 2), use it directly.
-    /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
+    /// Otherwise, query for the best worker using `query_prefill_worker`.
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let prefill_router = self.prefill_router.get()?;
+        let _ = self.prefill_router.get()?; // Ensure activated
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -271,30 +271,16 @@ impl PrefillRouter {
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
-        } else if self.router_mode.is_kv_routing() {
-            // KV mode: use find_best_match
-            let kv_router = match prefill_router {
-                InnerPrefillRouter::KvRouter(r) => r,
-                _ => return None,
-            };
-            match async {
-                kv_router
-                    .chooser
-                    .find_best_match(None, &req.token_ids, None, false)
-                    .await
-            }
-            .instrument(tracing::info_span!("kv_find_best_match"))
-            .await
+        } else {
+            // Use shared worker selection logic (update_states=false for peek behavior)
+            match self
+                .query_prefill_worker(&req.token_ids, false)
+                .instrument(tracing::info_span!("query_prefill_worker"))
+                .await
             {
-                Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
+                Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
                 Err(_) => return None,
             }
-        } else {
-            // Non-KV mode: use PushRouter's stateful selection
-            // We use peek_next_worker instead of select_next_worker to avoid double-incrementing the counter
-            // if we fall back to the original path.
-            let worker_id = prefill_router.peek_next_worker()?;
-            (worker_id, 0)
         };
 
         // Get bootstrap info from ModelManager (works for ANY mode)
@@ -468,9 +454,44 @@ impl PrefillRouter {
         self.prefill_router.get().is_some()
     }
 
+    /// Query the best prefill worker without executing a request.
+    /// Returns (worker_id, dp_rank).
+    ///
+    /// This is the shared worker selection logic used by both `build_bootstrap_info`
+    /// and `query_route`.
+    pub async fn query_prefill_worker(
+        &self,
+        token_ids: &[u32],
+        update_states: bool,
+    ) -> Result<(u64, u32)> {
+        let prefill_router = self
+            .prefill_router
+            .get()
+            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+
+        if self.router_mode.is_kv_routing() {
+            let kv_router = match prefill_router {
+                InnerPrefillRouter::KvRouter(r) => r,
+                _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
+            };
+            let (worker, _overlap) = kv_router
+                .chooser
+                .find_best_match(None, token_ids, None, update_states)
+                .await?;
+            Ok((worker.worker_id, worker.dp_rank))
+        } else {
+            let worker_id = if update_states {
+                prefill_router.select_next_worker()
+            } else {
+                prefill_router.peek_next_worker()
+            }
+            .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+            Ok((worker_id, 0))
+        }
+    }
+
     /// Query optimal worker IDs without executing a request.
     ///
-    /// This replicates the `query_instance_id` flow but standalone (not through pipeline).
     /// Returns both prefill and decode worker IDs based on current mode.
     ///
     /// # Arguments
@@ -487,9 +508,6 @@ impl PrefillRouter {
         token_ids: &[u32],
         update_states: bool,
     ) -> Result<RouteQueryResult> {
-        use super::RouterConfigOverride;
-
-        // Check if disaggregated mode is available
         let is_disaggregated = self.is_activated();
 
         if self.enforce_disagg && !is_disaggregated {
@@ -497,33 +515,11 @@ impl PrefillRouter {
         }
 
         if is_disaggregated {
-            // Disaggregated mode: query both prefill and decode
-            let prefill_router = self.prefill_router.get().unwrap();
+            // Disaggregated: query prefill worker, then decode with overlap_score_weight=0
+            let (prefill_worker_id, _dp_rank) =
+                self.query_prefill_worker(token_ids, update_states).await?;
 
-            // Query prefill worker
-            let prefill_worker_id = if self.router_mode.is_kv_routing() {
-                let kv_router = match prefill_router {
-                    InnerPrefillRouter::KvRouter(r) => r,
-                    _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
-                };
-                let (worker, _overlap) = kv_router
-                    .chooser
-                    .find_best_match(None, token_ids, None, update_states)
-                    .await?;
-                worker.worker_id
-            } else {
-                // Non-KV mode: use PushRouter's selection
-                if update_states {
-                    prefill_router.select_next_worker()
-                } else {
-                    prefill_router.peek_next_worker()
-                }
-                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?
-            };
-
-            // Query decode worker with overlap_score_weight = 0
-            // (minimize load, not maximize overlap for decode after prefill)
-            let mut decode_override = RouterConfigOverride::default();
+            let mut decode_override = super::RouterConfigOverride::default();
             decode_override.overlap_score_weight = Some(0.0);
 
             let (decode_worker, _overlap) = decode_router
@@ -536,7 +532,7 @@ impl PrefillRouter {
                 is_disaggregated: true,
             })
         } else {
-            // Aggregated mode: query decode router only
+            // Aggregated: query decode router only
             let (worker, _overlap) = decode_router
                 .find_best_match(None, token_ids, None, update_states)
                 .await?;
