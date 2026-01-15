@@ -29,7 +29,6 @@ pub mod indexer;
 pub mod prefill_router;
 pub mod protocols;
 pub mod publisher;
-pub mod query_router;
 pub mod recorder;
 pub mod scheduler;
 pub mod sequence;
@@ -38,8 +37,7 @@ pub mod worker_query;
 
 pub use direct_router::DirectFromRequestRouter;
 use indexer::WorkerKvQueryResponse;
-pub use prefill_router::PrefillRouter;
-pub use query_router::{QueryRouter, RouteQueryResult};
+pub use prefill_router::{PrefillRouter, RouteQueryResult};
 use worker_query::WorkerQueryClient;
 
 use crate::{

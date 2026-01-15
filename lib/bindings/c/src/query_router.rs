@@ -1,16 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! C FFI Bindings for QueryRouter
+//! C FFI Bindings for Query Routing
 //!
 //! This module provides C FFI bindings for query-only routing operations.
-//! The actual `QueryRouter` implementation is in `dynamo_llm::kv_router::query_router`.
+//! It directly manages PrefillRouter and KvRouter handles, delegating routing
+//! logic to `PrefillRouter.query_route()`.
 
 use std::ffi::CStr;
+use std::sync::Arc;
 
 use libc::c_char;
 
-use dynamo_llm::kv_router::{QueryRouter, RouteQueryResult};
+use dynamo_llm::discovery::ModelManager;
+use dynamo_llm::kv_router::{KvRouter, KvRouterConfig, PrefillRouter, RouteQueryResult};
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// C-compatible result of a routing query
@@ -35,8 +39,14 @@ impl From<RouteQueryResult> for CRouteQueryResult {
     }
 }
 
-/// Opaque handle for QueryRouter
-pub type QueryRouterHandle = *mut QueryRouter;
+/// Container holding both routers needed for query routing
+pub struct RouterHandles {
+    prefill_router: Arc<PrefillRouter>,
+    decode_router: Arc<KvRouter>,
+}
+
+/// Opaque handle for the router pair
+pub type RouterHandlesPtr = *mut RouterHandles;
 
 /// Result codes for C FFI
 #[repr(u32)]
@@ -49,19 +59,19 @@ pub enum QueryRouterResult {
     ErrDisaggEnforced = 5,
 }
 
-/// Create a new QueryRouter
+/// Create router handles for query-only routing
 ///
 /// # Safety
 /// - All string parameters must be valid null-terminated C strings
-/// - The returned handle must be freed with `query_router_destroy`
+/// - The returned handle must be freed with `router_handles_destroy`
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_router_create(
+pub unsafe extern "C" fn router_handles_create(
     namespace: *const c_char,
     component: *const c_char,
     model_name: *const c_char,
     block_size: u32,
     enforce_disagg: bool,
-    out_handle: *mut QueryRouterHandle,
+    out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     if namespace.is_null() || model_name.is_null() || out_handle.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -81,7 +91,7 @@ pub unsafe extern "C" fn query_router_create(
         }
     };
 
-    let model_name = match unsafe { CStr::from_ptr(model_name) }.to_str() {
+    let model_name_str = match unsafe { CStr::from_ptr(model_name) }.to_str() {
         Ok(s) => s,
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
@@ -104,23 +114,64 @@ pub unsafe extern "C" fn query_router_create(
             }
         };
 
-        match QueryRouter::new(
-            &drt,
-            namespace,
-            component,
-            model_name,
-            block_size,
-            None,
-            enforce_disagg,
-        )
-        .await
-        {
-            Ok(router) => Ok(Box::into_raw(Box::new(router))),
+        let kv_router_config = KvRouterConfig::default();
+
+        // Get component and endpoint
+        let component_handle = match drt.namespace(namespace) {
+            Ok(ns) => match ns.component(component) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(error = ?e, "Failed to get component");
+                    return Err(QueryRouterResult::ErrInitFailed);
+                }
+            },
             Err(e) => {
-                tracing::error!(error = ?e, "Failed to create query router");
-                Err(QueryRouterResult::ErrInitFailed)
+                tracing::error!(error = ?e, "Failed to get namespace");
+                return Err(QueryRouterResult::ErrInitFailed);
             }
-        }
+        };
+        let endpoint = component_handle.endpoint("generate");
+
+        let model_manager = Arc::new(ModelManager::new());
+
+        // Create decode router
+        let decode_router = match model_manager
+            .kv_chooser_for(&endpoint, block_size, Some(kv_router_config.clone()))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to create decode router");
+                return Err(QueryRouterResult::ErrInitFailed);
+            }
+        };
+
+        // Create PrefillRouter (auto-activates when prefill workers discovered)
+        let prefill_router = model_manager
+            .register_prefill_router(model_name_str.to_string())
+            .map(|rx| {
+                let mut prefill_config = kv_router_config.clone();
+                prefill_config.router_track_active_blocks = false;
+
+                PrefillRouter::new(
+                    rx,
+                    model_manager.clone(),
+                    RouterMode::KV,
+                    block_size,
+                    Some(prefill_config),
+                    enforce_disagg,
+                )
+            })
+            .unwrap_or_else(|| {
+                PrefillRouter::disabled(model_manager.clone(), RouterMode::KV, enforce_disagg)
+            });
+
+        let handles = RouterHandles {
+            prefill_router,
+            decode_router,
+        };
+
+        Ok(Box::into_raw(Box::new(handles)))
     });
 
     match result {
@@ -135,12 +186,12 @@ pub unsafe extern "C" fn query_router_create(
 /// Query optimal worker(s) for a request
 ///
 /// # Safety
-/// - `handle` must be a valid QueryRouter handle
+/// - `handle` must be a valid RouterHandles handle
 /// - `token_ids` must point to `token_count` valid u32 values
 /// - `out_result` must be a valid pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_router_query(
-    handle: QueryRouterHandle,
+pub unsafe extern "C" fn router_handles_query(
+    handle: RouterHandlesPtr,
     token_ids: *const u32,
     token_count: usize,
     update_states: bool,
@@ -150,7 +201,7 @@ pub unsafe extern "C" fn query_router_query(
         return QueryRouterResult::ErrInvalidParam;
     }
 
-    let router = unsafe { &*handle };
+    let handles = unsafe { &*handle };
     let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
 
     // Get runtime to execute async query
@@ -159,9 +210,12 @@ pub unsafe extern "C" fn query_router_query(
         Err(_) => return QueryRouterResult::ErrQueryFailed,
     };
 
-    let result = runtime
-        .secondary()
-        .block_on(async { router.query_route(tokens, update_states).await });
+    let result = runtime.secondary().block_on(async {
+        handles
+            .prefill_router
+            .query_route(&handles.decode_router, tokens, update_states)
+            .await
+    });
 
     match result {
         Ok(route_result) => {
@@ -182,32 +236,32 @@ pub unsafe extern "C" fn query_router_query(
 /// Check if disaggregated mode is active
 ///
 /// # Safety
-/// - `handle` must be a valid QueryRouter handle
+/// - `handle` must be a valid RouterHandles handle
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_router_is_disaggregated(handle: QueryRouterHandle) -> bool {
+pub unsafe extern "C" fn router_handles_is_disaggregated(handle: RouterHandlesPtr) -> bool {
     if handle.is_null() {
         return false;
     }
 
-    let router = unsafe { &*handle };
-    router.is_disaggregated()
+    let handles = unsafe { &*handle };
+    handles.prefill_router.is_activated()
 }
 
 /// Mark prefill as completed for a request
 ///
 /// # Safety
-/// - `handle` must be a valid QueryRouter handle
+/// - `handle` must be a valid RouterHandles handle
 /// - `request_id` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_router_mark_prefill_complete(
-    handle: QueryRouterHandle,
+pub unsafe extern "C" fn router_handles_mark_prefill_complete(
+    handle: RouterHandlesPtr,
     request_id: *const c_char,
 ) -> QueryRouterResult {
     if handle.is_null() || request_id.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
 
-    let router = unsafe { &*handle };
+    let handles = unsafe { &*handle };
     let request_id = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s,
         Err(_) => return QueryRouterResult::ErrInvalidParam,
@@ -220,7 +274,7 @@ pub unsafe extern "C" fn query_router_mark_prefill_complete(
 
     let result = runtime
         .secondary()
-        .block_on(async { router.decode_router().mark_prefill_completed(request_id).await });
+        .block_on(async { handles.decode_router.mark_prefill_completed(request_id).await });
 
     match result {
         Ok(_) => QueryRouterResult::Ok,
@@ -234,18 +288,18 @@ pub unsafe extern "C" fn query_router_mark_prefill_complete(
 /// Free a request (release resources)
 ///
 /// # Safety
-/// - `handle` must be a valid QueryRouter handle
+/// - `handle` must be a valid RouterHandles handle
 /// - `request_id` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_router_free_request(
-    handle: QueryRouterHandle,
+pub unsafe extern "C" fn router_handles_free_request(
+    handle: RouterHandlesPtr,
     request_id: *const c_char,
 ) -> QueryRouterResult {
     if handle.is_null() || request_id.is_null() {
         return QueryRouterResult::ErrInvalidParam;
     }
 
-    let router = unsafe { &*handle };
+    let handles = unsafe { &*handle };
     let request_id = match unsafe { CStr::from_ptr(request_id) }.to_str() {
         Ok(s) => s,
         Err(_) => return QueryRouterResult::ErrInvalidParam,
@@ -258,7 +312,7 @@ pub unsafe extern "C" fn query_router_free_request(
 
     let result = runtime
         .secondary()
-        .block_on(async { router.decode_router().free(request_id).await });
+        .block_on(async { handles.decode_router.free(request_id).await });
 
     match result {
         Ok(_) => QueryRouterResult::Ok,
@@ -269,13 +323,13 @@ pub unsafe extern "C" fn query_router_free_request(
     }
 }
 
-/// Destroy a QueryRouter handle
+/// Destroy router handles
 ///
 /// # Safety
-/// - `handle` must be a valid QueryRouter handle or null
+/// - `handle` must be a valid RouterHandles handle or null
 /// - After this call, `handle` must not be used
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn query_router_destroy(handle: QueryRouterHandle) {
+pub unsafe extern "C" fn router_handles_destroy(handle: RouterHandlesPtr) {
     if !handle.is_null() {
         drop(unsafe { Box::from_raw(handle) });
     }

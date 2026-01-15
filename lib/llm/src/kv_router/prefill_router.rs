@@ -44,6 +44,17 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
+/// Result of a routing query
+#[derive(Debug, Clone, Default)]
+pub struct RouteQueryResult {
+    /// Worker ID for prefill phase (only valid if is_disaggregated is true)
+    pub prefill_worker_id: u64,
+    /// Worker ID for decode phase (always valid)
+    pub decode_worker_id: u64,
+    /// True if disaggregated mode is active (prefill_worker_id is valid)
+    pub is_disaggregated: bool,
+}
+
 /// The inner router used by PrefillRouter
 #[derive(Clone)]
 enum InnerPrefillRouter {
@@ -475,9 +486,8 @@ impl PrefillRouter {
         decode_router: &super::KvRouter,
         token_ids: &[u32],
         update_states: bool,
-    ) -> Result<super::query_router::RouteQueryResult> {
+    ) -> Result<RouteQueryResult> {
         use super::RouterConfigOverride;
-        use super::query_router::RouteQueryResult;
 
         // Check if disaggregated mode is available
         let is_disaggregated = self.is_activated();
