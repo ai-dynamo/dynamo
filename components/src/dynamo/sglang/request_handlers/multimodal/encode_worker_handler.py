@@ -4,15 +4,11 @@
 import logging
 from typing import AsyncIterator
 
-import torch
-from sglang.srt.parser.conversation import chat_templates
-from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
-
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component, Context
 from dynamo.runtime import DistributedRuntime
 from dynamo.sglang.args import Config
-from dynamo.sglang.multimodal_utils import ImageLoader, encode_image_embeddings
+from dynamo.sglang.multimodal_utils import ImageLoader, MultimodalHelper
 from dynamo.sglang.protocol import SglangMultimodalRequest
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -52,39 +48,12 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
         self.served_model_name = config.server_args.served_model_name
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
-
-        self.image_processor = AutoImageProcessor.from_pretrained(
-            self.model, trust_remote_code=True
+        self.multimodal_helper = MultimodalHelper(
+            model_path=self.model,
+            served_model_name=self.served_model_name,
+            chat_template=config.server_args.chat_template,
+            image_loader=self.image_loader,
         )
-        self.vision_model = AutoModel.from_pretrained(
-            self.model,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-        )
-
-        # Load tokenizer to convert image token string to integer ID
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-
-        # Get image token string and handle it properly
-        image_token_str = (
-            chat_templates[getattr(config.server_args, "chat_template")]
-            .copy()
-            .image_token
-        )
-
-        # For Qwen2.5-VL, the image token might be multiple tokens
-        if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
-            # These are likely the individual special tokens for Qwen2.5-VL
-            image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-
-            # Use the image_pad token as the main image token
-            self.image_token_id = image_pad_id
-        else:
-            # Fallback for other models
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
 
         self.min_workers = 1
 
@@ -119,22 +88,11 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             if not request.multimodal_input.image_url:
                 raise ValueError("image_url is required for the encode worker.")
 
-            image = await self.image_loader.load_image(
+            (
+                precomputed_embeddings,
+                image_grid_thw,
+            ) = await self.multimodal_helper.encode_image(
                 request.multimodal_input.image_url
-            )
-
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
-            precomputed_embeddings = encode_image_embeddings(
-                model_name=self.served_model_name,
-                image_embeds=image_embeds,
-                vision_encoder=self.vision_model,
-                projector=None,
-            )
-
-            image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
             )
 
             # Store the image data info in the request for downstream
@@ -142,18 +100,9 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             request.embeddings_shape = tuple(precomputed_embeddings.shape)
 
             # Replace the single image token with multiple image tokens based on embedding shape
-            image_token_id_index = request.request.token_ids.index(self.image_token_id)
-
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
-            # Replace single image token with multiple image tokens
-            request.request.token_ids = (
-                request.request.token_ids[:image_token_id_index]
-                + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
+            num_image_tokens = precomputed_embeddings.shape[1]
+            request.request.token_ids = self.multimodal_helper.expand_image_tokens(
+                request.request.token_ids, num_image_tokens
             )
 
             # Create descriptor for the multimodal data

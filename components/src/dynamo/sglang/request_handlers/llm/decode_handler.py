@@ -10,6 +10,7 @@ import sglang as sgl
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
+from dynamo.sglang.multimodal_utils import MultimodalHelper, extract_image_url
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -38,6 +39,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             config,
             publisher,
         )
+        self._multimodal_helper: MultimodalHelper | None = None
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
                 "Decode worker handler initialized (disaggregated decode mode)"
@@ -102,6 +104,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
+        image_data = None
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is pre-computed in the request (from frontend)
@@ -141,12 +144,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            image_url = extract_image_url(request)
+            if image_url:
+                if not self._multimodal_helper:
+                    if not self.config.server_args.chat_template:
+                        raise ValueError(
+                            "Multimodal requests require --chat-template to be specified."
+                        )
+                    self._multimodal_helper = MultimodalHelper.from_config(self.config)
+                (
+                    expanded_token_ids,
+                    mm_item,
+                ) = await self._multimodal_helper.prepare_multimodal_inputs(
+                    request["token_ids"], image_url
+                )
+                input_param = {"input_ids": expanded_token_ids}
+                image_data = [mm_item]
             trace_header = (
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
             agg = await self.engine.async_generate(
                 **input_param,
+                image_data=image_data,
                 sampling_params=sampling_params,
                 stream=True,
                 external_trace_header=trace_header,

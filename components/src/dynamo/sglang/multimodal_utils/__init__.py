@@ -8,9 +8,15 @@ from dynamo.sglang.multimodal_utils.multimodal_chat_processor import (
 from dynamo.sglang.multimodal_utils.multimodal_encode_utils import (
     encode_image_embeddings,
 )
+from dynamo.sglang.multimodal_utils.multimodal_helper import (
+    MultimodalHelper,
+    extract_image_url,
+)
 from dynamo.sglang.multimodal_utils.multimodal_image_loader import ImageLoader
 
 __all__ = [
+    "extract_image_url",
+    "MultimodalHelper",
     "multimodal_request_to_sglang",
     "process_sglang_stream_response",
     "encode_image_embeddings",
