@@ -16,20 +16,17 @@ use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{
-    DistributedRuntimeProvider, events::EventPublisher, events::EventSubscriber,
-};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
     component::{Component, Namespace},
     transports::nats::{NatsQueue, Slug},
 };
-use futures::StreamExt;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-    WORKER_KV_INDEXER_QUERY_SUBJECT,
-    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent, WorkerKvQueryRequest},
+    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent},
     protocols::*,
+    worker_query::start_worker_kv_query_endpoint,
 };
 use dynamo_runtime::config::environment_names::nats as env_nats;
 
@@ -173,11 +170,10 @@ impl KvEventPublisher {
                 .drt()
                 .runtime()
                 .secondary()
-                .spawn(start_worker_kv_query_service(
+                .spawn(start_worker_kv_query_endpoint(
                     component,
                     worker_id,
                     local_indexer,
-                    cancellation_token.clone(),
                 ))
         });
 
@@ -306,80 +302,6 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                     tracing::error!("Failed to publish event to NATS: {}", e);
                 }
 
-            }
-        }
-    }
-}
-
-// Processor for Router -> LocalKvIndexer query service
-async fn start_worker_kv_query_service(
-    component: Component,
-    worker_id: u64,
-    local_indexer: Arc<LocalKvIndexer>,
-    cancellation_token: CancellationToken,
-) {
-    // Create NATS subscriber on a subject specific to worker's id
-    let subject = format!("{}.{}", WORKER_KV_INDEXER_QUERY_SUBJECT, worker_id);
-    let mut subscriber = match component.subscribe(&subject).await {
-        Ok(sub) => sub,
-        Err(e) => {
-            tracing::error!(
-                "Query service failed to subscribe for worker {worker_id} on subject {subject}: {e}"
-            );
-            return;
-        }
-    };
-    tracing::info!("Query service listening on NATS for worker {worker_id} on subject {subject}");
-
-    // Receive query request from router, retrieve event(s) from LocalKvIndexer, return response
-    loop {
-        tokio::select! {
-            _ = cancellation_token.cancelled() => {
-                tracing::info!("Query service received cancellation signal for worker {worker_id}");
-                break;
-            }
-
-            msg = subscriber.next() => {
-                let Some(msg) = msg else {
-                    tracing::warn!("Query service NATS stream ended for worker {worker_id}");
-                    break;
-                };
-
-                // deserialize from msg (async_nats::Message)
-                let request: WorkerKvQueryRequest = match serde_json::from_slice(&msg.payload) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        tracing::error!("Failed to deserialize WorkerKvQueryRequest for worker {worker_id}: {e}");
-                        continue;
-                    }
-                };
-
-                tracing::debug!("Received query request for worker {worker_id}: {request:?}");
-
-                // Query events based on optional start/end ids
-                let response = local_indexer
-                    .get_events_in_id_range(request.start_event_id, request.end_event_id)
-                    .await;
-
-                // Send reply back (if reply subject exists)
-                if let Some(reply_subject) = msg.reply {
-                    let payload = match serde_json::to_vec(&response) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            tracing::error!("Failed to serialize response for worker {worker_id}: {e}");
-                            continue;
-                        }
-                    };
-
-                    // Publish through DRT/NATS directly instead of namespace (adds a prefix)
-                    if let Err(e) = component
-                        .drt()
-                        .kv_router_nats_publish(reply_subject.to_string(), payload.into())
-                        .await
-                    {
-                        tracing::error!("Failed to send reply for worker {worker_id}: {e}");
-                    }
-                }
             }
         }
     }
@@ -1864,6 +1786,9 @@ mod tests_startup_helpers {
         let missed_events = match response {
             crate::kv_router::indexer::WorkerKvQueryResponse::Events(e) => e,
             crate::kv_router::indexer::WorkerKvQueryResponse::TreeDump(e) => e,
+            crate::kv_router::indexer::WorkerKvQueryResponse::Error(message) => {
+                panic!("Unexpected error response: {message}")
+            }
             other => panic!("Unexpected response: {:?}", other),
         };
         assert_eq!(
