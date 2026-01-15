@@ -20,11 +20,22 @@ package validation
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+)
+
+const (
+	// maxCombinedResourceNameLength is the maximum allowed combined length for Grove resource names.
+	// This constraint comes from Grove's PodCliqueSet webhook validation which enforces a 45-character
+	// limit on the combined length of PodCliqueSet name + PodCliqueScalingGroup name + PodClique name.
+	// Pod names follow formats like: <pcs-name>-<pcs-index>-<pcsg-name>-<pcsg-index>-<pclq-name>-<random>
+	// The random string and hyphens consume additional characters, leaving 45 for the resource names.
+	maxCombinedResourceNameLength = 45
 )
 
 // DynamoGraphDeploymentValidator validates DynamoGraphDeployment resources.
@@ -153,10 +164,66 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 // validateService validates a single service configuration using SharedSpecValidator.
 // Returns warnings and error.
 func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
+	// Validate service name length constraints for Grove PodCliqueSet naming
+	if err := v.validateServiceNameLength(serviceName, service); err != nil {
+		return nil, err
+	}
+
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
 	sharedValidator := NewSharedSpecValidator(service, fieldPath)
 	return sharedValidator.Validate()
+}
+
+// validateServiceNameLength validates that the service name combined with the DGD name
+// won't exceed Grove's 45-character limit for resource naming.
+//
+// Grove generates PodCliqueSet resources with the following naming patterns:
+// - PodCliqueSet name: DGD name (e.g., "vllm-agg")
+// - For multinode services:
+//   - PodCliqueScalingGroup name: lowercase(serviceName) (e.g., "vllmprefillworker")
+//   - PodClique names: lowercase(serviceName + "-ldr") and lowercase(serviceName + "-wkr")
+//
+// - For single-node services:
+//   - PodClique name: lowercase(serviceName)
+//
+// The combined length of these names must not exceed 45 characters.
+func (v *DynamoGraphDeploymentValidator) validateServiceNameLength(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) error {
+	dgdName := v.deployment.Name
+	lowerServiceName := strings.ToLower(serviceName)
+
+	// Check if this is a multinode service
+	isMultinode := service.GetNumberOfNodes() > 1
+
+	if isMultinode {
+		// For multinode: PodCliqueSet name + PodCliqueScalingGroup name + PodClique name (with leader suffix)
+		// The PodClique name is serviceName + "-ldr" (using GroveRoleSuffixLeader)
+		leaderPodCliqueName := lowerServiceName + "-" + consts.GroveRoleSuffixLeader
+		combinedLength := len(dgdName) + len(lowerServiceName) + len(leaderPodCliqueName)
+
+		if combinedLength > maxCombinedResourceNameLength {
+			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+				"For multinode services, the combined length of DGD name + service name + service name with role suffix (e.g., '%s-ldr') must not exceed %d characters",
+				serviceName, combinedLength, maxCombinedResourceNameLength,
+				dgdName, len(dgdName), serviceName, len(serviceName),
+				lowerServiceName, maxCombinedResourceNameLength)
+		}
+	} else {
+		// For single-node: PodCliqueSet name + PodClique name
+		combinedLength := len(dgdName) + len(lowerServiceName)
+
+		if combinedLength > maxCombinedResourceNameLength {
+			return fmt.Errorf("spec.services[%s]: combined resource name length %d exceeds %d-character limit required for pod naming. "+
+				"Consider shortening the DynamoGraphDeployment name '%s' (length %d) or service name '%s' (length %d). "+
+				"The combined length of DGD name + service name must not exceed %d characters",
+				serviceName, combinedLength, maxCombinedResourceNameLength,
+				dgdName, len(dgdName), serviceName, len(serviceName),
+				maxCombinedResourceNameLength)
+		}
+	}
+
+	return nil
 }
 
 // validatePVCs validates the PVC configurations.
