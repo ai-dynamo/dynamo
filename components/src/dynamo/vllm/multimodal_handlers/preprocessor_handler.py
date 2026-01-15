@@ -12,8 +12,15 @@ from dynamo.runtime import Client
 from transformers import AutoTokenizer
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import CompletionRequest
+
+try:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import CompletionRequest
+except ImportError:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+    )
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
