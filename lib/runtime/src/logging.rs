@@ -200,70 +200,6 @@ macro_rules! emit_at_level {
     };
 }
 
-/// Trait for extracting trace context fields from either
-/// DistributedTraceContext or PendingDistributedTraceContext
-trait TraceContext {
-    fn trace_id(&self) -> Option<&str>;
-    fn span_id(&self) -> Option<&str>;
-    fn parent_id(&self) -> Option<&str>;
-    fn tracestate(&self) -> Option<&str>;
-    fn x_request_id(&self) -> Option<&str>;
-    fn x_dynamo_request_id(&self) -> Option<&str>;
-}
-
-/// Macro to implement TraceContext for types with the same field names.
-/// Handles both `String` and `Option<String>` field types.
-macro_rules! impl_trace_context {
-    ($type:ty, $trace_id:tt, $span_id:tt) => {
-        impl TraceContext for $type {
-            fn trace_id(&self) -> Option<&str> {
-                impl_trace_context!(@field self.trace_id, $trace_id)
-            }
-            fn span_id(&self) -> Option<&str> {
-                impl_trace_context!(@field self.span_id, $span_id)
-            }
-            fn parent_id(&self) -> Option<&str> {
-                self.parent_id.as_deref()
-            }
-            fn tracestate(&self) -> Option<&str> {
-                self.tracestate.as_deref()
-            }
-            fn x_request_id(&self) -> Option<&str> {
-                self.x_request_id.as_deref()
-            }
-            fn x_dynamo_request_id(&self) -> Option<&str> {
-                self.x_dynamo_request_id.as_deref()
-            }
-        }
-    };
-    // For required (String) fields - always Some
-    (@field $field:expr, required) => {
-        Some(&$field)
-    };
-    // For optional (Option<String>) fields
-    (@field $field:expr, optional) => {
-        $field.as_deref()
-    };
-}
-
-impl_trace_context!(DistributedTraceContext, required, required);
-impl_trace_context!(PendingDistributedTraceContext, optional, optional);
-
-/// Get trace context from span extensions.
-/// First tries DistributedTraceContext (finalized), then falls back to
-/// PendingDistributedTraceContext (available during span creation events).
-fn get_trace_context<'a>(
-    ext: &'a tracing_subscriber::registry::Extensions<'_>,
-) -> Option<&'a dyn TraceContext> {
-    if let Some(ctx) = ext.get::<DistributedTraceContext>() {
-        return Some(ctx);
-    }
-    if let Some(ctx) = ext.get::<PendingDistributedTraceContext>() {
-        return Some(ctx);
-    }
-    None
-}
-
 impl DistributedTraceContext {
     /// Create a traceparent string from the context
     pub fn create_traceparent(&self) -> String {
@@ -1300,47 +1236,44 @@ where
                 serde_json::Value::String(span.name().to_string()),
             );
 
-            if let Some(ctx) = get_trace_context(&ext) {
-                if let Some(span_id) = ctx.span_id() {
-                    visitor.fields.insert(
-                        "span_id".to_string(),
-                        serde_json::Value::String(span_id.to_string()),
-                    );
-                }
-                if let Some(trace_id) = ctx.trace_id() {
-                    visitor.fields.insert(
-                        "trace_id".to_string(),
-                        serde_json::Value::String(trace_id.to_string()),
-                    );
-                }
-                if let Some(parent_id) = ctx.parent_id() {
+            if let Some(ctx) = ext.get::<DistributedTraceContext>() {
+                // trace_id and span_id are always present in DistributedTraceContext
+                visitor.fields.insert(
+                    "span_id".to_string(),
+                    serde_json::Value::String(ctx.span_id.clone()),
+                );
+                visitor.fields.insert(
+                    "trace_id".to_string(),
+                    serde_json::Value::String(ctx.trace_id.clone()),
+                );
+                if let Some(ref parent_id) = ctx.parent_id {
                     visitor.fields.insert(
                         "parent_id".to_string(),
-                        serde_json::Value::String(parent_id.to_string()),
+                        serde_json::Value::String(parent_id.clone()),
                     );
                 } else {
                     visitor.fields.remove("parent_id");
                 }
-                if let Some(tracestate) = ctx.tracestate() {
+                if let Some(ref tracestate) = ctx.tracestate {
                     visitor.fields.insert(
                         "tracestate".to_string(),
-                        serde_json::Value::String(tracestate.to_string()),
+                        serde_json::Value::String(tracestate.clone()),
                     );
                 } else {
                     visitor.fields.remove("tracestate");
                 }
-                if let Some(x_request_id) = ctx.x_request_id() {
+                if let Some(ref x_request_id) = ctx.x_request_id {
                     visitor.fields.insert(
                         "x_request_id".to_string(),
-                        serde_json::Value::String(x_request_id.to_string()),
+                        serde_json::Value::String(x_request_id.clone()),
                     );
                 } else {
                     visitor.fields.remove("x_request_id");
                 }
-                if let Some(x_dynamo_request_id) = ctx.x_dynamo_request_id() {
+                if let Some(ref x_dynamo_request_id) = ctx.x_dynamo_request_id {
                     visitor.fields.insert(
                         "x_dynamo_request_id".to_string(),
-                        serde_json::Value::String(x_dynamo_request_id.to_string()),
+                        serde_json::Value::String(x_dynamo_request_id.clone()),
                     );
                 } else {
                     visitor.fields.remove("x_dynamo_request_id");
