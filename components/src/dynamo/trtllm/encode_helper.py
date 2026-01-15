@@ -244,6 +244,7 @@ class EncodeHelper:
                 yield {"error": "NIXL connector is required for embedding_paths encode"}
                 return
             # Load the embeddings data
+            logging.info(f"EncodeHelper: loading embeddings from {embedding_paths[0]}")
             loaded_data = multimodal_processor.load_tensor_from_path_or_url(
                 embedding_paths[0]
             )
@@ -265,7 +266,7 @@ class EncodeHelper:
                 auxiliary_data = {}
             # Create readable operation with main embeddings tensor (works for both formats)
             descriptor = nixl_connect.Descriptor(encodings)
-            with connector.create_readable(descriptor) as readable_op:
+            with await connector.create_readable(descriptor) as readable_op:
                 # Get the metadata for the readable operation
                 op_metadata = readable_op.metadata()
 
@@ -304,6 +305,10 @@ class EncodeHelper:
                 prompts=[text_prompt],
                 media=image_urls[0],
             )
+            # Log encoder input
+            input_keys = list(inputs[0].keys()) if inputs and isinstance(inputs[0], dict) else "N/A"
+            logging.info(f"[EPD ENCODE] MultimodalEncoder input keys: {input_keys}")
+            
             # engine.llm is the MultimodalEncoder instance
             # MultimodalEncoder.generate() returns a list of GenerationResult objects
             if engine is None:
@@ -326,16 +331,15 @@ class EncodeHelper:
                 )
                 yield {"ep_disaggregated_params": None}
                 return
-            # NOTE: `hasattr` is used for TRT-LLM version compatibility: TBD
-            # may not have multimodal_embedding_handles/multimodal_hashes on DisaggregatedParams.
-            if (
+            # Log encoder output
+            has_handles = (
                 hasattr(ep_disaggregated_params, "multimodal_embedding_handles")
                 and ep_disaggregated_params.multimodal_embedding_handles
-            ):
-                logging.debug(
-                    f"ENCODE WORKER: Generated {len(ep_disaggregated_params.multimodal_embedding_handles)} embedding handle(s)"
-                )
-            else:
+            )
+            num_handles = len(ep_disaggregated_params.multimodal_embedding_handles) if has_handles else 0
+            logging.info(f"[EPD ENCODE] MultimodalEncoder output: multimodal_embedding_handles={num_handles}")
+            
+            if not has_handles:
                 logging.warning(
                     "ENCODE WORKER: ep_disaggregated_params has no multimodal_embedding_handles"
                 )

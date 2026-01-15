@@ -156,16 +156,14 @@ class PrefillHandler(HandlerBase):
             # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
-                    logging.debug(
-                        "PrefillHandler calling Encode Worker via remote_encode_with_nixl"
-                    )
+                    logging.info(f"PrefillHandler: embedding_paths={embedding_paths}")
                     embeddings_tensor = await self.remote_encode_with_nixl(request)
                 else:
                     # We can still handle embedding_paths without NIXL:
                     # `MultimodalRequestProcessor.process_openai_request` will load the embeddings
                     # locally in the prefill worker as a fallback. The encode-worker+NIXL path is
                     # useful when you want a dedicated I/O stage and/or explicit RDMA transfer.
-                    logging.debug(
+                    logging.info(
                         "PrefillHandler: no encode_client/connector; falling back to local embedding load"
                     )
 
@@ -181,6 +179,10 @@ class PrefillHandler(HandlerBase):
                             # Reconstruct DisaggregatedParams object from dict
                             ep_disaggregated_params = DisaggregatedParams(**params_dict)
                             ep_disaggregated_params.request_type = "context_only"
+                            logging.info(
+                                f"[EPD PREFILL] Received ep_disaggregated_params from encoder, "
+                                f"has_handles={ep_disaggregated_params.multimodal_embedding_handles is not None}"
+                            )
 
                             # Get the processed prompt from encoder (includes <image> tokens)
                             # Store it in the request so multimodal_processor can access it
