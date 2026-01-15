@@ -170,32 +170,6 @@ runs:
         echo "TEST_EXIT_CODE=${TEST_EXIT_CODE}" >> $GITHUB_ENV
         echo "🧪 Tests completed with exit code: ${TEST_EXIT_CODE}"
 
-        # Generate XML report from .coverage data file
-        if [[ "${{ inputs.enable_coverage }}" == "true" && "${{ inputs.dry_run }}" != "true" ]]; then
-          echo "📊 Generating XML coverage report from .coverage data file..."
-
-          if [[ -f "${TEST_RESULTS_DIR}/.coverage" ]]; then
-            echo "✅ .coverage data file found, generating XML..."
-            # Run coverage xml inside the same container to generate the report
-            docker run ${GPU_FLAGS} --rm -w /workspace \
-              --env COVERAGE_FILE=/workspace/test-results/.coverage \
-              -v "${TEST_RESULTS_DIR}:/workspace/test-results" \
-              ${{ inputs.image_tag }} \
-              bash -c "coverage xml -o /workspace/test-results/coverage.xml"
-
-            if [[ -f "${TEST_RESULTS_DIR}/coverage.xml" ]]; then
-              echo "✅ coverage.xml generated successfully"
-            else
-              echo "⚠️ Failed to generate coverage.xml"
-            fi
-          else
-            echo "⚠️ .coverage data file NOT found - cannot generate XML"
-          fi
-
-          echo "📁 Final files in test-results:"
-          ls -lah "${TEST_RESULTS_DIR}/"
-        fi
-
         # Verify test results were written (only in normal mode)
         if [[ "${{ inputs.dry_run }}" != "true" ]]; then
           if [[ -f "${TEST_RESULTS_DIR}/${{ env.PYTEST_XML_FILE }}" ]]; then
@@ -264,4 +238,4 @@ runs:
         name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}
         path: test-results/
         include-hidden-files: true
-        retention-days: 2
+        retention-days: 7

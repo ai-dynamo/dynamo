@@ -204,8 +204,6 @@ jobs:
           echo "==== Directory structure (including hidden files) ===="
           ls -Ra coverage-artifacts/
 
-          echo "==== Directory structure  ===="
-          pwd
           echo ""
           echo "==== Coverage files found ===="
           find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
@@ -213,40 +211,16 @@ jobs:
           echo "==== Specifically looking for .coverage files ===="
           find coverage-artifacts/ -name ".coverage" -type f
           echo ""
-          echo "==== Checking if .coverage files exist ===="
-          if find coverage-artifacts/ -name ".coverage" -type f | grep -q .; then
-            echo "✅ .coverage files found!"
-            find coverage-artifacts/ -name ".coverage" -type f -exec ls -lh {} \;
-          else
-            echo "❌ NO .coverage files found!"
-          fi
 
       - name: Merge All Coverage Data
         run: |
           set -x
           echo "📊 Merging all test coverage..."
 
-          # Debug: Show current directory and source code structure
-          echo "Current directory: $(pwd)"
-          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
-          echo "Source code structure:"
-          ls -la components/src/dynamo/ 2>/dev/null | head -20 || echo "components/src/dynamo not found"
-
-          # Create a .coveragerc file with path remapping
-          cat > .coveragerc << 'EOF'
-          [paths]
-          dynamo =
-              components/src/dynamo
-              /workspace/components/src/dynamo
-              $GITHUB_WORKSPACE/components/src/dynamo
-          [run]
-          parallel = True
-          EOF
-
           # Expand $GITHUB_WORKSPACE in the config
           sed -i "s|\$GITHUB_WORKSPACE|${GITHUB_WORKSPACE}|g" .coveragerc
 
-          echo "Created .coveragerc with path remapping:"
+          echo "Updated .coveragerc with path remapping:"
           cat .coveragerc
 
           # Find all .coverage files and copy them with unique names
@@ -269,17 +243,8 @@ jobs:
             echo "Running coverage combine with path remapping..."
             set +e  # Don't exit on error
             COVERAGE_RCFILE=../.coveragerc coverage combine --keep  .coverage.* 2>&1 | tee ../combine.log
-            COMBINE_EXIT=$?
             set -e
 
-            if [ $COMBINE_EXIT -ne 0 ]; then
-              echo "⚠️ Warning: coverage combine had issues (exit code: $COMBINE_EXIT)"
-              echo "Combine log:"
-              cat ../combine.log
-              # Try without --keep flag
-              echo "Retrying without --keep flag..."
-              COVERAGE_RCFILE=../.coveragerc coverage combine .coverage.* 2>&1 || echo "Second attempt also failed"
-            fi
 
             if [ -f .coverage ]; then
               echo "✅ Combined .coverage file created"
@@ -289,21 +254,10 @@ jobs:
               # Generate reports (continue even if some fail)
               echo "📊 Generating coverage reports..."
               set +e
-              COVERAGE_RCFILE=.coveragerc coverage report --show-missing --data-file=.coverage 2>&1 | tee coverage-report.txt
-              REPORT_EXIT=$?
               COVERAGE_RCFILE=.coveragerc coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
               COVERAGE_RCFILE=.coveragerc coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
               set -e
 
-              if [ $REPORT_EXIT -eq 0 ]; then
-                # Extract total coverage percentage
-                TOTAL_COVERAGE=$(grep "TOTAL" coverage-report.txt | awk '{print $NF}')
-                echo "📈 Total Coverage: ${TOTAL_COVERAGE}"
-                echo "TOTAL_COVERAGE=${TOTAL_COVERAGE}" >> $GITHUB_ENV
-              else
-                echo "⚠️ Coverage report generation had issues"
-                echo "TOTAL_COVERAGE=unknown" >> $GITHUB_ENV
-              fi
             else
               echo "❌ Failed to create combined .coverage file"
               cd ..
@@ -364,7 +318,7 @@ jobs:
           retention-days: 30
 
       - name: Store Daily Snapshot to Branch
-        if: github.event_name == 'schedule'
+        if: false && github.event_name == 'schedule' # disable this for now, to enable, we also need to give nightly-ci write permissions.
         run: |
           set -x
           git config user.name "github-actions[bot]"
