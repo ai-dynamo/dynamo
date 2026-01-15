@@ -135,7 +135,7 @@ Additional output with --thorough-check:
    └─ DYN_VAR2=value2
 
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check-only] [--json-output] [--cuda-info-only]
+    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check-only] [--json-output]
 
 Options:
     --thorough-check              Enable thorough checking (file permissions, directory sizes, disk space, ulimits, CUDA/NVIDIA info, DYN_* env, HuggingFace model details)
@@ -145,7 +145,6 @@ Options:
                                   and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
     --no-gpu-check                Skip GPU detection and information collection (useful for environments without GPU access)
     --no-framework-check          Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
-    --cuda-info-only              Only display CUDA/NVIDIA information (nvidia-smi, nvcc, env vars, dpkg, pip packages)
 """
 
 import datetime
@@ -791,7 +790,12 @@ class OSInfo(NodeInfo):
 
 
 class GPUInfo(NodeInfo):
-    """NVIDIA GPU information"""
+    """NVIDIA GPU information.
+
+    Displays GPU model, driver version, power/memory stats, and CUDA versions.
+    In thorough mode (--thorough-check), also collects detailed CUDA/NVIDIA
+    environment information (nvcc, env vars, dpkg packages, pip packages).
+    """
 
     def __init__(self, thorough_check: bool = False):
         self.thorough_check = thorough_check
@@ -904,7 +908,7 @@ class GPUInfo(NodeInfo):
 
             # Add CUDA/NVIDIA info in thorough mode
             if self.thorough_check:
-                cuda_info = self._check_cuda_version_consistency()
+                cuda_info = self._collect_cuda_info()
                 self.add_child(cuda_info)
 
         except Exception:
@@ -1063,10 +1067,19 @@ class GPUInfo(NodeInfo):
             pass
         return None
 
-    def _check_cuda_version_consistency(self) -> NodeInfo:
+    def _collect_cuda_info(self) -> NodeInfo:
         """
-        Display CUDA/NVIDIA environment and package information.
-        No version checking - just collects and displays information.
+        Collect and display CUDA/NVIDIA environment and package information.
+
+        This function gathers diagnostic information from multiple sources:
+        - nvidia-smi: Driver version and maximum supported CUDA version
+        - nvcc: Installed CUDA toolkit version
+        - Environment variables: CUDA_VERSION, NV_CUDA_*, NVIDIA_REQUIRE_CUDA
+        - dpkg: Installed CUDA packages (cuda-*, libcublas*, libnccl*)
+        - pip: CUDA-related Python packages (torch, nvidia-*, etc.)
+
+        Returns:
+            NodeInfo with collected CUDA/NVIDIA information (INFO status, no validation)
         """
         import re
 
@@ -3277,12 +3290,6 @@ def main():
         action="store_true",
         help="Skip LLM framework package checks (vllm, sglang, tensorrt_llm)",
     )
-    parser.add_argument(
-        "--cuda-info-only",
-        dest="cuda_only",
-        action="store_true",
-        help="Only display CUDA/NVIDIA information (nvidia-smi, nvcc, env vars, dpkg, pip packages)",
-    )
     args = parser.parse_args()
 
     # Validate mutual exclusion
@@ -3294,28 +3301,6 @@ def main():
         parser.error(
             "--json-output and --terse cannot be used together (json-output is already terse)"
         )
-    if args.cuda_only and (args.terse or args.json_output):
-        parser.error("--cuda-info-only cannot be used with --terse or --json-output")
-
-    # Handle CUDA-only mode: just display the info and exit
-    if args.cuda_only:
-        print("CUDA/NVIDIA Information")
-        print("=" * 70)
-        gpu_info = GPUInfo(thorough_check=True)
-
-        # Find the CUDA info child
-        cuda_info = None
-        for child in gpu_info.children:
-            if "CUDA/NVIDIA Information" in child.label:
-                cuda_info = child
-                break
-
-        if cuda_info:
-            cuda_info.print_tree()
-            sys.exit(0)
-        else:
-            print("No CUDA/NVIDIA information found (GPU may not be available)")
-            sys.exit(0)
 
     # Keep `--json-output` output JSON-only for copy/paste (no Python warnings noise).
     if args.json_output:
