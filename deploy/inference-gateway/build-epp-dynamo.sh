@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -83,7 +83,7 @@ echo "   Docker: ${GAIE_DIR}/Dockerfile.epp"
 echo "Applying Dynamo patch..."
 cd "${GAIE_DIR}"
 
-PATCH_FILE="${DYNAMO_DIR}/deploy/inference-gateway/epp-patches/v0.5.1-2/epp-v0.5.1-dyn2.patch"
+PATCH_FILE="${DYNAMO_DIR}/deploy/inference-gateway/epp-patches/v0.8.0/gaie.patch"
 if [[ -f "${PATCH_FILE}" ]]; then
     if git apply --check "${PATCH_FILE}" 2>/dev/null; then
         git apply "${PATCH_FILE}"
@@ -97,6 +97,14 @@ fi
 
 # Step 6: Build the EPP image
 echo "Building the custom EPP image for GAIE..."
-make dynamo-image-local-load
+
+# Build make args - pass DOCKER_PROXY if set (e.g., from ECR_HOSTNAME)
+MAKE_ARGS=""
+if [[ -n "${DOCKER_PROXY}" ]]; then
+    echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
+    MAKE_ARGS+="DOCKER_PROXY=${DOCKER_PROXY} "
+fi
+
+make ${MAKE_ARGS} dynamo-image-local-load
 
 echo "EPP image with Dynamo KV routing built"

@@ -1,0 +1,469 @@
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Unified development image with two targets:
+# - dev: Root-based development for use with run.sh
+# - local-dev: Non-root development with UID/GID remapping for Dev Container plugin
+#
+# IMPORTANT (concat model):
+# This Dockerfile is intended to be used via the temp concatenated Dockerfile flow in
+# `container/build.sh` (which prepends the selected framework Dockerfile):
+#   - container/Dockerfile
+#   - container/Dockerfile.vllm
+#   - container/Dockerfile.trtllm
+#   - container/Dockerfile.sglang
+#
+# The concatenated file provides the stages this Dockerfile depends on:
+#   - `dynamo_base`   (framework base stage; used for cached tool binaries like maturin)
+#   - `wheel_builder` (framework wheel_builder stage; used for cached Rust/Cargo and SGLang NIXL deps)
+#
+# Dependency graph (concat flow):
+#
+#   container/build.sh concatenates:
+#     [framework Dockerfile] + [this file]
+#
+#   Framework Dockerfile (examples: Dockerfile.vllm / Dockerfile.trtllm / Dockerfile.sglang)
+#   defines these stages (names matter; this file refers to them by name):
+#
+#     dynamo_base  (FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG})
+#        ├─ wheel_builder (FROM quay.io/pypa/manylinux_2_28_*)
+#        ├─ framework     (builds framework install + /opt/dynamo/venv, etc.)
+#        └─ runtime       (FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG}; copies from dynamo_base/wheel_builder/framework)
+#             └─ dev      (root dev image; adds dev-time linking config and pulls in tooling from dynamo_tools)
+#                  └─ local-dev (non-root dev image with UID/GID remapping)
+#
+#   Side stage used by `dev`:
+#
+#     dynamo_tools (FROM runtime; installs extra developer utilities that `dev` copies in)
+#
+# Both targets share:
+# - Developer utilities and tools from dynamo-tools
+# - Rust toolchain + maturin for editable installs (from concatenated framework stages)
+# - NIXL dependencies for SGLang (from concatenated framework wheel_builder stage)
+#
+# Note on build args:
+# - `ARCH` / `ARCH_ALT` are declared in the prepended framework Dockerfile; we re-declare them only
+#   in stages where they are used (Docker requires ARG re-declare per-stage).
+
+
+# ======================================================================
+# STAGE: dynamo_tools for developers
+# ======================================================================
+# Why this is a separate stage (not merged into `dev`):
+# - `dev` is built FROM the framework `runtime` image. Installing lots of tooling with apt in that stage is slow and
+#   makes rebuilds expensive when iterating on later dev layers.
+# - Keeping tooling installation in `dynamo_tools` lets Docker cache the tools layer independently; `dev` can then
+#   pull those binaries/configs in via COPY.
+FROM runtime AS dynamo_tools
+
+ARG ARCH
+ARG ARCH_ALT
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH=/usr/local/bin:${PATH}
+
+USER root
+SHELL ["/bin/bash", "-c"]
+
+# NOTE: We intentionally disable the NVIDIA CUDA apt repo for this stage.
+# The upstream runtime images may ship CUDA apt sources that occasionally go out of sync (mirror updates),
+# causing apt-get update to fail with "File has unexpected size ... Mirror sync in progress".
+# This stage only installs generic developer tools that are available from Ubuntu repos, so CUDA repos are unnecessary.
+#
+# We also add a small retry/backoff to make transient apt metadata issues less disruptive.
+RUN set -eux; \
+    if [ -d /etc/apt/sources.list.d ]; then \
+        mkdir -p /tmp/apt-disabled; \
+        for f in /etc/apt/sources.list.d/*.list; do \
+            [ -e "$f" ] || continue; \
+            if grep -q "developer.download.nvidia.com/compute/cuda/repos" "$f"; then \
+                mv "$f" "/tmp/apt-disabled/$(basename "$f")"; \
+            fi; \
+        done; \
+    fi; \
+    for i in 1 2 3 4 5; do \
+        apt-get update -y && break; \
+        rm -rf /var/lib/apt/lists/*; \
+        sleep $((i * 5)); \
+    done; \
+    apt-get install -y --no-install-recommends \
+        # Core CLI utilities
+        ca-certificates \
+        curl \
+        wget \
+        git \
+        git-lfs \
+        less \
+        grep \
+        sed \
+        # Editors / shells
+        vim \
+        nano \
+        htop \
+        tmux \
+        screen \
+        zsh \
+        fish \
+        bash-completion \
+        # Networking / transfers
+        net-tools \
+        openssh-client \
+        iproute2 \
+        iputils-ping \
+        zip \
+        unzip \
+        rsync \
+        # Build toolchain
+        build-essential \
+        cmake \
+        autoconf \
+        automake \
+        libtool \
+        meson \
+        ninja-build \
+        pybind11-dev \
+        pkg-config \
+        protobuf-compiler \
+        # Debugging / tracing
+        gdb \
+        valgrind \
+        strace \
+        ltrace \
+        # JSON/YAML + filesystem helpers
+        jq \
+        yq \
+        tree \
+        fd-find \
+        ripgrep \
+        # Privilege escalation + crypto tooling
+        sudo \
+        gnupg2 \
+        gnupg1 \
+        # GPU / perf helpers
+        nvtop \
+        # Python
+        python3 \
+        python3-pip \
+        python3-venv \
+        # Native deps for Python/Rust wheels
+        patchelf \
+        clang \
+        libclang-dev && \
+    rm -rf /var/lib/apt/lists/* && \
+    # Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
+    git lfs install
+
+# Install awk separately with fault tolerance.
+# awk is a virtual package with multiple implementations (gawk, mawk, original-awk).
+RUN (apt-get update && \
+     (apt-get install -y --no-install-recommends gawk || \
+      apt-get install -y --no-install-recommends mawk || \
+      apt-get install -y --no-install-recommends original-awk || \
+      echo "Warning: Could not install any awk implementation") && \
+     rm -rf /var/lib/apt/lists/*) && \
+    (command -v awk >/dev/null 2>&1 && echo "awk available: $(command -v awk)" || echo "awk not available")
+
+# Add NVIDIA devtools repository and install development tools (nsight-systems).
+RUN wget -qO - "https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH}/nvidia.pub" | \
+        gpg --dearmor -o /etc/apt/keyrings/nvidia-devtools.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nvidia-devtools.gpg] https://developer.download.nvidia.com/devtools/repos/ubuntu2404/${ARCH} /" | \
+        tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends nsight-systems-2025.5.1 && \
+    rm -rf /var/lib/apt/lists/*
+
+# ======================================================================
+# TARGET: dev (root-based development)
+# ======================================================================
+FROM runtime AS dev
+
+# Redeclare ARGs for use in this stage
+ARG FRAMEWORK
+
+USER root
+
+# Redeclare build args for use in this stage
+ARG PYTHON_VERSION
+
+# Ensure the runtime stage always has /usr/bin/python3.
+# - vLLM/TRTLLM runtime images may only have Python in /opt/dynamo/venv/bin/{python,python3}
+# - SGLang runtime images typically have /usr/bin/python3 already
+# - framework=none runtime stage now installs /usr/bin/python3
+RUN if [ ! -e /usr/bin/python3 ]; then \
+        if [ -x /opt/dynamo/venv/bin/python3 ]; then \
+            ln -s /opt/dynamo/venv/bin/python3 /usr/bin/python3; \
+        elif [ -x /opt/dynamo/venv/bin/python ]; then \
+            ln -s /opt/dynamo/venv/bin/python /usr/bin/python3; \
+        elif command -v python3 >/dev/null 2>&1; then \
+            ln -s $(command -v python3) /usr/bin/python3; \
+        elif command -v python >/dev/null 2>&1; then \
+            ln -s $(command -v python) /usr/bin/python3; \
+        else \
+            echo "ERROR: Could not find Python to symlink to /usr/bin/python3" >&2; \
+            exit 1; \
+        fi; \
+    fi
+
+# Copy UCX and NIXL libraries for dev stage compilation.
+# The upstream SGLang runtime image doesn't include NIXL, but cargo build needs to link against
+# -lnixl, -lnixl_build, and -lnixl_common. Runtime stage doesn't need this since it uses pre-built
+# wheels, but dev stage needs it for maturin develop and cargo build from source.
+# - SGLang: Copy NIXL/UCX/libfabric/gdrcopy binaries from wheel_builder (not in upstream lmsysorg/sglang runtime).
+# - vllm/trtllm/none: NIXL/UCX are already present in runtime (no-op).
+ARG ARCH_ALT
+RUN --mount=from=wheel_builder,target=/wheel_builder \
+    if [ "${FRAMEWORK}" = "sglang" ]; then \
+        if [ -d /wheel_builder/usr/local/ucx ] && [ -d /wheel_builder/opt/nvidia/nvda_nixl ]; then \
+            mkdir -p /opt/nvidia /usr/include /usr/lib64 /etc/ld.so.conf.d; \
+            cp -r /wheel_builder/opt/nvidia/nvda_nixl /opt/nvidia/; \
+            cp -r /wheel_builder/usr/local/ucx /usr/local/; \
+            cp -r /wheel_builder/usr/local/libfabric /usr/local/; \
+            cp /wheel_builder/usr/include/gdrapi.h /usr/include/; \
+            cp /wheel_builder/usr/lib64/libgdrapi.so* /usr/lib64/; \
+            echo "/usr/lib64" >> /etc/ld.so.conf.d/gdrcopy.conf; \
+            # SGLang expects ARCH-qualified lib paths; mirror lib64 into lib/${ARCH_ALT}-linux-gnu for parity.
+            if [ -d /opt/nvidia/nvda_nixl/lib64 ]; then \
+                mkdir -p /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu; \
+                cp -r /opt/nvidia/nvda_nixl/lib64/. /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/; \
+            fi; \
+        fi; \
+    fi
+
+# All frameworks use the same path pattern: /opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu
+# For vllm/trtllm/none: This resets the same values already set in runtime (no harm)
+# For sglang: This sets them for the first time (required)
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+
+# Set universal CUDA development environment variables (all frameworks)
+# vLLM: Dockerfile.vllm line 533, 597
+# TRT-LLM: Dockerfile.trtllm lines 600-606
+ENV CUDA_HOME=/usr/local/cuda \
+    CPATH=/usr/local/cuda/include \
+    CUDA_DEVICE_ORDER=PCI_BUS_ID \
+    TRITON_CUPTI_PATH=/usr/local/cuda/include \
+    TRITON_CUDACRT_PATH=/usr/local/cuda/include \
+    TRITON_CUOBJDUMP_PATH=/usr/local/cuda/bin/cuobjdump \
+    TRITON_NVDISASM_PATH=/usr/local/cuda/bin/nvdisasm \
+    TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+    TRITON_CUDART_PATH=/usr/local/cuda/include \
+    NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
+
+# Base LD_LIBRARY_PATH with universal paths (all frameworks have these)
+# Framework-specific paths are conditionally added in /etc/profile.d/50-framework-paths.sh
+ARG PYTHON_VERSION
+ENV LD_LIBRARY_PATH=\
+${NIXL_LIB_DIR}:\
+${NIXL_PLUGIN_DIR}:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+/usr/local/cuda/compat/lib.real:\
+${LD_LIBRARY_PATH}
+
+# Copy shell profile script for framework-specific environment variables
+# This script conditionally adds PATH/LD_LIBRARY_PATH entries based on what exists
+COPY --chmod=755 container/dev/50-framework-paths.sh /etc/profile.d/50-framework-paths.sh
+
+# Set umask for group-writable files in dev stage (runs as root)
+RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
+SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
+
+# Developer tools are installed in the dynamo_tools layer and copied into the runtime-based dev image.
+# This keeps dev builds fast and avoids apt-get in runtime-derived stages.
+#
+# IMPORTANT: Do not clobber runtime /usr/bin/python3 (SGLang depends on system python3 being present).
+# We stash the pre-tools python3 (which may be a real binary or a symlink we created earlier for vLLM/TRTLLM)
+# and restore it after copying toolchains from dynamo_tools.
+RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretools; fi
+COPY --from=dynamo_tools /usr/bin/ /usr/bin/
+COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
+COPY --from=dynamo_tools /usr/lib/ /usr/lib/
+COPY --from=dynamo_tools /lib/ /lib/
+COPY --from=dynamo_tools /usr/share/ /usr/share/
+COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
+COPY --from=dynamo_tools /etc/bash_completion.d/ /etc/bash_completion.d/
+COPY --from=dynamo_tools /etc/sudoers /etc/sudoers
+COPY --from=dynamo_tools /etc/sudoers.d/ /etc/sudoers.d/
+COPY --from=dynamo_tools /opt/nvidia/ /opt/nvidia/
+
+# Restore the pre-tools python3 (keeps SGLang system python intact and avoids venv symlink loops).
+RUN if [ -e /tmp/python3.pretools ]; then cp -af /tmp/python3.pretools /usr/bin/python3; fi
+
+ARG WORKSPACE_DIR=/workspace
+
+# Dev environment variables (aligned with framework dev stages)
+# Framework-specific PATH additions are handled in /etc/profile.d/50-framework-paths.sh
+ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
+    DYNAMO_HOME=${WORKSPACE_DIR} \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    CARGO_TARGET_DIR=/workspace/target \
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
+
+# Copy Rust/Cargo/Maturin from the concatenated framework stages.
+# - Rust/Cargo: from `wheel_builder` (already installed there)
+# - maturin: from `wheel_builder` venv (installed there via uv pip)
+COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/rustup /usr/local/rustup
+COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/local/cargo
+COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/maturin /usr/local/bin/maturin
+
+# Provide an `uv` binary for SGLang venv creation below.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /tmp/uv-binary
+
+# Create venv for SGLang (vLLM/TensorRT-LLM/framework=none already have /opt/dynamo/venv from runtime)
+# - SGLang: Use --system-site-packages to inherit runtime packages, then copy user site-packages
+# - framework=none: Runtime already has venv with dynamo packages installed
+# Note: umask 002 from login shell ensures files are group-writable
+RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
+        mkdir -p /opt/dynamo/venv && \
+        python3 -m venv --system-site-packages /opt/dynamo/venv && \
+        # Copy all packages from runtime stage system site-packages into venv
+        # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
+        # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
+        cp -r --no-preserve=mode /usr/local/lib/python3.12/dist-packages/* \
+              /opt/dynamo/venv/lib/python3.12/site-packages/; \
+        # Ensure `uv` is available on PATH for subsequent `uv pip ...` steps.
+        cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
+        chmod +x /opt/dynamo/venv/bin/uv && \
+        # Install maturin into the base interpreter so we can build/repair wheels when needed.
+        pip install --ignore-installed maturin[patchelf]; \
+    elif [ "${FRAMEWORK}" = "none" ] && [ ! -d /opt/dynamo/venv ]; then \
+        mkdir -p /opt/dynamo && \
+        python3 -m venv /opt/dynamo/venv; \
+    fi
+
+# Initialize Git LFS for the dynamo user (required for requirements with lfs=true)
+RUN git lfs install
+
+# Install common and test dependencies (matches main Dockerfile dev stage)
+# This installs pytest-benchmark and other test dependencies required for CI
+# TRT-LLM specific: Also installs cupy-cuda13x with special index strategy (Dockerfile.trtllm lines 768-776)
+# SGLang specific: Reinstall pytest to ensure venv has pytest executable with correct shebang
+ARG FRAMEWORK
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    UV_GIT_LFS=1 uv pip install \
+        --no-cache \
+        --index-strategy unsafe-best-match \
+        --extra-index-url https://download.pytorch.org/whl/cu130 \
+        --requirement /tmp/requirements.txt \
+        --requirement /tmp/requirements.test.txt \
+        cupy-cuda13x && \
+    if [ "${FRAMEWORK}" = "sglang" ]; then \
+        uv pip install --force-reinstall --no-deps pytest; \
+    fi
+
+# Copy entire workspace (old design - simpler for CI)
+# .dockerignore filters out unwanted files (.git, build artifacts, etc.)
+WORKDIR ${WORKSPACE_DIR}
+COPY --chmod=775 --chown=dynamo:0 ./ ${WORKSPACE_DIR}/
+
+RUN chmod g+w ${WORKSPACE_DIR}
+
+# Install benchmarks package (includes prefix_data_generator, tabulate, etc.)
+RUN cd ${WORKSPACE_DIR}/benchmarks && \
+    UV_GIT_LFS=1 uv pip install --no-cache .
+
+# Install maturin and create editable install entry points.
+#
+# Why the `uv` check:
+# - This dev stage uses `uv` earlier (requirements + benchmarks). For SGLang, we also install an `uv` binary into
+#   /opt/dynamo/venv/bin and put that venv on PATH, so `uv` is expected to be available here in normal builds.
+# - The `command -v uv` guard is defensive: on SGLang, `uv` needs to "disappear" from PATH and we fall back to
+#   `python3 -m pip` so the editable install can still proceed (instead of failing mid-layer with a confusing error).
+RUN if [ -f pyproject.toml ]; then \
+        if command -v uv >/dev/null 2>&1; then \
+            uv pip install --no-cache maturin[patchelf] && uv pip install --no-deps -e . ; \
+        else \
+            python3 -m pip install --no-cache-dir maturin[patchelf] && python3 -m pip install --no-deps -e . ; \
+        fi; \
+    else \
+        echo "ERROR: pyproject.toml not found in ${WORKSPACE_DIR}; expected to build from the Dynamo repo root." >&2; \
+        exit 1; \
+    fi && \
+    chmod -R g+w /root/.cache /home/dynamo/.cache 2>/dev/null || true
+
+# Set commit SHA for tests (passed via build.sh as --build-arg)
+ARG DYNAMO_COMMIT_SHA
+ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+# ======================================================================
+# TARGET: local-dev (non-root development with UID/GID remapping)
+# ======================================================================
+FROM dev AS local-dev
+
+ENV USERNAME=dynamo
+ARG USER_UID
+ARG USER_GID
+
+# Copy rustup home into a writable per-user location so sanity_check passes.
+# (dev target already has rustup/cargo/maturin from concatenated wheel_builder/dynamo_base)
+RUN cp -r /usr/local/rustup /home/dynamo/.rustup && \
+    chown -R dynamo:0 /home/dynamo/.rustup
+
+# Put rustup state under the user's home (writable) while still using /usr/local/cargo/bin shims.
+ENV RUSTUP_HOME=/home/${USERNAME}/.rustup
+ENV CARGO_HOME=/home/${USERNAME}/.cargo
+ENV PATH=/usr/local/cargo/bin:/usr/local/bin:${CARGO_HOME}/bin:${PATH}
+
+# https://code.visualstudio.com/remote/advancedcontainers/add-nonroot-user
+# Configure user with sudo access for Dev Container workflows
+#
+# 🚨 PERFORMANCE / PERMISSIONS MEMO (DO NOT VIOLATE)
+# NEVER use `chown -R` or `chmod -R` in local-dev images.
+# - It can take minutes on large mounts (and makes devcontainers feel "hung")
+# - It is unnecessary: permissioning should be done via COPY --chmod/--chown and a few targeted, non-recursive ops.
+# If you think you need recursion here, stop and redesign the permissions flow.
+RUN mkdir -p /etc/sudoers.d \
+    && echo "$USERNAME ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME \
+    && mkdir -p /home/$USERNAME \
+    # Handle GID conflicts: if target GID exists and it's not our group, remove it
+    && (getent group $USER_GID | grep -v "^$USERNAME:" && groupdel $(getent group $USER_GID | cut -d: -f1) || true) \
+    # Create group if it doesn't exist, otherwise modify existing group
+    && (getent group $USERNAME > /dev/null 2>&1 && groupmod -g $USER_GID $USERNAME || groupadd -g $USER_GID $USERNAME) \
+    && usermod -u $USER_UID -g $USER_GID -G 0 $USERNAME \
+    && chown $USERNAME:$USER_GID /home/$USERNAME \
+    && chsh -s /bin/bash $USERNAME
+
+# Set workspace directory variable
+ENV WORKSPACE_DIR=${WORKSPACE_DIR}
+
+# Development environment variables for the local-dev target
+# Path configuration notes:
+# - DYNAMO_HOME: Main project directory (workspace mount point)
+# - CARGO_TARGET_DIR: Build artifacts in workspace/target for persistence
+# - PATH: Includes cargo binaries for rust tool access
+ENV HOME=/home/$USERNAME
+ENV DYNAMO_HOME=${WORKSPACE_DIR}
+ENV CARGO_TARGET_DIR=${WORKSPACE_DIR}/target
+ENV PATH=${CARGO_HOME}/bin:$PATH
+
+# Switch to dynamo user (dev stage has umask 002, so files should already be group-writable)
+USER $USERNAME
+WORKDIR $HOME
+
+# Create user-level cargo/rustup state dirs as the target user (avoids root-owned caches).
+RUN mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}"
+
+# Ensure Python user site-packages exists and is writable (important for non-venv frameworks like SGLang).
+RUN python3 -c 'import os, site; p = site.getusersitepackages(); os.makedirs(p, exist_ok=True); print(p)'
+
+# https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
+RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.commandhistory/.bash_history" \
+    && mkdir -p $HOME/.commandhistory \
+    && chmod g+w $HOME/.commandhistory \
+    && touch $HOME/.commandhistory/.bash_history \
+    && echo "$SNIPPET" >> "$HOME/.bashrc"
+
+RUN mkdir -p /home/$USERNAME/.cache/ \
+    && chmod g+w /home/$USERNAME/.cache/
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []

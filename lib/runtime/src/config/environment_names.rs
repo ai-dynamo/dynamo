@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Environment variable name constants for centralized management across the codebase
@@ -195,6 +195,37 @@ pub mod kvbm {
             "DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
     }
 
+    /// Object storage configuration
+    pub mod object_storage {
+        /// Enable object storage. Set to "1" to enable.
+        pub const DYN_KVBM_OBJECT_ENABLED: &str = "DYN_KVBM_OBJECT_ENABLED";
+
+        /// Bucket name for object storage cache
+        /// Supports `{worker_id}` template for per-worker buckets
+        /// Example: "kv-cache-{worker_id}"
+        pub const DYN_KVBM_OBJECT_BUCKET: &str = "DYN_KVBM_OBJECT_BUCKET";
+
+        /// Endpoint for object storage
+        pub const DYN_KVBM_OBJECT_ENDPOINT: &str = "DYN_KVBM_OBJECT_ENDPOINT";
+
+        /// Region for object storage
+        pub const DYN_KVBM_OBJECT_REGION: &str = "DYN_KVBM_OBJECT_REGION";
+
+        /// Access key for authentication
+        pub const DYN_KVBM_OBJECT_ACCESS_KEY: &str = "DYN_KVBM_OBJECT_ACCESS_KEY";
+
+        /// Secret key for authentication
+        pub const DYN_KVBM_OBJECT_SECRET_KEY: &str = "DYN_KVBM_OBJECT_SECRET_KEY";
+
+        /// Number of blocks to store in object storage
+        pub const DYN_KVBM_OBJECT_NUM_BLOCKS: &str = "DYN_KVBM_OBJECT_NUM_BLOCKS";
+    }
+    /// Transfer configuration
+    pub mod transfer {
+        /// Maximum number of blocks per transfer batch
+        pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
+    }
+
     /// KVBM leader (distributed mode) configuration
     pub mod leader {
         /// Timeout in seconds for KVBM leader and worker initialization
@@ -224,6 +255,9 @@ pub mod kvbm {
 pub mod llm {
     /// HTTP body size limit in MB
     pub const DYN_HTTP_BODY_LIMIT_MB: &str = "DYN_HTTP_BODY_LIMIT_MB";
+
+    pub const DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS: &str =
+        "DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS";
 
     /// Enable LoRA adapter support (set to "true" to enable)
     pub const DYN_LORA_ENABLED: &str = "DYN_LORA_ENABLED";

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
@@ -8,6 +8,7 @@ use crate::{
     discovery::{KvWorkerMonitor, ModelManager, ModelWatcher},
     engines::StreamingEngineAdapter,
     entrypoint::{EngineConfig, RouterConfig},
+    http::service::metrics::Metrics,
     kv_router::{KvPushRouter, KvRouter, PrefillRouter},
     migration::Migration,
     model_card::ModelDeploymentCard,
@@ -23,6 +24,7 @@ use crate::{
     },
 };
 
+use anyhow::Context as _;
 use dynamo_runtime::{
     DistributedRuntime,
     component::Client,
@@ -58,12 +60,18 @@ pub async fn prepare_engine(
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
-        EngineConfig::Dynamic(local_model) => {
+        EngineConfig::Dynamic {
+            model: local_model, ..
+        } => {
             let model_manager = Arc::new(ModelManager::new());
+            // Create metrics for migration tracking (not exposed via /metrics in Dynamic engine mode)
+            let metrics = Arc::new(Metrics::new());
             let watch_obj = Arc::new(ModelWatcher::new(
                 distributed_runtime.clone(),
                 model_manager.clone(),
                 RouterConfig::default(),
+                None,
+                metrics,
             ));
             let discovery = distributed_runtime.discovery();
             let discovery_stream = discovery
@@ -165,12 +173,14 @@ where
 pub async fn build_routed_pipeline<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -182,12 +192,15 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) = PromptFormatter::from_mdc(card)?;
+    let PromptFormatter::OAI(formatter) =
+        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
     let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())?;
+        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
+            .context("OpenAIPreprocessor.new_with_parts")?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,
+        model_manager,
         router_mode,
         worker_monitor,
         chooser,
@@ -195,6 +208,7 @@ where
         hf_tokenizer,
         prefill_chooser,
         enforce_disagg,
+        metrics,
     )
     .await
 }
@@ -203,6 +217,7 @@ where
 pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     card: &ModelDeploymentCard,
     client: &Client,
+    model_manager: Arc<crate::discovery::ModelManager>,
     router_mode: RouterMode,
     worker_monitor: Option<KvWorkerMonitor>,
     chooser: Option<Arc<KvRouter>>,
@@ -210,6 +225,7 @@ pub async fn build_routed_pipeline_with_preprocessor<Req, Resp>(
     hf_tokenizer: tokenizers::Tokenizer,
     prefill_chooser: Option<Arc<PrefillRouter>>,
     enforce_disagg: bool,
+    metrics: Arc<Metrics>,
 ) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
 where
     Req: Data,
@@ -224,7 +240,7 @@ where
     let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
     let preprocessor_op = preprocessor.into_operator();
     let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
-    let migration = Migration::from_mdc(card).into_operator();
+    let migration = Migration::from_mdc(card, metrics).into_operator();
 
     // For KV routing, use the client from the chooser to ensure shared state
     let router_client = if router_mode == RouterMode::KV {
@@ -237,7 +253,10 @@ where
     };
 
     // Get threshold value and wrap monitor for PushRouter
-    let threshold_value = worker_monitor.as_ref().map(|m| m.threshold());
+    // Note: PushRouter uses active_decode_blocks_threshold for its internal logic
+    let threshold_value = worker_monitor
+        .as_ref()
+        .map(|m| m.active_decode_blocks_threshold());
     let monitor_arc =
         worker_monitor.map(|m| Arc::new(m) as Arc<dyn dynamo_runtime::pipeline::WorkerLoadMonitor>);
 
@@ -264,8 +283,8 @@ where
     };
 
     // Use the provided prefill chooser, or create a disabled one if not provided
-    let prefill_chooser =
-        prefill_chooser.unwrap_or_else(|| PrefillRouter::disabled(router_mode, enforce_disagg));
+    let prefill_chooser = prefill_chooser
+        .unwrap_or_else(|| PrefillRouter::disabled(model_manager, router_mode, enforce_disagg));
     let prefill_op = prefill_chooser.into_operator();
 
     // Link with prefill chooser including backward edge for response flow

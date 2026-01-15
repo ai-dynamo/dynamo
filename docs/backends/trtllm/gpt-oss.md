@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -430,7 +430,6 @@ aiperf profile \
     --num-dataset-entries 8000 \
     --random-seed 100 \
     --artifact-dir /tmp/benchmark-results \
-    -v \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 ```

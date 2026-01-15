@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::component::{Component, Instance};
@@ -397,13 +397,18 @@ impl DistributedRuntime {
 
     /// TODO: This is a temporary KV router measure for component/component.rs EventPublisher impl for
     /// Component, to allow it to publish to NATS. KV Router is the only user.
-    pub(crate) async fn kv_router_nats_publish(
+    ///
+    /// When NATS is not available (e.g., running in approximate mode with --no-kv-events),
+    /// this function returns Ok(()) silently since publishing is optional in that mode.
+    pub async fn kv_router_nats_publish(
         &self,
         subject: String,
         payload: bytes::Bytes,
     ) -> anyhow::Result<()> {
         let Some(nats_client) = self.nats_client.as_ref() else {
-            anyhow::bail!("KV router's EventPublisher requires NATS");
+            // NATS not available - this is expected in approximate mode (--no-kv-events)
+            tracing::trace!("Skipping NATS publish (NATS not configured): {}", subject);
+            return Ok(());
         };
         Ok(nats_client.client().publish(subject, payload).await?)
     }
@@ -418,6 +423,25 @@ impl DistributedRuntime {
             anyhow::bail!("KV router's EventSubscriber requires NATS");
         };
         Ok(nats_client.client().subscribe(subject).await?)
+    }
+
+    /// TODO (karenc): This is a temporary KV router measure for worker query requests.
+    /// Allows KV Router to perform request/reply with workers. (versus the pub/sub pattern above)
+    /// KV Router is the only user, made public for use in dynamo-llm crate
+    pub async fn kv_router_nats_request(
+        &self,
+        subject: String,
+        payload: bytes::Bytes,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<async_nats::Message> {
+        let Some(nats_client) = self.nats_client.as_ref() else {
+            anyhow::bail!("KV router's request requires NATS");
+        };
+        let response =
+            tokio::time::timeout(timeout, nats_client.client().request(subject, payload))
+                .await
+                .map_err(|_| anyhow::anyhow!("Request timed out after {:?}", timeout))??;
+        Ok(response)
     }
 
     /// DEPRECATED: This method exists only for NATS request plane support.
@@ -511,9 +535,31 @@ pub struct DistributedConfig {
 impl DistributedConfig {
     pub fn from_settings() -> DistributedConfig {
         let request_plane = RequestPlaneMode::from_env();
+        // NATS is used for more than just NATS request-plane RPC:
+        // - KV router events (JetStream or NATS core + local indexer)
+        // - inter-router replica sync (NATS core)
+        //
+        // Historically we only connected to NATS when the request plane was NATS, which made
+        // `DYN_REQUEST_PLANE=tcp|http` incompatible with KV routing modes that rely on NATS.
+        // If a NATS server is configured via env, enable the client regardless of request plane.
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
+
+        // Check discovery backend to determine the appropriate KV store backend -
+        // kubernetes discovery, or etcd.
+        let discovery_backend =
+            std::env::var("DYN_DISCOVERY_BACKEND").unwrap_or_else(|_| "kv_store".to_string());
+
+        let store_backend = if discovery_backend == "kubernetes" {
+            tracing::info!("Using Kubernetes discovery backend");
+            kv::Selector::Memory
+        } else {
+            kv::Selector::Etcd(Box::default())
+        };
+
         DistributedConfig {
-            store_backend: kv::Selector::Etcd(Box::default()),
-            nats_config: if request_plane.is_nats() {
+            store_backend,
+            nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
                 None
@@ -528,9 +574,11 @@ impl DistributedConfig {
             ..Default::default()
         };
         let request_plane = RequestPlaneMode::from_env();
+        let nats_enabled = request_plane.is_nats()
+            || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
             store_backend: kv::Selector::Etcd(Box::new(etcd_config)),
-            nats_config: if request_plane.is_nats() {
+            nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
                 None
@@ -555,12 +603,12 @@ impl DistributedConfig {
 /// Request plane transport mode configuration
 ///
 /// This determines how requests are distributed from routers to workers:
-/// - `Nats`: Use NATS for request distribution (default, legacy)
+/// - `Nats`: Use NATS for request distribution (legacy)
 /// - `Http`: Use HTTP/2 for request distribution
-/// - `Tcp`: Use raw TCP for request distribution with msgpack support
+/// - `Tcp`: Use raw TCP for request distribution with msgpack support (default)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestPlaneMode {
-    /// Use NATS for request plane (default for backward compatibility)
+    /// Use NATS for request plane
     Nats,
     /// Use HTTP/2 for request plane
     Http,
@@ -570,7 +618,7 @@ pub enum RequestPlaneMode {
 
 impl Default for RequestPlaneMode {
     fn default() -> Self {
-        Self::Nats
+        Self::Tcp
     }
 }
 
@@ -628,6 +676,26 @@ pub mod distributed_test_utils {
         let rt = crate::Runtime::from_current().unwrap();
         let config = super::DistributedConfig {
             store_backend: kv::Selector::Memory,
+            nats_config: Some(nats::ClientOptions::default()),
+            request_plane: crate::distributed::RequestPlaneMode::default(),
+        };
+        super::DistributedRuntime::new(rt, config).await.unwrap()
+    }
+
+    /// Helper function to create a DRT instance which points at
+    /// a (shared) file-backed KV store and ephemeral NATS transport so that
+    /// multiple DRT instances may observe the same registration state.
+    /// NOTE: This gets around the fact that create_test_drt_async() is
+    /// hardcoded to spin up a memory-backed discovery store
+    /// which means we can't share discovery state across runtimes.
+    pub async fn create_test_shared_drt_async(
+        store_path: &std::path::Path,
+    ) -> super::DistributedRuntime {
+        use crate::{storage::kv, transports::nats};
+
+        let rt = crate::Runtime::from_current().unwrap();
+        let config = super::DistributedConfig {
+            store_backend: kv::Selector::File(store_path.to_path_buf()),
             nats_config: Some(nats::ClientOptions::default()),
             request_plane: crate::distributed::RequestPlaneMode::default(),
         };

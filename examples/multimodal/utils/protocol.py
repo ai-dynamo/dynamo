@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
@@ -26,7 +26,7 @@ from vllm.logprobs import PromptLogprobs
 from vllm.multimodal.inputs import MultiModalUUIDDict  # noqa: F401
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import RequestMetrics
+from vllm.v1.metrics.stats import RequestStateStats
 
 import dynamo.nixl_connect as connect
 
@@ -89,9 +89,13 @@ class vLLMGenerateRequest(BaseModel):
             return SamplingParams(**v)
         return v
 
+    @field_serializer("sampling_params")
+    def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
+        """Serialize SamplingParams using msgspec and return as dict."""
+        return json.loads(msgspec.json.encode(value))
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)},
     )
 
 
@@ -166,7 +170,7 @@ class MyRequestOutput(BaseModel):
     https://github.com/vllm-project/vllm/blob/a4c402a756fa3213caf9d2cde0e4ceb2d57727f2/vllm/outputs.py#L85
 
     This class is used to serialize the RequestOutput and any recursively defined types
-    We can do this because PromptLogprobs, RequestMetrics, and CompletionOutput are all serializable dataclasses
+    We can do this because PromptLogprobs, RequestStateStats, and CompletionOutput are all serializable dataclasses
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -177,7 +181,7 @@ class MyRequestOutput(BaseModel):
     prompt_logprobs: Optional[PromptLogprobs] = None
     outputs: List[CompletionOutput]
     finished: bool
-    metrics: Optional[RequestMetrics] = None
+    metrics: Optional[RequestStateStats] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
     # lora_request: Optional[LoRARequest] = None
     # encoder_prompt: Optional[str] = None

@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# syntax=docker/dockerfile:1.10.0
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # NOTE FOR dynamo_base AND wheel_builder STAGES:
@@ -36,6 +37,7 @@ ARG BASE_IMAGE_TAG
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
 ARG ENABLE_MEDIA_NIXL
+ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
@@ -58,6 +60,7 @@ ARG SCCACHE_REGION=""
 ARG NIXL_UCX_REF
 ARG NIXL_REF
 ARG NIXL_GDRCOPY_REF
+ARG NIXL_LIBFABRIC_REF
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -163,7 +166,10 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         cmake \
         ninja-build \
         clang-devel \
-        gcc-c++ \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        gcc-toolset-14-gcc \
+        gcc-toolset-14-gcc-c++ \
+        gcc-toolset-14-binutils \
         flex \
         wget \
         # Kernel module build dependencies
@@ -178,7 +184,17 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libibumad \
         libibumad-devel \
         librdmacm-devel \
-        numactl-devel
+        numactl-devel \
+        # Libfabric support
+        hwloc \
+        hwloc-devel
+
+# Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
+ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64:${LD_LIBRARY_PATH}" \
+    CC="/opt/rh/gcc-toolset-14/root/usr/bin/gcc" \
+    CXX="/opt/rh/gcc-toolset-14/root/usr/bin/g++"
+
 
 # Ensure a modern protoc is available (required for --experimental_allow_proto3_optional)
 RUN set -eux; \
@@ -207,7 +223,7 @@ ENV CUDA_PATH=/usr/local/cuda \
 ARG PYTHON_VERSION
 ENV VIRTUAL_ENV=/workspace/.venv
 RUN uv venv ${VIRTUAL_ENV} --python $PYTHON_VERSION && \
-    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf]
+    uv pip install --upgrade meson pybind11 patchelf maturin[patchelf] tomlkit
 
 ARG NIXL_UCX_REF
 ARG NIXL_REF
@@ -232,16 +248,58 @@ RUN if [ "$USE_SCCACHE" = "true" ]; then \
 
 # Set SCCACHE environment variables
 ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET}} \
-    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}} \
-    RUSTC_WRAPPER=${USE_SCCACHE:+sccache}
+    SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION}}
+
+# Build FFmpeg from source
+# Do not delete the source tarball for legal reasons
+ARG FFMPEG_VERSION=7.1
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+    export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
+    dnf install -y pkg-config && \
+    cd /tmp && \
+    curl -LO https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    tar xf ffmpeg-${FFMPEG_VERSION}.tar.xz && \
+    cd ffmpeg-${FFMPEG_VERSION} && \
+    ./configure \
+        --prefix=/usr/local \
+        --disable-gpl \
+        --disable-nonfree \
+        --disable-programs \
+        --disable-doc \
+        --disable-static \
+        --disable-x86asm \
+        --disable-postproc \
+        --disable-network \
+        --disable-encoders \
+        --disable-muxers \
+        --disable-bsfs \
+        --disable-devices \
+        --disable-libdrm \
+        --enable-shared && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "FFMPEG" && \
+    ldconfig && \
+    mkdir -p /usr/local/src/ffmpeg && \
+    mv /tmp/ffmpeg-${FFMPEG_VERSION}* /usr/local/src/ffmpeg/; \
+fi
 
 # Build and install UCX
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-    export CMAKE_CUDA_COMPILER_LAUNCHER="sccache" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /usr/local/src && \
      git clone https://github.com/openucx/ucx.git && \
      cd ucx && 			     \
@@ -268,20 +326,63 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
      echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
      ldconfig
 
+ARG NIXL_LIBFABRIC_REF
+RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
+    --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
+    export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
+    cd /usr/local/src && \
+    git clone https://github.com/ofiwg/libfabric.git && \
+    cd libfabric && \
+    git checkout $NIXL_LIBFABRIC_REF && \
+    ./autogen.sh && \
+    ./configure --prefix="/usr/local/libfabric" \
+                --disable-verbs \
+                --disable-psm3 \
+                --disable-opx \
+                --disable-usnic \
+                --disable-rstream \
+                --enable-efa \
+                --with-cuda=/usr/local/cuda \
+                --enable-cuda-dlopen \
+                --with-gdrcopy \
+                --enable-gdrcopy-dlopen && \
+    make -j$(nproc) && \
+    make install && \
+    /tmp/use-sccache.sh show-stats "LIBFABRIC" && \
+    echo "/usr/local/libfabric/lib" > /etc/ld.so.conf.d/libfabric.conf && \
+    ldconfig
+
 # build and install nixl
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
-    git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" && \
+    git clone "https://github.com/ai-dynamo/nixl.git" && \
     cd nixl && \
+    git checkout ${NIXL_REF} && \
+    CUDA_MAJOR=$(nvcc --version | grep -Eo 'release [0-9]+\.[0-9]+' | cut -d' ' -f2 | cut -d'.' -f1) && \
+    if [ "$CUDA_MAJOR" -ne 12 ] && [ "$CUDA_MAJOR" -ne 13 ]; then \
+        echo "Invalid CUDA_MAJOR: '$CUDA_MAJOR'" && \
+        exit 1; \
+    fi && \
+    PKG_NAME="nixl-cu${CUDA_MAJOR}" && \
+    ./contrib/tomlutil.py --wheel-name $PKG_NAME pyproject.toml && \
     mkdir build && \
     meson setup build/ --prefix=/opt/nvidia/nvda_nixl --buildtype=release \
     -Dcudapath_lib="/usr/local/cuda/lib64" \
     -Dcudapath_inc="/usr/local/cuda/include" \
-    -Ducx_path="/usr/local/ucx" && \
+    -Ducx_path="/usr/local/ucx" \
+    -Dlibfabric_path="/usr/local/libfabric" && \
     cd build && \
     ninja && \
     ninja install && \
@@ -298,11 +399,14 @@ RUN echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
 
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
-    export CC=$(which gcc) && \
-    export CXX=$(which g++) && \
     export SCCACHE_S3_KEY_PREFIX="${SCCACHE_S3_KEY_PREFIX:-${ARCH}}" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CUDA_COMPILER_LAUNCHER="sccache"; \
+    fi && \
     cd /workspace/nixl && \
-    uv build . --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
+    uv build . --wheel --out-dir /opt/dynamo/dist/nixl --python $PYTHON_VERSION
 
 # Copy source code (order matters for layer caching)
 COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml hatch_build.py /opt/dynamo/
@@ -312,18 +416,28 @@ COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheels
 ARG ENABLE_KVBM
+ARG USE_SCCACHE
 RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     --mount=type=secret,id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
     export SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX:-${ARCH}} && \
-    export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
-    export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
-    export RUSTC_WRAPPER="sccache" && \
+    if [ "$USE_SCCACHE" = "true" ]; then \
+        export CMAKE_C_COMPILER_LAUNCHER="sccache" && \
+        export CMAKE_CXX_COMPILER_LAUNCHER="sccache" && \
+        export RUSTC_WRAPPER="sccache"; \
+    fi && \
     source ${VIRTUAL_ENV}/bin/activate && \
     cd /opt/dynamo && \
     uv build --wheel --out-dir /opt/dynamo/dist && \
     cd /opt/dynamo/lib/bindings/python && \
+    FEATURES=""; \
     if [ "$ENABLE_MEDIA_NIXL" = "true" ]; then \
-        maturin build --release --features dynamo-llm/media-nixl --out /opt/dynamo/dist; \
+        FEATURES="$FEATURES dynamo-llm/media-nixl"; \
+    fi; \
+    if [ "$ENABLE_MEDIA_FFMPEG" = "true" ]; then \
+        FEATURES="$FEATURES media-ffmpeg"; \
+    fi; \
+    if [ -n "$FEATURES" ]; then \
+        maturin build --release --features "$FEATURES" --out /opt/dynamo/dist; \
     else \
         maturin build --release --out /opt/dynamo/dist; \
     fi && \
@@ -447,7 +561,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        # TRTLLM 1.2.0rc2 has issues installing from pypi with uv, installing from direct wheel link works best
+        # TRTLLM 1.2.0rc6.post1 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
@@ -565,6 +679,8 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ninja-build \
         git \
         git-lfs \
+        # required for verification of GPG keys
+        gnupg2 \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
@@ -581,6 +697,7 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         libibumad3 \
         libibverbs1 \
         libnuma1 \
+        numactl \
         librdmacm1 \
         rdma-core \
         # OpenMPI dependencies
@@ -589,7 +706,9 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         # System utilities and dependencies
         curl && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    # Create libnccl.so symlink pointing to libnccl.so.2. TensorRT-LLM requires explicit libnccl.so
+    ln -sf /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so.2 /usr/lib/${ARCH_ALT}-linux-gnu/libnccl.so
 
 # Switch to dynamo user
 USER dynamo
@@ -619,6 +738,14 @@ COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_L
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
 COPY --chown=dynamo: --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
+# Copy ffmpeg
+RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/local/ \
+    cp -rnL /tmp/usr/local/include/libav* /tmp/usr/local/include/libsw* /usr/local/include/; \
+    cp -nL /tmp/usr/local/lib/libav*.so /tmp/usr/local/lib/libsw*.so /usr/local/lib/; \
+    cp -nL /tmp/usr/local/lib/pkgconfig/libav*.pc /tmp/usr/local/lib/pkgconfig/libsw*.pc /usr/lib/pkgconfig/; \
+    cp -r /tmp/usr/local/src/ffmpeg /usr/local/src/; \
+    true # in case ffmpeg not enabled
+
 ENV TENSORRT_LIB_DIR=/usr/local/tensorrt/targets/${ARCH_ALT}-linux-gnu/lib
 ENV PATH="/usr/local/ucx/bin:${VIRTUAL_ENV}/bin:/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/bin:/usr/local/cuda/nvvm/bin:$PATH"
 ENV LD_LIBRARY_PATH=\
@@ -631,7 +758,10 @@ $NIXL_PLUGIN_DIR:\
 $TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
+/usr/local/cuda/lib:\
+/usr/local/cuda/lib64:\
 $LD_LIBRARY_PATH
+ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
@@ -672,7 +802,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 pyproject.toml /workspace/
 COPY --chmod=775 --chown=dynamo:0 tests /workspace/tests
 COPY --chmod=775 --chown=dynamo:0 examples /workspace/examples
 COPY --chmod=775 --chown=dynamo:0 deploy /workspace/deploy
@@ -697,82 +826,4 @@ ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
-CMD []
-
-###########################################################
-########## Development (run.sh, runs as root user) ########
-###########################################################
-#
-# PURPOSE: Local development environment for use with run.sh (not Dev Container plug-in)
-#
-# This stage runs as root and provides:
-# - Development tools and utilities for local debugging
-# - Support for vscode/cursor development outside the Dev Container plug-in
-#
-# Use this stage if you need a full-featured development environment with extra tools,
-# but do not use it with the Dev Container plug-in.
-
-FROM runtime AS dev
-
-# Don't want ubuntu to be editable, just change uid and gid.
-ARG WORKSPACE_DIR=/workspace
-
-# Switch to root for system package installation
-USER root
-
-# Install utilities as root
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends  \
-        # Install utilities
-        nvtop \
-        wget \
-        tmux \
-        vim \
-        git \
-        iproute2 \
-        rsync \
-        zip \
-        unzip \
-        htop \
-        # Build Dependencies
-        autoconf \
-        automake \
-        cmake \
-        libtool \
-        meson \
-        net-tools \
-        pybind11-dev \
-        # Rust build dependencies
-        clang \
-        libclang-dev \
-        protobuf-compiler && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-# Set umask for group-writable files in dev stage (runs as root)
-RUN mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
-SHELL ["/bin/bash", "-l", "-o", "pipefail", "-c"]
-
-# Set workspace directory variable
-ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
-    DYNAMO_HOME=${WORKSPACE_DIR} \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv \
-    PATH=/usr/local/cargo/bin:$PATH
-
-# Copy rust installation from dynamo_base to avoid duplication efforts
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> because COPY --chmod only affects <path>/*, not <path>
-COPY --from=dynamo_base --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=dynamo_base --chmod=775 /usr/local/cargo /usr/local/cargo
-RUN chmod g+w /usr/local/rustup /usr/local/cargo
-
-# Install maturin, for maturin develop
-RUN uv pip install --no-cache maturin[patchelf]
-
-# Editable install of dynamo
-COPY pyproject.toml README.md hatch_build.py /workspace/
-RUN uv pip install --no-cache --no-deps -e .
-
 CMD []

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! NATS transport
@@ -415,9 +415,6 @@ pub fn url_to_bucket_and_key(url: &Url) -> anyhow::Result<(String, String)> {
     };
     Ok((bucket.to_string(), key.to_string()))
 }
-
-/// Default queue name for publishing events
-pub const QUEUE_NAME: &str = "queue";
 
 /// A queue implementation using NATS JetStream
 pub struct NatsQueue {
@@ -863,16 +860,6 @@ impl EventPublisher for NatsQueue {
         event_name: impl AsRef<str> + Send + Sync,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        // We expect the stream to be always suffixed with "queue"
-        // This suffix itself is nothing special, just a repo standard
-        if event_name.as_ref() != QUEUE_NAME {
-            tracing::warn!(
-                "Expected event_name to be '{}', but got '{}'",
-                QUEUE_NAME,
-                event_name.as_ref()
-            );
-        }
-
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
 
         // Note: enqueue_task requires &mut self, but EventPublisher requires &self

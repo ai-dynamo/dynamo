@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -17,7 +17,6 @@ spec:
   backendFramework: sglang
   services:
     Frontend:
-      dynamoNamespace: sglang-disagg-multinode
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -27,7 +26,6 @@ spec:
       multinode:
         nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
       replicas: 1
       resources:
@@ -64,7 +62,6 @@ spec:
       multinode:
         nodeCount: 2
       envFromSecret: hf-token-secret
-      dynamoNamespace: sglang-disagg-multinode
       componentType: worker
       replicas: 1
       resources:

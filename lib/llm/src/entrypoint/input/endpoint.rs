@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -82,7 +82,7 @@ pub async fn run(
             let fut = endpoint.endpoint_builder().handler(ingress).start();
             Box::pin(fut)
         }
-        EngineConfig::Dynamic(_) => {
+        EngineConfig::Dynamic { .. } => {
             unreachable!("An endpoint input will never have a Dynamic engine");
         }
     };

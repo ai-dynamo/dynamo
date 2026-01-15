@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Asynchronous Scheduler for LLM Request Management
@@ -275,6 +275,7 @@ impl Scheduler {
                 args.block_size,
                 component,
                 dp_rank,
+                args.enable_local_indexer,
             );
             let mut hit_rates = RunningMean::new(1000);
 

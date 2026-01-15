@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import List, Optional, Tuple
@@ -47,7 +47,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self.inner = WorkerMetricsPublisher()
         # Use labels directly for the new create_endpoint signature
         metrics_labels = metrics_labels or []
-        self.inner.create_endpoint(component, metrics_labels)
+        self.inner.create_endpoint(component)
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
         self.request_total_slots = 1

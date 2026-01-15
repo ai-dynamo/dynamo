@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -48,35 +48,26 @@ The example demonstrates:
 
 ## Getting Started
 
-## Prerequisites
+### Prerequisites
 
- Before running this example, ensure you have the following services running:
-
- - **etcd**: A distributed key-value store used for service discovery and metadata storage
- - **NATS**: A high-performance message broker for inter-component communication
-
- You can start these services using Docker Compose:
-
- ```bash
- # clone the dynamo repository if necessary
- # git clone https://github.com/ai-dynamo/dynamo.git
- cd dynamo
- docker compose -f deploy/docker-compose.yml up -d
- ```
+Dynamo must be installed. No external services are required for local development—the example uses file-based KV storage by default.
 
 ### Running the Example
 
 First, start the backend service:
 ```bash
 cd examples/custom_backend/hello_world
-python hello_world.py
+DYN_STORE_KV=file python hello_world.py
 ```
 
 Second, in a separate terminal, run the client:
 ```bash
 cd examples/custom_backend/hello_world
-python client.py
+DYN_STORE_KV=file python client.py
 ```
+
+> **Note**: Setting `DYN_STORE_KV=file` uses file-based storage instead of etcd.
+> Both the backend and client must use the same KV backend to discover each other.
 
 The client will connect to the backend service and print the streaming results.
 
@@ -106,7 +97,7 @@ Hello star!
 Note that this a very simple degenerate example which does not demonstrate the standard Dynamo FrontEnd-Backend deployment. The hello-world client is not a web server, it is a one-off function which sends the predefined text "world,sun,moon,star" to the backend. The example is meant to show the HelloWorldWorker. As such you will only see the HelloWorldWorker pod in deployment. The client will run and exit and the pod will not be operational.
 
 
-Follow the [Quickstart Guide](../../../docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
+Follow the [Quickstart Guide](/docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
 Then deploy to kubernetes using
 
 ```bash

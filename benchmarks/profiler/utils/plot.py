@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +21,7 @@ import numpy as np
 from matplotlib import cm
 from scipy.interpolate import griddata
 
+from benchmarks.profiler.utils.defaults import DEFAULT_GPU_COST_PER_HOUR
 from benchmarks.profiler.utils.pareto import compute_pareto
 
 logger = logging.getLogger(__name__)
@@ -208,10 +209,19 @@ def plot_decode_3d_surface(
     xi = np.linspace(min(x_kv_usage), max(x_kv_usage), 100)
     yi = np.linspace(min(y_context_length), max(y_context_length), 100)
     X, Y = np.meshgrid(xi, yi)
-    Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
-    Z_thpt = griddata(
-        (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="cubic"
-    )
+
+    # Try cubic interpolation first, fallback to linear if Qhull error occurs
+    try:
+        Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="cubic")
+        Z_thpt = griddata(
+            (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="cubic"
+        )
+    except Exception as e:
+        logger.warning(f"Cubic interpolation failed: {e}. Falling back to linear.")
+        Z_itl = griddata((x_kv_usage, y_context_length), z_itl, (X, Y), method="linear")
+        Z_thpt = griddata(
+            (x_kv_usage, y_context_length), z_thpt_per_gpu, (X, Y), method="linear"
+        )
 
     # Plot ITL surface
     fig = plt.figure(figsize=(12, 10))
@@ -297,13 +307,11 @@ def plot_pd_joint_results(isl, osl, prefill_data, decode_data, output_dir):
         decode_data: DecodeProfileData instance containing profiling results
         output_dir: directory to save the plot
     """
-    GPU_COST_PER_HOUR = 3.0  # $3/hour
-
     # compute pareto front for prefill
-    p_ttft, p_thpt = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
+    p_ttft, p_thpt, _ = compute_pareto(prefill_data.ttft, prefill_data.thpt_per_gpu)
 
     # compute pareto front for decode
-    d_itl, d_thpt = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
+    d_itl, d_thpt, _ = compute_pareto(decode_data.itl, decode_data.thpt_per_gpu)
 
     # convert to cost per thousand requests
     p_ttft = np.array(p_ttft)
@@ -316,14 +324,16 @@ def plot_pd_joint_results(isl, osl, prefill_data, decode_data, output_dir):
     ttft = []
     for _p_ttft, _p_thpt in zip(p_ttft, p_thpt):
         ttft.append(_p_ttft)
-        prefill_cost = isl * 1000 / _p_thpt * GPU_COST_PER_HOUR / 3600
+        prefill_cost = isl * 1000 / _p_thpt * DEFAULT_GPU_COST_PER_HOUR / 3600
         tokens_per_user.append(1000 / d_itl)
-        cost.append(osl * 1000 / d_thpt * GPU_COST_PER_HOUR / 3600 + prefill_cost)
+        cost.append(
+            osl * 1000 / d_thpt * DEFAULT_GPU_COST_PER_HOUR / 3600 + prefill_cost
+        )
 
     # plot
     plt.figure(figsize=(12, 10))
     plt.title(
-        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${GPU_COST_PER_HOUR}) Under Different SLA"
+        f"Cost Per 1000 i{isl}o{osl} requests (GPU/hour = ${DEFAULT_GPU_COST_PER_HOUR}) Under Different SLA"
     )
     for _tokens_per_user, _cost, _ttft in zip(tokens_per_user, cost, ttft):
         line = plt.plot(_tokens_per_user, _cost, label=f"TTFT: {_ttft:.2f}ms")[0]

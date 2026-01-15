@@ -155,13 +155,13 @@ export DOCKER_SERVER=your-registry.com/  # your container registry
 export IMAGE_TAG=latest
 
 # Build operator image
-cd deploy/cloud/operator
+cd deploy/operator
 docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
 docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
 cd -
 
 # Install CRDs
-cd deploy/cloud/helm
+cd deploy/helm/charts
 helm install dynamo-crds ./crds/ --namespace default
 
 # Install platform with custom operator image

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! MockSchedulerEngine - AsyncEngine wrapper around the Scheduler
@@ -28,6 +28,7 @@ use dynamo_runtime::{
 };
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
+use crate::mocker::bootstrap::{BootstrapServer, connect_to_prefill};
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal, WorkerType};
 use crate::mocker::scheduler::Scheduler;
@@ -47,6 +48,8 @@ pub struct MockVllmEngine {
     active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
     request_senders: Arc<OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>>,
     engine_args: MockEngineArgs,
+    /// Bootstrap server for prefill workers in disaggregated mode
+    bootstrap_server: Arc<OnceCell<Arc<BootstrapServer>>>,
 }
 
 impl MockVllmEngine {
@@ -56,17 +59,31 @@ impl MockVllmEngine {
             active_requests: Arc::new(Mutex::new(HashMap::new())),
             request_senders: Arc::new(OnceCell::new()),
             engine_args: args,
+            bootstrap_server: Arc::new(OnceCell::new()),
         }
     }
 
     pub async fn start(&self, component: Component) -> Result<()> {
-        let cancel_token = component.drt().runtime().child_token();
+        // Use primary_token() instead of child_token() so the mocker continues running
+        // during graceful shutdown (Phase 1/2) and only stops in Phase 3.
+        // child_token() is a child of endpoint_shutdown_token which is cancelled in Phase 1.
+        // primary_token() is only cancelled in Phase 3, after waiting for inflight requests.
+        let cancel_token = component.drt().primary_token();
 
         // Simulate engine startup time if configured
         if let Some(startup_time_secs) = self.engine_args.startup_time {
             tracing::info!("Simulating engine startup time: {:.2}s", startup_time_secs);
             tokio::time::sleep(Duration::from_secs_f64(startup_time_secs)).await;
             tracing::info!("Engine startup simulation completed");
+        }
+
+        // Start bootstrap server for prefill workers in disaggregated mode
+        if self.engine_args.worker_type == WorkerType::Prefill
+            && let Some(port) = self.engine_args.bootstrap_port
+        {
+            let server = BootstrapServer::start(port, cancel_token.clone()).await?;
+            let _ = self.bootstrap_server.set(server);
+            tracing::info!(port = port, "Bootstrap server started for prefill worker");
         }
 
         // Pass component to schedulers only if prefix caching is enabled and not a decode worker
@@ -143,6 +160,11 @@ impl MockVllmEngine {
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {
+                            tracing::info!("Scheduler output task cancelled, clearing active requests");
+                            // Clear all active requests to unblock waiting request handlers
+                            // This will cause their request_rx.recv() to return None
+                            let mut active = active_requests_clone.lock().await;
+                            active.clear();
                             break;
                         }
                     }
@@ -229,8 +251,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
     ) -> Result<ManyOut<LLMEngineOutput>, Error> {
         let (request, ctx) = input.into_parts();
 
-        // Extract dp_rank from request field (defaults to 0 if not set)
-        let dp_rank = request.dp_rank.unwrap_or(0);
+        // Extract dp_rank from routing hints (defaults to 0 if not set)
+        let dp_rank = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.dp_rank)
+            .unwrap_or(0);
 
         // Validate dp_rank
         if dp_rank >= self.engine_args.dp_size {
@@ -238,6 +264,22 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 "dp_rank {} is out of bounds for dp_size {}",
                 dp_rank, self.engine_args.dp_size
             )));
+        }
+
+        // Bootstrap rendezvous for disaggregated serving
+        // - Decode: connect to prefill's server, block until prefill completes
+        // - Prefill: complete_room() is called after first token (see below)
+        let bootstrap_room = request.bootstrap_info.as_ref().map(|b| b.bootstrap_room);
+        if let Some(bootstrap_info) = &request.bootstrap_info
+            && self.engine_args.worker_type == WorkerType::Decode
+        {
+            connect_to_prefill(
+                &bootstrap_info.bootstrap_host,
+                bootstrap_info.bootstrap_port,
+                bootstrap_info.bootstrap_room,
+            )
+            .await
+            .map_err(|e| Error::msg(format!("Bootstrap connection failed: {e}")))?;
         }
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
@@ -275,6 +317,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
+        let bootstrap_server = self.bootstrap_server.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -300,6 +343,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             log_probs: None,
                             top_logprobs: None,
                             finish_reason: None,
+                            stop_reason: None,
                             index: None,
                             // Add dummy disaggregated_params for prefill workers
                             disaggregated_params: if is_prefill {
@@ -310,6 +354,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             extra_args: None,
                             completion_usage: None,
                         };
+
+                        // Prefill: after first token, mark room complete (unblocks decode)
+                        if is_prefill
+                            && token_count == 1
+                            && let (Some(server), Some(room_id)) = (bootstrap_server.get(), bootstrap_room)
+                        {
+                            server.complete_room(room_id);
+                        }
 
                         if signal.completed && token_count < max_output_tokens {
                             let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string()));

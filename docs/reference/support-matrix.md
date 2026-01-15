@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 # Dynamo Support Matrix
 
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
+
+> **See also:** [Feature Compatibility Matrix](../../feature-matrix.md) for backend-specific feature support (vLLM, TensorRT-LLM, SGLang).
 
 ## Hardware Compatibility
 
@@ -52,27 +54,35 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version** | glibc version                         | CUDA Version |
 | :----------------- | :---------- | :------------------------------------ | :----------- |
-| ai-dynamo          | 0.7.0       | >=2.28                                |              |
-| ai-dynamo-runtime  | 0.7.0       | >=2.28 (Python 3.12 has known issues) |              |
-| NIXL               | 0.7.1       | >=2.27                                | >=11.8       |
+| ai-dynamo          | 0.8.0       | >=2.28                                |              |
+| ai-dynamo-runtime  | 0.8.0       | >=2.28 (Python 3.12 has known issues) |              |
+| NIXL               | 0.8.0       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
 
-| **Build Dependency** | **Version as of Dynamo v0.7.0**                                                   |
-| :------------------- | :------------------------------------------------------------------------------- |
-| **SGLang**           | 0.5.3.post4                                                                      |
-| **TensorRT-LLM**     | 1.2.0rc2                                                                         |
-| **vLLM**             | 0.11.0                                                                           |
-| **NIXL**             | 0.7.1                                                                            |
+The following table shows the dependency versions included with each Dynamo release:
+
+| **Dependency** | **main (ToT)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
+| :------------- | :------------- | :--------- | :--------- | :--------------- | :--------- |
+| SGLang         | 0.5.7          | 0.5.6.post2 | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
+| TensorRT-LLM   | 1.2.0rc6.post1 | 1.2.0rc6.post1 | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
+| vLLM           | 0.13.0         | 0.12.0     | 0.11.0     | 0.11.0           | 0.11.0     |
+| NIXL           | 0.8.0          | 0.8.0      | 0.8.0      | 0.8.0            | 0.8.0      |
+
+> [!Note]
+> **main (ToT)** reflects the current development branch.
 
 
 > [!Important]
 > Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.
 
 ### CUDA Support by Framework
-| **Dynamo Version**   | **SGLang**              | **TensorRT-LLM**        | **vLLM**                |
-| :------------------- | :-----------------------| :-----------------------| :-----------------------|
-| **Dynamo 0.7.0**     | CUDA 12.8               | CUDA 13.0               | CUDA 12.8               |
+| **Dynamo Version**   | **SGLang**                        | **TensorRT-LLM**        | **vLLM**                          |
+| :------------------- | :-------------------------------- | :-----------------------| :-------------------------------- |
+| **Dynamo 0.8.0**     | CUDA 12.9, CUDA 13.0 (🧪)         | CUDA 13.0               | CUDA 12.9, CUDA 13.0 (🧪)         |
+| **Dynamo 0.7.1**     | CUDA 12.8                         | CUDA 13.0               | CUDA 12.9                         |
+
+> 🧪 = Experimental
 
 ## Cloud Service Provider Compatibility
 

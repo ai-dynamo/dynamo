@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -430,7 +430,7 @@ def llm_server(request, runtime_services):
         server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
@@ -445,7 +445,8 @@ def llm_server(request, runtime_services):
 def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
     t = DisaggDeterminismTester(
-        base_url=llm_server.base_url, server_type=llm_server.server_type
+        base_url=llm_server.base_url,
+        server_type=llm_server.server_type,
     )
     t.download_shakespeare_text()
     return t
@@ -468,30 +469,6 @@ class TestDeterminismDisagg(BaseTestDeterminism):
         self, tester, llm_server, runtime_services
     ):
         """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
-        # Call the base class implementation
-        super().base_test_determinism_with_cache_reset(
-            tester,
-            llm_server,
-            runtime_services,
-            success_rate_threshold=SUCCESS_RATE_THRESHOLD,
-        )
-
-    @pytest.mark.parametrize(
-        "llm_server",
-        [
-            {
-                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")),
-                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "1000")),
-            },
-        ],
-        indirect=True,
-    )
-    @pytest.mark.kvbm_v2
-    def test_determinism_disagg_with_cache_reset_v2(
-        self, tester, llm_server, runtime_services, monkeypatch
-    ):
-        """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
-        monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
         # Call the base class implementation
         super().base_test_determinism_with_cache_reset(
             tester,

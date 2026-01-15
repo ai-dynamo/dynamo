@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashSet;
@@ -228,6 +228,18 @@ impl WorkerSchedulerClient {
                 true
             }
         }
+    }
+
+    /// Clone the scheduler channel for async use.
+    pub fn get_scheduler_tx(&self) -> mpsc::UnboundedSender<SchedulerMessage> {
+        self.scheduler_tx.clone()
+    }
+
+    /// Record operation in slot (bookkeeping only, no send).
+    /// This updates the slot's expected operation count so is_complete() works correctly.
+    pub fn record_operation(&mut self, request_id: &str, uuid: uuid::Uuid) {
+        let slot = self.slots.get_mut(request_id).expect("slot does not exist");
+        slot.operations.push(uuid);
     }
 }
 

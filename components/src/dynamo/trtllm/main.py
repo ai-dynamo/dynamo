@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -22,7 +22,6 @@ if "TLLM_LOG_LEVEL" not in os.environ and os.getenv(
 import uvloop
 from prometheus_client import REGISTRY
 from tensorrt_llm.llmapi import (
-    BuildConfig,
     CapacitySchedulerPolicy,
     DynamicBatchConfig,
     KvCacheConfig,
@@ -114,7 +113,10 @@ async def worker():
     config = cmd_line_args()
 
     loop = asyncio.get_running_loop()
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+    # Enable NATS based on use_kv_events flag (derived from publish_events_and_metrics)
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, config.use_kv_events
+    )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
@@ -162,13 +164,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     else:
         gpus_per_node = config.gpus_per_node
 
-    build_config = BuildConfig(
-        max_batch_size=config.max_batch_size,
-        max_num_tokens=config.max_num_tokens,
-        max_beam_width=config.max_beam_width,
-        max_seq_len=config.max_seq_len,
-    )
-
     kv_cache_config = KvCacheConfig(
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
@@ -190,7 +185,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         "pipeline_parallel_size": config.pipeline_parallel_size,
         "moe_expert_parallel_size": config.expert_parallel_size,
         "backend": Backend.PYTORCH,
-        "build_config": build_config,
         "kv_cache_config": kv_cache_config,
         "gpus_per_node": gpus_per_node,
         "max_num_tokens": config.max_num_tokens,
@@ -217,14 +211,14 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if config.publish_events_and_metrics:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-        # Add it to kv_cache_config while preserving cache_transceiver_config from YAML
+        # Add it to kv_cache_config while preserving all settings from YAML
         current_kv_config = arg_map["kv_cache_config"]
         if isinstance(current_kv_config, KvCacheConfig):
-            # Convert KvCacheConfig object to dict (no cache_transceiver_config to preserve)
-            arg_map["kv_cache_config"] = {
-                "free_gpu_memory_fraction": config.free_gpu_memory_fraction,
-                "event_buffer_max_size": DEFAULT_KV_EVENT_BUFFER_MAX_SIZE,
-            }
+            # Convert KvCacheConfig object to dict, preserving ALL existing settings
+            # This ensures YAML overrides are not lost when adding event_buffer_max_size
+            kv_config_dict = current_kv_config.model_dump(exclude_none=True)
+            kv_config_dict["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            arg_map["kv_cache_config"] = kv_config_dict
         elif isinstance(current_kv_config, dict):
             # Add event_buffer_max_size while preserving cache_transceiver_config and other YAML settings
             current_kv_config[
@@ -360,6 +354,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.max_num_batched_tokens = config.max_num_tokens
         runtime_config.reasoning_parser = config.reasoning_parser
         runtime_config.tool_call_parser = config.tool_call_parser
+        runtime_config.enable_local_indexer = config.enable_local_indexer
 
         logging.info(f"Set runtime config max_num_seqs: {runtime_config.max_num_seqs}")
         logging.info(
@@ -467,6 +462,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.kv_block_size,
                 metrics_labels,
                 zmq_endpoint=trtllm_zmq_bind_endpoint,
+                enable_local_indexer=config.enable_local_indexer,
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)

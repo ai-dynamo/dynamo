@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # KV Manager
@@ -72,7 +72,7 @@ pub struct KvManager {
 
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
-        Self::new_with_publisher(max_capacity, block_size, None, 0)
+        Self::new_with_publisher(max_capacity, block_size, None, 0, false)
     }
 
     pub fn new_with_publisher(
@@ -80,6 +80,7 @@ impl KvManager {
         block_size: usize,
         component: Option<Component>,
         dp_rank: u32,
+        enable_local_indexer: bool,
     ) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
@@ -87,10 +88,10 @@ impl KvManager {
 
         let kv_event_publisher = component.map(|comp| {
             tracing::info!(
-                "Initializing KV event publisher for DP rank {dp_rank} with block_size {block_size}"
+                "Initializing KV event publisher for DP rank {dp_rank} with block_size {block_size}, enable_local_indexer={enable_local_indexer}"
             );
             Arc::new(
-                KvEventPublisher::new(comp, block_size as u32, None)
+                KvEventPublisher::new_with_local_indexer(comp, block_size as u32, None, enable_local_indexer)
                     .expect("Failed to create KV event publisher"),
             )
         });
@@ -138,6 +139,7 @@ impl KvManager {
                     .map(|(global_hash, local_hash)| KvCacheStoredBlockData {
                         block_hash: ExternalSequenceBlockHash(global_hash),
                         tokens_hash: LocalBlockHash(*local_hash),
+                        mm_extra_info: None,
                     })
                     .collect(),
             })

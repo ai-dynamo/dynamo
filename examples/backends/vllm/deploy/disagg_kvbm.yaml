@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-kvbm
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-kvbm
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -33,13 +31,10 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-8B
-            - --gpu-memory-utilization
-            - "0.3"
             - --max-model-len
             - "32000"
             - --enforce-eager
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-kvbm
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -65,8 +60,6 @@ spec:
             - --model
             - Qwen/Qwen3-8B
             - --is-prefill-worker
-            - --gpu-memory-utilization
-            - "0.3"
             - --max-model-len
             - "32000"
             - --enforce-eager

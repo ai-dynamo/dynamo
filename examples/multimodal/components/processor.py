@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -17,8 +17,8 @@ from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import FlexibleArgumentParser
+from vllm.tokenizers import TokenizerLike as AnyTokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
@@ -27,6 +27,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.chat_message_utils import extract_user_text
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import (
     MultiModalInput,
@@ -134,7 +135,6 @@ class Processor(ProcessMixIn):
         (
             request,
             conversation,
-            prompt,
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
@@ -204,11 +204,7 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text
-        try:
-            user_text = raw_request.messages[0].content[0].text
-        except (IndexError, AttributeError) as e:
-            raise ValueError(f"Invalid message structure: {e}")
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 

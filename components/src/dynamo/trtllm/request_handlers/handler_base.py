@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,6 +29,7 @@ from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo._core import Context
+from dynamo.common.utils.otel_tracing import build_trace_headers
 from dynamo.logits_processing.examples import HelloWorldLogitsProcessor
 from dynamo.nixl_connect import Connector
 from dynamo.runtime import DistributedRuntime
@@ -283,6 +284,10 @@ class HandlerBase:
         if "prefill_result" in request:
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
+            request["prefill_result"].get("disaggregated_params", {}).pop(
+                "worker_id", None
+            )
+
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(
                     **request["prefill_result"].get("disaggregated_params")
@@ -362,6 +367,9 @@ class HandlerBase:
             prefill_result.get("prompt_tokens_details") if prefill_result else None
         )
 
+        # Build trace headers for distributed tracing
+        trace_headers = build_trace_headers(context)
+
         try:
             # NEW: Updated engine call to include multimodal data
             generation_result = self.engine.llm.generate_async(
@@ -369,6 +377,7 @@ class HandlerBase:
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
                 streaming=streaming,
+                trace_headers=trace_headers,
             )
 
             # Use the context manager to handle cancellation monitoring
