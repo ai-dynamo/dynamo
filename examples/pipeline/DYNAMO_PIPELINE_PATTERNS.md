@@ -9,7 +9,7 @@ A stage is just a class with an async generator method:
 ```python
 from dynamo._core import DistributedRuntime
 
-class Stage3:
+class Stage1:
     async def generate(self, request, context):
         # Do work with request
         result = transform(request)
@@ -17,10 +17,10 @@ class Stage3:
 
 # Register and serve the endpoint
 runtime = DistributedRuntime(loop, "file", "tcp")
-component = runtime.namespace("pipeline").component("stage3")
+component = runtime.namespace("pipeline").component("stage1")
 endpoint = component.endpoint("generate")
 
-await endpoint.serve_endpoint(Stage3().generate)
+await endpoint.serve_endpoint(Stage1().generate)
 ```
 
 That's it. Your function is now a distributed service.
@@ -30,8 +30,8 @@ That's it. Your function is now a distributed service.
 To call another stage, get a client and call the method:
 
 ```python
-# Connect to stage2
-endpoint = runtime.namespace("pipeline").component("stage2").endpoint("generate")
+# Connect to stage1
+endpoint = runtime.namespace("pipeline").component("stage1").endpoint("generate")
 client = await endpoint.client()
 await client.wait_for_instances()
 
