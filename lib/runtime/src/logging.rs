@@ -839,6 +839,8 @@ where
 
             drop(extensions);
 
+            // Emit SPAN_CREATED event. This only runs if the span passed the layer's filter
+            // (on_enter is not called for filtered-out spans), so no additional check needed.
             if span_events_enabled() {
                 emit_at_level!(span_level, target: "span_event", message = "SPAN_CREATED");
             }
