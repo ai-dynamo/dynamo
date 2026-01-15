@@ -382,7 +382,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     }
 
                     if let Some(offload_filter) = offload_filter.as_ref()
-                        && !offload_filter.should_offload(request.sequence_hash)
+                        && !offload_filter.should_offload_with_priority(
+                            request.sequence_hash,
+                            request.key.priority,
+                        )
                     {
                         continue;
                     }

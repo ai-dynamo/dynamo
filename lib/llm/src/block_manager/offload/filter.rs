@@ -16,6 +16,18 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 pub trait OffloadFilter: Send + Sync + Debug {
     fn should_offload(&self, sequence_hash: SequenceHash) -> bool;
+
+    /// Check if a block should be offloaded, considering its retention priority.
+    /// Default implementation ignores priority and delegates to should_offload.
+    ///
+    /// # Arguments
+    /// * `sequence_hash` - The sequence hash of the block
+    /// * `priority` - The retention priority of the block (0-100, higher = more important)
+    fn should_offload_with_priority(&self, sequence_hash: SequenceHash, priority: u64) -> bool {
+        // Default: ignore priority, use existing logic
+        let _ = priority;
+        self.should_offload(sequence_hash)
+    }
 }
 
 /// A filter that offloads blocks based on their frequency of use.
@@ -121,6 +133,64 @@ impl OffloadFilter for FrequencyFilter {
         }
 
         should_offload
+    }
+}
+
+/// A filter that offloads blocks based on their retention priority.
+///
+/// Only blocks with priority >= threshold will be offloaded to the next tier.
+/// This is used to implement priority-based KV cache offload filtering for
+/// explicit prompt caching (EPC) use cases.
+///
+/// The filter reads its threshold from the environment variable
+/// `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY`. If not set, defaults to 0
+/// (no filtering - offload all blocks).
+#[derive(Debug, Clone)]
+pub struct PriorityFilter {
+    /// Minimum priority for offload (0-100). Blocks with priority < threshold are skipped.
+    threshold: u64,
+    /// Whether to enforce contiguous offloading (stop at first block below threshold).
+    /// This is tracked at a higher level, not in this filter.
+    #[allow(dead_code)]
+    contiguous: bool,
+}
+
+impl PriorityFilter {
+    /// Create a new priority filter with the given threshold.
+    pub fn new(threshold: u64) -> Self {
+        Self {
+            threshold,
+            contiguous: true,
+        }
+    }
+
+    /// Create a priority filter from environment variable.
+    /// Reads `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY`.
+    /// Defaults to 0 (no filtering) if not set or invalid.
+    pub fn from_env() -> Self {
+        let threshold = std::env::var("DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        Self::new(threshold)
+    }
+
+    /// Get the current threshold value.
+    pub fn threshold(&self) -> u64 {
+        self.threshold
+    }
+}
+
+impl OffloadFilter for PriorityFilter {
+    fn should_offload(&self, _sequence_hash: SequenceHash) -> bool {
+        // Without priority information, we can't filter.
+        // Default to allowing offload (backward compatible behavior).
+        true
+    }
+
+    fn should_offload_with_priority(&self, _sequence_hash: SequenceHash, priority: u64) -> bool {
+        // Only offload blocks with priority >= threshold
+        priority >= self.threshold
     }
 }
 
@@ -239,5 +309,45 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(filter.frequency_map.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_priority_filter_basic() {
+        let filter = PriorityFilter::new(60);
+
+        // High priority (80) >= threshold (60) -> offload
+        assert!(filter.should_offload_with_priority(hash(0), 80));
+
+        // Low priority (10) < threshold (60) -> skip
+        assert!(!filter.should_offload_with_priority(hash(1), 10));
+
+        // At threshold (60) >= threshold (60) -> offload
+        assert!(filter.should_offload_with_priority(hash(2), 60));
+
+        // Just below threshold (59) < threshold (60) -> skip
+        assert!(!filter.should_offload_with_priority(hash(3), 59));
+    }
+
+    #[test]
+    fn test_priority_filter_no_filtering() {
+        // Threshold 0 means no filtering (offload all)
+        let filter = PriorityFilter::new(0);
+
+        assert!(filter.should_offload_with_priority(hash(0), 0));
+        assert!(filter.should_offload_with_priority(hash(1), 35));
+        assert!(filter.should_offload_with_priority(hash(2), 100));
+    }
+
+    #[test]
+    fn test_priority_filter_fallback() {
+        // When called without priority (legacy path), should allow offload
+        let filter = PriorityFilter::new(60);
+        assert!(filter.should_offload(hash(0)));
+    }
+
+    #[test]
+    fn test_priority_filter_threshold_getter() {
+        let filter = PriorityFilter::new(42);
+        assert_eq!(filter.threshold(), 42);
     }
 }

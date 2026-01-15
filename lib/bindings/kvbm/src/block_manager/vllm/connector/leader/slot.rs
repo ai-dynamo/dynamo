@@ -120,6 +120,7 @@ pub trait Slot: std::fmt::Debug {
         block_ids: &[usize],
         computed_position: usize,
         is_new_request: bool,
+        priorities: Option<&[u32]>,
     ) -> Result<(), SlotError>;
 
     fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
@@ -378,6 +379,14 @@ pub struct VllmConnectorSlot {
 
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
+
+    /// Retention priorities for each block (same length as device_blocks).
+    /// Used for priority-based offload filtering.
+    priorities: Vec<u32>,
+
+    /// Minimum priority threshold for offload filtering.
+    /// Blocks with priority < threshold are not offloaded.
+    offload_min_priority: u32,
 }
 
 impl VllmConnectorSlot {
@@ -415,6 +424,11 @@ impl VllmConnectorSlot {
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             cache_stats,
+            priorities: Vec::new(),
+            offload_min_priority: std::env::var("DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
         }
     }
 
@@ -649,6 +663,7 @@ impl Slot for VllmConnectorSlot {
         block_ids: &[usize],
         computed_position: usize,
         is_new_request: bool,
+        priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
         // TRTLLM's KV Connector Manager will have (computed_position - external matches)
         // in onborading case
@@ -685,6 +700,13 @@ impl Slot for VllmConnectorSlot {
         if !block_ids.is_empty() {
             tracing::debug!("assigning {} new device blocks slot", block_ids.len());
             self.device_blocks.extend(block_ids);
+            // Store priorities for the new blocks (use 0 as default if not provided)
+            if let Some(prios) = priorities {
+                self.priorities.extend(prios.iter().copied());
+            } else {
+                // Fill with default priority (0) if not provided
+                self.priorities.extend(std::iter::repeat(0).take(block_ids.len()));
+            }
         }
 
         // This approach is fragile, but it’s the only way currently to skip evaluating
@@ -702,35 +724,75 @@ impl Slot for VllmConnectorSlot {
             ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
 
         if num_candidate_blocks > 0 {
-            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
-            // for now, offload all the blocks to the host
-            let offload_block_ids: Vec<usize> = self
+            // Get candidate block IDs and their priorities
+            let candidate_block_ids: Vec<usize> = self
                 .device_blocks
                 .iter()
                 .skip(self.evaluated_blocks)
                 .take(num_candidate_blocks)
                 .copied()
-                .collect::<Vec<_>>();
+                .collect();
+
+            let candidate_priorities: Vec<u32> = self
+                .priorities
+                .iter()
+                .skip(self.evaluated_blocks)
+                .take(num_candidate_blocks)
+                .copied()
+                .collect();
 
             assert_eq!(
-                offload_block_ids.len(),
+                candidate_block_ids.len(),
                 num_candidate_blocks,
                 "device block overflow - candidate blocks exceed block count at offset {}",
                 self.evaluated_blocks
             );
 
-            let offload_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .cloned()
-                .collect::<Vec<_>>();
+            // Apply contiguous priority filtering: find how many blocks from the start
+            // meet the minimum priority threshold. Stop at first block below threshold.
+            let num_blocks_to_offload = if self.offload_min_priority > 0 {
+                candidate_priorities
+                    .iter()
+                    .take_while(|&&priority| priority >= self.offload_min_priority)
+                    .count()
+            } else {
+                // No filtering, offload all candidate blocks
+                num_candidate_blocks
+            };
 
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
-                .expect("failed to offload blocks");
+            if num_blocks_to_offload > 0 {
+                tracing::debug!(
+                    "priority filtering: offloading {}/{} blocks (threshold={})",
+                    num_blocks_to_offload,
+                    num_candidate_blocks,
+                    self.offload_min_priority
+                );
 
+                let offload_block_ids: Vec<usize> = candidate_block_ids
+                    .into_iter()
+                    .take(num_blocks_to_offload)
+                    .collect();
+
+                let offload_token_blocks: Vec<TokenBlock> = self
+                    .sequence
+                    .blocks()
+                    .iter()
+                    .skip(self.evaluated_blocks)
+                    .take(num_blocks_to_offload)
+                    .cloned()
+                    .collect();
+
+                self.offload_blocks(&offload_block_ids, &offload_token_blocks)
+                    .expect("failed to offload blocks");
+            } else if self.offload_min_priority > 0 {
+                tracing::debug!(
+                    "priority filtering: skipping all {} candidate blocks (threshold={})",
+                    num_candidate_blocks,
+                    self.offload_min_priority
+                );
+            }
+
+            // Mark all candidate blocks as evaluated (even if not offloaded)
             self.evaluated_blocks += num_candidate_blocks;
         }
 
