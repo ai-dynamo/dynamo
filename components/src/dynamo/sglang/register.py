@@ -112,15 +112,29 @@ def _get_bootstrap_info_for_config(
                 )
                 resolved = infos[0][4][0]  # let OS policy pick v4/v6
                 bootstrap_host = resolved
-            except socket.gaierror:
+                addr_family = infos[0][0]
+                logging.info(
+                    f"Resolved bootstrap host '{host_core}' -> '{resolved}' "
+                    f"({'IPv6' if addr_family == socket.AF_INET6 else 'IPv4'})"
+                )
+            except socket.gaierror as e:
                 # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
                 bootstrap_host = host_core
+                logging.warning(
+                    f"Failed to resolve bootstrap host '{host_core}': {e}, using as-is"
+                )
         else:
             bootstrap_host = get_local_ip_auto()
+            is_ipv6 = ":" in bootstrap_host
+            logging.info(
+                f"Using auto-detected local IP: {bootstrap_host} "
+                f"({'IPv6' if is_ipv6 else 'IPv4'})"
+            )
 
         # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
         if ":" in bootstrap_host and not bootstrap_host.startswith("["):
             bootstrap_host = f"[{bootstrap_host}]"
+            logging.info(f"Wrapped IPv6 address with brackets: {bootstrap_host}")
 
         return bootstrap_host, bootstrap_port
     except Exception as e:
