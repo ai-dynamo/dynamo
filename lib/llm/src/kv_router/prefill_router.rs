@@ -445,15 +445,6 @@ impl PrefillRouter {
         Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
     }
 
-    // =========================================================================
-    // Query-only methods for EPP integration (no request execution)
-    // =========================================================================
-
-    /// Check if disaggregated mode is currently active (prefill router activated)
-    pub fn is_activated(&self) -> bool {
-        self.prefill_router.get().is_some()
-    }
-
     /// Query the best prefill worker without executing a request.
     /// Returns (worker_id, dp_rank).
     ///
@@ -489,6 +480,14 @@ impl PrefillRouter {
             Ok((worker_id, 0))
         }
     }
+
+    /// Query-only methods for EPP integration (no request execution)
+
+    /// Check if disaggregated mode is currently active (prefill router activated)
+    pub fn is_activated(&self) -> bool {
+        self.prefill_router.get().is_some()
+    }
+
 
     /// Query optimal worker IDs without executing a request.
     ///
