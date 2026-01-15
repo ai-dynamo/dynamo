@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod query_router;
+pub use query_router::*;
+
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;

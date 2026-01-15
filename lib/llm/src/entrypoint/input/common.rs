@@ -30,8 +30,8 @@ use dynamo_runtime::{
     component::Client,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
-        ServiceEngine, ServiceFrontend, SingleIn, Source,
+        AsyncEngine, Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource,
+        ServiceBackend, ServiceEngine, ServiceFrontend, SingleIn, Source, async_trait,
     },
 };
 use std::sync::Arc;
@@ -301,4 +301,114 @@ where
         .link(frontend)?;
 
     Ok(engine)
+}
+
+/// Direct routing pipeline for pre-routed requests (EPP integration)
+///
+/// This pipeline is used when worker IDs are pre-determined by an external orchestrator
+/// (such as the Inference Gateway EPP). It skips the routing selection logic and routes
+/// directly to the worker specified in the request's routing hints.
+///
+/// Key differences from `build_routed_pipeline_with_preprocessor`:
+/// - No KvRouter or PrefillRouter - worker selection already done
+/// - Uses DirectFromRequest router that reads worker ID from request
+/// - Simpler pipeline without disaggregated routing complexity
+///
+/// The request must have `routing.decode_worker_id` or `routing.backend_instance_id` set.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_direct_routed_pipeline<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    preprocessor: Arc<OpenAIPreprocessor>,
+    hf_tokenizer: tokenizers::Tokenizer,
+    metrics: Arc<Metrics>,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+            Context<Req>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+            Context<PreprocessedRequest>,
+            Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+        >,
+{
+    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let preprocessor_op = preprocessor.into_operator();
+    let backend = Backend::from_tokenizer(hf_tokenizer).into_operator();
+    let migration = Migration::from_mdc(card, metrics).into_operator();
+
+    // Create DirectFromRequest router that reads worker ID from request
+    let direct_router = DirectFromRequestRouter::new(client.clone()).await?;
+    let service_backend = ServiceBackend::from_engine(Arc::new(direct_router));
+
+    // Simpler pipeline without PrefillRouter (disagg handled externally by EPP)
+    let engine = frontend
+        .link(preprocessor_op.forward_edge())?
+        .link(migration.forward_edge())?
+        .link(backend.forward_edge())?
+        .link(service_backend)?
+        .link(backend.backward_edge())?
+        .link(migration.backward_edge())?
+        .link(preprocessor_op.backward_edge())?
+        .link(frontend)?;
+
+    Ok(engine)
+}
+
+/// Router that reads worker ID from the request's routing hints
+///
+/// This router is used in the direct routing pipeline when worker selection
+/// is done externally (e.g., by EPP). It extracts the worker ID from:
+/// - `routing.decode_worker_id` (preferred)
+/// - `routing.backend_instance_id` (fallback)
+///
+/// If neither is set, the request fails.
+pub struct DirectFromRequestRouter {
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
+}
+
+impl DirectFromRequestRouter {
+    pub async fn new(client: Client) -> anyhow::Result<Self> {
+        // Create PushRouter in Direct mode with a placeholder worker ID
+        // The actual worker ID will be extracted from each request
+        let inner = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+            client,
+            RouterMode::Direct(0), // Placeholder - we'll override per-request
+        )
+        .await?;
+
+        Ok(Self { inner })
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, anyhow::Error>
+    for DirectFromRequestRouter
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, anyhow::Error> {
+        // Extract worker ID from request routing hints
+        let worker_id = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.decode_worker_id.or(r.backend_instance_id))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Direct routing requires decode_worker_id or backend_instance_id in request. \
+                     This pipeline expects worker IDs to be set by an external orchestrator (e.g., EPP)."
+                )
+            })?;
+
+        tracing::debug!(
+            worker_id = worker_id,
+            request_id = %request.context().id(),
+            "Direct routing to pre-selected worker"
+        );
+
+        // Route directly to the specified worker
+        self.inner.direct(request, worker_id).await
+    }
 }
