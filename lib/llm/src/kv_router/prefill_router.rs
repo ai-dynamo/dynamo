@@ -457,47 +457,85 @@ impl PrefillRouter {
         self.prefill_router.get().is_some()
     }
 
-    /// Query optimal prefill worker ID without executing a request.
+    /// Query optimal worker IDs without executing a request.
     ///
-    /// This is used by the EPP/QueryRouter to determine prefill routing.
-    /// For decode worker, the caller should use KvRouter directly.
+    /// This replicates the `query_instance_id` flow but standalone (not through pipeline).
+    /// Returns both prefill and decode worker IDs based on current mode.
     ///
     /// # Arguments
+    /// * `decode_router` - The decode router (KvRouter) to query for decode worker
     /// * `token_ids` - Token IDs from the tokenized request
     /// * `update_states` - Whether to update router state (set false for query-only)
     ///
     /// # Returns
-    /// * `Ok((worker_id, dp_rank))` - Prefill worker ID and DP rank
-    /// * `Err` - If routing fails or not activated
-    pub async fn query_prefill_worker(
+    /// * In disaggregated mode: both prefill_worker_id and decode_worker_id
+    /// * In aggregated mode (not activated): decode_worker_id only
+    pub async fn query_route(
         &self,
+        decode_router: &super::KvRouter,
         token_ids: &[u32],
         update_states: bool,
-    ) -> Result<(u64, u32)> {
-        let prefill_router = self
-            .prefill_router
-            .get()
-            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+    ) -> Result<super::query_router::RouteQueryResult> {
+        use super::RouterConfigOverride;
+        use super::query_router::RouteQueryResult;
 
-        if self.router_mode.is_kv_routing() {
-            let kv_router = match prefill_router {
-                InnerPrefillRouter::KvRouter(r) => r,
-                _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
+        // Check if disaggregated mode is available
+        let is_disaggregated = self.is_activated();
+
+        if self.enforce_disagg && !is_disaggregated {
+            anyhow::bail!(PrefillError::NotActivated);
+        }
+
+        if is_disaggregated {
+            // Disaggregated mode: query both prefill and decode
+            let prefill_router = self.prefill_router.get().unwrap();
+
+            // Query prefill worker
+            let prefill_worker_id = if self.router_mode.is_kv_routing() {
+                let kv_router = match prefill_router {
+                    InnerPrefillRouter::KvRouter(r) => r,
+                    _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
+                };
+                let (worker, _overlap) = kv_router
+                    .chooser
+                    .find_best_match(None, token_ids, None, update_states)
+                    .await?;
+                worker.worker_id
+            } else {
+                // Non-KV mode: use PushRouter's selection
+                if update_states {
+                    prefill_router.select_next_worker()
+                } else {
+                    prefill_router.peek_next_worker()
+                }
+                .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?
             };
-            let (worker, _overlap) = kv_router
-                .chooser
+
+            // Query decode worker with overlap_score_weight = 0
+            // (minimize load, not maximize overlap for decode after prefill)
+            let mut decode_override = RouterConfigOverride::default();
+            decode_override.overlap_score_weight = Some(0.0);
+
+            let (decode_worker, _overlap) = decode_router
+                .find_best_match(None, token_ids, Some(&decode_override), update_states)
+                .await?;
+
+            Ok(RouteQueryResult {
+                prefill_worker_id,
+                decode_worker_id: decode_worker.worker_id,
+                is_disaggregated: true,
+            })
+        } else {
+            // Aggregated mode: query decode router only
+            let (worker, _overlap) = decode_router
                 .find_best_match(None, token_ids, None, update_states)
                 .await?;
-            Ok((worker.worker_id, worker.dp_rank))
-        } else {
-            // Non-KV mode: use PushRouter's selection
-            let worker_id = if update_states {
-                prefill_router.select_next_worker()
-            } else {
-                prefill_router.peek_next_worker()
-            }
-            .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
-            Ok((worker_id, 0))
+
+            Ok(RouteQueryResult {
+                prefill_worker_id: 0,
+                decode_worker_id: worker.worker_id,
+                is_disaggregated: false,
+            })
         }
     }
 }

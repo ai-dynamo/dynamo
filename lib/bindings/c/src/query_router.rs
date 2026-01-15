@@ -141,7 +141,6 @@ pub unsafe extern "C" fn query_router_create(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn query_router_query(
     handle: QueryRouterHandle,
-    request_id: *const c_char,
     token_ids: *const u32,
     token_count: usize,
     update_states: bool,
@@ -154,12 +153,6 @@ pub unsafe extern "C" fn query_router_query(
     let router = unsafe { &*handle };
     let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
 
-    let request_id = if request_id.is_null() {
-        None
-    } else {
-        unsafe { CStr::from_ptr(request_id) }.to_str().ok()
-    };
-
     // Get runtime to execute async query
     let runtime = match Runtime::from_settings() {
         Ok(rt) => rt,
@@ -168,7 +161,7 @@ pub unsafe extern "C" fn query_router_query(
 
     let result = runtime
         .secondary()
-        .block_on(async { router.query_route(request_id, tokens, update_states).await });
+        .block_on(async { router.query_route(tokens, update_states).await });
 
     match result {
         Ok(route_result) => {
