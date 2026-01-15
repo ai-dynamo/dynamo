@@ -262,7 +262,6 @@ runs:
       if: always() && inputs.enable_coverage == 'true'
       with:
         name: coverage-python-${{ inputs.framework }}-${{ env.STR_TEST_TYPE }}-${{ env.PLATFORM_ARCH }}-${{ github.run_id }}
-        path: |
-          test-results/coverage.xml
-          test-results/.coverage
+        path: test-results/
+        include-hidden-files: true
         retention-days: 2

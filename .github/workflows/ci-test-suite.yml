@@ -201,14 +201,22 @@ jobs:
       - name: List Downloaded Artifacts
         run: |
           echo "📦 Downloaded coverage artifacts:"
-          echo "==== Directory structure ===="
-          ls -R coverage-artifacts/
+          echo "==== Directory structure (including hidden files) ===="
+          ls -Ra coverage-artifacts/
           echo ""
           echo "==== Coverage files found ===="
           find coverage-artifacts/ -type f \( -name "*.xml" -o -name ".coverage*" \) | sort
           echo ""
           echo "==== Specifically looking for .coverage files ===="
           find coverage-artifacts/ -name ".coverage" -type f
+          echo ""
+          echo "==== Checking if .coverage files exist ===="
+          if find coverage-artifacts/ -name ".coverage" -type f | grep -q .; then
+            echo "✅ .coverage files found!"
+            find coverage-artifacts/ -name ".coverage" -type f -exec ls -lh {} \;
+          else
+            echo "❌ NO .coverage files found!"
+          fi
 
       - name: Merge All Coverage Data
         run: |
