@@ -178,19 +178,14 @@ impl QueryRouter {
         self.prefill_router.is_activated()
     }
 
-    /// Mark prefill as completed for a request (for state tracking)
-    pub async fn mark_prefill_complete(&self, request_id: &str) -> Result<()> {
-        self.decode_router
-            .mark_prefill_completed(request_id)
-            .await
-            .context("Failed to mark prefill complete")
+    /// Get direct access to the decode router for state management
+    /// (mark_prefill_completed, free, etc.)
+    pub fn decode_router(&self) -> &Arc<KvRouter> {
+        &self.decode_router
     }
 
-    /// Free a request (release resources)
-    pub async fn free(&self, request_id: &str) -> Result<()> {
-        self.decode_router
-            .free(request_id)
-            .await
-            .context("Failed to free request")
+    /// Get direct access to the prefill router
+    pub fn prefill_router(&self) -> &Arc<PrefillRouter> {
+        &self.prefill_router
     }
 }

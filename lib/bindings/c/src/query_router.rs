@@ -227,7 +227,7 @@ pub unsafe extern "C" fn query_router_mark_prefill_complete(
 
     let result = runtime
         .secondary()
-        .block_on(async { router.mark_prefill_complete(request_id).await });
+        .block_on(async { router.decode_router().mark_prefill_completed(request_id).await });
 
     match result {
         Ok(_) => QueryRouterResult::Ok,
@@ -265,7 +265,7 @@ pub unsafe extern "C" fn query_router_free_request(
 
     let result = runtime
         .secondary()
-        .block_on(async { router.free(request_id).await });
+        .block_on(async { router.decode_router().free(request_id).await });
 
     match result {
         Ok(_) => QueryRouterResult::Ok,
