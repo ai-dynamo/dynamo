@@ -1,0 +1,578 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: GAIE Deployment with Dynamo (vllm)
+
+on:
+  # workflow_dispatch:
+  push:
+    branches:
+      - dep-423-test
+  # pull_request:
+  #   paths:
+  #     - lib/bindings/c/src/**
+  #     - lib/runtime/src/**
+  #     - lib/llm/src/**
+  schedule:
+    # Run at 03:00 UTC on the 1st and 15th of each month (approx every 2 weeks)
+    - cron: "0 3 1,15 * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  gaie:
+    name: Build Images, Deploy Dynamo, Install GAIE, create EPP image and make sure it works.
+    runs-on: gpu-l40-amd64
+    env:
+      FRAMEWORK: vllm
+      PROFILE: agg
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      MODEL_NAME: Qwen/Qwen3-0.6B
+      VLLM_IMAGE_TAG: ${{ github.sha }}-vllm-amd64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Install tooling (curl, jq, yq, helm, kubectl, az)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y \
+            curl bash openssl gettext git jq ca-certificates apt-transport-https lsb-release gnupg \
+            build-essential protobuf-compiler
+          # Install Azure CLI
+          curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          # Install yq
+          curl -L https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o yq
+          sudo install -m 0755 yq /usr/local/bin/yq
+          # Install Helm
+          curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+          sudo chmod 700 get_helm.sh
+          sudo ./get_helm.sh
+          # Install kubectl
+          KUBECTL_VER=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VER}/bin/linux/amd64/kubectl"
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+
+      - name: Install Rust toolchain and cbindgen
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Install Rust (cargo + rustc)
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+          # Make cargo available to later steps
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          # Install cbindgen (needed in build-epp-dynamo.sh)
+          "$HOME/.cargo/bin/cargo" install cbindgen
+
+      - name: Login to NGC
+        if: ${{ github.event_name == 'push' || github.event_name == 'schedule' }}
+        run: |
+          echo "${{ secrets.NGC_CI_ACCESS_TOKEN }}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+
+      - name: Build vLLM image in ACR
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Extract registry name from hostname
+          REGISTRY_NAME=$(echo "${{ secrets.AZURE_ACR_HOSTNAME }}" | cut -d'.' -f1)
+
+          # Login to ACR using credentials (for Docker)
+          az acr login --name "${REGISTRY_NAME}" \
+            --username "${{ secrets.AZURE_ACR_USER }}" \
+            --password "${{ secrets.AZURE_ACR_PASSWORD }}"
+
+          # Build vLLM image using build.sh
+          VLLM_FULL_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${VLLM_IMAGE_TAG}"
+          echo "==============================================="
+          echo "VLLM_IMAGE_TAG: ${VLLM_IMAGE_TAG}"
+          echo "VLLM_FULL_IMAGE: ${VLLM_FULL_IMAGE}"
+          echo "==============================================="
+          echo "Starting vLLM image build..."
+
+          ./container/build.sh \
+            --framework vllm \
+            --target runtime \
+            --platform linux/amd64 \
+            --tag "${VLLM_FULL_IMAGE}"
+
+          # Push the image to ACR
+          echo "Pushing image to ACR: ${VLLM_FULL_IMAGE}"
+          docker push "${VLLM_FULL_IMAGE}"
+
+          echo "Successfully built and pushed vLLM image: ${VLLM_FULL_IMAGE}"
+
+      - name: Login to ECR
+        if: steps.check-operator-image.outputs.exists != 'true'
+        shell: bash
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region ${{ secrets.AWS_DEFAULT_REGION }} \
+            | docker login --username AWS --password-stdin ${ECR_HOSTNAME}
+
+      # TODO get this to finish.
+      # - name: Build vllm runtime image (amd64)
+      #   id: build-vllm
+      #   uses: ./.github/actions/docker-build
+      #   env:
+      #     BUILDKIT_PROGRESS: plain
+      #   with:
+      #     framework: vllm
+      #     target: runtime
+      #     platform: linux/amd64
+      #     ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      #     ci_token: ${{ secrets.CI_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      #.    aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      # - name: Tag and Push vllm image to ACR
+      #   uses: ./.github/actions/docker-tag-push
+      #   with:
+      #     local_image: ${{ steps.build-vllm.outputs.image_tag }}
+      #     push_tag: ${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ env.VLLM_IMAGE_TAG }}
+      #     aws_push: "false"
+      #     azure_push: "true"
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+
+      - name: Configure kubeconfig and namespace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > "${{ github.workspace }}/.kubeconfig"
+          chmod 600 "${{ github.workspace }}/.kubeconfig"
+          # Persist KUBECONFIG for subsequent steps
+          echo "KUBECONFIG=${{ github.workspace }}/.kubeconfig" >> $GITHUB_ENV
+          # Also export for use within this step
+          export KUBECONFIG="${{ github.workspace }}/.kubeconfig"
+          # Create ephemeral namespace for Dynamo
+          PROFILE_SANITIZED="${PROFILE//_/-}"
+          echo "NAMESPACE=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}" >> $GITHUB_ENV
+          echo "DEPLOYMENT_FILE=${PROFILE}.yaml" >> $GITHUB_ENV
+          kubectl delete namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} || true
+          kubectl create namespace gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED}
+          kubectl label namespaces gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} \
+            nscleanup/enabled=true nscleanup/ttl=7200 gitlab-imagepull=enabled ngc-api=enabled nvcr-imagepull=enabled --overwrite=true
+          kubectl config set-context --current --namespace=gh-job-id-${{ github.run_id }}-${FRAMEWORK}-${PROFILE_SANITIZED} --kubeconfig "$KUBECONFIG"
+
+      - name: Create image pull secret for Dynamo Operator
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          kubectl create secret docker-registry docker-imagepullsecret \
+            --docker-server=${{ secrets.AZURE_ACR_HOSTNAME }} \
+            --docker-username=${{ secrets.AZURE_ACR_USER }} \
+            --docker-password=${{ secrets.AZURE_ACR_PASSWORD }} \
+            --namespace=${NAMESPACE} || true
+
+      - name: Install Dynamo Platform
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          RELEASE_VERSION="0.8.0"
+          echo "Installing Dynamo platform into namespace '${NAMESPACE}'..."
+
+          helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
+          helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+            --set dynamo-operator.namespaceRestriction.enabled=true \
+            --set dynamo-operator.namespaceRestriction.allowedNamespaces[0]=${NAMESPACE} \
+            --namespace ${NAMESPACE} \
+            --timeout 10m --wait
+
+          echo "Helm install of dynamo-platform succeeded."
+
+          # Optional: simple rollout wait after Helm succeeds
+          timeout 300s kubectl rollout status deployment -n ${NAMESPACE} --watch || true
+
+      - name: Configure image pull secrets and deploy vllm graph
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          export FRAMEWORK_RUNTIME_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${VLLM_IMAGE_TAG}"
+
+          echo "Namespace: ${NAMESPACE}"
+          echo "FRAMEWORK_RUNTIME_IMAGE=${FRAMEWORK_RUNTIME_IMAGE}"
+
+          # Secrets
+          kubectl create secret generic hf-token-secret \
+            --from-literal=HF_TOKEN=${{ secrets.HF_TOKEN }} \
+            -n ${NAMESPACE} || true
+
+          # Deploy vllm backend graph
+          cd "${{ github.workspace }}/examples/backends/${FRAMEWORK}/deploy/"
+          echo "DEPLOYMENT_FILE=${DEPLOYMENT_FILE}"
+          GRAPH_NAME=$(yq e '.metadata.name' "${DEPLOYMENT_FILE}")
+          export GRAPH_NAME
+          echo "GRAPH_NAME=${GRAPH_NAME}"
+
+          echo "Patching image in ${DEPLOYMENT_FILE}..."
+          yq -i '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' "${DEPLOYMENT_FILE}"
+
+          echo "Applying ${DEPLOYMENT_FILE} to namespace ${NAMESPACE}..."
+          kubectl apply -n ${NAMESPACE} -f "${DEPLOYMENT_FILE}"
+
+          echo "Waiting for frontend pods to be Ready and decodeworker pods to be Running..."
+          ATTEMPTS=60
+          SLEEP=20
+          OK=0
+
+          for i in $(seq 1 ${ATTEMPTS}); do
+            echo "Attempt ${i}/${ATTEMPTS}..."
+
+            POD_JSON=$(kubectl get pods -n ${NAMESPACE} \
+              -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" \
+              -o json 2>/dev/null || echo "")
+
+            COUNT=$(echo "${POD_JSON}" | jq '.items | length' 2>/dev/null || echo 0)
+            if [[ "${COUNT}" -eq 0 ]]; then
+              echo "No pods yet for graph ${GRAPH_NAME}..."
+              sleep ${SLEEP}
+              continue
+            fi
+
+            echo "Current pods:"
+            kubectl get pods -n ${NAMESPACE} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o wide || true
+
+            # Fail fast on obvious bad states (for ANY pod)
+            if echo "${POD_JSON}" | jq -e '
+              .items[]?
+              | select(type=="object" and .status.containerStatuses != null)
+              | .status.containerStatuses[]
+              | select(.state.waiting.reason=="CrashLoopBackOff"
+                       or .state.waiting.reason=="ImagePullBackOff"
+                       or .state.waiting.reason=="ErrImagePull")
+            ' >/dev/null; then
+              echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in vLLM pods" >&2
+              kubectl describe pods -n ${NAMESPACE} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" || true
+              exit 1
+            fi
+
+            # Frontend pods: name contains "-frontend-"
+            FRONT_COUNT=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+              | select(
+                  (type == "object") and
+                  ((.metadata.name // "") | contains("-frontend-"))
+                )
+              ] | length
+            ')
+
+            # Decodeworker pods: name contains "vllmdecodeworker"
+            DECODE_COUNT=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+              | select(
+                  (type == "object") and
+                  ((.metadata.name // "") | contains("vllmdecodeworker"))
+                )
+              ] | length
+            ')
+
+
+            echo "Frontend pods count: ${FRONT_COUNT}"
+            echo "Backend pods count: ${DECODE_COUNT}"
+
+            if [[ "${FRONT_COUNT}" -eq 0 || "${DECODE_COUNT}" -eq 0 ]]; then
+              echo "Waiting for both frontend and decodeworker pods to be created..."
+              sleep ${SLEEP}
+              continue
+            fi
+
+            # Check: all frontend pods Ready == True
+            FRONT_NOT_READY=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+                | select(
+                    (type == "object") and
+                    ((.metadata.name // "") | contains("-frontend-"))
+                  )
+                | {conds: (.status.conditions // [])}
+                | select(
+                    (([.conds[]? | select(.type=="Ready") | .status] | first) // "False") != "True"
+                  )
+              ] | length
+            ')
+
+
+            # Check: all decodeworker pods have phase == Running
+            DECODE_NOT_RUNNING=$(echo "${POD_JSON}" | jq '
+              [.items[]?
+                | select(
+                    (type == "object") and
+                    ((.metadata.name // "") | contains("vllmdecodeworker")) and
+                    ((.status.phase // "") != "Running")
+                  )
+              ] | length
+            ')
+
+
+            echo "Frontend not ready count: ${FRONT_NOT_READY}"
+            echo "Decodeworker not running count: ${DECODE_NOT_RUNNING}"
+
+            if [[ "${FRONT_NOT_READY}" -eq 0 && "${DECODE_NOT_RUNNING}" -eq 0 ]]; then
+              echo "All frontend pods are Ready and all decodeworker pods are Running."
+              OK=1
+              break
+            fi
+
+            sleep ${SLEEP}
+          done
+
+          if [[ "${OK}" -ne 1 ]]; then
+            echo "vLLM graph pods for ${GRAPH_NAME} did not reach desired states (frontend Ready, decodeworker Running) in time; dumping debug info..."
+            kubectl get pods -n ${NAMESPACE} -l "nvidia.com/dynamo-graph-deployment-name=${GRAPH_NAME}" -o wide || true
+            kubectl get events -n ${NAMESPACE} --sort-by=.lastTimestamp | tail -n 50 || true
+            exit 1
+          fi
+
+          echo "vLLM graph is up: frontend Ready, Backend Running."
+
+      - name: Clone GAIE repo into separate folder and set environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          GAIE_CLONE_DIR="${{ github.workspace }}/external/gateway-api-inference-extension"
+          rm -rf "${GAIE_CLONE_DIR}"
+          mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
+          git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git "${GAIE_CLONE_DIR}"
+          cd "${GAIE_CLONE_DIR}"
+          git checkout ${INFERENCE_EXTENSION_VERSION}
+          echo "GAIE_DIR=${GAIE_CLONE_DIR}" >> $GITHUB_ENV
+          echo "DYNAMO_DIR=${{ github.workspace }}" >> $GITHUB_ENV
+
+      - name: Run build-epp-dynamo.sh
+        shell: bash
+        env:
+          GAIE_DIR: ${{ env.GAIE_DIR }}
+          DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
+        run: |
+          set -euo pipefail
+          echo "GAIE_DIR=${GAIE_DIR}"
+          echo "DYNAMO_DIR=${DYNAMO_DIR}"
+          cd ${DYNAMO_DIR}/deploy/inference-gateway
+          ./build-epp-dynamo.sh
+          EPP_IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo/epp-inference-extension-dynamo:${{ github.run_id }}"
+          docker tag us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.5.1-dirty ${EPP_IMAGE}
+          docker push ${EPP_IMAGE}
+          echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
+
+      - name: Deploy GAIE recipe
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+          GAIE_DIR: ${{ env.GAIE_DIR }}
+          DYNAMO_DIR: ${{ env.DYNAMO_DIR }}
+        run: |
+          set -euo pipefail
+          echo "Using EPP_IMAGE=${EPP_IMAGE}"
+
+          RECIPE_DIR="recipes/llama-3-70b/vllm/agg/gaie/k8s-manifests"
+
+          # 1. Replace all occurrences of "llama3-70b" with "qwen" in all YAML files
+          echo "Replacing 'llama3-70b' with 'qwen' in all YAML files..."
+          find "${RECIPE_DIR}" -type f -name "*.yaml" -exec sed -i 's/llama3-70b/qwen/g' {} +
+
+          # 2. Replace EPP image in deployment.yaml with the newly built EPP image
+          echo "Updating EPP image to ${EPP_IMAGE}..."
+          sed -i "s|image: nvcr.io/nvidia/ai-dynamo/frontend:.*|image: ${EPP_IMAGE}|g" "${RECIPE_DIR}/epp/deployment.yaml"
+
+          # 3. Replace model name in inference-model.yaml
+          echo "Updating modelName to Qwen/Qwen3-0.6B..."
+          sed -i 's|modelName: RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic|modelName: Qwen/Qwen3-0.6B|g' "${RECIPE_DIR}/model/inference-model.yaml"
+
+          # Apply all manifests
+          echo "Applying GAIE manifests to namespace ${NAMESPACE}..."
+          kubectl apply -R -f "${RECIPE_DIR}" -n "${NAMESPACE}"
+
+      - name: Verify qwen-epp deployment readiness
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          echo "Waiting for Deployment/qwen-epp to appear in namespace ${NAMESPACE}..."
+          ATTEMPTS=60
+          SLEEP=10
+          FOUND=0
+          for i in $(seq 1 ${ATTEMPTS}); do
+            if kubectl get deploy qwen-epp -n ${NAMESPACE} >/dev/null 2>&1; then
+              FOUND=1
+              break
+            fi
+            sleep ${SLEEP}
+          done
+          if [[ ${FOUND} -ne 1 ]]; then
+            echo "Deployment qwen-epp not found in ${NAMESPACE} after $((ATTEMPTS*SLEEP)) seconds" >&2
+            kubectl get deploy -n ${NAMESPACE} || true
+            exit 1
+          fi
+
+          echo
+          echo "=== Deployment qwen-epp found. Basic info ==="
+          kubectl get deploy qwen-epp -n ${NAMESPACE} -o wide || true
+
+          echo
+          echo "=== Deployment image ==="
+          kubectl get deploy/qwen-epp -n ${NAMESPACE} -o jsonpath='{.spec.template.spec.containers[*].image}{"\n"}' || true
+
+          echo
+          echo "=== Pod template imagePullSecrets ==="
+          kubectl get deploy/qwen-epp -n ${NAMESPACE} -o jsonpath='{.spec.template.spec.imagePullSecrets}{"\n"}' || true
+
+          echo
+          echo "Deriving pod selector from Deployment..."
+          SELECTOR=$(kubectl get deploy/qwen-epp -n ${NAMESPACE} -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')
+          if [[ -n "${SELECTOR}" ]]; then
+            echo "Using selector: ${SELECTOR}"
+            echo
+            echo "=== Current pods (name, image, ready, waitingReason, restartCount) ==="
+            kubectl get pods -n ${NAMESPACE} -l "${SELECTOR}" \
+              -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\t"}{range .status.containerStatuses[*]}{.ready}{"\t"}{.state.waiting.reason}{"\t"}{.restartCount}{"\n"}{end}{end}' || true
+
+            # Pick first pod for deeper inspection
+            POD=$(kubectl get pods -n ${NAMESPACE} -l "${SELECTOR}" -o jsonpath='{.items[0].metadata.name}')
+            echo
+            echo "=== describe pod ${POD} ==="
+            kubectl describe pod "${POD}" -n ${NAMESPACE} || true
+
+            echo
+            echo "=== Last 50 events in namespace ${NAMESPACE} (sorted by time) ==="
+            kubectl get events -n ${NAMESPACE} --sort-by=.lastTimestamp | tail -n 50 || true
+
+            echo
+            echo "=== Pod logs (may be empty if stuck in ContainerCreating) ==="
+            kubectl logs "${POD}" -n ${NAMESPACE} --all-containers=true --tail=200 || true
+
+            echo
+            echo "Checking for common crash conditions..."
+            if kubectl get pods -n ${NAMESPACE} -l "${SELECTOR}" -o json | jq -e \
+              '.items[] | select(.status.containerStatuses != null) | .status.containerStatuses[] | select(.state.waiting.reason=="CrashLoopBackOff" or .state.waiting.reason=="ImagePullBackOff" or .state.waiting.reason=="ErrImagePull")' >/dev/null; then
+              echo "Detected CrashLoopBackOff/ImagePullBackOff/ErrImagePull in qwen-epp pods" >&2
+              exit 1
+            fi
+          else
+            echo "Could not derive a label selector from Deployment; skipping pod checks."
+          fi
+
+          echo
+          echo "=== Waiting for Deployment/qwen-epp rollout to complete ==="
+          # Run rollout in a non-fatal block so we can dump debug info on failure
+          set +e
+          kubectl rollout status deploy/qwen-epp -n ${NAMESPACE} --timeout=600s
+          ROLLOUT_STATUS=$?
+          set -e
+
+          echo
+          echo "=== Final qwen-epp Deployment status ==="
+          kubectl get deploy qwen-epp -n ${NAMESPACE} -o wide || true
+
+          if [[ ${ROLLOUT_STATUS} -ne 0 ]]; then
+            echo
+            echo "!!! qwen-epp rollout FAILED with status ${ROLLOUT_STATUS} – collecting extra debug info..."
+
+            echo
+            echo "=== Describe Deployment qwen-epp ==="
+            kubectl describe deploy qwen-epp -n ${NAMESPACE} || true
+
+            echo
+            echo "=== All pods for qwen-epp (wide) ==="
+            kubectl get pods -n ${NAMESPACE} -l "${SELECTOR}" -o wide || true
+
+            POD=$(kubectl get pods -n ${NAMESPACE} -l "${SELECTOR}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+            if [[ -n "${POD}" ]]; then
+              echo
+              echo "=== Final describe pod ${POD} ==="
+              kubectl describe pod "${POD}" -n ${NAMESPACE} || true
+
+              echo
+              echo "=== Events for pod ${POD} (sorted by time) ==="
+              kubectl get events -n ${NAMESPACE} \
+                --field-selector involvedObject.name=${POD} \
+                --sort-by=.lastTimestamp || true
+
+              echo
+              echo "=== Pod status JSON (for Waiting reason/message) ==="
+              kubectl get pod "${POD}" -n ${NAMESPACE} -o json | jq '.status.containerStatuses // []' || true
+
+              echo
+              echo "=== Logs for pod ${POD} (all containers, if any) ==="
+              kubectl logs "${POD}" -n ${NAMESPACE} --all-containers=true --tail=200 || true
+            else
+              echo "No qwen-epp pod found when debugging rollout failure."
+            fi
+
+            echo
+            echo "=== epp ConfigMap (dynamo-gaie-epp-config) ==="
+            kubectl get configmap dynamo-gaie-epp-config -n ${NAMESPACE} -o yaml || true
+
+            exit ${ROLLOUT_STATUS}
+          fi
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        env:
+          KUBECONFIG: ${{ github.workspace }}/.kubeconfig
+        run: |
+          set -euo pipefail
+          if [[ -n "${NAMESPACE:-}" ]]; then
+            echo "=== Namespaced resources in ${NAMESPACE} ==="
+            kubectl get all -n ${NAMESPACE} || true
+
+            echo "=== Uninstalling Helm releases in ${NAMESPACE} ==="
+            helm uninstall dynamo-platform -n ${NAMESPACE} || true
+            helm uninstall dynamo-gaie -n ${NAMESPACE} || true
+
+            echo "=== Deleting Dynamo graph resources in ${NAMESPACE} ==="
+            kubectl delete dynamographdeployments --all -n ${NAMESPACE} || true
+            kubectl delete deployment qwen-epp -n ${NAMESPACE} || true
+
+            echo "=== Deleting namespace ${NAMESPACE} ==="
+            kubectl delete namespace ${NAMESPACE} || true
+          else
+            echo "NAMESPACE is unset; skipping namespace-scoped cleanup." >&2
+          fi
+
+          echo "=== Cleaning up cluster-scoped GAIE RBAC (pod-read) ==="
+          kubectl delete clusterrole pod-read --ignore-not-found
+          kubectl delete clusterrolebinding pod-read-binding --ignore-not-found || true
+
+      - name: Remove kubeconfig file
+        if: always()
+        shell: bash
+        run: |
+          rm -f "${{ github.workspace }}/.kubeconfig"
+
+      - name: Report failure to Slack
+        if: failure() || cancelled()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          payload: |
+            {
+              "text": "GAIE Deployment with Dynamo (vllm) ${{ job.status }}*\nWorkflow URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\nBranch: ${{ github.ref_name }}\nCommit: ${{ github.sha }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_FAILURE_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
