@@ -82,3 +82,66 @@ class Stage1:
 - **Flexible topology**: Connect stages however you want
 - **Context propagation**: Cancellation flows through the entire pipeline
 - **Scale independently**: Each stage runs as its own process
+
+## Pipeline Flow
+
+```
+┌────────┐      ┌────────┐      ┌────────┐      ┌────────┐
+│ Client │ ──── │ Stage1 │ ──── │ Stage2 │ ──── │ Stage3 │
+└────────┘      └────────┘      └────────┘      └────────┘
+     │               │               │               │
+     │   request     │   request     │   request     │
+     │ ───────────►  │ ───────────►  │ ───────────►  │
+     │               │               │               │
+     │               │               │    yield      │
+     │    yield      │    yield      │ ◄───────────  │
+     │ ◄───────────  │ ◄───────────  │               │
+     │               │               │               │
+└────────────────────────────────────────────────────────┘
+                      context flows through
+```
+
+## Parallel Pipeline
+
+Stages can also be called in parallel and their results combined:
+
+```
+                      ┌────────┐
+                 ┌──► │ Stage2 │ ──┐
+┌────────┐      │    └────────┘    │      ┌────────┐
+│ Client │ ──── │                  │ ──── │ Stage1 │
+└────────┘      │    ┌────────┐    │      └────────┘
+                 └──► │ Stage3 │ ──┘
+                      └────────┘
+```
+
+```python
+class Stage1:
+    def __init__(self, runtime):
+        self.runtime = runtime
+
+    async def initialize(self):
+        # Connect to both stages
+        endpoint2 = self.runtime.namespace("pipeline").component("stage2").endpoint("generate")
+        endpoint3 = self.runtime.namespace("pipeline").component("stage3").endpoint("generate")
+        self.stage2_client = await endpoint2.client()
+        self.stage3_client = await endpoint3.client()
+        await self.stage2_client.wait_for_instances()
+        await self.stage3_client.wait_for_instances()
+
+    async def generate(self, request, context):
+        # Call stage2 and stage3 in parallel
+        stream2 = await self.stage2_client.generate(request, context=context)
+        stream3 = await self.stage3_client.generate(request, context=context)
+
+        # Gather results from both
+        result2 = None
+        result3 = None
+        async for response in stream2:
+            result2 = response.data()
+        async for response in stream3:
+            result3 = response.data()
+
+        # Return combined result
+        yield {"stage2": result2, "stage3": result3}
+```
