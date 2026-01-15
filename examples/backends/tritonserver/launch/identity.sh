@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Launch script for Triton Server backend with Dynamo
-# This runs the frontend and triton worker in aggregated mode
+# This runs the frontend and triton worker on the same node
 
 set -e
 

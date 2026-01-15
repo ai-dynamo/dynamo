@@ -179,8 +179,6 @@ Options:
 
 - **Single model**: Currently loads one model at a time
 - **Identity backend only**: The Makefile builds the identity backend by default; other backends require modifying the build configuration
-- **No batching optimization**: Dynamo's request batching is not yet integrated with Triton's dynamic batching
-- **Limited error handling**: Error propagation between Triton and Dynamo could be improved
 
 ## Building Triton from Source
 

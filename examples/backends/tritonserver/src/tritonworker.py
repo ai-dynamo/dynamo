@@ -44,11 +44,12 @@ class RequestHandler:
 
     async def generate(self, request: dict) -> dict:
         # Deserialize to numpy array
-        print(f"Received request: {request}")
+        logger.debug(f"Received request: {request}")
 
         inference_request = self.model.create_request()
         for tensor in request["tensors"]:
-            print(f"Tensor: {tensor}")
+            logger.debug(f"Tensor: {tensor}")
+            # Convert Triton dtype string ("INT32") to NumPy dtype (np.int32) for array construction
             np_dtype = triton_to_np_dtype(tensor["metadata"]["data_type"].upper())
             arr = np.array(tensor["data"]["values"], dtype=np_dtype).reshape(
                 tensor["metadata"]["shape"]
