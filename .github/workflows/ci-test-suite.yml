@@ -228,28 +228,62 @@ jobs:
           find coverage-artifacts/ -name ".coverage" 2>/dev/null | while read -r file; do
             unique_name=$(echo "$file" | tr '/' '_' | sed 's/coverage-artifacts_//')
             cp "$file" "coverage-combined/.coverage.${unique_name}"
+            echo "Copied: $file -> coverage-combined/.coverage.${unique_name}"
           done
 
           # Check if we have any coverage files
           if ls coverage-combined/.coverage.* 1> /dev/null 2>&1; then
             echo "✅ Found coverage files to merge"
+            echo "Files to merge:"
+            ls -lh coverage-combined/
+
             cd coverage-combined
 
-            # Combine all coverage data
-            coverage combine .coverage.* --keep
-            mv .coverage ../
-            cd ..
+            # Combine all coverage data (ignore path errors)
+            echo "Running coverage combine..."
+            set +e  # Don't exit on error
+            coverage combine .coverage.* --keep 2>&1 | tee ../combine.log
+            COMBINE_EXIT=$?
+            set -e
 
-            # Generate reports
-            echo "📊 Generating coverage reports..."
-            coverage report --data-file=.coverage | tee coverage-report.txt
-            coverage html --data-file=.coverage -d coverage-html/
-            coverage xml --data-file=.coverage -o coverage-merged.xml
+            if [ $COMBINE_EXIT -ne 0 ]; then
+              echo "⚠️ Warning: coverage combine had issues (exit code: $COMBINE_EXIT)"
+              echo "Combine log:"
+              cat ../combine.log
+              # Try without --keep flag
+              echo "Retrying without --keep flag..."
+              coverage combine .coverage.* 2>&1 || echo "Second attempt also failed"
+            fi
 
-            # Extract total coverage percentage
-            TOTAL_COVERAGE=$(grep "TOTAL" coverage-report.txt | awk '{print $NF}')
-            echo "📈 Total Coverage: ${TOTAL_COVERAGE}"
-            echo "TOTAL_COVERAGE=${TOTAL_COVERAGE}" >> $GITHUB_ENV
+            if [ -f .coverage ]; then
+              echo "✅ Combined .coverage file created"
+              mv .coverage ../
+              cd ..
+
+              # Generate reports (continue even if some fail)
+              echo "📊 Generating coverage reports..."
+              set +e
+              coverage report --data-file=.coverage 2>&1 | tee coverage-report.txt
+              REPORT_EXIT=$?
+              coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
+              coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
+              set -e
+
+              if [ $REPORT_EXIT -eq 0 ]; then
+                # Extract total coverage percentage
+                TOTAL_COVERAGE=$(grep "TOTAL" coverage-report.txt | awk '{print $NF}')
+                echo "📈 Total Coverage: ${TOTAL_COVERAGE}"
+                echo "TOTAL_COVERAGE=${TOTAL_COVERAGE}" >> $GITHUB_ENV
+              else
+                echo "⚠️ Coverage report generation had issues"
+                echo "TOTAL_COVERAGE=unknown" >> $GITHUB_ENV
+              fi
+            else
+              echo "❌ Failed to create combined .coverage file"
+              cd ..
+              echo "No coverage data available" > coverage-report.txt
+              echo "TOTAL_COVERAGE=0%" >> $GITHUB_ENV
+            fi
           else
             echo "⚠️  No coverage data found"
             echo "No coverage data available" > coverage-report.txt
