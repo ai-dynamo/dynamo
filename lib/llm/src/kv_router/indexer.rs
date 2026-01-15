@@ -933,7 +933,7 @@ impl KvIndexer {
                             let result_is_ok = result.is_ok();
                             metrics.increment_event_applied(event_type, result);
 
-                            tracing::debug!(
+                            tracing::info!(
                                 event_type = event_type,
                                 event_id = event.event.event_id,
                                 worker_id = %event.worker_id,
@@ -1669,16 +1669,6 @@ impl KvIndexerSharded {
                                 let result = trie.apply_event(event.clone());
                                 let result_is_ok = result.is_ok();
                                 metrics.increment_event_applied(event_type, result);
-
-                                tracing::debug!(
-                                    shard_id = shard_idx,
-                                    event_type = event_type,
-                                    event_id = event.event.event_id,
-                                    worker_id = %event.worker_id,
-                                    success = result_is_ok,
-                                    global_radix_tree_size = trie.current_size(),
-                                    "Applied KV event to global radix tree (sharded)"
-                                );
 
                                 // Track blocks in PruneManager if TTL is enabled and event was stored successfully
                                 let Some(ref mut pm) = prune_manager else { continue };
