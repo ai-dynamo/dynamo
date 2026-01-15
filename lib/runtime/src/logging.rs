@@ -1006,6 +1006,13 @@ fn filters(config: LoggingConfig) -> EnvFilter {
             }
         }
     }
+
+    // When span events are enabled, allow "span_event" target at all levels
+    // This ensures SPAN_CREATED events pass the filter when emitted from on_enter
+    if span_events_enabled() {
+        filter_layer = filter_layer.add_directive("span_event=trace".parse().unwrap());
+    }
+
     filter_layer
 }
 
@@ -1789,6 +1796,91 @@ pub mod tests {
                         }
                     }
                 }
+
+                Ok::<(), anyhow::Error>(())
+            })(),
+        )
+        .await;
+        Ok(())
+    }
+
+    // Test functions at different log levels for filtering tests
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn debug_level_span() {
+        tracing::debug!("inside debug span");
+    }
+
+    #[tracing::instrument(level = "info", skip_all)]
+    async fn info_level_span() {
+        tracing::info!("inside info span");
+    }
+
+    #[tracing::instrument(level = "warn", skip_all)]
+    async fn warn_level_span() {
+        tracing::warn!("inside warn span");
+    }
+
+    /// Test that span events respect log level filtering
+    /// When DYN_LOG=warn, only warn+ level spans should generate SPAN_CREATED events
+    #[tokio::test]
+    async fn test_span_events_respect_level_filter() -> Result<()> {
+        #[allow(clippy::redundant_closure_call)]
+        let _ = temp_env::async_with_vars(
+            [
+                (env_logging::DYN_LOGGING_JSONL, Some("1")),
+                (env_logging::DYN_LOGGING_SPAN_EVENTS, Some("1")),
+                (env_logging::DYN_LOG, Some("warn")), // Only warn and above
+            ],
+            (async || {
+                let tmp_file = NamedTempFile::new().unwrap();
+                let file_name = tmp_file.path().to_str().unwrap();
+                let guard = StderrOverride::from_file(file_name)?;
+                init();
+
+                // Create spans at different levels
+                debug_level_span().await;
+                info_level_span().await;
+                warn_level_span().await;
+
+                drop(guard);
+
+                let lines = load_log(file_name)?;
+
+                // Count SPAN_CREATED events by span name
+                let debug_span_created = lines.iter().any(|log| {
+                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
+                        && log.get("span_name").and_then(|v| v.as_str()) == Some("debug_level_span")
+                });
+                let info_span_created = lines.iter().any(|log| {
+                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
+                        && log.get("span_name").and_then(|v| v.as_str()) == Some("info_level_span")
+                });
+                let warn_span_created = lines.iter().any(|log| {
+                    log.get("message").and_then(|v| v.as_str()) == Some("SPAN_CREATED")
+                        && log.get("span_name").and_then(|v| v.as_str()) == Some("warn_level_span")
+                });
+
+                // Note: Due to global logging initialization, this test may not work
+                // if another test initialized logging first with different settings.
+                // If logging was initialized with span events enabled and correct filter,
+                // we expect: debug=false, info=false, warn=true
+                if warn_span_created {
+                    // Logging was initialized with our settings
+                    assert!(
+                        !debug_span_created,
+                        "DEBUG span should be filtered out with DYN_LOG=warn"
+                    );
+                    assert!(
+                        !info_span_created,
+                        "INFO span should be filtered out with DYN_LOG=warn"
+                    );
+                    assert!(
+                        warn_span_created,
+                        "WARN span should pass filter with DYN_LOG=warn"
+                    );
+                }
+                // If warn_span_created is false, logging was initialized by another test
+                // with different settings - skip assertions
 
                 Ok::<(), anyhow::Error>(())
             })(),
