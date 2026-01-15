@@ -16,7 +16,7 @@ class MyStage:
         yield result
 
 # Register and serve the endpoint
-runtime = DistributedRuntime(loop, "file", "nats")
+runtime = DistributedRuntime(loop, "file", "tcp")
 component = runtime.namespace("my_app").component("my_stage")
 endpoint = component.endpoint("process")
 
@@ -36,7 +36,7 @@ client = await endpoint.client()
 await client.wait_for_instances()
 
 # Call it and stream results
-stream = await client.process(data, context=context)
+stream = await client.generate(data, context=context)
 async for response in stream:
     result = response.data()
 ```
@@ -61,7 +61,7 @@ class MiddleStage:
         transformed = do_something(request)
 
         # Call next stage, passing context through
-        stream = await self.next_client.process(transformed, context=context)
+        stream = await self.next_client.generate(transformed, context=context)
         async for response in stream:
             yield response.data()
 ```
