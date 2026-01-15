@@ -6,11 +6,14 @@ use k8s_openapi::api::discovery::v1::EndpointSlice;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-/// Hash a pod name to get a consistent instance ID
+/// Hash a pod name to get a consistent instance ID.
+/// The high bit is cleared to keep the result below 2^63, avoiding issues with
+/// systems that may interpret u64 as i64 (where values >= 2^63 become negative).
 pub fn hash_pod_name(pod_name: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     pod_name.hash(&mut hasher);
-    hasher.finish()
+    // Clear the high bit to ensure the result is always < 2^63
+    hasher.finish() & 0x7FFF_FFFF_FFFF_FFFF
 }
 
 /// Extract endpoint information from an EndpointSlice
