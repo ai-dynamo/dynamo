@@ -71,7 +71,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--use-sglang-tokenizer"],
         "action": "store_true",
         "default": False,
-        "help": "Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
+        "help": "Use SGLang's tokenizer via PyO3 in the frontend for tokenization. This enables support for non-HuggingFace tokenizers (e.g., mistral-common) and ensures exact tokenizer parity with SGLang backend. KV routing is fully supported in this mode. Cannot be used with --custom-jinja-template.",
     },
     "multimodal-processor": {
         "flags": ["--multimodal-processor"],
@@ -219,28 +219,14 @@ def _set_parser(
     Raises:
         ValueError: If parser name is not valid.
     """
+    if not dynamo_str:
+        return None
+
     # If both are present, give preference to dynamo_str
     if sglang_str is not None and dynamo_str is not None:
         logging.warning(
             f"--dyn-{arg_name} and --{arg_name} are both set. Giving preference to --dyn-{arg_name}"
         )
-        return dynamo_str
-    # If dynamo_str is not set, use try to use sglang_str if it matches with the allowed parsers
-    elif sglang_str is not None:
-        logging.warning(f"--dyn-{arg_name} is not set. Using --{arg_name}.")
-        if arg_name == "tool-call-parser" and sglang_str not in get_tool_parser_names():
-            raise ValueError(
-                f"--{arg_name} is not a valid tool call parser. Valid parsers are: {get_tool_parser_names()}"
-            )
-        elif (
-            arg_name == "reasoning-parser"
-            and sglang_str not in get_reasoning_parser_names()
-        ):
-            raise ValueError(
-                f"--{arg_name} is not a valid reasoning parser. Valid parsers are: {get_reasoning_parser_names()}"
-            )
-        return sglang_str
-    else:
         return dynamo_str
 
 

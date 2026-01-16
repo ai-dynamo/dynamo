@@ -3,6 +3,9 @@
 
 pub mod hf;
 
+#[cfg(feature = "sglang-tokenizer")]
+pub mod sglang;
+
 // TODO: Add tokenizer benchmarks
 // TODO: Enable README.md as a module doc
 // #[doc = include_str!("../README.md")]
@@ -15,6 +18,9 @@ use crate::protocols::TokenIdType;
 pub use anyhow::{Error, Result};
 
 pub use hf::HuggingFaceTokenizer;
+
+#[cfg(feature = "sglang-tokenizer")]
+pub use sglang::SglangTokenizer;
 
 /// Represents the type of tokenizer being used
 #[derive(Debug)]

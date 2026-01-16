@@ -501,6 +501,8 @@ class ModelRuntimeConfig:
     tool_call_parser: str | None
     reasoning_parser: str | None
     enable_local_indexer: bool
+    use_sglang_tokenizer: bool
+    tokenizer_mode: str | None
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
 

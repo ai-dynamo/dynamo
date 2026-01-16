@@ -1658,6 +1658,8 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "prost 0.13.5",
+ "pyo3",
+ "pythonize",
  "rand 0.9.2",
  "rayon",
  "regex",

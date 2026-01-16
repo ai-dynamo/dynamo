@@ -192,11 +192,10 @@ where
             Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
         >,
 {
-    let PromptFormatter::OAI(formatter) =
-        PromptFormatter::from_mdc(card).context("PromptFormatter.from_mdc")?;
-    let preprocessor =
-        OpenAIPreprocessor::new_with_parts(card.clone(), formatter, hf_tokenizer.clone())
-            .context("OpenAIPreprocessor.new_with_parts")?;
+    // Use OpenAIPreprocessor::new() which checks use_sglang_tokenizer flag
+    // and uses the appropriate tokenizer (SGLang via PyO3 or HuggingFace)
+    let preprocessor = OpenAIPreprocessor::new(card.clone())
+        .context("OpenAIPreprocessor::new")?;
     build_routed_pipeline_with_preprocessor(
         card,
         client,

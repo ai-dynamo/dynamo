@@ -55,6 +55,16 @@ impl ModelRuntimeConfig {
         self.inner.enable_local_indexer = enable_local_indexer;
     }
 
+    #[setter]
+    fn set_use_sglang_tokenizer(&mut self, use_sglang_tokenizer: bool) {
+        self.inner.use_sglang_tokenizer = use_sglang_tokenizer;
+    }
+
+    #[setter]
+    fn set_tokenizer_mode(&mut self, tokenizer_mode: Option<String>) {
+        self.inner.tokenizer_mode = tokenizer_mode;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
@@ -112,6 +122,16 @@ impl ModelRuntimeConfig {
     #[getter]
     fn enable_local_indexer(&self) -> bool {
         self.inner.enable_local_indexer
+    }
+
+    #[getter]
+    fn use_sglang_tokenizer(&self) -> bool {
+        self.inner.use_sglang_tokenizer
+    }
+
+    #[getter]
+    fn tokenizer_mode(&self) -> Option<String> {
+        self.inner.tokenizer_mode.clone()
     }
 
     #[getter]

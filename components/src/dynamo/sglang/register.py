@@ -40,13 +40,21 @@ async def _register_llm_with_runtime_config(
     input_type = input_type
 
     if not server_args.skip_tokenizer_init:
-        logging.warning(
-            "The skip-tokenizer-init flag was not set. Using the sglang tokenizer/detokenizer instead. The dynamo tokenizer/detokenizer will not be used and only v1/chat/completions will be available"
+        # --use-sglang-tokenizer was specified
+        # The frontend will use PyO3 to call SGLang's tokenizer, then send tokens to backend
+        # This enables KV routing (which requires token_ids) while using SGLang's tokenizer
+        logging.info(
+            "SGLang tokenizer mode enabled. Frontend will use PyO3 SGLang tokenizer "
+            "for tokenization, enabling KV routing support with SGLang's tokenizer."
         )
-        input_type = ModelInput.Text
-        # Only override output_type for chat models, not for embeddings
-        if output_type != ModelType.Embedding:
-            output_type = ModelType.Chat
+        # Keep ModelInput.Tokens - frontend tokenizes via PyO3, sends token_ids to backend
+        input_type = ModelInput.Tokens
+        # Mark that frontend should use SGLang tokenizer
+        runtime_config.use_sglang_tokenizer = True
+        # Pass tokenizer_mode if set (e.g., "mistral" for mistral-common)
+        tokenizer_mode = getattr(server_args, "tokenizer_mode", None)
+        if tokenizer_mode and tokenizer_mode != "auto":
+            runtime_config.tokenizer_mode = tokenizer_mode
 
     try:
         await register_llm(

@@ -60,8 +60,11 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Returns:
             Dict of sampling parameters for SGLang engine.
         """
-        if self.skip_tokenizer_init:
-            # Token-based request format
+        # Use token-based format if:
+        # 1. skip_tokenizer_init is True (original behavior), OR
+        # 2. use_sglang_tokenizer is True (frontend sends PreprocessedRequest)
+        if self.skip_tokenizer_init or self.use_sglang_tokenizer:
+            # Token-based request format (PreprocessedRequest)
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
 
@@ -134,7 +137,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 rid=trace_id,
             )
 
-            if self.skip_tokenizer_init:
+            # Use token stream if:
+            # 1. skip_tokenizer_init is True (original behavior), OR
+            # 2. use_sglang_tokenizer is True (frontend tokenizes via PyO3, backend outputs tokens)
+            if self.skip_tokenizer_init or self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(decode, context):
                     yield out
             else:
@@ -152,7 +158,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 external_trace_header=trace_header,
                 rid=trace_id,
             )
-            if self.skip_tokenizer_init:
+            # Use token stream if:
+            # 1. skip_tokenizer_init is True (original behavior), OR
+            # 2. use_sglang_tokenizer is True (frontend tokenizes via PyO3, backend outputs tokens)
+            if self.skip_tokenizer_init or self.use_sglang_tokenizer:
                 async for out in self._process_token_stream(agg, context):
                     yield out
             else:

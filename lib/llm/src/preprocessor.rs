@@ -123,10 +123,78 @@ pub struct OpenAIPreprocessor {
 impl OpenAIPreprocessor {
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
+
+        // Check if we should use SGLang tokenizer via PyO3
+        #[cfg(feature = "sglang-tokenizer")]
+        if mdc.runtime_config.use_sglang_tokenizer {
+            return match formatter {
+                PromptFormatter::OAI(formatter) => {
+                    Self::new_with_sglang_tokenizer(mdc, formatter)
+                }
+            };
+        }
+
         let tokenizer = mdc.tokenizer_hf()?;
         match formatter {
             PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
         }
+    }
+
+    /// Create preprocessor with SGLang tokenizer via PyO3.
+    /// This enables support for non-HuggingFace tokenizers (e.g., mistral-common).
+    #[cfg(feature = "sglang-tokenizer")]
+    fn new_with_sglang_tokenizer(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+    ) -> Result<Arc<Self>> {
+        use crate::tokenizers::SglangTokenizer;
+
+        let mdcsum = mdc.mdcsum().to_string();
+
+        // Get model path for tokenizer initialization
+        // Use source_path if available (preserves original HF repo path), otherwise use display_name
+        let model_path = mdc
+            .source_path
+            .clone()
+            .unwrap_or_else(|| mdc.display_name.clone());
+
+        // Get tokenizer mode (e.g., "mistral" for mistral-common)
+        let tokenizer_mode = mdc.runtime_config.tokenizer_mode.as_deref();
+
+        tracing::info!(
+            model_path = %model_path,
+            tokenizer_mode = ?tokenizer_mode,
+            "Initializing SGLang tokenizer via PyO3"
+        );
+
+        let tokenizer: Arc<dyn Tokenizer> =
+            Arc::new(SglangTokenizer::new(&model_path, tokenizer_mode)?);
+
+        let Some(model_info) = mdc.model_info else {
+            anyhow::bail!(
+                "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
+            );
+        };
+        let model_info = model_info.get_model_info()?;
+        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+        let runtime_config = mdc.runtime_config.clone();
+
+        #[cfg(feature = "media-nixl")]
+        let media_loader = match mdc.media_decoder {
+            Some(media_decoder) => Some(MediaLoader::new(media_decoder, mdc.media_fetcher)?),
+            None => None,
+        };
+
+        Ok(Arc::new(Self {
+            formatter,
+            tokenizer,
+            model_info,
+            mdcsum,
+            runtime_config,
+            tool_call_parser,
+            #[cfg(feature = "media-nixl")]
+            media_loader,
+        }))
     }
 
     pub fn new_with_parts(

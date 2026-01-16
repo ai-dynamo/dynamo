@@ -36,6 +36,19 @@ pub struct ModelRuntimeConfig {
     #[serde(default)]
     pub enable_local_indexer: bool,
 
+    /// Use SGLang tokenizer via PyO3 in frontend instead of Rust HuggingFace tokenizer.
+    /// This enables support for mistral-common and other non-HF tokenizers.
+    /// When true, the frontend will call SGLang's Python tokenizer for tokenization.
+    #[serde(default)]
+    pub use_sglang_tokenizer: bool,
+
+    /// Tokenizer mode for SGLang tokenizer (e.g., "auto", "mistral").
+    /// Only used when `use_sglang_tokenizer` is true.
+    /// - "auto" (default): Auto-detect tokenizer type
+    /// - "mistral": Use mistral-common tokenizer for Mistral models
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_mode: Option<String>,
+
     /// Mapping of engine-specific runtime configs
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub runtime_data: HashMap<String, serde_json::Value>,
@@ -69,6 +82,8 @@ impl Default for ModelRuntimeConfig {
             reasoning_parser: None,
             data_parallel_size: default_data_parallel_size(),
             enable_local_indexer: false,
+            use_sglang_tokenizer: false,
+            tokenizer_mode: None,
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,

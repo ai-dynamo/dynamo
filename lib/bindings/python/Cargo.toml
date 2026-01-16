@@ -24,6 +24,8 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
+# Enable SGLang tokenizer support via PyO3 (for --use-sglang-tokenizer)
+sglang-tokenizer = ["dynamo-llm/sglang-tokenizer"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }

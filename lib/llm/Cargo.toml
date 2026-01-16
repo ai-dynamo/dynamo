@@ -27,6 +27,8 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
+# Enable SGLang tokenizer support via PyO3 (for --use-sglang-tokenizer)
+sglang-tokenizer = ["dep:pyo3", "dep:pythonize"]
 
 [[bench]]
 name = "tokenizer"
@@ -153,6 +155,10 @@ itertools = { version = "0.14.0" }
 minijinja = { version = "2.14.0", features = ["loader"] }
 minijinja-contrib = { version = "2.14.0", features = ["pycompat"] }
 json-five = { version = "0.3" }
+
+# sglang-tokenizer (optional - for PyO3-based tokenization)
+pyo3 = { version = "0.23.4", optional = true, default-features = false, features = ["macros"] }
+pythonize = { version = "0.23", optional = true }
 
 # media loading in the preprocessor
 reqwest = { workspace = true }

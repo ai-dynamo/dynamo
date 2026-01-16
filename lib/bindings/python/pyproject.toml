@@ -23,7 +23,6 @@ authors = [
     { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
 ]
 license = { text = "Apache-2.0" }
-license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.10.6,<=2.13",
