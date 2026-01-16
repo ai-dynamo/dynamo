@@ -837,7 +837,7 @@ pub unsafe extern "C" fn router_handles_add_request(
 
 /// Mark prefill as completed for a request.
 ///
-/// Call this when the first token is generated to release prefill tokens from tracking.
+/// Call when the first token is generated to release prefill tokens from decode worker's load
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
