@@ -635,6 +635,11 @@ pub unsafe extern "C" fn router_handles_query_prefill(
     let handles = unsafe { &*handle };
     let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
 
+    // Check if prefill router is activated
+    if !handles.prefill_router.is_activated() {
+        return QueryRouterResult::ErrDisaggEnforced;
+    }
+
     let runtime = match Runtime::from_settings() {
         Ok(rt) => rt,
         Err(_) => return QueryRouterResult::ErrQueryFailed,
@@ -643,22 +648,18 @@ pub unsafe extern "C" fn router_handles_query_prefill(
     let result = runtime.secondary().block_on(async {
         handles
             .prefill_router
-            .query_prefill_worker_id(tokens, update_states)
+            .query_prefill_worker(tokens, update_states)
             .await
     });
 
     match result {
-        Ok(worker_id) => {
+        Ok((worker_id, _dp_rank)) => {
             unsafe { *out_worker_id = worker_id };
             QueryRouterResult::Ok
         }
         Err(e) => {
             tracing::error!(error = ?e, "Prefill query failed");
-            if e.to_string().contains("not yet activated") {
-                QueryRouterResult::ErrDisaggEnforced
-            } else {
-                QueryRouterResult::ErrQueryFailed
-            }
+            QueryRouterResult::ErrQueryFailed
         }
     }
 }

@@ -242,15 +242,14 @@ impl PrefillRouter {
 
     /// Build bootstrap_info for disaggregated serving
     /// If preselected_worker is provided (GAIE Stage 2), use it directly.
-    /// Otherwise, query for the best worker using `query_prefill_worker`.
+    /// Otherwise, query for the best worker (KV mode) or select next worker (non-KV modes).
     async fn build_bootstrap_info(
         &self,
         req: &PreprocessedRequest,
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        // Ensure prefill router is activated before proceeding
-        let _prefill_router = self.prefill_router.get()?;
+        let prefill_router = self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -476,33 +475,6 @@ impl PrefillRouter {
     /// Check if disaggregated mode is currently active (prefill router activated)
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
-    }
-
-    /// Query optimal prefill worker ID without executing a request.
-    ///
-    /// This is a public wrapper around `query_prefill_worker` for C FFI bindings.
-    /// Returns only the prefill worker ID (decode worker should be queried separately
-    /// via KvRouter for proper separation of concerns).
-    ///
-    /// # Arguments
-    /// * `token_ids` - Token IDs from the tokenized request
-    /// * `update_states` - Whether to update router state (set false for query-only)
-    ///
-    /// # Returns
-    /// * Worker ID for the prefill phase
-    ///
-    /// # Errors
-    /// * `PrefillError::NotActivated` if prefill router is not yet activated
-    pub async fn query_prefill_worker_id(
-        &self,
-        token_ids: &[u32],
-        update_states: bool,
-    ) -> Result<u64> {
-        if !self.is_activated() {
-            anyhow::bail!(PrefillError::NotActivated);
-        }
-        let (worker_id, _dp_rank) = self.query_prefill_worker(token_ids, update_states).await?;
-        Ok(worker_id)
     }
 }
 
