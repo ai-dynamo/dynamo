@@ -1,0 +1,282 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Navigation structure for Latest version
+# Matching https://docs.nvidia.com/dynamo/latest/
+
+navigation:
+  # ==================== Getting Started ====================
+  - section: Getting Started
+    contents:
+      - page: Quickstart
+        path: ../pages/getting-started/quickstart.mdx
+      - page: Installation
+        path: ../pages/getting-started/installation.mdx
+      - page: Support Matrix
+        path: ../pages/reference/support-matrix.mdx
+      - page: Examples
+        path: ../pages/getting-started/examples.mdx
+
+  # ==================== Kubernetes Deployment ====================
+  - section: Kubernetes Deployment
+    contents:
+      - section: Deployment Guide
+        contents:
+          - page: Kubernetes Quickstart
+            path: ../pages/kubernetes/README.mdx
+          - page: Detailed Installation Guide
+            path: ../pages/kubernetes/installation-guide.mdx
+          - page: Dynamo Operator
+            path: ../pages/kubernetes/dynamo-operator.mdx
+          - page: Minikube Setup
+            path: ../pages/kubernetes/deployment/minikube-setup.mdx
+          - page: Managing Models with DynamoModel
+            path: ../pages/kubernetes/deployment/dynamomodel-guide.mdx
+      - section: Observability (K8s)
+        contents:
+          - page: Metrics
+            path: ../pages/kubernetes/observability/metrics.mdx
+          - page: Logging
+            path: ../pages/kubernetes/observability/logging.mdx
+      - section: Multinode
+        contents:
+          - page: Multinode Deployments
+            path: ../pages/kubernetes/deployment/multinode-deployment.mdx
+          - page: Grove
+            path: ../pages/kubernetes/grove.mdx
+
+  # ==================== User Guides ====================
+  - section: User Guides
+    contents:
+      - page: Tool Calling
+        path: ../pages/agents/tool-calling.mdx
+      - page: Multimodality Support
+        path: ../pages/multimodal/index.mdx
+      - page: Finding Best Initial Configs
+        path: ../pages/performance/aiconfigurator.mdx
+      - page: Dynamo Benchmarking Guide
+        path: ../pages/benchmarks/benchmarking.mdx
+      - page: Tuning Disaggregated Performance
+        path: ../pages/performance/tuning.mdx
+      - page: Writing Python Workers in Dynamo
+        path: ../pages/development/runtime-guide.mdx
+      - section: Observability (Local)
+        contents:
+          - page: Overview
+            path: ../pages/observability/README.mdx
+          - page: Prometheus + Grafana Setup
+            path: ../pages/observability/prometheus-grafana.mdx
+          - page: Metrics
+            path: ../pages/observability/metrics.mdx
+          - page: Metrics Developer Guide
+            path: ../pages/observability/metrics-developer-guide.mdx
+          - page: Health Checks
+            path: ../pages/observability/health-checks.mdx
+          - page: Tracing
+            path: ../pages/observability/tracing.mdx
+          - page: Logging
+            path: ../pages/observability/logging.mdx
+      - page: Glossary
+        path: ../pages/reference/glossary.mdx
+
+  # ==================== Components ====================
+  - section: Components
+    contents:
+      - section: Backends
+        contents:
+          - page: vLLM
+            path: ../pages/backends/vllm/README.mdx
+          - page: SGLang
+            path: ../pages/backends/sglang/README.mdx
+          - page: TensorRT-LLM
+            path: ../pages/backends/trtllm/README.mdx
+      - page: Router
+        path: ../pages/router/README.mdx
+      - section: Planner
+        contents:
+          - page: Overview
+            path: ../pages/planner/planner-intro.mdx
+          - page: SLA Planner Quick Start
+            path: ../pages/planner/sla-planner-quickstart.mdx
+          - page: SLA-Driven Profiling
+            path: ../pages/benchmarks/sla-driven-profiling.mdx
+          - page: SLA-based Planner
+            path: ../pages/planner/sla-planner.mdx
+      - section: KVBM
+        contents:
+          - page: Overview
+            path: ../pages/kvbm/kvbm-intro.mdx
+          - page: Motivation
+            path: ../pages/kvbm/kvbm-motivation.mdx
+          - page: Architecture
+            path: ../pages/kvbm/kvbm-architecture.mdx
+          - page: Components
+            path: ../pages/kvbm/kvbm-components.mdx
+          - page: Design Deep Dive
+            path: ../pages/kvbm/kvbm-design-deepdive.mdx
+          - page: Integrations
+            path: ../pages/kvbm/kvbm-integrations.mdx
+          - page: KVBM in vLLM
+            path: ../pages/kvbm/vllm-setup.mdx
+          - page: KVBM in TRTLLM
+            path: ../pages/kvbm/trtllm-setup.mdx
+          - page: LMCache Integration
+            path: ../pages/backends/vllm/LMCache-Integration.mdx
+          - page: Further Reading
+            path: ../pages/kvbm/kvbm-reading.mdx
+
+  # ==================== Design Docs ====================
+  - section: Design Docs
+    contents:
+      - page: Overall Architecture
+        path: ../pages/design-docs/architecture.mdx
+      - page: Architecture Flow
+        path: ../pages/design-docs/dynamo-flow.mdx
+      - page: Disaggregated Serving
+        path: ../pages/design-docs/disagg-serving.mdx
+      - page: Distributed Runtime
+        path: ../pages/design-docs/distributed-runtime.mdx
+
+  # ==================== Additional Resources ====================
+  # Hidden section - these pages are accessible via direct URL but not shown in navigation
+  - section: Additional Resources
+    hidden: true
+    contents:
+      - section: Advanced Kubernetes
+        contents:
+          - page: Create Deployment
+            path: ../pages/kubernetes/deployment/create-deployment.mdx
+          - page: Autoscaling
+            path: ../pages/kubernetes/autoscaling.mdx
+          - page: Service Discovery
+            path: ../pages/kubernetes/service-discovery.mdx
+          - page: Model Caching with Fluid
+            path: ../pages/kubernetes/model-caching-with-fluid.mdx
+          - page: FluxCD
+            path: ../pages/kubernetes/fluxcd.mdx
+          - page: Webhooks
+            path: ../pages/kubernetes/webhooks.mdx
+          - page: API Reference
+            path: ../pages/kubernetes/api-reference.mdx
+      - section: Multimodal Details
+        contents:
+          - page: vLLM
+            path: ../pages/multimodal/vllm.mdx
+          - page: SGLang
+            path: ../pages/multimodal/sglang.mdx
+          - page: TensorRT-LLM
+            path: ../pages/multimodal/trtllm.mdx
+      - section: Router Details
+        contents:
+          - page: KV Cache Routing
+            path: ../pages/router/kv-cache-routing.mdx
+      - section: Fault Tolerance
+        contents:
+          - page: Request Cancellation
+            path: ../pages/fault-tolerance/request-cancellation.mdx
+          - page: Request Migration
+            path: ../pages/fault-tolerance/request-migration.mdx
+      - section: Benchmarks
+        contents:
+          - page: KV Router A/B Testing
+            path: ../pages/benchmarks/kv-router-ab-testing.mdx
+      - section: Frontends
+        contents:
+          - page: KServe
+            path: ../pages/frontends/kserve.mdx
+      - section: Development
+        contents:
+          - page: Backend Guide
+            path: ../pages/development/backend-guide.mdx
+      - section: Guides
+        contents:
+          - page: Request Plane
+            path: ../pages/guides/request-plane.mdx
+          - page: Jail Stream
+            path: ../pages/guides/jail-stream-readme.mdx
+      - page: Load Planner
+        path: ../pages/planner/load-planner.mdx
+      - page: CLI Reference
+        path: ../pages/reference/cli.mdx
+      - section: API Reference
+        contents:
+          - section: NIXL Connect
+            contents:
+              - page: Overview
+                path: ../pages/api/nixl-connect/README.mdx
+              - page: Connector
+                path: ../pages/api/nixl-connect/connector.mdx
+              - page: Device
+                path: ../pages/api/nixl-connect/device.mdx
+              - page: Device Kind
+                path: ../pages/api/nixl-connect/device-kind.mdx
+              - page: Descriptor
+                path: ../pages/api/nixl-connect/descriptor.mdx
+              - page: Read Operation
+                path: ../pages/api/nixl-connect/read-operation.mdx
+              - page: Write Operation
+                path: ../pages/api/nixl-connect/write-operation.mdx
+              - page: Readable Operation
+                path: ../pages/api/nixl-connect/readable-operation.mdx
+              - page: Writable Operation
+                path: ../pages/api/nixl-connect/writable-operation.mdx
+              - page: Operation Status
+                path: ../pages/api/nixl-connect/operation-status.mdx
+              - page: RDMA Metadata
+                path: ../pages/api/nixl-connect/rdma-metadata.mdx
+      - section: Backend Details
+        contents:
+          - section: vLLM
+            contents:
+              - page: DeepSeek-R1
+                path: ../pages/backends/vllm/deepseek-r1.mdx
+              - page: GPT-OSS
+                path: ../pages/backends/vllm/gpt-oss.mdx
+              - page: Multi-Node
+                path: ../pages/backends/vllm/multi-node.mdx
+              - page: Speculative Decoding
+                path: ../pages/backends/vllm/speculative-decoding.mdx
+              - page: Prompt Embeddings
+                path: ../pages/backends/vllm/prompt-embeddings.mdx
+              - page: Prometheus
+                path: ../pages/backends/vllm/prometheus.mdx
+          - section: SGLang
+            contents:
+              - page: GPT-OSS
+                path: ../pages/backends/sglang/gpt-oss.mdx
+              - page: Disaggregation
+                path: ../pages/backends/sglang/sglang-disaggregation.mdx
+              - page: Expert Distribution (EPLB)
+                path: ../pages/backends/sglang/expert-distribution-eplb.mdx
+              - page: HiCache Example
+                path: ../pages/backends/sglang/sgl-hicache-example.mdx
+              - page: Profiling
+                path: ../pages/backends/sglang/profiling.mdx
+              - page: Prometheus
+                path: ../pages/backends/sglang/prometheus.mdx
+          - section: TensorRT-LLM
+            contents:
+              - page: GPT-OSS
+                path: ../pages/backends/trtllm/gpt-oss.mdx
+              - page: KV Cache Transfer
+                path: ../pages/backends/trtllm/kv-cache-transfer.mdx
+              - page: Gemma3 Sliding Window
+                path: ../pages/backends/trtllm/gemma3-sliding-window-attention.mdx
+              - page: Llama4 + Eagle
+                path: ../pages/backends/trtllm/llama4-plus-eagle.mdx
+              - page: Multinode Examples
+                path: ../pages/backends/trtllm/multinode/multinode-examples.mdx
+              - page: Prometheus
+                path: ../pages/backends/trtllm/prometheus.mdx
