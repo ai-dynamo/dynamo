@@ -163,7 +163,9 @@ class VLLMNativeEncoderRequest(BaseModel):
     """Request for vLLM-native encoder worker using ECConnector"""
 
     request_id: str
-    prompt: str
+    token_ids: List[
+        int
+    ]  # Pre-tokenized prompt with placeholder tokens (for TokensPrompt)
     multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
     modality: Optional[
         Literal["image", "video", "audio"]

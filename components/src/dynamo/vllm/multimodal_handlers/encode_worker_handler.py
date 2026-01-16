@@ -10,7 +10,7 @@ from typing import AsyncGenerator, AsyncIterator
 import safetensors
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs.data import TextPrompt
+from vllm.inputs import TokensPrompt
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.sampling_params import SamplingParams
 
@@ -307,9 +307,9 @@ class VLLMEncodeWorkerHandler:
                 raise
 
             try:
-                # Prompt can be a random string as the encoder is only interested in the multimodal data
-                prompt_dict = TextPrompt(
-                    prompt=request.prompt, multi_modal_data={media_key: media}
+                prompt_dict = TokensPrompt(
+                    prompt_token_ids=request.token_ids,
+                    multi_modal_data={media_key: media},
                 )
 
                 gen = self.engine_client.generate(
@@ -332,6 +332,7 @@ class VLLMEncodeWorkerHandler:
                 raise
 
             # Yield metadata for each item (PD workers can use these to lookup from cache)
+            # Right now this is not used. Can be used for logging purpose later.
             response = VLLMNativeEncoderResponse(
                 request_id=item_request_id,
                 mm_hash=mm_hash,
