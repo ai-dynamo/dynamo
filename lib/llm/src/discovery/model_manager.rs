@@ -378,8 +378,6 @@ impl ModelManager {
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
-
-        let router_id = rand::random::<u64>();
         let chooser = KvRouter::new(
             endpoint.clone(),
             client,
@@ -387,7 +385,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            router_id,
+            instance_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
