@@ -126,7 +126,7 @@ async def worker(runtime: DistributedRuntime) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
 
-    logger.info(f"MM Router Worker starting...")
+    logger.info("MM Router Worker starting...")
     logger.info(f"Model: {args.model}")
     logger.info(f"This worker: {args.namespace}.{args.component}.{args.endpoint}")
     logger.info(

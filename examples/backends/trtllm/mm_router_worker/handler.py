@@ -10,17 +10,16 @@ from typing import Any, AsyncGenerator
 
 from dynamo._core import KvIndexer, compute_block_hash_for_seq_py
 from dynamo.runtime import Client
+from dynamo.runtime.logging import configure_dynamo_logging
 
 from .mm_processor import (
-    ProcessedInput,
     build_block_mm_infos,
     build_prompt_from_messages,
-    compute_mm_hashes,
     extract_image_urls,
-    get_mm_tokens,
     process_multimodal,
 )
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -122,9 +121,7 @@ class MMRouterHandler:
                 tokens = self.tokenizer.encode(prompt)
                 logger.debug(f"Tokenized text-only prompt: {len(tokens)} tokens")
 
-            local_hashes = compute_block_hash_for_seq_py(
-                tokens, self.block_size, None
-            )
+            local_hashes = compute_block_hash_for_seq_py(tokens, self.block_size, None)
 
             logger.debug(
                 f"Text request: {len(tokens)} tokens, {len(local_hashes)} blocks"
@@ -167,7 +164,7 @@ class MMRouterHandler:
             overlap_scores = await self.indexer.find_matches(local_hashes)
             scores_dict = overlap_scores.scores
             # Check tree_sizes to see if indexer has any blocks stored
-            tree_sizes = getattr(overlap_scores, 'tree_sizes', {})
+            tree_sizes = getattr(overlap_scores, "tree_sizes", {})
             logger.info(f"Indexer returned scores_dict: {scores_dict}")
             logger.info(f"Indexer tree_sizes (total blocks per worker): {tree_sizes}")
 

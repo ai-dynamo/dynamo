@@ -265,7 +265,8 @@ class HandlerBase:
         else:
             # text-only flow
             processed_input = request.get("token_ids")
-
+        if processed_input is None:
+            processed_input = request.get("token_ids")
         # Check if there is an error in the publisher error queue
         publishers_error = (
             self.publisher.check_error_queue() if self.publisher else None

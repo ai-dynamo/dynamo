@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Qwen2-VL specific token IDs
 QWEN2_VL_IMAGE_TOKEN_ID = 151655
-QWEN2_VL_REPLACEMENT_ID = 151937
+QWEN2_VL_REPLACEMENT_ID = 151937  # to match TRTLLM process logic, the image padding token in kv event is vocab_size + 1
 
 
 @dataclass
@@ -109,8 +109,12 @@ def process_multimodal(
         mm_input = inputs[0]
         processed_prompt = mm_input.get("prompt", prompt)
         multi_modal_data = mm_input.get("multi_modal_data")
-        logger.info(f"TRT-LLM loader returned processed_prompt: {processed_prompt[:200] if processed_prompt else 'None'}...")
-        logger.info(f"multi_modal_data keys: {multi_modal_data.keys() if multi_modal_data else 'None'}")
+        logger.info(
+            f"TRT-LLM loader returned processed_prompt: {processed_prompt[:200] if processed_prompt else 'None'}..."
+        )
+        logger.info(
+            f"multi_modal_data keys: {multi_modal_data.keys() if multi_modal_data else 'None'}"
+        )
 
         # Get tokens with visual expansion
         tokens, image_offsets_list = get_mm_tokens(
@@ -160,7 +164,9 @@ def get_mm_tokens(
         Tuple of (tokens, image_offsets_list)
     """
     if processor is None:
-        logger.warning("HF processor is None, using tokenizer.encode() - no visual token expansion!")
+        logger.warning(
+            "HF processor is None, using tokenizer.encode() - no visual token expansion!"
+        )
         return tokenizer.encode(prompt), None
 
     try:
@@ -186,7 +192,9 @@ def get_mm_tokens(
 
         # Count occurrences of image token
         img_token_count = tokens.count(image_token_id)
-        logger.info(f"Found {img_token_count} occurrences of image_token_id={image_token_id}")
+        logger.info(
+            f"Found {img_token_count} occurrences of image_token_id={image_token_id}"
+        )
 
         return replace_image_tokens(tokens, image_token_id, QWEN2_VL_REPLACEMENT_ID)
 
@@ -235,7 +243,7 @@ def compute_mm_hashes(multi_modal_data: dict | None) -> list[int] | None:
     """
     Compute mm_hash for each image in multimodal data.
 
-    Uses TRT-LLM's apply_mm_hashes which computes BLAKE3 hash of image tensors.
+    Uses TRT-LLM's apply_mm_hashes which computes hash of image tensors.
 
     Args:
         multi_modal_data: Dict containing processed image tensors

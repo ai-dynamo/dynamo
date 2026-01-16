@@ -9,7 +9,7 @@ for images and routing requests to the worker with the best KV cache overlap.
 """
 
 from .handler import MMRouterHandler
-from .mm_processor import ProcessedInput, compute_mm_hashes, build_block_mm_infos
+from .mm_processor import ProcessedInput, build_block_mm_infos, compute_mm_hashes
 
 __all__ = [
     "MMRouterHandler",

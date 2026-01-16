@@ -17,8 +17,8 @@ This worker sits between the Dynamo frontend and TRT-LLM workers, providing MM-a
 ```
 Frontend (standard)      MM Router Worker (this)        TRT-LLM Worker (standard)
 ┌──────────────┐        ┌─────────────────────┐        ┌───────────────────┐
-│  HTTP 入口   │───────>│ 1. Download images  │───────>│ python -m         │
-│  round-robin │        │ 2. Compute mm_hash  │ direct │ dynamo.trtllm     │
+│              │───────>│ 1. Download images  │───────>│ python -m         │
+│  round-robin │        │ 2. Compute mm_hash  │        │ dynamo.trtllm     │
 │  to mm_router│<───────│ 3. Find best worker │<───────│ --modality mm     │
 └──────────────┘        │ 4. Forward request  │        │ (processes images)│
                         └─────────────────────┘        └───────────────────┘
@@ -107,7 +107,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### MM Hash Computation
 
-The worker uses TRT-LLM's `apply_mm_hashes()` function to compute a BLAKE3 hash of each image's tensor representation. This hash is included in the block hash computation, ensuring that:
+The worker uses TRT-LLM's `apply_mm_hashes()` function to compute a hash of each image's tensor representation. This hash is included in the block hash computation, ensuring that:
 
 - Same image = Same mm_hash = Same block hashes = Cache hit
 - Different image = Different mm_hash = Different block hashes = No false cache hit
@@ -148,6 +148,10 @@ This is passed to `compute_block_hash_for_seq_py()` to compute MM-aware block ha
 
 ## Dependencies
 
-- `tensorrt_llm` - For `apply_mm_hashes()` and `default_multimodal_input_loader()`
+- `tensorrt_llm >= 1.2.0rc6` - For `apply_mm_hashes()` and `default_multimodal_input_loader()`. Earlier versions may not include multimodal hash support in KV events.
 - `transformers` - For `AutoProcessor`
 - `dynamo` - For runtime, KvIndexer, and compute_block_hash_for_seq_py
+
+## Known Limitations
+
+- **Qwen2-VL specific**: The image token IDs are hardcoded for Qwen2-VL (original: 151655, replacement: 151937). Supporting other multimodal models requires updating these values in `mm_processor.py` and `publisher.py`.

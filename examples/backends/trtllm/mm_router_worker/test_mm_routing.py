@@ -13,42 +13,38 @@ Tests various scenarios:
 """
 
 import argparse
-import json
 import time
+
 import requests
 
 # Test images (using stable public URLs from picsum.photos - seeded for consistency)
 # Different sizes to test various token counts
 IMAGES = {
-    "cat": "https://picsum.photos/seed/cat123/200/200",      # Small square
-    "dog": "https://picsum.photos/seed/dog456/400/300",      # Medium landscape
-    "bird": "https://picsum.photos/seed/bird789/300/500",    # Tall portrait
-    "flower": "https://picsum.photos/seed/flower012/600/400", # Large landscape
+    "cat": "https://picsum.photos/seed/cat123/200/200",  # Small square
+    "dog": "https://picsum.photos/seed/dog456/400/300",  # Medium landscape
+    "bird": "https://picsum.photos/seed/bird789/300/500",  # Tall portrait
+    "flower": "https://picsum.photos/seed/flower012/600/400",  # Large landscape
 }
 
 
-def make_request(base_url: str, images: list[str], text: str = "Describe the image(s) briefly.") -> dict:
+def make_request(
+    base_url: str, images: list[str], text: str = "Describe the image(s) briefly."
+) -> dict:
     """Make a chat completion request with images."""
     content = []
 
     # Add images first
     for img_url in images:
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": img_url}
-        })
+        content.append({"type": "image_url", "image_url": {"url": img_url}})
 
     # Add text
-    content.append({
-        "type": "text",
-        "text": text
-    })
+    content.append({"type": "text", "text": text})
 
     payload = {
         "model": "Qwen/Qwen2-VL-2B-Instruct",
         "messages": [{"role": "user", "content": content}],
         "max_tokens": 50,
-        "stream": False
+        "stream": False,
     }
 
     try:
@@ -56,7 +52,7 @@ def make_request(base_url: str, images: list[str], text: str = "Describe the ima
             f"{base_url}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
             json=payload,
-            timeout=120
+            timeout=120,
         )
         if response.status_code != 200:
             print(f"  ERROR: HTTP {response.status_code}: {response.text[:200]}")
@@ -73,7 +69,7 @@ def make_text_request(base_url: str, text: str) -> dict:
         "model": "Qwen/Qwen2-VL-2B-Instruct",
         "messages": [{"role": "user", "content": text}],
         "max_tokens": 50,
-        "stream": False
+        "stream": False,
     }
 
     try:
@@ -81,7 +77,7 @@ def make_text_request(base_url: str, text: str) -> dict:
             f"{base_url}/v1/chat/completions",
             headers={"Content-Type": "application/json"},
             json=payload,
-            timeout=60
+            timeout=60,
         )
         if response.status_code != 200:
             print(f"  ERROR: HTTP {response.status_code}: {response.text[:200]}")
@@ -96,28 +92,36 @@ def run_test(name: str, base_url: str, delay: float = 2.0):
     """Run a named test with delay between requests."""
     print(f"\n{'='*60}")
     print(f"TEST: {name}")
-    print('='*60)
+    print("=" * 60)
     time.sleep(delay)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Test MM-aware KV routing")
-    parser.add_argument("--base-url", default="http://localhost:8000", help="Base URL for API")
-    parser.add_argument("--delay", type=float, default=3.0, help="Delay between tests (seconds)")
+    parser.add_argument(
+        "--base-url", default="http://localhost:8000", help="Base URL for API"
+    )
+    parser.add_argument(
+        "--delay", type=float, default=3.0, help="Delay between tests (seconds)"
+    )
     args = parser.parse_args()
 
     base_url = args.base_url
     delay = args.delay
 
-    print("="*60)
+    print("=" * 60)
     print("MM-AWARE KV ROUTING TEST SUITE")
-    print("="*60)
+    print("=" * 60)
     print(f"Base URL: {base_url}")
     print(f"Delay between requests: {delay}s")
     print("\nWatch the mm_router logs for [ROUTING] messages to see overlap scores.\n")
 
     # Test 1: Same single image twice
-    run_test("1. Same single image twice (expect HIGH overlap on 2nd request)", base_url, delay)
+    run_test(
+        "1. Same single image twice (expect HIGH overlap on 2nd request)",
+        base_url,
+        delay,
+    )
     print("Request 1a: cat image")
     make_request(base_url, [IMAGES["cat"]])
     time.sleep(delay)
@@ -130,7 +134,9 @@ def main():
     make_request(base_url, [IMAGES["dog"]])
 
     # Test 3: Same two images twice
-    run_test("3. Same two images twice (expect HIGH overlap on 2nd request)", base_url, delay)
+    run_test(
+        "3. Same two images twice (expect HIGH overlap on 2nd request)", base_url, delay
+    )
     print("Request 3a: cat + dog")
     make_request(base_url, [IMAGES["cat"], IMAGES["dog"]])
     time.sleep(delay)
@@ -138,17 +144,29 @@ def main():
     make_request(base_url, [IMAGES["cat"], IMAGES["dog"]])
 
     # Test 4: Swapped image order
-    run_test("4. Swapped image order (expect PARTIAL overlap - text prefix matches)", base_url, delay)
+    run_test(
+        "4. Swapped image order (expect PARTIAL overlap - text prefix matches)",
+        base_url,
+        delay,
+    )
     print("Request 4: dog + cat (swapped order)")
     make_request(base_url, [IMAGES["dog"], IMAGES["cat"]])
 
     # Test 5: Subset of images
-    run_test("5. Subset of images (expect PARTIAL overlap - first image matches)", base_url, delay)
+    run_test(
+        "5. Subset of images (expect PARTIAL overlap - first image matches)",
+        base_url,
+        delay,
+    )
     print("Request 5: cat only (subset of cat+dog)")
     make_request(base_url, [IMAGES["cat"]])
 
     # Test 6: Superset of images
-    run_test("6. Superset of images (expect PARTIAL overlap - prefix matches)", base_url, delay)
+    run_test(
+        "6. Superset of images (expect PARTIAL overlap - prefix matches)",
+        base_url,
+        delay,
+    )
     print("Request 6: cat + dog + bird (superset)")
     make_request(base_url, [IMAGES["cat"], IMAGES["dog"], IMAGES["bird"]])
 
@@ -158,7 +176,11 @@ def main():
     make_request(base_url, [IMAGES["bird"], IMAGES["flower"]])
 
     # Test 8: Same image different text
-    run_test("8. Same image, different text (expect HIGH overlap - image tokens dominate)", base_url, delay)
+    run_test(
+        "8. Same image, different text (expect HIGH overlap - image tokens dominate)",
+        base_url,
+        delay,
+    )
     print("Request 8a: cat with text 'What is this?'")
     make_request(base_url, [IMAGES["cat"]], text="What is this?")
     time.sleep(delay)
@@ -173,9 +195,9 @@ def main():
     print("Request 9b: cat + dog + bird again")
     make_request(base_url, [IMAGES["cat"], IMAGES["dog"], IMAGES["bird"]])
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("TEST SUITE COMPLETE")
-    print("="*60)
+    print("=" * 60)
     print("\nCheck the mm_router logs above for [ROUTING] messages.")
     print("Expected results:")
     print("  - Same images: HIGH overlap (90%+)")
