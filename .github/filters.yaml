@@ -57,6 +57,7 @@ ignore:
   - 'container/Dockerfile.local_dev'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
+  - 'container/dev/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -69,7 +70,6 @@ core:
   - 'container/build.sh'
   - 'container/Dockerfile'
   - '.dockerignore'
-  - 'container/dev/**'
   - 'container/deps/*'
   - '.cargo/config.toml'
   - 'lib/**'
