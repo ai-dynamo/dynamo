@@ -10615,7 +10615,7 @@ License Text:
    limitations under the License.
 ```
 
-### github.com/NVIDIA/grove/operator/api
+### github.com/ai-dynamo/grove/operator/api
 
 License Identifier: Apache 2.0
 License Text:
