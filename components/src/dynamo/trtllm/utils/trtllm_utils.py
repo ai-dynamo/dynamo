@@ -389,7 +389,6 @@ def cmd_line_args():
     config.use_kv_events = config.publish_events_and_metrics
     config.connector = args.connector
 
-
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
         expanded_template_path = os.path.expandvars(
