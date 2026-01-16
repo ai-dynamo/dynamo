@@ -26,8 +26,6 @@ spec:
       componentType: worker
       subComponentType: decode
       replicas: 1
-      multinode:
-        nodeCount: 2
       resources:
         limits:
           gpu: "8"
@@ -39,7 +37,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /sgl-workspace/dynamo
+          workingDir: /workspace
           command:
             - python3
             - -m
@@ -50,14 +48,13 @@ spec:
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
-            - "16"
+            - "8"
             - --dp
-            - "16"
+            - "8"
             - --enable-dp-attention
             - --ep-size
-            - "16"
+            - "8"
             - --trust-remote-code
-            - --skip-tokenizer-init
             - --disaggregation-mode
             - decode
             - --disaggregation-bootstrap-port
@@ -71,8 +68,6 @@ spec:
       componentType: worker
       subComponentType: prefill
       replicas: 1
-      multinode:
-        nodeCount: 2
       resources:
         limits:
           gpu: "8"
@@ -84,7 +79,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-          workingDir: /sgl-workspace/dynamo
+          workingDir: /workspace
           command:
             - python3
             - -m
@@ -95,11 +90,10 @@ spec:
             - --served-model-name
             - deepseek-ai/DeepSeek-R1
             - --tp
-            - "16"
+            - "8"
             - --ep-size
-            - "16"
+            - "8"
             - --trust-remote-code
-            - --skip-tokenizer-init
             - --disaggregation-mode
             - prefill
             - --disaggregation-bootstrap-port
