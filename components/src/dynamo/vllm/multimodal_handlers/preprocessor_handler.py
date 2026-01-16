@@ -10,11 +10,20 @@ from typing import Any, AsyncIterator, Dict, List, Union
 
 from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
-from vllm.outputs import RequestOutput
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
 from dynamo.runtime import Client
+
+try:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.engine.protocol import CompletionRequest
+except ImportError:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+    )
+
+from vllm.outputs import RequestOutput
+from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
 from ..multimodal_utils import (
     ChatProcessor,
