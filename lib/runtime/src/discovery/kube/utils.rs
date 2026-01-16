@@ -10,7 +10,7 @@ use std::hash::{Hash, Hasher};
 pub fn hash_pod_name(pod_name: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     pod_name.hash(&mut hasher);
-    hasher.finish()
+    hasher.finish() & 0x7FFF_FFFF_FFFF_FFFF
 }
 
 /// Extract endpoint information from an EndpointSlice
