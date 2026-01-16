@@ -104,7 +104,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
-        logging.debug(f"New Request ID: {context.id()}")
+        logging.info(f"New Decode Request ID: {context.id()}")
         # Use context.id() as the rid for SGLang - this must match the ID used by
         # decode_disagger.rs when calling the migrate endpoint
         request_id = context.id()
@@ -138,6 +138,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     context, bootstrap_info["bootstrap_room"]
                 )
 
+            logging.info(
+                f"Sending disaggregated decode request {request_id} to engine "
+                f"(room={bootstrap_info['bootstrap_room']})"
+            )
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -184,6 +188,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(context)
 
+            logging.info(f"Sending aggregated request {request_id} to engine")
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
