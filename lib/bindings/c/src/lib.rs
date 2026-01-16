@@ -399,6 +399,44 @@ pub struct CTokenizedResult {
     pub formatted_prompt: *mut c_char,
 }
 
+/// Complete routing result for a chat completion request (C-compatible)
+///
+/// This is the result of `router_handles_route_chat_request` which combines
+/// tokenization and worker selection in a single call.
+///
+/// Caller must free `token_ids` using `router_handles_free_routing_result`.
+#[repr(C)]
+pub struct CRoutingResult {
+    /// Whether disaggregated mode is active
+    pub is_disaggregated: bool,
+    /// Prefill worker ID (only valid if is_disaggregated is true)
+    pub prefill_worker_id: u64,
+    /// Decode worker ID
+    pub decode_worker_id: u64,
+    /// Decode worker's data parallel rank
+    pub decode_dp_rank: u32,
+    /// Number of overlapping blocks on decode worker
+    pub decode_overlap_blocks: u32,
+    /// Token IDs (needed for add_request callback)
+    pub token_ids: *mut u32,
+    /// Number of tokens in the request
+    pub token_count: usize,
+}
+
+impl Default for CRoutingResult {
+    fn default() -> Self {
+        Self {
+            is_disaggregated: false,
+            prefill_worker_id: 0,
+            decode_worker_id: 0,
+            decode_dp_rank: 0,
+            decode_overlap_blocks: 0,
+            token_ids: ptr::null_mut(),
+            token_count: 0,
+        }
+    }
+}
+
 impl Default for CTokenizedResult {
     fn default() -> Self {
         Self {
@@ -1210,6 +1248,188 @@ pub unsafe extern "C" fn router_handles_has_preprocessor(handle: RouterHandlesPt
 
     let handles = unsafe { &*handle };
     handles.preprocessor.is_some()
+}
+
+/// Route a chat completion request in a single call.
+///
+/// This is the main function for EPP to route a `/v1/chat/completions` request.
+/// It combines tokenization and worker selection in one call:
+/// 1. Applies the chat template to the request JSON
+/// 2. Tokenizes the formatted prompt
+/// 3. Queries the prefill router (if disaggregated mode)
+/// 4. Queries the decode router
+/// 5. Returns all worker IDs and token_ids
+///
+/// After this call, EPP should:
+/// - Call `router_handles_add_request()` to register the request for bookkeeping
+/// - Set worker ID headers and forward to backend
+/// - Call `router_handles_free_routing_result()` to free the result
+///
+/// Note: `router_handles_add_request()` could be called internally by this function
+/// if a `request_id` parameter were added. Currently kept separate for flexibility.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `out_result` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_route_chat_request(
+    handle: RouterHandlesPtr,
+    request_json: *const c_char,
+    out_result: *mut CRoutingResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    // Get preprocessor
+    let preprocessor = match &handles.preprocessor {
+        Some(p) => p,
+        None => {
+            tracing::error!("Preprocessor not available");
+            return QueryRouterResult::ErrInitFailed;
+        }
+    };
+
+    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+
+    // Parse JSON
+    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        match serde_json::from_str(json_str) {
+            Ok(req) => req,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to parse request JSON");
+                return QueryRouterResult::ErrInvalidParam;
+            }
+        };
+
+    // Apply chat template
+    let formatted_prompt = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => prompt,
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to apply chat template");
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    // Tokenize
+    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+        Ok(enc) => enc,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to tokenize");
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    let tokens = encoding.token_ids();
+    let token_count = tokens.len();
+    let is_disaggregated = handles.prefill_router.is_activated();
+
+    // Query workers
+    let result = handles.runtime.secondary().block_on(async {
+        let mut prefill_worker_id: u64 = 0;
+
+        // Query prefill worker if disaggregated
+        if is_disaggregated {
+            match handles
+                .prefill_router
+                .query_prefill_worker(tokens, true)
+                .await
+            {
+                Ok((worker_id, _dp_rank)) => {
+                    prefill_worker_id = worker_id;
+                }
+                Err(e) => {
+                    tracing::error!(error = ?e, "Prefill query failed");
+                    return Err(QueryRouterResult::ErrQueryFailed);
+                }
+            }
+        }
+
+        // Query decode worker
+        let config_override = if is_disaggregated {
+            let mut cfg = RouterConfigOverride::default();
+            cfg.overlap_score_weight = Some(0.0);
+            Some(cfg)
+        } else {
+            None
+        };
+
+        let (decode_worker, overlap_blocks) = match handles
+            .decode_router
+            .find_best_match(None, tokens, config_override.as_ref(), true)
+            .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(error = ?e, "Decode query failed");
+                return Err(QueryRouterResult::ErrQueryFailed);
+            }
+        };
+
+        tracing::info!(
+            is_disaggregated = is_disaggregated,
+            prefill_worker_id = prefill_worker_id,
+            decode_worker_id = decode_worker.worker_id,
+            decode_dp_rank = decode_worker.dp_rank,
+            token_count = token_count,
+            "Routed chat request"
+        );
+
+        Ok((prefill_worker_id, decode_worker, overlap_blocks))
+    });
+
+    match result {
+        Ok((prefill_worker_id, decode_worker, overlap_blocks)) => {
+            // Allocate and copy token IDs for caller
+            let token_vec: Vec<u32> = tokens.to_vec();
+            let mut tokens_boxed = token_vec.into_boxed_slice();
+            let token_ptr = tokens_boxed.as_mut_ptr();
+            std::mem::forget(tokens_boxed);
+
+            unsafe {
+                *out_result = CRoutingResult {
+                    is_disaggregated,
+                    prefill_worker_id,
+                    decode_worker_id: decode_worker.worker_id,
+                    decode_dp_rank: decode_worker.dp_rank,
+                    decode_overlap_blocks: overlap_blocks,
+                    token_ids: token_ptr,
+                    token_count,
+                };
+            }
+            QueryRouterResult::Ok
+        }
+        Err(code) => code,
+    }
+}
+
+/// Free a routing result.
+///
+/// # Safety
+/// - `result` must be a valid pointer to a CRoutingResult previously returned by route functions
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_free_routing_result(result: *mut CRoutingResult) {
+    if result.is_null() {
+        return;
+    }
+
+    let res = unsafe { &mut *result };
+
+    // Free token IDs
+    if !res.token_ids.is_null() && res.token_count > 0 {
+        drop(unsafe {
+            Box::from_raw(std::slice::from_raw_parts_mut(res.token_ids, res.token_count))
+        });
+        res.token_ids = ptr::null_mut();
+        res.token_count = 0;
+    }
 }
 
 /// Fetch model card via discovery and create preprocessor.
