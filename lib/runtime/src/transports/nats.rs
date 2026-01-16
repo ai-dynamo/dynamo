@@ -992,6 +992,7 @@ mod tests {
     }
 
     // Integration test for broadcast pattern with purging
+    #[allow(deprecated)]
     #[tokio::test]
     #[ignore]
     async fn test_nats_queue_broadcast_with_purge() {

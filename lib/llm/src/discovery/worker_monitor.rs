@@ -8,6 +8,7 @@ use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+#[allow(deprecated)]
 use dynamo_runtime::traits::events::EventSubscriber;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -172,6 +173,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
     ///
     /// This is safe to call multiple times (e.g., from cloned monitors shared across
     /// pipelines) - only the first call spawns the background task.
+    #[allow(deprecated)]
     async fn start_monitoring(&self) -> anyhow::Result<()> {
         // Guard: only start once across all clones
         if self.started.swap(true, Ordering::SeqCst) {

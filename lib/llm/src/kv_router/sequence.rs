@@ -506,6 +506,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Background task to subscribe to active sequence events and update all workers
+    #[allow(deprecated)]
     async fn subscribe_to_events(
         senders: Arc<
             DashMap<WorkerWithDpRank, tokio::sync::mpsc::UnboundedSender<UpdateSequences>>,
