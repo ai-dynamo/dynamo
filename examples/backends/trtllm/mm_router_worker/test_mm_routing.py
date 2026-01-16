@@ -15,7 +15,8 @@ Tests various scenarios:
 import argparse
 import time
 
-import requests
+# NOTE: `requests` is lazy-imported inside functions to avoid pytest collection
+# failures when the package is not installed (this is an example script, not a unit test).
 
 # Test images (using stable public URLs from picsum.photos - seeded for consistency)
 # Different sizes to test various token counts
@@ -31,6 +32,8 @@ def make_request(
     base_url: str, images: list[str], text: str = "Describe the image(s) briefly."
 ) -> dict:
     """Make a chat completion request with images."""
+    import requests
+
     content = []
 
     # Add images first
@@ -65,6 +68,8 @@ def make_request(
 
 def make_text_request(base_url: str, text: str) -> dict:
     """Make a text-only chat completion request."""
+    import requests
+
     payload = {
         "model": "Qwen/Qwen2-VL-2B-Instruct",
         "messages": [{"role": "user", "content": text}],

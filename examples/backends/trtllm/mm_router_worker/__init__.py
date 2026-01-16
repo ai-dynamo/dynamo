@@ -14,6 +14,6 @@ from .mm_processor import ProcessedInput, build_block_mm_infos, compute_mm_hashe
 __all__ = [
     "MMRouterHandler",
     "ProcessedInput",
-    "compute_mm_hashes",
     "build_block_mm_infos",
+    "compute_mm_hashes",
 ]
