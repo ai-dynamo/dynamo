@@ -1,20 +1,18 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod request_tokenizer;
-
-pub use request_tokenizer::*;
-
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::borrow::Cow;
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
+use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use dynamo_llm::kv_router::{protocols::*, publisher::KvEventPublisher};
+use dynamo_llm::preprocessor::OpenAIPreprocessor;
 use dynamo_runtime::discovery::DiscoveryQuery;
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
@@ -390,7 +388,28 @@ pub struct CWorkerQueryResult {
     pub overlap_blocks: u32,
 }
 
-/// Container holding both routers needed for query routing
+/// Result of tokenization (C-compatible)
+#[repr(C)]
+pub struct CTokenizedResult {
+    /// Pointer to token IDs array (caller must free with router_handles_free_tokenized)
+    pub token_ids: *mut u32,
+    /// Number of tokens
+    pub token_count: usize,
+    /// Formatted prompt string (caller must free with router_handles_free_tokenized)
+    pub formatted_prompt: *mut c_char,
+}
+
+impl Default for CTokenizedResult {
+    fn default() -> Self {
+        Self {
+            token_ids: ptr::null_mut(),
+            token_count: 0,
+            formatted_prompt: ptr::null_mut(),
+        }
+    }
+}
+
+/// Container holding routers and preprocessor for query routing
 pub struct RouterHandles {
     prefill_router: Arc<PrefillRouter>,
     decode_router: Arc<KvRouter>,
@@ -400,6 +419,8 @@ pub struct RouterHandles {
     namespace: String,
     /// Cached runtime for executing async operations (avoids creating new runtime per call)
     runtime: Runtime,
+    /// Preprocessor for tokenization and template application (fetched via discovery)
+    preprocessor: Option<Arc<OpenAIPreprocessor>>,
 }
 
 /// Opaque handle for the router pair
@@ -563,6 +584,22 @@ pub unsafe extern "C" fn router_handles_create(
         // Start prefill watcher for dynamic discovery
         spawn_prefill_watcher(drt.clone(), model_manager.clone(), namespace_str.clone());
 
+        // Fetch model card via discovery and create preprocessor
+        let preprocessor = match fetch_preprocessor_from_discovery(&drt, &model_name_str).await {
+            Ok(prep) => {
+                tracing::info!(model_name = %model_name_str, "Preprocessor created from discovery");
+                Some(prep)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    model_name = %model_name_str,
+                    error = %e,
+                    "Failed to create preprocessor from discovery, tokenization will not be available"
+                );
+                None
+            }
+        };
+
         // Optionally wait for prefill workers to be discovered
         if wait_for_prefill {
             let timeout_secs = if prefill_timeout_secs == 0 {
@@ -608,17 +645,18 @@ pub unsafe extern "C" fn router_handles_create(
             }
         }
 
-        Ok((prefill_router, decode_router, model_manager, namespace_str))
+        Ok((prefill_router, decode_router, model_manager, namespace_str, preprocessor))
     });
 
     match result {
-        Ok((prefill_router, decode_router, model_manager, namespace_str)) => {
+        Ok((prefill_router, decode_router, model_manager, namespace_str, preprocessor)) => {
             let handles = RouterHandles {
                 prefill_router,
                 decode_router,
                 model_manager,
                 namespace: namespace_str,
                 runtime, // Store the runtime for reuse
+                preprocessor,
             };
             unsafe { *out_handle = Box::into_raw(Box::new(handles)) };
             QueryRouterResult::Ok
@@ -964,6 +1002,263 @@ pub unsafe extern "C" fn router_handles_destroy(handle: RouterHandlesPtr) {
     if !handle.is_null() {
         drop(unsafe { Box::from_raw(handle) });
     }
+}
+
+/// Tokenize a chat completion request using the embedded preprocessor.
+///
+/// Takes a JSON request, applies the model's chat template, and tokenizes.
+/// The preprocessor is fetched via discovery during `router_handles_create`.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `request_json` must be a valid null-terminated C string containing JSON
+/// - `out_result` must be a valid pointer
+/// - Caller must free the result using `router_handles_free_tokenized`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_tokenize_chat(
+    handle: RouterHandlesPtr,
+    request_json: *const c_char,
+    out_result: *mut CTokenizedResult,
+) -> QueryRouterResult {
+    if handle.is_null() || request_json.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    let preprocessor = match &handles.preprocessor {
+        Some(p) => p,
+        None => {
+            tracing::error!("Preprocessor not available - model card may not have been fetched via discovery");
+            return QueryRouterResult::ErrInitFailed;
+        }
+    };
+
+    let json_str = match unsafe { CStr::from_ptr(request_json) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+
+    // Parse JSON to NvCreateChatCompletionRequest
+    let request: dynamo_llm::types::openai::chat_completions::NvCreateChatCompletionRequest =
+        match serde_json::from_str(json_str) {
+            Ok(req) => req,
+            Err(e) => {
+                tracing::error!(error = ?e, "Failed to parse request JSON");
+                return QueryRouterResult::ErrInvalidParam;
+            }
+        };
+
+    // Apply chat template
+    let formatted_prompt = match preprocessor.apply_template(&request) {
+        Ok(Some(prompt)) => prompt,
+        Ok(None) => String::new(),
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to apply chat template");
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    // Tokenize
+    let encoding = match preprocessor.tokenize(&formatted_prompt) {
+        Ok(enc) => enc,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to tokenize");
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    // Allocate and copy token IDs
+    let token_ids = encoding.token_ids().to_vec();
+    let mut tokens = token_ids.into_boxed_slice();
+    let token_ptr = tokens.as_mut_ptr();
+    let token_count = tokens.len();
+    std::mem::forget(tokens);
+
+    // Allocate and copy formatted prompt
+    let prompt_cstring = match CString::new(formatted_prompt) {
+        Ok(s) => s,
+        Err(_) => {
+            drop(unsafe {
+                Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count))
+            });
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    unsafe {
+        *out_result = CTokenizedResult {
+            token_ids: token_ptr,
+            token_count,
+            formatted_prompt: prompt_cstring.into_raw(),
+        };
+    }
+    QueryRouterResult::Ok
+}
+
+/// Tokenize a raw prompt string (for completions API).
+///
+/// Directly tokenizes the prompt without template application.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `prompt` must be a valid null-terminated C string
+/// - `out_result` must be a valid pointer
+/// - Caller must free the result using `router_handles_free_tokenized`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_tokenize_raw(
+    handle: RouterHandlesPtr,
+    prompt: *const c_char,
+    out_result: *mut CTokenizedResult,
+) -> QueryRouterResult {
+    if handle.is_null() || prompt.is_null() || out_result.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+
+    let preprocessor = match &handles.preprocessor {
+        Some(p) => p,
+        None => {
+            tracing::error!("Preprocessor not available - model card may not have been fetched via discovery");
+            return QueryRouterResult::ErrInitFailed;
+        }
+    };
+
+    let prompt_str = match unsafe { CStr::from_ptr(prompt) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return QueryRouterResult::ErrInvalidParam,
+    };
+
+    // Tokenize
+    let encoding = match preprocessor.tokenize(prompt_str) {
+        Ok(enc) => enc,
+        Err(e) => {
+            tracing::error!(error = ?e, "Failed to tokenize");
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    // Allocate and copy token IDs
+    let token_ids = encoding.token_ids().to_vec();
+    let mut tokens = token_ids.into_boxed_slice();
+    let token_ptr = tokens.as_mut_ptr();
+    let token_count = tokens.len();
+    std::mem::forget(tokens);
+
+    // Allocate and copy prompt (same as input for raw tokenization)
+    let prompt_cstring = match CString::new(prompt_str) {
+        Ok(s) => s,
+        Err(_) => {
+            drop(unsafe {
+                Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count))
+            });
+            return QueryRouterResult::ErrQueryFailed;
+        }
+    };
+
+    unsafe {
+        *out_result = CTokenizedResult {
+            token_ids: token_ptr,
+            token_count,
+            formatted_prompt: prompt_cstring.into_raw(),
+        };
+    }
+    QueryRouterResult::Ok
+}
+
+/// Free a tokenized result.
+///
+/// # Safety
+/// - `result` must be a valid pointer to a CTokenizedResult previously returned by tokenize functions
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_free_tokenized(result: *mut CTokenizedResult) {
+    if result.is_null() {
+        return;
+    }
+
+    let res = unsafe { &mut *result };
+
+    // Free token IDs
+    if !res.token_ids.is_null() && res.token_count > 0 {
+        drop(unsafe {
+            Box::from_raw(std::slice::from_raw_parts_mut(res.token_ids, res.token_count))
+        });
+        res.token_ids = ptr::null_mut();
+        res.token_count = 0;
+    }
+
+    // Free formatted prompt
+    if !res.formatted_prompt.is_null() {
+        drop(unsafe { CString::from_raw(res.formatted_prompt) });
+        res.formatted_prompt = ptr::null_mut();
+    }
+}
+
+/// Check if preprocessor is available for tokenization.
+///
+/// Returns true if the model card was successfully fetched via discovery
+/// and the preprocessor was created.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_has_preprocessor(handle: RouterHandlesPtr) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let handles = unsafe { &*handle };
+    handles.preprocessor.is_some()
+}
+
+/// Fetch model card via discovery and create preprocessor.
+///
+/// This function:
+/// 1. Lists all models via discovery
+/// 2. Finds the first model matching the given name
+/// 3. Downloads the model config (tokenizer files) if needed
+/// 4. Creates an OpenAIPreprocessor from the model card
+async fn fetch_preprocessor_from_discovery(
+    drt: &DistributedRuntime,
+    model_name: &str,
+) -> anyhow::Result<Arc<OpenAIPreprocessor>> {
+    use dynamo_llm::model_card::ModelDeploymentCard;
+    use dynamo_runtime::discovery::DiscoveryInstance;
+
+    let discovery = drt.discovery();
+
+    // List all models
+    let instances = discovery.list(DiscoveryQuery::AllModels).await?;
+
+    // Find matching model card
+    let mut model_card: Option<ModelDeploymentCard> = None;
+
+    for instance in instances {
+        if let DiscoveryInstance::Model { .. } = &instance {
+            match instance.deserialize_model::<ModelDeploymentCard>() {
+                Ok(card) if card.name() == model_name => {
+                    model_card = Some(card);
+                    break;
+                }
+                Ok(_) => continue, // Different model name
+                Err(e) => {
+                    tracing::debug!(error = %e, "Failed to deserialize model card, skipping");
+                    continue;
+                }
+            }
+        }
+    }
+
+    let mut card = model_card.ok_or_else(|| {
+        anyhow::anyhow!("Model '{}' not found in discovery", model_name)
+    })?;
+
+    // Download config (tokenizer files) if not local
+    card.download_config().await?;
+
+    // Create preprocessor
+    OpenAIPreprocessor::new(card)
 }
 
 /// Spawn a background task to watch for prefill models and activate prefill routers.
