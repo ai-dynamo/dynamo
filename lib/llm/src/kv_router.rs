@@ -325,7 +325,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
-        consumer_id: String,
+        router_id: u64,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
@@ -380,7 +380,7 @@ impl KvRouter {
             workers_with_configs.clone(),
             selector,
             kv_router_config.router_replica_sync,
-            consumer_id.clone(),
+            router_id,
         )
         .await?;
 
@@ -433,6 +433,8 @@ impl KvRouter {
                     "Not all workers have local_indexer enabled, using JetStream subscription"
                 );
 
+                // Convert router_id to string for NATS consumer naming
+                let consumer_id = format!("{:x}", router_id);
                 start_kv_router_background(
                     component.clone(),
                     consumer_id,

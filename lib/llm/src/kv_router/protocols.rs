@@ -3,7 +3,6 @@
 
 use crate::tokens::{SequenceHash, Token};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use xxhash_rust::xxh3;
 
 /// Seed for XXH3 hashing, consistent with indexer.rs
@@ -265,7 +264,7 @@ pub struct PrefillEvent {
     pub request_id: String,
     pub worker_id: WorkerId,
     pub data: PrefillEventData,
-    pub router_id: Uuid,
+    pub router_id: u64,
 }
 
 /// Represents the different stages of prefilling tokens for a request.
@@ -284,7 +283,7 @@ pub struct ActiveSequenceEvent {
     pub request_id: String,
     pub worker: WorkerWithDpRank,
     pub data: ActiveSequenceEventData,
-    pub router_id: Uuid,
+    pub router_id: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -36,7 +36,6 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
-use uuid::Uuid;
 
 use super::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank,
@@ -317,7 +316,7 @@ pub struct ActiveSequencesMultiWorker {
     handles: Arc<DashMap<WorkerWithDpRank, std::thread::JoinHandle<()>>>,
     block_size: usize,
     component: Component,
-    router_id: Uuid,
+    router_id: u64,
     replica_sync: bool,
 }
 
@@ -327,21 +326,13 @@ impl ActiveSequencesMultiWorker {
         block_size: usize,
         workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
         replica_sync: bool,
-        router_uuid: String,
+        router_id: u64,
     ) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
 
         let senders = Arc::new(DashMap::new());
         let handles = Arc::new(DashMap::new());
         let request_to_worker = Arc::new(DashMap::new());
-        let router_id = Uuid::parse_str(&router_uuid).unwrap_or_else(|e| {
-            tracing::warn!(
-                "Failed to parse router UUID '{}': {}, using new UUID",
-                router_uuid,
-                e
-            );
-            Uuid::new_v4()
-        });
 
         // Expand workers by their dp_rank
         for (worker_id, config) in workers_with_configs {
@@ -501,7 +492,7 @@ impl ActiveSequencesMultiWorker {
         >,
         request_to_worker: Arc<DashMap<RequestId, WorkerWithDpRank>>,
         component: Component,
-        router_id: Uuid,
+        router_id: u64,
         cancel_token: CancellationToken,
     ) -> Result<()> {
         let mut subscriber = component
