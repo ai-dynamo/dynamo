@@ -542,9 +542,11 @@ class HandlerBase:
         self._normalize_request_format(request)
 
         # Setup disaggregated params based on PREFILL/DECODE mode
-        disaggregated_params, ep_disaggregated_params, epd_metadata = (
-            self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
-        )
+        (
+            disaggregated_params,
+            ep_disaggregated_params,
+            epd_metadata,
+        ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
 
         # Prepare input for generation (handles multimodal/text flows)
         processed_input = await self._prepare_input_for_generation(

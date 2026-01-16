@@ -261,7 +261,9 @@ class EncodeHelper:
             yield response
 
             # Wait for prefill worker to complete the read
-            logging.debug("EncodeHelper waiting for PrefillHandler to read embeddings...")
+            logging.debug(
+                "EncodeHelper waiting for PrefillHandler to read embeddings..."
+            )
             await readable_op.wait_for_completion()
             logging.debug("EncodeHelper completed readable operation.")
 
@@ -401,9 +403,11 @@ class EncodeHelper:
         messages = request.get("extra_args", {}).get(
             "messages", request.get("messages", [])
         )
-        text_prompt, image_urls, embedding_paths = (
-            multimodal_processor.extract_prompt_and_media(messages)
-        )
+        (
+            text_prompt,
+            image_urls,
+            embedding_paths,
+        ) = multimodal_processor.extract_prompt_and_media(messages)
 
         # Flow 1: Embedding-path flow (pre-computed embeddings via NIXL)
         if embedding_paths:
@@ -418,7 +422,9 @@ class EncodeHelper:
         # Flow 2: Full EPD flow (image URLs via MultimodalEncoder)
         elif image_urls and text_prompt:
             if model_dir is None or model_type is None:
-                yield {"error": "model_dir and model_type are required for full EPD encode"}
+                yield {
+                    "error": "model_dir and model_type are required for full EPD encode"
+                }
                 return
             if engine is None:
                 yield {"error": "No engine configured on encode worker for full EPD"}
