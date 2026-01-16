@@ -54,11 +54,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self,
         component: Component,
         dp_rank: int,
-        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
-        metrics_labels = metrics_labels or []
-        self.inner.create_endpoint(component, metrics_labels)
+        self.inner.create_endpoint(component)
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
         self.request_total_slots = 1
@@ -165,9 +163,7 @@ class StatLoggerFactory:
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
-        logger = DynamoStatLoggerPublisher(
-            self.component, dp_rank, metrics_labels=self.metrics_labels
-        )
+        logger = DynamoStatLoggerPublisher(self.component, dp_rank)
         self.created_logger = logger
 
         return logger

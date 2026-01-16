@@ -119,10 +119,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 f"room={bootstrap_info['bootstrap_room']}"
             )
 
-            if self.enable_trace:
-                self._propagate_trace_context_to_sglang(
-                    context, bootstrap_info["bootstrap_room"]
-                )
+            trace_header = (
+                self._get_trace_header(context) if self.enable_trace else None
+            )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -131,6 +130,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                external_trace_header=trace_header,
                 rid=trace_id,
             )
 
@@ -141,13 +141,15 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
-            if self.enable_trace:
-                self._propagate_trace_context_to_sglang(context)
+            trace_header = (
+                self._get_trace_header(context) if self.enable_trace else None
+            )
 
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
                 stream=True,
+                external_trace_header=trace_header,
                 rid=trace_id,
             )
             if self.skip_tokenizer_init:

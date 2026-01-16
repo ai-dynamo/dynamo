@@ -34,7 +34,7 @@ from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
-    ProcessorHandler,
+    PreprocessedHandler,
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
@@ -676,13 +676,17 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         .client()
     )
 
-    # Get prompt template from args (must be passed via environment or command line)
-    mm_prompt_template = config.mm_prompt_template
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
 
-    handler = ProcessorHandler(
+    handler = PreprocessedHandler(
         config.engine_args,
         encode_worker_client,
-        mm_prompt_template,
+        pd_worker_client,
     )
 
     logger.info("Waiting for Encoder Worker Instances ...")
@@ -690,7 +694,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,
         ModelType.Chat,
         generate_endpoint,
         config.model,

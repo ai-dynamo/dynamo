@@ -233,3 +233,8 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 	}
 	return false
 }
+
+// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
+func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
+	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
+}
