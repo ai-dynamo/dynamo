@@ -151,7 +151,7 @@ KVBM currently provides following types of metrics out of the box:
 1. If enabling KVBM does not show any TTFT perf gain or even perf degradation, one potential reason is not enough prefix cache hit on KVBM to reuse offloaded KV blocks.
 To confirm, please enable KVBM metrics as mentioned above and check the grafana dashboard `Onboard Blocks - Host to Device` and `Onboard Blocks - Disk to Device`.
 If observed large number of onboarded KV blocks as the example below, we can rule out this cause:
-![Grafana Example](../../assets/img/kvbm_metrics_grafana.png)
+![Grafana Example](../../assets/img/kvbm-metrics-grafana.png)
 
 2. Allocating large memory and disk storage can take some time and lead to KVBM worker initialization timeout.
 To avoid it, please set a longer timeout (default 1800 seconds) for leader–worker initialization.

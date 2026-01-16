@@ -75,7 +75,7 @@ Dynamo prioritizes seamless integration. Its modular design enables it to work h
 
 Disaggregating prefill and decode boosts performance, gaining efficiency when more GPUs are involved in inference. For example, for Llama 70B, single-node tests show a 30% throughput/GPU improvement, while two-node setups achieve over 2X gains due to better parallelization.
 
-![Two scatter plots comparing the performance of disagg and baseline configurations on one node versus two nodes](../../assets/img/disagg_perf_benefit.png)
+![Two scatter plots comparing the performance of disagg and baseline configurations on one node versus two nodes](../../assets/img/disagg-perf-benefit.png)
 
 * Tested on H100s with R1 Distilled Llama 70B model FP8 using vLLM. 3K ISL/ 150 OSL
 
@@ -84,7 +84,7 @@ The disaggregation of prefill and decode phases offers valuable flexibility. Sin
 
 ### KV aware routing
 
-![Two bar charts comparing Random routing and Dynamo with KV aware routing for Time To First Token (3x faster with Dynamo) and Avg request latency (2x faster with Dynamo).](../../assets/img/kv_routing.png)
+![Two bar charts comparing Random routing and Dynamo with KV aware routing for Time To First Token (3x faster with Dynamo) and Avg request latency (2x faster with Dynamo).](../../assets/img/kv-routing.png)
 
 * Tested with 100K requests to R1 using R1 Distilled Llama 70B FP8 on 2 nodes of H100s. Avg 4K ISL / 800 OSL
 
@@ -94,7 +94,7 @@ Existing routing methods, including load-based routing, overlook the specific pr
 ### KV cache manager
 
 The Dynamo KV Block Manager (KVBM) enables KV cache offloading to system CPU memory, local SSDs, and network-attached storage, allowing more KV blocks to be reused instead of recomputed. In many cases, KV transfer is faster than recomputation, so KVBM helps reduce time-to-first-token (TTFT). The following plot highlights the performance gains achieved through CPU memory offloading. In a scenario involving 20 multi-turn conversations with 15 users, KVBM with CPU memory offloading achieved a 2.2×–12× improvement in TTFT (depending on QPS), demonstrating benefits that extend beyond basic prefix caching.
-![Line graph comparing Pure GPU prefix caching with vLLM and KVBM host offloading for TTFT (Time To First Token)](../../assets/img/kvbm_agg_performance.png)
+![Line graph comparing Pure GPU prefix caching with vLLM and KVBM host offloading for TTFT (Time To First Token)](../../assets/img/kvbm-agg-performance.png)
 
 * Tested with different QPS using Qwen3-8B on H100. Avg 20K ISL / 100 OSL.
 
