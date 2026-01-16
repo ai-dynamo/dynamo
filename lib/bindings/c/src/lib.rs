@@ -364,7 +364,7 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 }
 
 /* ------------------------------------------------------------------------
- * Query Router Bindings
+ *  Router Bindings for GAIE EPP
  * ------------------------------------------------------------------------ */
 
 use dynamo_runtime::Runtime;
@@ -398,6 +398,8 @@ pub struct RouterHandles {
     model_manager: Arc<ModelManager>,
     #[allow(dead_code)]
     namespace: String,
+    /// Cached runtime for executing async operations (avoids creating new runtime per call)
+    runtime: Runtime,
 }
 
 /// Opaque handle for the router pair
@@ -451,7 +453,7 @@ pub unsafe extern "C" fn router_handles_create(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
-    // Get or create the runtime
+    // Create the runtime once - it will be stored in RouterHandles and reused
     let runtime = match Runtime::from_settings() {
         Ok(rt) => rt,
         Err(e) => {
@@ -460,8 +462,11 @@ pub unsafe extern "C" fn router_handles_create(
         }
     };
 
-    let result = runtime.secondary().block_on(async {
-        let drt = match DistributedRuntime::from_settings(runtime.clone()).await {
+    // Clone for use inside the async block (the original will be moved into handles)
+    let runtime_for_async = runtime.clone();
+
+    let result = runtime_for_async.secondary().block_on(async {
+        let drt = match DistributedRuntime::from_settings(runtime_for_async.clone()).await {
             Ok(drt) => drt,
             Err(e) => {
                 tracing::error!(error = ?e, "Failed to create distributed runtime");
@@ -524,19 +529,19 @@ pub unsafe extern "C" fn router_handles_create(
         // Start prefill watcher for dynamic discovery
         spawn_prefill_watcher(drt.clone(), model_manager.clone(), namespace_str.clone());
 
-        let handles = RouterHandles {
-            prefill_router,
-            decode_router,
-            model_manager,
-            namespace: namespace_str,
-        };
-
-        Ok(Box::into_raw(Box::new(handles)))
+        Ok((prefill_router, decode_router, model_manager, namespace_str))
     });
 
     match result {
-        Ok(handle) => {
-            unsafe { *out_handle = handle };
+        Ok((prefill_router, decode_router, model_manager, namespace_str)) => {
+            let handles = RouterHandles {
+                prefill_router,
+                decode_router,
+                model_manager,
+                namespace: namespace_str,
+                runtime, // Store the runtime for reuse
+            };
+            unsafe { *out_handle = Box::into_raw(Box::new(handles)) };
             QueryRouterResult::Ok
         }
         Err(code) => code,
@@ -572,12 +577,7 @@ pub unsafe extern "C" fn router_handles_query_decode(
     let handles = unsafe { &*handle };
     let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
 
-    let runtime = match Runtime::from_settings() {
-        Ok(rt) => rt,
-        Err(_) => return QueryRouterResult::ErrQueryFailed,
-    };
-
-    let result = runtime.secondary().block_on(async {
+    let result = handles.runtime.secondary().block_on(async {
         // For decode phase in disaggregated mode, use overlap_score_weight=0
         let config_override = if for_decode_phase {
             let mut override_cfg = RouterConfigOverride::default();
@@ -640,12 +640,7 @@ pub unsafe extern "C" fn router_handles_query_prefill(
         return QueryRouterResult::ErrDisaggEnforced;
     }
 
-    let runtime = match Runtime::from_settings() {
-        Ok(rt) => rt,
-        Err(_) => return QueryRouterResult::ErrQueryFailed,
-    };
-
-    let result = runtime.secondary().block_on(async {
+    let result = handles.runtime.secondary().block_on(async {
         handles
             .prefill_router
             .query_prefill_worker(tokens, update_states)
@@ -713,15 +708,10 @@ pub unsafe extern "C" fn router_handles_add_request(
         Vec::new()
     };
 
-    let runtime = match Runtime::from_settings() {
-        Ok(rt) => rt,
-        Err(_) => return QueryRouterResult::ErrQueryFailed,
-    };
-
     let decode_router = handles.decode_router.clone();
     let request_id_owned = request_id_str.clone();
 
-    let result = runtime.secondary().block_on(async {
+    let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
 
         tokio::time::timeout(timeout_duration, async {
@@ -788,15 +778,10 @@ pub unsafe extern "C" fn router_handles_mark_prefill_complete(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
-    let runtime = match Runtime::from_settings() {
-        Ok(rt) => rt,
-        Err(_) => return QueryRouterResult::ErrQueryFailed,
-    };
-
     let decode_router = handles.decode_router.clone();
     let request_id_owned = request_id_str.clone();
 
-    let result = runtime.secondary().block_on(async {
+    let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
 
         tokio::time::timeout(timeout_duration, async {
@@ -854,15 +839,10 @@ pub unsafe extern "C" fn router_handles_free_request(
         Err(_) => return QueryRouterResult::ErrInvalidParam,
     };
 
-    let runtime = match Runtime::from_settings() {
-        Ok(rt) => rt,
-        Err(_) => return QueryRouterResult::ErrQueryFailed,
-    };
-
     let decode_router = handles.decode_router.clone();
     let request_id_owned = request_id_str.clone();
 
-    let result = runtime.secondary().block_on(async {
+    let result = handles.runtime.secondary().block_on(async {
         let timeout_duration = Duration::from_secs(BOOKKEEPING_TIMEOUT_SECS);
 
         tokio::time::timeout(timeout_duration, async {
