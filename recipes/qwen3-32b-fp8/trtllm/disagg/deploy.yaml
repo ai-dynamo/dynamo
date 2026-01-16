@@ -218,7 +218,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
       replicas: 1
     TrtllmPrefillWorker:
       componentType: worker
@@ -253,7 +253,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
@@ -313,7 +313,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           env:
           - name: TRTLLM_ENABLE_PDL
             value: "1"
