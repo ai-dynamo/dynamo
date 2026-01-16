@@ -20,10 +20,12 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, TextIO
+from typing import Any, Dict, List, Optional, TextIO
 
 import pytest
 import requests
@@ -79,7 +81,7 @@ class LLMServerManager:
             self.log_dir / f"{self.server_type}_server_{config_str}_{timestamp}.log"
         )
         self.server_stdout_file: Optional[TextIO] = None
-        self.server_stderr_file: Optional[TextIO] = None
+        self._tee_threads: List[threading.Thread] = []
 
         # Environment for the process
         self.env = os.environ.copy()
@@ -177,33 +179,59 @@ class LLMServerManager:
         with open(config_path, "w") as f:
             yaml.dump(llm_api_config, f, default_flow_style=False, sort_keys=False)
 
+    def _tee_output(self, pipe: Any, log_file: TextIO, prefix: str) -> None:
+        """Read from pipe and write to both log file and stdout (tee)."""
+        try:
+            for line in iter(pipe.readline, ""):
+                if not line:
+                    break
+                # Write to log file
+                log_file.write(line)
+                log_file.flush()
+                # Write to stdout with prefix
+                sys.stdout.write(f"[{prefix}] {line}")
+                sys.stdout.flush()
+        except (ValueError, OSError):
+            pass  # Pipe closed
+        finally:
+            pipe.close()
+
     def start_server(self, timeout: int = 300) -> bool:
         """Start LLM server and wait for readiness."""
         if self.is_server_running():
             self.stop_server()
             time.sleep(2)
 
-        # Open log files
-        self.server_stdout_file = open(
-            self.server_log_file.with_suffix(".stdout.log"), "w"
-        )
-        self.server_stderr_file = open(
-            self.server_log_file.with_suffix(".stderr.log"), "w"
-        )
-        if self.server_stdout_file is not None:
-            self.server_stdout_file.write(
-                f"=== {self.server_type} Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
-            )
-            self.server_stdout_file.flush()
+        # Open log file (combined stdout+stderr)
+        self.server_stdout_file = open(self.server_log_file.with_suffix(".log"), "w")
 
-        # Launch
+        # Write header
+        header = f"=== {self.server_type} Server Started at {datetime.now()} ===\nCommand: {' '.join(self.server_cmd)}\n"
+        self.server_stdout_file.write(header)
+        self.server_stdout_file.flush()
+        print(f"[{self.server_type}] {header}", end="")
+
+        # Launch with pipe, redirect stderr to stdout
         self.process = subprocess.Popen(
             self.server_cmd,
-            stdout=self.server_stdout_file,
-            stderr=self.server_stderr_file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Redirect stderr to stdout
             env=self.env,
             preexec_fn=os.setsid,
+            text=True,
+            bufsize=1,  # Line buffered
         )
+
+        # Start tee thread for combined output
+        self._tee_threads = [
+            threading.Thread(
+                target=self._tee_output,
+                args=(self.process.stdout, self.server_stdout_file, self.server_type),
+                daemon=True,
+            ),
+        ]
+        for t in self._tee_threads:
+            t.start()
 
         # Wait for health
         start_time = time.time()
@@ -211,6 +239,9 @@ class LLMServerManager:
             if self.is_server_running():
                 return True
             if self.process.poll() is not None:
+                # Process exited, wait for tee thread to finish
+                for t in self._tee_threads:
+                    t.join(timeout=2)
                 self._close_log_files()
                 return False
             time.sleep(5)
@@ -233,6 +264,10 @@ class LLMServerManager:
                 pass
             finally:
                 self.process = None
+        # Wait for tee threads to finish
+        for t in self._tee_threads:
+            t.join(timeout=2)
+        self._tee_threads = []
         self._close_log_files()
 
     def _close_log_files(self):
@@ -242,9 +277,6 @@ class LLMServerManager:
             )
             self.server_stdout_file.close()
             self.server_stdout_file = None
-        if self.server_stderr_file:
-            self.server_stderr_file.close()
-            self.server_stderr_file = None
 
     def is_server_running(self) -> bool:
         try:
