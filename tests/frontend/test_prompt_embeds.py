@@ -20,12 +20,12 @@ in lib/llm/src/protocols/openai/completions.rs
 
 - Ensure you have a venv with vllm, all tests requirements (`uv pip install -r container/deps/requirements.test.txt`),
   and the bindings built and installed.
-- Start NATS: `nats-server -js`
 - Start the frontend: `python -m dynamo.frontend --store-kv file --request-plane tcp`
 - Start vllm with prompt embeds enabled and the matching model:
 ```
-python -m dynamo.vllm --connector none --max-model-len 4096 --model Qwen/Qwen3-0.6B --store-kv file --request-plane tcp --enable-prompt-embeds
+python -m dynamo.vllm --connector none --max-model-len 4096 --model Qwen/Qwen3-0.6B --store-kv file --request-plane tcp --enable-prompt-embeds --kv-events-config '{"enable_kv_cache_events": false}'
 ```
+- Run this test suite: `pytest tests/frontend/test_prompt_embeds.py`
 
 """
 
