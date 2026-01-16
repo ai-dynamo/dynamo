@@ -13,8 +13,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
-    NixlAgentMetadata,
     NixlConnector,
+    NixlHandshakePayload,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -111,14 +111,14 @@ class PdConnector(MultiConnector):
         metadata so decode workers can connect for KV transfer coordination.
 
         Returns:
-            NixlAgentMetadata from the NIXL connector, or None if not available.
+            NixlHandshakePayload from the NIXL connector, or None if not available.
         """
         # Get handshake metadata from the NIXL connector (second connector)
         nixl_connector = self._connectors[1]
         metadata = nixl_connector.get_handshake_metadata()
-        if metadata is not None and not isinstance(metadata, NixlAgentMetadata):
+        if metadata is not None and not isinstance(metadata, NixlHandshakePayload):
             raise TypeError(
-                f"Expected NixlAgentMetadata from NIXL connector, "
+                f"Expected NixlHandshakePayload from NIXL connector, "
                 f"got {type(metadata).__name__}"
             )
         return metadata

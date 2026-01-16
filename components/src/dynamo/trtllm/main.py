@@ -100,13 +100,11 @@ async def get_engine_runtime_config(
         logging.info(
             f"Set runtime config max_num_batched_tokens: {runtime_config.max_num_batched_tokens}"
         )
-
-        return runtime_config
-
     except Exception as e:
         logging.error(f"Failed to get runtime config from TensorRT-LLM engine: {e}")
-        # Return config with default/None values if retrieval fails
-        return runtime_config
+        # Keep default/None values if retrieval fails
+
+    return runtime_config
 
 
 async def worker():

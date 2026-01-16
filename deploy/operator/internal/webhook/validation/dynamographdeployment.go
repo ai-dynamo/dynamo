@@ -226,7 +226,8 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
-	sharedValidator := NewSharedSpecValidator(service, fieldPath)
+	calculatedNamespace := v.deployment.GetDynamoNamespaceForService(service)
+	sharedValidator := NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
 	return sharedValidator.Validate()
 }
 

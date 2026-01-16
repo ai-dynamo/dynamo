@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v1-disagg-router
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -18,7 +17,6 @@ spec:
         - name: DYN_ROUTER_MODE
           value: kv
     VllmDecodeWorker:
-      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -46,7 +44,6 @@ spec:
           args:
             - python3 -m dynamo.vllm --model meta-llama/Llama-3.1-70B-Instruct -tp 8
     VllmPrefillWorker:
-      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
