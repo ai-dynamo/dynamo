@@ -55,6 +55,7 @@ def pytest_configure(config):
         "planner: marks tests for planner component",
         "kvbm: marks tests for KV behavior and model determinism",
         "kvbm_v2: marks tests using KVBM V2",
+        "kvbm_concurrency: marks concurrency stress tests for KVBM (runs separately)",
         "model: model id used by a test or parameter",
         "custom_build: marks tests that require custom builds or special setup (e.g., MoE models)",
         "k8s: marks tests as requiring Kubernetes",
