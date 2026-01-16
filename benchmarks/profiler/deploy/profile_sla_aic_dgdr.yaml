@@ -12,26 +12,19 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
+
+    # NOTE: any image built before January 10 and any release prior to 0.8.1
+    # will need to use snake_case within profilingConfig.config
     config:
-      # Sweep/profiling configuration
       sweep:
-        # AI Configurator mode (fast simulation-based profiling)
         useAiConfigurator: true
         aicSystem: h200_sxm
-        aicHfId: Qwen/Qwen3-32B
-        aicBackendVersion: "0.20.0"
-
-      # SLA targets for profiling
       sla:
-        isl: 3000   # Input sequence length
-        osl: 150    # Output sequence length
-        ttft: 500.0 # Time To First Token target (milliseconds)
-        itl: 30.0   # Inter-Token Latency target (milliseconds)
-
-  # Deployment overrides for the auto-created DGD
+        isl: 3000
+        osl: 150
+        ttft: 500.0
+        itl: 30.0
   deploymentOverrides:
     workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag"
-
-  # Automatically create DynamoGraphDeployment after profiling
   autoApply: true
