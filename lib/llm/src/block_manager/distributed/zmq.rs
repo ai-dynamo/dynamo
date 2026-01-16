@@ -10,6 +10,7 @@ use utils::*;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
+use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tmq::{
@@ -84,7 +85,7 @@ pub struct ZmqActiveMessageLeader {
 impl ZmqActiveMessageLeader {
     /// Handshake-first constructor: collects WorkerMetaData, broadcasts LeaderMetadata,
     /// waits for allocation ACKs, then runs the final ping loop.
-    pub async fn new_with_handshake<F>(
+    pub async fn new_with_handshake<F, WMetadata, LMetadata>(
         leader_sockets: LeaderSockets,
         num_workers: usize,
         overall_timeout: Duration,
@@ -92,7 +93,9 @@ impl ZmqActiveMessageLeader {
         make_leader_meta: F,
     ) -> Result<Self>
     where
-        F: Fn(&[WorkerMetadata]) -> LeaderMetadata + Send + Sync + 'static,
+        WMetadata: Send + Sync + 'static + Serialize + DeserializeOwned,
+        LMetadata: Send + Sync + 'static + Serialize + DeserializeOwned,
+        F: Fn(&[WMetadata]) -> LMetadata + Send + Sync + 'static,
     {
         let pub_socket = Arc::new(Mutex::new(leader_sockets.pub_socket));
         let pull_socket = leader_sockets.ack_socket;
@@ -166,10 +169,10 @@ impl ZmqActiveMessageLeader {
             }
         };
 
-        let mut workers: Vec<WorkerMetadata> = Vec::with_capacity(workers_payloads.len());
+        let mut workers: Vec<WMetadata> = Vec::with_capacity(workers_payloads.len());
 
         for payload in workers_payloads {
-            let worker: WorkerMetadata =
+            let worker: WMetadata =
                 bincode::serde::decode_from_slice(&payload, bincode::config::standard())?.0;
             workers.push(worker);
         }

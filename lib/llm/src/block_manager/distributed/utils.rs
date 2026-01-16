@@ -19,8 +19,20 @@ pub struct WorkerMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeaderMetadata {
+    pub num_workers: usize,
     pub num_host_blocks: usize,
     pub num_disk_blocks: usize,
+}
+
+// Hardcoded ports for MLA inter-rank communication
+pub const MLA_LEADER_PUB_PORT: u16 = 57001;
+pub const MLA_LEADER_ACK_PORT: u16 = 57002;
+
+/// Check if MLA mode is enabled via environment variable
+pub fn is_mla_enabled() -> bool {
+    std::env::var("DYN_KVBM_IS_MLA")
+        .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+        .unwrap_or(false)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy)]

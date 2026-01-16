@@ -171,6 +171,7 @@ impl KvbmLeader {
                     LeaderMetadata {
                         num_host_blocks,
                         num_disk_blocks,
+                        num_workers: workers.len(),
                     }
                 },
             )
