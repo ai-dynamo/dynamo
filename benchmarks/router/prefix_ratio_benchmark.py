@@ -84,6 +84,8 @@ def get_aiperf_cmd(
         str(num_prefix_prompts),
         "--artifact-dir",
         artifact_dir,
+        "--dataset-sampling-strategy",
+        "shuffle",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
