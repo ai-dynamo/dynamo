@@ -1081,14 +1081,14 @@ mod tests {
             block_size,
             workers_with_configs.clone(),
             true,
-            Uuid::new_v4().to_string(),
+            1,
         ));
         let seq_manager_2 = Arc::new(ActiveSequencesMultiWorker::new(
             component,
             block_size,
             workers_with_configs,
             true,
-            Uuid::new_v4().to_string(),
+            2,
         ));
 
         // Give some time for the subscription loops to start
@@ -1237,14 +1237,14 @@ mod tests {
             block_size,
             workers_with_configs.clone(),
             true,
-            Uuid::new_v4().to_string(),
+            1,
         ));
         let seq_manager_2 = Arc::new(ActiveSequencesMultiWorker::new(
             component,
             block_size,
             workers_with_configs,
             true,
-            Uuid::new_v4().to_string(),
+            2,
         ));
 
         // Give some time for the subscription loops to start
