@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "request_migration"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+dynamo-runtime = { workspace = true }
+
+# third-party
+anyhow = { workspace = true }
+tracing = "0.1.44"

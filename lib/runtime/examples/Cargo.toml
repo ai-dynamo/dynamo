@@ -4,6 +4,7 @@
 [workspace]
 members = [
     "hello_world",
+    "request_migration",
     "service_metrics",
     "system_metrics",
 ]
