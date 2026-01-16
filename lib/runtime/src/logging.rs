@@ -189,12 +189,15 @@ struct PendingDistributedTraceContext {
 /// Macro to emit a tracing event at a dynamic level with a custom target.
 macro_rules! emit_at_level {
     ($level:expr, target: $target:expr, $($arg:tt)*) => {
+        // tracing::event! requires a compile-time constant level, so we must match
+        // on the runtime level and use a literal Level constant in each arm.
+        // See: https://github.com/tokio-rs/tracing/issues/2730
         match $level {
-            &tracing::Level::ERROR => tracing::error!(target: $target, $($arg)*),
-            &tracing::Level::WARN => tracing::warn!(target: $target, $($arg)*),
-            &tracing::Level::INFO => tracing::info!(target: $target, $($arg)*),
-            &tracing::Level::DEBUG => tracing::debug!(target: $target, $($arg)*),
-            &tracing::Level::TRACE => tracing::trace!(target: $target, $($arg)*),
+            &tracing::Level::ERROR => tracing::event!(target: $target, tracing::Level::ERROR, $($arg)*),
+            &tracing::Level::WARN => tracing::event!(target: $target, tracing::Level::WARN, $($arg)*),
+            &tracing::Level::INFO => tracing::event!(target: $target, tracing::Level::INFO, $($arg)*),
+            &tracing::Level::DEBUG => tracing::event!(target: $target, tracing::Level::DEBUG, $($arg)*),
+            &tracing::Level::TRACE => tracing::event!(target: $target, tracing::Level::TRACE, $($arg)*),
         }
     };
 }
