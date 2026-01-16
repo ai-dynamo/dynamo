@@ -20,7 +20,6 @@ import os
 import signal
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, TextIO
@@ -28,7 +27,7 @@ from typing import Any, Dict, Optional, TextIO
 import pytest
 import requests
 
-from .common import DeterminismTester, ServerType, fetch_kvbm_metrics
+from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 
 # Test markers to align with repository conventions
@@ -369,7 +368,10 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.parametrize(
         "llm_server",
         [
-            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")), "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048"))},
+            {
+                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")),
+                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048")),
+            },
         ],
         indirect=True,
     )
@@ -394,12 +396,14 @@ class TestDeterminismAgg(BaseTestDeterminism):
         self, tester, llm_server, runtime_services
     ):
         """Test Spanish prompt determinism under high concurrency load.
-        
+
         Reproduces the bug where Spanish responses become English or corrupted.
         """
         # Get the Spanish prompt path relative to this test file
-        spanish_prompt_path = Path(os.path.join(os.path.dirname(__file__), "spanish-prompt.txt")).absolute()
-        
+        spanish_prompt_path = Path(
+            os.path.join(os.path.dirname(__file__), "spanish-prompt.txt")
+        ).absolute()
+
         # Call the base class implementation
         super().base_test_spanish_prompt_determinism_under_load(
             tester, llm_server, runtime_services, spanish_prompt_path

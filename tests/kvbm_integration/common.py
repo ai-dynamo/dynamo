@@ -13,7 +13,6 @@ import os
 import re
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -629,10 +628,10 @@ class TestDeterminism:
         self, tester, llm_server, runtime_services, spanish_prompt_path: Path
     ):
         """Base implementation: send Spanish prompt repeatedly while vllm bench runs.
-        
+
         Tests determinism under high concurrency load. Reproduces bugs where responses
         can become corrupted or non-deterministic under memory pressure.
-        
+
         Args:
             tester: DeterminismTester instance
             llm_server: LLM server manager
@@ -640,7 +639,7 @@ class TestDeterminism:
             spanish_prompt_path: Path to the Spanish prompt file
         """
         import subprocess
-        
+
         print("\n" + "=" * 70)
         print("DETERMINISM TEST UNDER HIGH CONCURRENCY LOAD")
         print("=" * 70)
@@ -648,10 +647,10 @@ class TestDeterminism:
         # Load Spanish prompt
         if not spanish_prompt_path.exists():
             pytest.skip(f"Spanish prompt not found at {spanish_prompt_path}")
-        
+
         with open(spanish_prompt_path, "r", encoding="utf-8") as f:
             prompt = f.read().strip()
-        
+
         print(f"Loaded Spanish prompt: {len(prompt)} chars")
         print(f"Preview: {prompt[:100]}...")
 
@@ -659,24 +658,36 @@ class TestDeterminism:
         num_requests = int(os.environ.get("KVBM_NUM_ITERATIONS", "15"))
         delay_seconds = int(os.environ.get("KVBM_REQUEST_DELAY", "30"))
         max_tokens = int(os.environ.get("KVBM_MAX_TOKENS", "100"))
-        
-        print(f"\nTest configuration:")
+
+        print("\nTest configuration:")
         print(f"  Requests: {num_requests}")
         print(f"  Delay: {delay_seconds}s")
         print(f"  Max tokens: {max_tokens}")
 
         # Start vllm bench in background
-        model = os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
+        model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
         bench_cmd = [
-            "vllm", "bench", "serve",
-            "--backend", "vllm",
-            "--model", model,
-            "--base-url", llm_server.base_url,
-            "--dataset-name", "random",
-            "--random-input-len", "4000",
-            "--random-output-len", "180",
-            "--max-concurrency", "7",
-            "--num-prompts", "2000",
+            "vllm",
+            "bench",
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            model,
+            "--base-url",
+            llm_server.base_url,
+            "--dataset-name",
+            "random",
+            "--random-input-len",
+            "4000",
+            "--random-output-len",
+            "180",
+            "--max-concurrency",
+            "7",
+            "--num-prompts",
+            "2000",
         ]
 
         print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
@@ -699,33 +710,39 @@ class TestDeterminism:
             except Exception as e:
                 print(f"Could not fetch initial metrics: {e}")
                 initial_offload = 0
-            
+
             # Wait for benchmark to start and create offload activity
             print("\nWaiting for benchmark to start and create memory pressure...")
             max_wait = int(os.environ.get("KVBM_BENCH_STARTUP_WAIT", "120"))
             benchmark_started = False
-            
+
             for wait_iteration in range(max_wait // 5):
                 time.sleep(5)
                 elapsed = (wait_iteration + 1) * 5
-                
+
                 try:
                     current_metrics = fetch_kvbm_metrics()
                     current_offload = current_metrics.get("kvbm_offload_blocks_d2h", 0)
-                    
+
                     if current_offload > initial_offload:
                         offload_delta = current_offload - initial_offload
-                        print(f" Benchmark activity detected after {elapsed}s ({offload_delta} blocks offloaded)")
+                        print(
+                            f" Benchmark activity detected after {elapsed}s ({offload_delta} blocks offloaded)"
+                        )
                         benchmark_started = True
                         break
                     else:
-                        print(f" Waiting... ({elapsed}s elapsed, no offload activity yet)")
+                        print(
+                            f" Waiting... ({elapsed}s elapsed, no offload activity yet)"
+                        )
                 except Exception as e:
-                    print(f"  Waiting... ({elapsed}s elapsed, metrics check failed: {e})")
-            
+                    print(
+                        f"  Waiting... ({elapsed}s elapsed, metrics check failed: {e})"
+                    )
+
             if not benchmark_started:
                 print(f" Warning: No benchmark activity detected after {max_wait}s")
-                print(f" Test will continue anyway, but may not reproduce the bug")
+                print(" Test will continue anyway, but may not reproduce the bug")
             else:
                 # Give a bit more time for benchmark to ramp up
                 print("Waiting additional 10s for benchmark to fully ramp up...")
@@ -735,57 +752,69 @@ class TestDeterminism:
             print(f"\n{'='*70}")
             print(f"SENDING {num_requests} REQUESTS")
             print(f"{'='*70}")
-            
+
             responses = []
             baseline_response = None  # Will be set from first response
             mismatches = []  # Track which requests had non-deterministic responses
-            
+
             for i in range(num_requests):
                 print(f"\n--- Request {i+1}/{num_requests} ---")
-                
+
                 try:
                     response = tester.make_request(
-                        prompt,
-                        max_tokens=max_tokens,
-                        temperature=0.7,
-                        seed=42
+                        prompt, max_tokens=max_tokens, temperature=0.7, seed=42
                     )
                     responses.append(response)
                     print(f"Response: {response}")
-                    
+
                     # Check for obvious corruption patterns (fail immediately)
                     corruption_detected = False
                     corruption_reason = []
-                    
+
                     # Check for excessive repetition of short patterns (like {{char}}{{char}})
-                    if response.count('{{') > 20 or response.count('}}') > 20:
-                        open_count = response.count('{{')
-                        close_count = response.count('}}')
-                        corruption_reason.append(f"Excessive template markers (open: {open_count}, close: {close_count})")
+                    if response.count("{{") > 20 or response.count("}}") > 20:
+                        open_count = response.count("{{")
+                        close_count = response.count("}}")
+                        corruption_reason.append(
+                            f"Excessive template markers (open: {open_count}, close: {close_count})"
+                        )
                         corruption_detected = True
-                    
+
                     # Check for excessive dots/newlines
-                    if response.count('\n') > 50 or response.count('.') > len(response) * 0.3:
-                        corruption_reason.append(f"Excessive dots/newlines")
+                    if (
+                        response.count("\n") > 50
+                        or response.count(".") > len(response) * 0.3
+                    ):
+                        corruption_reason.append("Excessive dots/newlines")
                         corruption_detected = True
-                    
+
                     # Check for null bytes or replacement characters
-                    if '\x00' in response or '�' in response:
+                    if "\x00" in response or "�" in response:
                         corruption_reason.append("Null bytes or replacement characters")
                         corruption_detected = True
-                    
+
                     # Check for control characters
-                    control_chars = sum(1 for c in response if ord(c) < 32 and c not in '\n\t\r')
+                    control_chars = sum(
+                        1 for c in response if ord(c) < 32 and c not in "\n\t\r"
+                    )
                     if control_chars > 10:
-                        corruption_reason.append(f"Excessive control characters: {control_chars}")
+                        corruption_reason.append(
+                            f"Excessive control characters: {control_chars}"
+                        )
                         corruption_detected = True
-                    
+
                     # Check for strange ASCII patterns (non-printable, high ratio of special chars)
-                    non_printable = sum(1 for c in response if ord(c) > 127 or (ord(c) < 32 and c not in '\n\t\r'))
+                    non_printable = sum(
+                        1
+                        for c in response
+                        if ord(c) > 127 or (ord(c) < 32 and c not in "\n\t\r")
+                    )
                     if len(response) > 0 and non_printable / len(response) > 0.3:
-                        corruption_reason.append(f"Strange ASCII: {non_printable}/{len(response)} chars are non-printable")
+                        corruption_reason.append(
+                            f"Strange ASCII: {non_printable}/{len(response)} chars are non-printable"
+                        )
                         corruption_detected = True
-                    
+
                     if corruption_detected:
                         print(f"\n{'='*70}")
                         print("SEVERE CORRUPTION DETECTED - FAILING IMMEDIATELY!")
@@ -798,31 +827,30 @@ class TestDeterminism:
                             f"Reason: {corruption_reason}\n"
                             f"Response: {response[:300]}"
                         )
-                    
+
                     # Set first response as baseline
                     if i == 0:
                         baseline_response = response
-                        print(f"✓ Baseline set (request 1)")
+                        print("✓ Baseline set (request 1)")
                     else:
                         # From request 2 onwards, check determinism against baseline
                         if response != baseline_response:
-                            print(f"NON-DETERMINISTIC (differs from baseline)")
-                            mismatches.append({
-                                "request_num": i+1,
-                                "response": response,
-                                "baseline": baseline_response
-                            })
+                            print("NON-DETERMINISTIC (differs from baseline)")
+                            mismatches.append(
+                                {
+                                    "request_num": i + 1,
+                                    "response": response,
+                                    "baseline": baseline_response,
+                                }
+                            )
                         else:
-                            print(f"Match with baseline")
-                        
+                            print("Match with baseline")
+
                 except Exception as e:
                     print(f"Request failed: {e}")
                     responses.append(None)
-                    mismatches.append({
-                        "request_num": i+1,
-                        "error": str(e)
-                    })
-                
+                    mismatches.append({"request_num": i + 1, "error": str(e)})
+
                 # Wait before next request
                 if i < num_requests - 1:
                     print(f"Waiting {delay_seconds}s...")
@@ -835,7 +863,7 @@ class TestDeterminism:
             print(f"Total requests: {num_requests}")
             print(f"Deterministic: {num_requests - len(mismatches)}/{num_requests}")
             print(f"Non-deterministic: {len(mismatches)}/{num_requests}")
-            
+
             if mismatches:
                 print(f"\n{'='*70}")
                 print(f"NON-DETERMINISTIC RESPONSES ({len(mismatches)} total):")
@@ -849,15 +877,15 @@ class TestDeterminism:
                         print(f"\nRequest {req_num}: MISMATCH")
                         print(f"  Baseline: {mismatch['baseline'][:150]}...")
                         print(f"  Got:      {mismatch['response'][:150]}...")
-                
+
                 # Calculate percentage
                 success_rate = ((num_requests - len(mismatches)) / num_requests) * 100
                 print(f"\n{'='*70}")
-                print(f"TEST FAILED")
+                print("TEST FAILED")
                 print(f"{'='*70}")
                 print(f"Success rate: {success_rate:.1f}%")
                 print(f"Failed requests: {[m['request_num'] for m in mismatches]}")
-                
+
                 pytest.fail(
                     f"Determinism test failed!\n"
                     f"{len(mismatches)}/{num_requests} responses were non-deterministic\n"
@@ -868,7 +896,7 @@ class TestDeterminism:
                 print("TEST PASSED - ALL RESPONSES DETERMINISTIC")
                 print(f"{'='*70}")
                 print(f"All {num_requests} responses matched the baseline!")
-            
+
             # Check final onboard stats
             print(f"\n{'='*70}")
             print("FINAL KVBM STATS")
@@ -877,23 +905,27 @@ class TestDeterminism:
                 final_metrics = fetch_kvbm_metrics()
                 final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
                 final_onboard = final_metrics.get("kvbm_onboard_blocks_h2d", 0)
-                
+
                 offload_delta = final_offload - initial_offload
                 print(f"Initial offload: {initial_offload} blocks")
                 print(f"Final offload:   {final_offload} blocks")
                 print(f"Total offloaded: {offload_delta} blocks")
                 print(f"Total onboarded: {final_onboard} blocks")
-                
+
                 if offload_delta > 0:
-                    print(f"\n KVBM offload activity detected: {offload_delta} blocks offloaded")
+                    print(
+                        f"\n KVBM offload activity detected: {offload_delta} blocks offloaded"
+                    )
                 else:
-                    print(f"\n WARNING: No offload activity detected during test")
-                
+                    print("\n WARNING: No offload activity detected during test")
+
                 if final_onboard > 0:
-                    print(f" KVBM onboard activity detected: {final_onboard} blocks onboarded")
+                    print(
+                        f" KVBM onboard activity detected: {final_onboard} blocks onboarded"
+                    )
                 else:
-                    print(f" WARNING: No onboard activity detected during test")
-                    
+                    print(" WARNING: No onboard activity detected during test")
+
             except Exception as e:
                 print(f"Could not fetch final metrics: {e}")
 
