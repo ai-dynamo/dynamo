@@ -16,7 +16,10 @@ use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
 use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
+#[allow(deprecated)]
+use dynamo_runtime::traits::events::EventPublisher;
+use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventPublisher};
 use dynamo_runtime::{
     component::{Component, Namespace},
     transports::nats::{NatsQueue, Slug},
@@ -186,10 +189,10 @@ impl KvEventPublisher {
             // This is simpler and doesn't require JetStream durability since recovery
             // is handled via the local indexer's event buffer.
             tracing::info!("Using NATS Core for KV event publishing (local_indexer mode)");
-            let component_clone = component.clone();
+            let event_plane = EventPlane::for_component(&component);
             component.drt().runtime().secondary().spawn(async move {
                 start_event_processor(
-                    component_clone,
+                    event_plane,
                     worker_id,
                     cancellation_token_clone,
                     rx,
@@ -199,8 +202,13 @@ impl KvEventPublisher {
             });
         } else {
             // When local indexer is disabled, use JetStream (NatsQueue) for durability.
+            let event_plane_subject = format!(
+                "namespace.{}.component.{}",
+                component.namespace().name(),
+                component.name()
+            );
             let stream_name =
-                Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+                Slug::slugify(&format!("{}.{}", event_plane_subject, KV_EVENT_SUBJECT))
                     .to_string()
                     .replace("_", "-");
             let nats_server = std::env::var(env_nats::NATS_SERVER)
@@ -216,7 +224,7 @@ impl KvEventPublisher {
                     tracing::error!("Failed to connect NatsQueue: {e}");
                     return;
                 }
-                start_event_processor(
+                start_event_processor_legacy(
                     nats_queue,
                     worker_id,
                     cancellation_token_clone,
@@ -260,7 +268,8 @@ impl Drop for KvEventPublisher {
     }
 }
 
-async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
+/// Event processor using the new GenericEventPublisher trait (for NATS Core via EventPlane)
+async fn start_event_processor<P: GenericEventPublisher + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -295,11 +304,58 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                     }
                 }
 
-                // Then publish to NATS for global distribution
+                // Then publish to event plane for global distribution
                 // Use KV_EVENT_SUBJECT so both JetStream and NATS Core subscribers
                 // can receive events on the expected subject.
                 if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
-                    tracing::error!("Failed to publish event to NATS: {}", e);
+                    tracing::error!("Failed to publish event: {}", e);
+                }
+
+            }
+        }
+    }
+}
+
+/// Legacy event processor using the deprecated EventPublisher trait (for JetStream via NatsQueue)
+#[allow(deprecated)]
+async fn start_event_processor_legacy<P: EventPublisher + Send + Sync + 'static>(
+    publisher: P,
+    worker_id: u64,
+    cancellation_token: CancellationToken,
+    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
+) {
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::info!("KV Event source received cancellation signal");
+                break;
+            }
+            event = rx.recv() => {
+                let Some(event) = event else {
+                    tracing::debug!("Event processor channel closed.");
+                    break;
+                };
+
+                // Encapsulate in a router event.
+                tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
+                let router_event = RouterEvent::new(worker_id, event);
+
+                // Apply to local indexer first (if present)
+                if let Some(indexer) = &local_indexer {
+                    // Adds event into local indexer, and logs it into internal buffer
+                    if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                        tracing::warn!(
+                            "Failed to send event to local indexer for worker {}: {}",
+                            worker_id,
+                            e
+                        );
+                    }
+                }
+
+                // Then publish to NATS JetStream for global distribution
+                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
+                    tracing::error!("Failed to publish event to NATS JetStream: {}", e);
                 }
 
             }
@@ -938,6 +994,7 @@ impl WorkerMetricsPublisher {
     /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
     fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
         let nats_rx = self.rx.clone();
+        let event_plane = EventPlane::for_namespace(&namespace);
 
         tokio::spawn(async move {
             let mut rx = nats_rx;
@@ -999,9 +1056,9 @@ impl WorkerMetricsPublisher {
                             };
 
                             if let Err(e) =
-                                namespace.publish(KV_METRICS_SUBJECT, &active_load).await
+                                event_plane.publish(KV_METRICS_SUBJECT, &active_load).await
                             {
-                                tracing::warn!("Failed to publish metrics over NATS: {}", e);
+                                tracing::warn!("Failed to publish metrics: {}", e);
                             }
                         }
 
@@ -1169,34 +1226,30 @@ mod tests_startup_helpers {
     }
 
     #[async_trait::async_trait]
-    impl EventPublisher for MockComponent {
-        async fn publish(
+    impl GenericEventPublisher for MockComponent {
+        async fn publish<T: serde::Serialize + Send + Sync>(
             &self,
-            event_name: impl AsRef<str> + Send + Sync,
-            event: &(impl serde::Serialize + Send + Sync),
+            topic: &str,
+            event: &T,
         ) -> anyhow::Result<()> {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
                 .unwrap()
-                .push((event_name.as_ref().to_string(), bytes));
+                .push((topic.to_string(), bytes));
             Ok(())
         }
 
-        async fn publish_bytes(
-            &self,
-            event_name: impl AsRef<str> + Send + Sync,
-            bytes: Vec<u8>,
-        ) -> anyhow::Result<()> {
+        async fn publish_bytes(&self, topic: &str, bytes: Vec<u8>) -> anyhow::Result<()> {
             self.published
                 .lock()
                 .unwrap()
-                .push((event_name.as_ref().to_string(), bytes));
+                .push((topic.to_string(), bytes));
             Ok(())
         }
 
-        fn subject(&self) -> String {
-            "mock.subject".into()
+        fn publisher_id(&self) -> u64 {
+            12345 // Mock publisher ID
         }
     }
 

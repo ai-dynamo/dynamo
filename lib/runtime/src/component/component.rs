@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::component::Component;
 use crate::traits::DistributedRuntimeProvider;
+#[allow(deprecated)]
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
+#[allow(deprecated)]
 #[async_trait]
 impl EventPublisher for Component {
     fn subject(&self) -> String {
@@ -39,6 +41,7 @@ impl EventPublisher for Component {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl EventSubscriber for Component {
     async fn subscribe(

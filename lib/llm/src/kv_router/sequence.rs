@@ -29,7 +29,7 @@ use dashmap::DashMap;
 use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
+use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventPublisher, GenericEventSubscriber};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
@@ -317,6 +317,10 @@ pub struct ActiveSequencesMultiWorker {
     handles: Arc<DashMap<WorkerWithDpRank, std::thread::JoinHandle<()>>>,
     block_size: usize,
     component: Component,
+    /// Event plane for publishing sequence events
+    event_plane: EventPlane,
+    /// Event plane for publishing metrics (namespace-scoped)
+    namespace_event_plane: EventPlane,
     router_id: Uuid,
     replica_sync: bool,
 }
@@ -357,12 +361,17 @@ impl ActiveSequencesMultiWorker {
             }
         }
 
+        let event_plane = EventPlane::for_component(&component);
+        let namespace_event_plane = EventPlane::for_namespace(component.namespace());
+
         let multi_worker = Self {
             senders: senders.clone(),
             request_to_worker: request_to_worker.clone(),
             handles,
             block_size,
             component: component.clone(),
+            event_plane,
+            namespace_event_plane,
             router_id,
             replica_sync,
         };
@@ -504,8 +513,9 @@ impl ActiveSequencesMultiWorker {
         router_id: Uuid,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        let mut subscriber = component
-            .subscribe_with_type::<ActiveSequenceEvent>(ACTIVE_SEQUENCES_SUBJECT)
+        let event_plane = EventPlane::for_component(&component);
+        let mut subscriber = event_plane
+            .subscribe_typed::<ActiveSequenceEvent>(ACTIVE_SEQUENCES_SUBJECT)
             .await?;
 
         loop {
@@ -517,7 +527,7 @@ impl ActiveSequencesMultiWorker {
                         break;
                     };
 
-                    let Ok(event) = result else {
+                    let Ok((_envelope, event)) = result else {
                         tracing::error!(
                             "Error receiving active sequence event: {}",
                             result.unwrap_err()
@@ -673,7 +683,7 @@ impl ActiveSequencesMultiWorker {
                 },
                 router_id: self.router_id,
             };
-            self.component
+            self.event_plane
                 .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
                 .await?;
         }
@@ -733,7 +743,7 @@ impl ActiveSequencesMultiWorker {
                 data: ActiveSequenceEventData::Free,
                 router_id: self.router_id,
             };
-            self.component
+            self.event_plane
                 .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
                 .await?;
         }
@@ -784,7 +794,7 @@ impl ActiveSequencesMultiWorker {
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: self.router_id,
             };
-            self.component
+            self.event_plane
                 .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
                 .await?;
         }
@@ -849,8 +859,7 @@ impl ActiveSequencesMultiWorker {
         };
 
         if let Err(e) = self
-            .component
-            .namespace()
+            .namespace_event_plane
             .publish(KV_METRICS_SUBJECT, &active_load)
             .await
         {

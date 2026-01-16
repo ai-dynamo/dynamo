@@ -12,8 +12,10 @@ use serde::Serialize;
 use crate::component::Namespace;
 use crate::metrics::{MetricsHierarchy, MetricsRegistry};
 use crate::traits::DistributedRuntimeProvider;
+#[allow(deprecated)]
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
+#[allow(deprecated)]
 #[async_trait]
 impl EventPublisher for Namespace {
     fn subject(&self) -> String {
@@ -42,6 +44,7 @@ impl EventPublisher for Namespace {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl EventSubscriber for Namespace {
     async fn subscribe(

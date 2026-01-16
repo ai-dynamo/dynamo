@@ -18,6 +18,7 @@
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
 use crate::metrics::MetricsHierarchy;
 use crate::protocols::EndpointId;
+#[allow(deprecated)]
 use crate::traits::events::EventPublisher;
 
 use anyhow::Result;
@@ -840,6 +841,7 @@ impl NatsQueue {
     }
 }
 
+#[allow(deprecated)]
 #[async_trait]
 impl EventPublisher for NatsQueue {
     fn subject(&self) -> String {
@@ -990,6 +992,7 @@ mod tests {
     }
 
     // Integration test for broadcast pattern with purging
+    #[allow(deprecated)]
     #[tokio::test]
     #[ignore]
     async fn test_nats_queue_broadcast_with_purge() {
