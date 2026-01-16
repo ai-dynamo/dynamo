@@ -17,6 +17,7 @@ disaggregated mode, aggregated mode has less randomness chances.
 import importlib.util
 import logging
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -30,10 +31,17 @@ import requests
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
 
+
+def _check_command_available(command: str) -> bool:
+    """Check if a command is available in PATH."""
+    return shutil.which(command) is not None
+
+
+HAS_VLLM_BENCH = _check_command_available("vllm")
+
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
 pytestmark = [
-    pytest.mark.kvbm,
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.gpu_1,
@@ -375,6 +383,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
         ],
         indirect=True,
     )
+    @pytest.mark.kvbm
     def test_determinism_agg_with_cache_reset(
         self, tester, llm_server, runtime_services
     ):
@@ -392,6 +401,12 @@ class TestDeterminismAgg(BaseTestDeterminism):
         indirect=True,
     )
     @pytest.mark.kvbm_concurrency
+    @pytest.mark.skipif(
+        not HAS_VLLM_BENCH, reason="requires vllm bench (vllm command not found)"
+    )
+    @pytest.mark.xfail(
+        reason="Known issue, fixed in PR: https://github.com/ai-dynamo/dynamo/pull/5475"
+    )
     def test_spanish_prompt_determinism_under_load(
         self, tester, llm_server, runtime_services
     ):
