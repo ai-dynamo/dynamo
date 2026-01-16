@@ -200,10 +200,10 @@ trtllm_configs = {
         delayed_start=60,
         request_payloads=[multimodal_payload_default()],
     ),
-    "epd_multimodal": TRTLLMConfig(
-        name="epd_multimodal",
+    "epd_multimodal_image": TRTLLMConfig(
+        name="epd_multimodal_image",
         directory=trtllm_dir,
-        script_name="epd_multimodal.sh",
+        script_name="epd_multimodal_image.sh",
         marks=[
             pytest.mark.gpu_4,
             pytest.mark.trtllm,

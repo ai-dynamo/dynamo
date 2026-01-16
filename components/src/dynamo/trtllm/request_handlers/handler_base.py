@@ -354,6 +354,154 @@ class HandlerBase:
 
         return params_dict
 
+    def _setup_disaggregated_params_for_mode(
+        self,
+        request: dict,
+        ep_disaggregated_params: Optional[Any],
+    ) -> tuple[Any, Any, dict]:
+        """
+        Setup disaggregated_params based on PREFILL/DECODE mode.
+
+        For PREFILL mode:
+        - Uses ep_disaggregated_params from encode worker if available
+        - Otherwise creates new LlmDisaggregatedParams with request_type="context_only"
+
+        For DECODE mode:
+        - Decodes disaggregated_params from prefill_result
+        - Extracts EPD metadata for prompt optimization
+
+        Args:
+            request: Request dictionary (may contain prefill_result)
+            ep_disaggregated_params: Optional params from encode worker (EPD flow)
+
+        Returns:
+            Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
+        """
+        disaggregated_params = None
+        epd_metadata = {}
+
+        # PREFILL mode: setup context_only params
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            if ep_disaggregated_params:
+                ep_disaggregated_params.request_type = "context_only"
+                disaggregated_params = ep_disaggregated_params
+            else:
+                disaggregated_params = LlmDisaggregatedParams(
+                    request_type="context_only"
+                )
+
+        # DECODE mode: decode params from prefill_result
+        prefill_result = request.get("prefill_result")
+        if prefill_result and "disaggregated_params" in prefill_result:
+            (
+                disaggregated_params,
+                epd_metadata,
+            ) = self._decode_disaggregated_params_from_prefill(prefill_result)
+            # For full EPD flow, make decoded params available to multimodal processor
+            ep_disaggregated_params = disaggregated_params
+
+        return disaggregated_params, ep_disaggregated_params, epd_metadata
+
+    async def _prepare_input_for_generation(
+        self,
+        request: dict,
+        embeddings: Optional[Union[torch.Tensor, dict]],
+        ep_disaggregated_params: Optional[Any],
+        epd_metadata: dict,
+    ) -> Any:
+        """
+        Prepare input for TRT-LLM generation (handles multimodal/text flows).
+
+        Three paths:
+        1. DECODE with prefill metadata: Use cached prompt, skip image re-processing
+        2. Multimodal: Process via multimodal_processor
+        3. Text-only: Use token_ids from request
+
+        Args:
+            request: Request dictionary
+            embeddings: Optional embeddings tensor/dict from encode worker
+            ep_disaggregated_params: Optional params from encode worker (EPD flow)
+            epd_metadata: Metadata from prefill worker (DECODE optimization)
+
+        Returns:
+            Processed input for TRT-LLM (dict with prompt/token_ids, or raw token_ids)
+        """
+        # DECODE mode: Use prefill metadata to skip re-processing multimodal content
+        # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
+        has_prefill_metadata = epd_metadata and (
+            epd_metadata.get("_prefill_prompt")
+            or epd_metadata.get("_epd_processed_prompt")
+        )
+
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and has_prefill_metadata
+        ):
+            # Use prompt/token_ids from PREFILL, skip image re-processing
+            prefill_prompt = epd_metadata.get("_prefill_prompt") or epd_metadata.get(
+                "_epd_processed_prompt"
+            )
+            prefill_token_ids = epd_metadata.get(
+                "_prefill_prompt_token_ids"
+            ) or epd_metadata.get("_epd_prompt_token_ids")
+
+            # Build input without multimodal data (already in KV cache)
+            # Use the SAME multimodal key that PREFILL used:
+            # - EPD/Embeddings flow: PREFILL used multi_modal_embeddings
+            # - Simple P→D (image URL): PREFILL used multi_modal_data
+            is_epd_flow = epd_metadata.get("_epd_processed_prompt") is not None
+
+            processed_input = {
+                "prompt": prefill_prompt,
+                "prompt_token_ids": prefill_token_ids,
+            }
+            if is_epd_flow:
+                processed_input["multi_modal_embeddings"] = None
+            else:
+                processed_input["multi_modal_data"] = None
+            return processed_input
+
+        # PREFILL/ENCODE/AGGREGATED: Process multimodal content if available
+        if self.multimodal_processor:
+            processed_input = await self.multimodal_processor.process_openai_request(
+                request, embeddings, ep_disaggregated_params
+            )
+            if processed_input:
+                return processed_input
+
+        # Fallback: text-only flow
+        return request.get("token_ids")
+
+    def _normalize_request_format(self, request: dict) -> None:
+        """
+        Convert OpenAI request format to TRT-LLM internal format.
+
+        Moves fields from OpenAI locations to where TRT-LLM expects them:
+        - max_tokens: top-level → stop_conditions.max_tokens
+        - temperature: top-level → sampling_options.temperature
+
+        Note: The Rust frontend's PrefillRouter handles the *value* of max_tokens
+        (sets to 1 for prefill, restores original for decode). This method only
+        moves fields to the correct location.
+
+        Args:
+            request: Request dictionary to normalize (modified in place)
+        """
+        # Ensure stop_conditions exists
+        if "stop_conditions" not in request:
+            request["stop_conditions"] = {}
+        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
+            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
+
+        # Ensure sampling_options exists
+        if "sampling_options" not in request:
+            request["sampling_options"] = {}
+        if (
+            "temperature" in request
+            and "temperature" not in request["sampling_options"]
+        ):
+            request["sampling_options"]["temperature"] = request.pop("temperature")
+
     async def _initiate_shutdown(self, error: Exception):
         """Initiate graceful shutdown after fatal error"""
         logging.warning(f"Initiating graceful shutdown due to: {error}")
@@ -386,109 +534,22 @@ class HandlerBase:
             request: The request dictionary containing generation parameters
             context: Context object for cancellation handling
             embeddings: Optional tensor or dict containing embeddings for multimodal processing
+            ep_disaggregated_params: Optional DisaggregatedParams from encode worker (full EPD flow)
         """
         logging.debug(f"Request: {request}")
 
-        # Decode the disaggregated params from the request FIRST
-        # This must happen before multimodal processing so that ep_disaggregated_params
-        # is available for full EPD flow
-        disaggregated_params = None
+        # Normalize OpenAI format to TRT-LLM internal format
+        self._normalize_request_format(request)
 
-        # Normalize OpenAI request format
-        # Note: The Rust frontend's PrefillRouter already handles max_tokens:
-        #   - Saves original max_tokens before prefill
-        #   - Sends max_tokens=1 to prefill worker
-        #   - Restores original max_tokens for decode worker
-        # So we don't need to save/modify max_tokens here!
-        if "stop_conditions" not in request:
-            request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
-
-        if "sampling_options" not in request:
-            request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
-
-        # Setup disaggregated_params for PREFILL mode
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if ep_disaggregated_params:
-                ep_disaggregated_params.request_type = "context_only"
-                disaggregated_params = ep_disaggregated_params
-            else:
-                disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
-                )
-        # Check for disaggregated_params in prefill_result (new frontend routing)
-        # or directly in request (legacy/direct routing)
-        prefill_result = request.get("prefill_result")
-        epd_metadata = {}
-
-        if prefill_result and "disaggregated_params" in prefill_result:
-            # Decode from prefill_result (new frontend disaggregated routing)
-            (
-                disaggregated_params,
-                epd_metadata,
-            ) = self._decode_disaggregated_params_from_prefill(prefill_result)
-            # For full EPD flow, make decoded params available to multimodal processor
-            ep_disaggregated_params = disaggregated_params
-
-        # Default to text-based input. This will be overwritten if multimodal
-        # content is found and processed.
-        processed_input = None
-
-        # DECODE mode: Use prefill metadata to skip re-processing multimodal content
-        # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
-        has_prefill_metadata = epd_metadata and (
-            epd_metadata.get("_prefill_prompt")
-            or epd_metadata.get("_epd_processed_prompt")
+        # Setup disaggregated params based on PREFILL/DECODE mode
+        disaggregated_params, ep_disaggregated_params, epd_metadata = (
+            self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
         )
 
-        if (
-            self.disaggregation_mode == DisaggregationMode.DECODE
-            and has_prefill_metadata
-        ):
-            # Use prompt/token_ids from PREFILL, skip image re-processing
-            prefill_prompt = epd_metadata.get("_prefill_prompt") or epd_metadata.get(
-                "_epd_processed_prompt"
-            )
-            prefill_token_ids = epd_metadata.get(
-                "_prefill_prompt_token_ids"
-            ) or epd_metadata.get("_epd_prompt_token_ids")
-
-            # Build input without multimodal data (already in KV cache)
-            # Use the SAME multimodal key that PREFILL used:
-            # - EPD/Embeddings flow: PREFILL used multi_modal_embeddings → DECODE uses multi_modal_embeddings: None
-            # - Simple P→D (image URL): PREFILL used multi_modal_data → DECODE uses multi_modal_data: None
-            # Check which key was used based on metadata source
-            is_epd_flow = epd_metadata.get("_epd_processed_prompt") is not None
-
-            processed_input = {
-                "prompt": prefill_prompt,
-                "prompt_token_ids": prefill_token_ids,
-            }
-            if is_epd_flow:
-                # EPD/Embeddings flow - PREFILL used multi_modal_embeddings
-                processed_input["multi_modal_embeddings"] = None
-            else:
-                # Simple P→D - PREFILL used multi_modal_data
-                processed_input["multi_modal_data"] = None
-        elif self.multimodal_processor:
-            # PREFILL, ENCODE, or DECODE mode - process multimodal content
-            # For DECODE: TRT-LLM needs the SAME input structure as PREFILL
-            # The disaggregated_params.request_type="generation_only" tells TRT-LLM to use KV cache
-            processed_input = await self.multimodal_processor.process_openai_request(
-                request, embeddings, ep_disaggregated_params
-            )
-            if not processed_input:
-                # Fallback to text-only if no multimodal content
-                processed_input = request.get("token_ids")
-        else:
-            # text-only flow
-            processed_input = request.get("token_ids")
+        # Prepare input for generation (handles multimodal/text flows)
+        processed_input = await self._prepare_input_for_generation(
+            request, embeddings, ep_disaggregated_params, epd_metadata
+        )
 
         # Check if there is an error in the publisher error queue
         publishers_error = (

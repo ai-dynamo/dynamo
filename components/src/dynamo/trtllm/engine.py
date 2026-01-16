@@ -56,6 +56,8 @@ class TensorRTLLMEngine:
                 logging.info(
                     f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
                 )
+                # MultimodalEncoder and LLM both inherit from BaseLLM in TRT-LLM,
+                # so storing either in self._llm is valid.
                 self._llm = MultimodalEncoder(
                     model=model,
                     max_batch_size=max_batch_size,
