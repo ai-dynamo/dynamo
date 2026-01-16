@@ -58,6 +58,11 @@ cd <dynamo-source-root>/examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
+When using GAIE the FrontEnd does not choose the workers. The routing is determined in the EPP.
+You must enable the `--direct-route` flag in the FrontEnd cli.
+The pre-selected worker (decode and prefill in case of the disaggregated serving) are passed in the request headers.
+The flag makes sure that the routing respects this selection.
+
 Take a note of or change the DYNAMO_IMAGE in the model deployment file.
 
 Do not forget docker registry secret if needed.
@@ -122,7 +127,6 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 - Set `DYNAMO_BUSY_THRESHOLD` to configure the upper bound on how “full” a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYNAMO_ROUTER_REPLICA_SYNC=true` to enable a background watcher to keep multiple router instances in sync (important if you run more than one KV router per component).
 - By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-dynamo-epp.yaml] if you prefer to route in the round-robin fashion.
 - If using kv-routing:
   - Overwrite the `DYNAMO_KV_BLOCK_SIZE` in your [values-dynamo-epp.yaml](./values-dynamo-epp.yaml) to match your model's block size.The `DYNAMO_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.

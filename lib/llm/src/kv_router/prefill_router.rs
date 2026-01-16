@@ -249,7 +249,8 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let prefill_router = self.prefill_router.get()?;
+        // Ensure prefill router is activated (check for disaggregated mode)
+        let _prefill_router = self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -260,30 +261,16 @@ impl PrefillRouter {
                 "Using pre-selected prefill worker for bootstrap"
             );
             (id, dp_rank)
-        } else if self.router_mode.is_kv_routing() {
-            // KV mode: use find_best_match
-            let kv_router = match prefill_router {
-                InnerPrefillRouter::KvRouter(r) => r,
-                _ => return None,
-            };
-            match async {
-                kv_router
-                    .chooser
-                    .find_best_match(None, &req.token_ids, None, false)
-                    .await
-            }
-            .instrument(tracing::info_span!("kv_find_best_match"))
-            .await
+        } else {
+            // Use shared worker selection logic (update_states=false for peek behavior)
+            match self
+                .query_prefill_worker(&req.token_ids, false)
+                .instrument(tracing::info_span!("query_prefill_worker"))
+                .await
             {
-                Ok((worker, _overlap)) => (worker.worker_id, worker.dp_rank),
+                Ok((worker_id, dp_rank)) => (worker_id, dp_rank),
                 Err(_) => return None,
             }
-        } else {
-            // Non-KV mode: use PushRouter's stateful selection
-            // We use peek_next_worker instead of select_next_worker to avoid double-incrementing the counter
-            // if we fall back to the original path.
-            let worker_id = prefill_router.peek_next_worker()?;
-            (worker_id, 0)
         };
 
         // Get bootstrap info from ModelManager (works for ANY mode)
@@ -446,6 +433,47 @@ impl PrefillRouter {
         // For call_prefill path, routing is handled by the router itself (no direct routing needed)
         // No phase permit needed - we wait for completion before changing phase
         Self::execute_prefill(self.prefill_router.get().cloned(), request, None, None).await
+    }
+
+    /// Query the best prefill worker without executing a request.
+    /// Returns (worker_id, dp_rank).
+    ///
+    /// This is the shared worker selection logic used by both `build_bootstrap_info`
+    /// and `query_route`.
+    pub async fn query_prefill_worker(
+        &self,
+        token_ids: &[u32],
+        update_states: bool,
+    ) -> Result<(u64, u32)> {
+        let prefill_router = self
+            .prefill_router
+            .get()
+            .ok_or_else(|| anyhow::anyhow!(PrefillError::NotActivated))?;
+
+        if self.router_mode.is_kv_routing() {
+            let kv_router = match prefill_router {
+                InnerPrefillRouter::KvRouter(r) => r,
+                _ => anyhow::bail!("Expected KvRouter for KV routing mode"),
+            };
+            let (worker, _overlap) = kv_router
+                .chooser
+                .find_best_match(None, token_ids, None, update_states)
+                .await?;
+            Ok((worker.worker_id, worker.dp_rank))
+        } else {
+            let worker_id = if update_states {
+                prefill_router.select_next_worker()
+            } else {
+                prefill_router.peek_next_worker()
+            }
+            .ok_or_else(|| anyhow::anyhow!("No workers available for prefill"))?;
+            Ok((worker_id, 0))
+        }
+    }
+
+    /// Check if disaggregated mode is currently active (prefill router activated)
+    pub fn is_activated(&self) -> bool {
+        self.prefill_router.get().is_some()
     }
 }
 

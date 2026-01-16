@@ -93,18 +93,22 @@ pub struct RouterConfig {
     /// Threshold for active prefill tokens utilization (literal token count)
     active_prefill_tokens_threshold: Option<u64>,
     enforce_disagg: bool,
+    /// If true, require worker IDs in request. Error if missing instead of using router selection.
+    /// Used for EPP integration where worker selection is done externally.
+    require_worker_ids: bool,
 }
 
 #[pymethods]
 impl RouterConfig {
     #[new]
-    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false))]
+    #[pyo3(signature = (mode, config=None, active_decode_blocks_threshold=None, active_prefill_tokens_threshold=None, enforce_disagg=false, require_worker_ids=false))]
     pub fn new(
         mode: RouterMode,
         config: Option<KvRouterConfig>,
         active_decode_blocks_threshold: Option<f64>,
         active_prefill_tokens_threshold: Option<u64>,
         enforce_disagg: bool,
+        require_worker_ids: bool,
     ) -> Self {
         Self {
             router_mode: mode,
@@ -112,6 +116,7 @@ impl RouterConfig {
             active_decode_blocks_threshold,
             active_prefill_tokens_threshold,
             enforce_disagg,
+            require_worker_ids,
         }
     }
 }
@@ -124,6 +129,7 @@ impl From<RouterConfig> for RsRouterConfig {
             active_decode_blocks_threshold: rc.active_decode_blocks_threshold,
             active_prefill_tokens_threshold: rc.active_prefill_tokens_threshold,
             enforce_disagg: rc.enforce_disagg,
+            require_worker_ids: rc.require_worker_ids,
         }
     }
 }
