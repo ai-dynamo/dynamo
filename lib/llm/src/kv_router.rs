@@ -35,7 +35,7 @@ pub mod subscriber;
 pub mod worker_query;
 
 use indexer::WorkerKvQueryResponse;
-pub use prefill_router::{PrefillRouter, RouteQueryResult};
+pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{

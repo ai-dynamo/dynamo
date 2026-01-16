@@ -372,32 +372,22 @@ use dynamo_runtime::Runtime;
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::kv_router::protocols::WorkerWithDpRank;
-use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouteQueryResult};
+use dynamo_llm::kv_router::{KvRouter, PrefillRouter, RouterConfigOverride};
 use dynamo_runtime::pipeline::RouterMode;
 
 /// Default timeout for bookkeeping operations (30 seconds)
 const BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
 
-/// C-compatible result of a routing query
+/// C-compatible result of a worker query (single worker ID)
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
-pub struct CRouteQueryResult {
-    /// Worker ID for prefill phase (only valid if is_disaggregated is true)
-    pub prefill_worker_id: u64,
-    /// Worker ID for decode phase (always valid)
-    pub decode_worker_id: u64,
-    /// True if disaggregated mode is active (prefill_worker_id is valid)
-    pub is_disaggregated: bool,
-}
-
-impl From<RouteQueryResult> for CRouteQueryResult {
-    fn from(result: RouteQueryResult) -> Self {
-        Self {
-            prefill_worker_id: result.prefill_worker_id,
-            decode_worker_id: result.decode_worker_id,
-            is_disaggregated: result.is_disaggregated,
-        }
-    }
+pub struct CWorkerQueryResult {
+    /// The selected worker ID
+    pub worker_id: u64,
+    /// Data parallel rank (0 if not applicable)
+    pub dp_rank: u32,
+    /// Number of overlapping blocks (for decode queries)
+    pub overlap_blocks: u32,
 }
 
 /// Container holding both routers needed for query routing
@@ -553,19 +543,27 @@ pub unsafe extern "C" fn router_handles_create(
     }
 }
 
-/// Query optimal worker(s) for a request
+/// Query optimal decode worker for a request.
+///
+/// This queries the decode/aggregated KvRouter to find the best worker based on
+/// KV cache overlap and load balancing. Use this for both aggregated mode and
+/// the decode phase of disaggregated mode.
+///
+/// For disaggregated decode, set `for_decode_phase` to true to use overlap_score_weight=0
+/// (since KV cache is being transferred, not reused).
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
 /// - `token_ids` must point to `token_count` valid u32 values
 /// - `out_result` must be a valid pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_query(
+pub unsafe extern "C" fn router_handles_query_decode(
     handle: RouterHandlesPtr,
     token_ids: *const u32,
     token_count: usize,
     update_states: bool,
-    out_result: *mut CRouteQueryResult,
+    for_decode_phase: bool,
+    out_result: *mut CWorkerQueryResult,
 ) -> QueryRouterResult {
     if handle.is_null() || token_ids.is_null() || out_result.is_null() {
         return QueryRouterResult::ErrInvalidParam;
@@ -574,7 +572,69 @@ pub unsafe extern "C" fn router_handles_query(
     let handles = unsafe { &*handle };
     let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
 
-    // Get runtime to execute async query
+    let runtime = match Runtime::from_settings() {
+        Ok(rt) => rt,
+        Err(_) => return QueryRouterResult::ErrQueryFailed,
+    };
+
+    let result = runtime.secondary().block_on(async {
+        // For decode phase in disaggregated mode, use overlap_score_weight=0
+        let config_override = if for_decode_phase {
+            let mut override_cfg = RouterConfigOverride::default();
+            override_cfg.overlap_score_weight = Some(0.0);
+            Some(override_cfg)
+        } else {
+            None
+        };
+
+        handles
+            .decode_router
+            .find_best_match(None, tokens, config_override.as_ref(), update_states)
+            .await
+    });
+
+    match result {
+        Ok((worker, overlap)) => {
+            unsafe {
+                *out_result = CWorkerQueryResult {
+                    worker_id: worker.worker_id,
+                    dp_rank: worker.dp_rank,
+                    overlap_blocks: overlap,
+                }
+            };
+            QueryRouterResult::Ok
+        }
+        Err(e) => {
+            tracing::error!(error = ?e, "Decode query failed");
+            QueryRouterResult::ErrQueryFailed
+        }
+    }
+}
+
+/// Query optimal prefill worker for a request (disaggregated mode only).
+///
+/// This queries the prefill router to find the best prefill worker.
+/// Only call this when `router_handles_is_disaggregated()` returns true.
+///
+/// # Safety
+/// - `handle` must be a valid RouterHandles handle
+/// - `token_ids` must point to `token_count` valid u32 values
+/// - `out_worker_id` must be a valid pointer
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn router_handles_query_prefill(
+    handle: RouterHandlesPtr,
+    token_ids: *const u32,
+    token_count: usize,
+    update_states: bool,
+    out_worker_id: *mut u64,
+) -> QueryRouterResult {
+    if handle.is_null() || token_ids.is_null() || out_worker_id.is_null() {
+        return QueryRouterResult::ErrInvalidParam;
+    }
+
+    let handles = unsafe { &*handle };
+    let tokens = unsafe { std::slice::from_raw_parts(token_ids, token_count) };
+
     let runtime = match Runtime::from_settings() {
         Ok(rt) => rt,
         Err(_) => return QueryRouterResult::ErrQueryFailed,
@@ -583,18 +643,18 @@ pub unsafe extern "C" fn router_handles_query(
     let result = runtime.secondary().block_on(async {
         handles
             .prefill_router
-            .query_worker_ids(&handles.decode_router, tokens, update_states)
+            .query_prefill_worker_id(tokens, update_states)
             .await
     });
 
     match result {
-        Ok(route_result) => {
-            unsafe { *out_result = route_result.into() };
+        Ok(worker_id) => {
+            unsafe { *out_worker_id = worker_id };
             QueryRouterResult::Ok
         }
         Err(e) => {
-            tracing::error!(error = ?e, "Query failed");
-            if e.to_string().contains("enforced") {
+            tracing::error!(error = ?e, "Prefill query failed");
+            if e.to_string().contains("not yet activated") {
                 QueryRouterResult::ErrDisaggEnforced
             } else {
                 QueryRouterResult::ErrQueryFailed

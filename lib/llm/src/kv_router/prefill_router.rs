@@ -44,17 +44,6 @@ pub enum PrefillError {
     NoDisaggregatedParams(String),
 }
 
-/// Result of a routing query
-#[derive(Debug, Clone, Default)]
-pub struct RouteQueryResult {
-    /// Worker ID for prefill phase (only valid if is_disaggregated is true)
-    pub prefill_worker_id: u64,
-    /// Worker ID for decode phase (always valid)
-    pub decode_worker_id: u64,
-    /// True if disaggregated mode is active (prefill_worker_id is valid)
-    pub is_disaggregated: bool,
-}
-
 /// The inner router used by PrefillRouter
 #[derive(Clone)]
 enum InnerPrefillRouter {
@@ -260,7 +249,8 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let prefill_router = self.prefill_router.get()?;
+        // Ensure prefill router is activated before proceeding
+        let _prefill_router = self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
@@ -488,59 +478,31 @@ impl PrefillRouter {
         self.prefill_router.get().is_some()
     }
 
-    /// Query optimal worker IDs without executing a request.
+    /// Query optimal prefill worker ID without executing a request.
     ///
-    /// Returns both prefill and decode worker IDs based on current mode.
+    /// This is a public wrapper around `query_prefill_worker` for C FFI bindings.
+    /// Returns only the prefill worker ID (decode worker should be queried separately
+    /// via KvRouter for proper separation of concerns).
     ///
     /// # Arguments
-    /// * `decode_router` - The decode router (KvRouter) to query for decode worker
     /// * `token_ids` - Token IDs from the tokenized request
     /// * `update_states` - Whether to update router state (set false for query-only)
     ///
     /// # Returns
-    /// * In disaggregated mode: both prefill_worker_id and decode_worker_id
-    /// * In aggregated mode (not activated): decode_worker_id only
-    pub async fn query_worker_ids(
+    /// * Worker ID for the prefill phase
+    ///
+    /// # Errors
+    /// * `PrefillError::NotActivated` if prefill router is not yet activated
+    pub async fn query_prefill_worker_id(
         &self,
-        decode_router: &super::KvRouter,
         token_ids: &[u32],
         update_states: bool,
-    ) -> Result<RouteQueryResult> {
-        let is_disaggregated = self.is_activated();
-
-        if self.enforce_disagg && !is_disaggregated {
+    ) -> Result<u64> {
+        if !self.is_activated() {
             anyhow::bail!(PrefillError::NotActivated);
         }
-
-        if is_disaggregated {
-            // Disaggregated: query prefill worker, then decode with overlap_score_weight=0
-            let (prefill_worker_id, _dp_rank) =
-                self.query_prefill_worker(token_ids, update_states).await?;
-
-            let mut decode_override = super::RouterConfigOverride::default();
-            decode_override.overlap_score_weight = Some(0.0);
-
-            let (decode_worker, _overlap) = decode_router
-                .find_best_match(None, token_ids, Some(&decode_override), update_states)
-                .await?;
-
-            Ok(RouteQueryResult {
-                prefill_worker_id,
-                decode_worker_id: decode_worker.worker_id,
-                is_disaggregated: true,
-            })
-        } else {
-            // Aggregated: query decode router only
-            let (worker, _overlap) = decode_router
-                .find_best_match(None, token_ids, None, update_states)
-                .await?;
-
-            Ok(RouteQueryResult {
-                prefill_worker_id: 0,
-                decode_worker_id: worker.worker_id,
-                is_disaggregated: false,
-            })
-        }
+        let (worker_id, _dp_rank) = self.query_prefill_worker(token_ids, update_states).await?;
+        Ok(worker_id)
     }
 }
 
