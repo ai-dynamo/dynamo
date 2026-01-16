@@ -99,7 +99,7 @@ mod tests {
             "worker-0",
             "worker-99999",
             "deployment-with-hash-suffix-a1b2c3d4e5f6",
-            "fake-name-1-0-worker-nrdfv"
+            "fake-name-1-0-worker-nrdfv",
         ];
 
         for pod_name in &pod_names {
