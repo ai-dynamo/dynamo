@@ -132,4 +132,31 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         type=str,
         help="Model name of deployment (only required for virtual environment)",
     )
+
+    # Power awareness arguments
+    parser.add_argument(
+        "--enable-power-awareness",
+        action="store_true",
+        default=SLAPlannerDefaults.enable_power_awareness,
+        help="Enable power-aware autoscaling",
+    )
+    parser.add_argument(
+        "--total-gpu-power-limit",
+        type=int,
+        default=SLAPlannerDefaults.total_gpu_power_limit,
+        help="Total cluster GPU power budget in watts",
+    )
+    parser.add_argument(
+        "--prefill-engine-gpu-power-limit",
+        type=int,
+        default=SLAPlannerDefaults.prefill_engine_gpu_power_limit,
+        help="Power limit per prefill GPU in watts",
+    )
+    parser.add_argument(
+        "--decode-engine-gpu-power-limit",
+        type=int,
+        default=SLAPlannerDefaults.decode_engine_gpu_power_limit,
+        help="Power limit per decode GPU in watts",
+    )
+
     return parser

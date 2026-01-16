@@ -226,8 +226,8 @@ class Planner:
                     logger.info(
                         f"Started Prometheus metrics server on port {self.prometheus_port}"
                     )
-                except Exception as e:
-                    logger.error(f"Failed to start Prometheus metrics server: {e}")
+                except Exception:
+                    logger.exception("Failed to start Prometheus metrics server")
 
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
@@ -392,8 +392,8 @@ class Planner:
                 f"Predicted load: num_req={next_num_req:.2f}, isl={next_isl:.2f}, osl={next_osl:.2f}"
             )
             return next_num_req, next_isl, next_osl
-        except Exception as e:
-            logger.error(f"Failed to predict load: {e}")
+        except Exception:
+            logger.exception("Failed to predict load")
             return None, None, None
 
     def dryrun_observe_metrics(self, num_req: int, isl_avg: float, osl_avg: float):
@@ -495,7 +495,178 @@ class Planner:
                 f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({self.args.max_gpu_budget}), scaling down to {next_num_p} prefill and {next_num_d} decode replicas"
             )
 
+        # ==========================================
+        # POWER BUDGET ENFORCEMENT (NEW) ✅
+        # ==========================================
+
+        if self.args.enable_power_awareness:
+            # Get current actual power from Prometheus (for logging/observability)
+            try:
+                current_power = self.prometheus_api_client.get_total_cluster_power()
+                logger.debug(f"Current cluster power consumption: {current_power:.1f}W")
+            except Exception as e:
+                logger.warning(
+                    f"Failed to query current power, skipping enforcement: {e}"
+                )
+                return next_num_p, next_num_d
+
+            # Calculate projected power for the NEW configuration
+            requested_prefill_power = (
+                next_num_p
+                * self.args.prefill_engine_num_gpu
+                * self.args.prefill_engine_gpu_power_limit
+            )
+            requested_decode_power = (
+                next_num_d
+                * self.args.decode_engine_num_gpu
+                * self.args.decode_engine_gpu_power_limit
+            )
+            requested_total_power = requested_prefill_power + requested_decode_power
+
+            # CLAMPING LOGIC: If we exceed the budget, scale down
+            if requested_total_power > self.args.total_gpu_power_limit:
+                logger.warning(
+                    f"⚠️ POWER BUDGET EXCEEDED: "
+                    f"Requested {requested_total_power:.1f}W > Budget {self.args.total_gpu_power_limit}W"
+                )
+
+                # Calculate reduction factor to fit within budget
+                reduction_factor = (
+                    self.args.total_gpu_power_limit / requested_total_power
+                )
+
+                # Apply reduction proportionally
+                next_num_p_capped = max(
+                    self.args.min_endpoint, int(next_num_p * reduction_factor)
+                )
+                next_num_d_capped = max(
+                    self.args.min_endpoint, int(next_num_d * reduction_factor)
+                )
+
+                # Re-check to handle rounding errors
+                actual_prefill_power = (
+                    next_num_p_capped
+                    * self.args.prefill_engine_num_gpu
+                    * self.args.prefill_engine_gpu_power_limit
+                )
+                actual_decode_power = (
+                    next_num_d_capped
+                    * self.args.decode_engine_num_gpu
+                    * self.args.decode_engine_gpu_power_limit
+                )
+                actual_total_power = actual_prefill_power + actual_decode_power
+
+                # If still over (due to rounding), reduce decode further
+                if actual_total_power > self.args.total_gpu_power_limit:
+                    remaining_budget = (
+                        self.args.total_gpu_power_limit - actual_prefill_power
+                    )
+                    next_num_d_capped = max(
+                        self.args.min_endpoint,
+                        int(
+                            remaining_budget
+                            / (
+                                self.args.decode_engine_num_gpu
+                                * self.args.decode_engine_gpu_power_limit
+                            )
+                        ),
+                    )
+                    actual_decode_power = (
+                        next_num_d_capped
+                        * self.args.decode_engine_num_gpu
+                        * self.args.decode_engine_gpu_power_limit
+                    )
+                    actual_total_power = actual_prefill_power + actual_decode_power
+
+                logger.warning(
+                    f"✅ Power budget enforced: "
+                    f"prefill={next_num_p}→{next_num_p_capped}, "
+                    f"decode={next_num_d}→{next_num_d_capped}, "
+                    f"power={requested_total_power:.1f}W→{actual_total_power:.1f}W"
+                )
+
+                next_num_p = next_num_p_capped
+                next_num_d = next_num_d_capped
+
+            else:
+                logger.info(
+                    f"✅ Power budget OK: {requested_total_power:.1f}W / {self.args.total_gpu_power_limit}W"
+                )
+
         return next_num_p, next_num_d
+
+    async def _set_pod_power_limit(
+        self, pod_name: str, namespace: str, power_limit: int
+    ):
+        """
+        Helper to patch a single pod's power limit annotation.
+
+        Args:
+            pod_name: Name of the pod
+            namespace: Namespace of the pod
+            power_limit: Power limit in watts
+        """
+        try:
+            patch = {
+                "metadata": {
+                    "annotations": {
+                        "dynamo.nvidia.com/gpu-power-limit": str(power_limit)
+                    }
+                }
+            }
+            # Uses standard K8s API - no exec!
+            self.connector.kube_api.core_api.patch_namespaced_pod(
+                name=pod_name, namespace=namespace, body=patch
+            )
+            logger.debug(
+                f"Set power limit annotation on {namespace}/{pod_name}: {power_limit}W"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to patch pod {namespace}/{pod_name}: {e}")
+
+    async def apply_power_limits(self):
+        """
+        Apply power limit annotations to all active worker pods.
+        Called at the end of the adjustment loop.
+
+        The Power Agent DaemonSet will watch for these annotations
+        and apply the limits via NVML on each node.
+        """
+        if not self.args.enable_power_awareness:
+            return
+
+        try:
+            # Get pod lists for each component type
+            prefill_pods = await self.connector.get_component_pods(
+                SubComponentType.PREFILL, component_name=self.prefill_component_name
+            )
+            decode_pods = await self.connector.get_component_pods(
+                SubComponentType.DECODE, component_name=self.decode_component_name
+            )
+
+            # Apply power limit annotations
+            for pod in prefill_pods:
+                await self._set_pod_power_limit(
+                    pod["name"],
+                    pod["namespace"],
+                    self.args.prefill_engine_gpu_power_limit,
+                )
+
+            for pod in decode_pods:
+                await self._set_pod_power_limit(
+                    pod["name"],
+                    pod["namespace"],
+                    self.args.decode_engine_gpu_power_limit,
+                )
+
+            logger.info(
+                f"Applied power limits: "
+                f"{len(prefill_pods)} prefill @ {self.args.prefill_engine_gpu_power_limit}W, "
+                f"{len(decode_pods)} decode @ {self.args.decode_engine_gpu_power_limit}W"
+            )
+
+        except Exception:
+            logger.exception("Failed to apply power limits")
 
     async def make_adjustments(self):
         # Skip adjustment if no traffic
@@ -539,8 +710,8 @@ class Planner:
                     self.prometheus_metrics.d_correction_factor.set(
                         self.d_correction_factor
                     )
-            except Exception as e:
-                logger.error(f"Failed to correct prediction factors: {e}")
+            except Exception:
+                logger.exception("Failed to correct prediction factors")
                 return
 
         next_num_req, next_isl, next_osl = self.predict_load()
@@ -563,8 +734,8 @@ class Planner:
                 if self.prometheus_port != 0:
                     self.prometheus_metrics.predicted_num_p.set(next_num_p)
                     self.prometheus_metrics.predicted_num_d.set(next_num_d)
-            except Exception as e:
-                logger.error(f"Failed to compute number of replicas: {e}")
+            except Exception:
+                logger.exception("Failed to compute number of replicas")
                 return
 
         if not self.args.no_operation:
@@ -581,6 +752,9 @@ class Planner:
                 ),
             ]
             await self.connector.set_component_replicas(target_replicas, blocking=False)
+
+            # NEW: Apply power limit annotations to pods
+            await self.apply_power_limits()
 
     async def run(self):
         """Main loop for the planner"""

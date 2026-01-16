@@ -30,9 +30,11 @@ examples:
   - 'examples/**'
   - 'benchmarks/**'
   - '.devcontainer/**'
+  - 'components/power_agent/**'
   - 'deploy/discovery/**'
   - 'deploy/inference-gateway/**'
   - 'deploy/observability/**'
+  - 'deploy/power_agent/**'
   - 'deploy/pre-deployment/**'
 
 ignore:

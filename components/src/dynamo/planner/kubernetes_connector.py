@@ -257,6 +257,48 @@ class KubernetesConnector(PlannerConnector):
                 self.graph_deployment_name,
             )
 
+    async def get_component_pods(
+        self, sub_component_type: SubComponentType, component_name: Optional[str] = None
+    ) -> list[dict]:
+        """
+        Get list of pods for a specific component.
+
+        Args:
+            sub_component_type: Component type (SubComponentType.PREFILL or SubComponentType.DECODE)
+            component_name: Optional component name for fallback
+
+        Returns:
+            List of dicts with keys: name, namespace, uid
+        """
+        try:
+            # Get the service to determine the correct label
+            deployment = self.kube_api.get_graph_deployment(self.graph_deployment_name)
+            service = get_service_from_sub_component_type_or_name(
+                deployment, sub_component_type, component_name=component_name
+            )
+
+            # Query pods by component label
+            label_selector = f"nvidia.com/dynamo-component={service.name}"
+
+            pods = self.kube_api.core_api.list_namespaced_pod(
+                namespace=self.kube_api.current_namespace, label_selector=label_selector
+            )
+
+            return [
+                {
+                    "name": pod.metadata.name,
+                    "namespace": pod.metadata.namespace,
+                    "uid": pod.metadata.uid,
+                }
+                for pod in pods.items
+            ]
+
+        except Exception:
+            logger.exception(
+                f"Failed to get pods for component {sub_component_type.value}"
+            )
+            return []
+
 
 if __name__ == "__main__":
     import argparse

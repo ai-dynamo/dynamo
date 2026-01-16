@@ -71,6 +71,12 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     load_prediction_window_size = 50  # predict load using how many recent load samples
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
 
+    # Power awareness settings (default to False for backwards compatibility)
+    enable_power_awareness = False
+    total_gpu_power_limit = 2000  # Watts (must be configured per datacenter!)
+    prefill_engine_gpu_power_limit = 250  # Watts per prefill GPU
+    decode_engine_gpu_power_limit = 250  # Watts per decode GPU
+
 
 class VllmComponentName:
     prefill_worker_k8s_name = "VllmPrefillWorker"
