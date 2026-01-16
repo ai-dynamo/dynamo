@@ -213,6 +213,12 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         Value::from_serialize(&messages_json)
     }
 
+    fn typed_messages(
+        &self,
+    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+        Some(self.inner.messages.as_slice())
+    }
+
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
             None
