@@ -42,22 +42,26 @@ impl SchedulerOutput {
 
     // I am surprised that vLLM's NewRequestData does not include the salt hash.
     // It has almost everything else to compute the block hashes worker side.
+    #[pyo3(signature = (request_id, prompt_token_ids, block_ids, num_computed_tokens, priorities=None))]
     pub fn add_new_request(
         &mut self,
         request_id: String,
         prompt_token_ids: Vec<u32>,
         block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
+        priorities: Option<Vec<u32>>,
     ) {
         self.new_requests.push(NewRequestData {
             request_id,
             prompt_token_ids,
             block_ids,
             num_computed_tokens,
+            priorities,
         });
     }
 
     /// This is called by the leader to update the cached requests
+    #[pyo3(signature = (request_id, resumed_from_preemption, new_token_ids, new_block_ids, num_computed_tokens, priorities=None))]
     pub fn add_cached_request(
         &mut self,
         request_id: String,
@@ -65,6 +69,7 @@ impl SchedulerOutput {
         new_token_ids: Vec<u32>,
         new_block_ids: Vec<BlockId>,
         num_computed_tokens: usize,
+        priorities: Option<Vec<u32>>,
     ) {
         self.cached_requests.push(CachedRequestData {
             request_id,
@@ -72,6 +77,7 @@ impl SchedulerOutput {
             new_token_ids,
             new_block_ids,
             num_computed_tokens,
+            priorities,
         });
     }
 
@@ -99,6 +105,9 @@ pub struct NewRequestData {
     pub prompt_token_ids: Vec<u32>,
     pub block_ids: Vec<BlockId>,
     pub num_computed_tokens: usize,
+    /// Retention priorities for each block (same length as block_ids).
+    /// Used for priority-based offload filtering.
+    pub priorities: Option<Vec<u32>>,
 }
 
 impl std::fmt::Debug for NewRequestData {
@@ -119,6 +128,9 @@ pub struct CachedRequestData {
     pub new_token_ids: Vec<u32>,
     pub new_block_ids: Vec<BlockId>,
     pub num_computed_tokens: usize,
+    /// Retention priorities for each new block (same length as new_block_ids).
+    /// Used for priority-based offload filtering.
+    pub priorities: Option<Vec<u32>>,
 }
 
 impl std::fmt::Debug for CachedRequestData {
