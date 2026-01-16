@@ -416,7 +416,27 @@ pub enum QueryRouterResult {
     ErrDisaggEnforced = 5,
 }
 
+/// Default timeout for waiting for worker discovery (seconds)
+const DISCOVERY_TIMEOUT_SECS: u64 = 30;
+
+/// Default timeout for waiting for prefill workers (seconds)
+const DEFAULT_PREFILL_TIMEOUT_SECS: u32 = 30;
+
 /// Create router handles for query-only routing
+///
+/// This function waits for at least one decode worker to be discovered before returning.
+/// If `wait_for_prefill` is true, it also waits for prefill workers to be discovered
+/// (up to `prefill_timeout_secs`). This is recommended for disaggregated deployments.
+///
+/// # Arguments
+/// - `namespace`: Namespace for the model
+/// - `component`: Component name (defaults to "backend" if NULL or empty)
+/// - `model_name`: Model name for prefill router registration
+/// - `block_size`: KV cache block size
+/// - `enforce_disagg`: If true, disaggregated mode is required
+/// - `wait_for_prefill`: If true, wait for prefill workers before returning
+/// - `prefill_timeout_secs`: How long to wait for prefill workers (0 = use default 30s)
+/// - `out_handle`: Output handle
 ///
 /// # Safety
 /// - All string parameters must be valid null-terminated C strings
@@ -428,6 +448,8 @@ pub unsafe extern "C" fn router_handles_create(
     model_name: *const c_char,
     block_size: u32,
     enforce_disagg: bool,
+    wait_for_prefill: bool,
+    prefill_timeout_secs: u32,
     out_handle: *mut RouterHandlesPtr,
 ) -> QueryRouterResult {
     if namespace.is_null() || model_name.is_null() || out_handle.is_null() {
@@ -473,6 +495,18 @@ pub unsafe extern "C" fn router_handles_create(
                 return Err(QueryRouterResult::ErrInitFailed);
             }
         };
+
+        // Wait for at least one worker to be discovered before proceeding
+        // This ensures the decode router can be created successfully
+        let instance_count = wait_for_discovery_sync(&drt, DISCOVERY_TIMEOUT_SECS).await;
+        if instance_count == 0 {
+            tracing::error!(
+                "Discovery sync failed: no worker instances found after {}s. Is the backend running?",
+                DISCOVERY_TIMEOUT_SECS
+            );
+            return Err(QueryRouterResult::ErrInitFailed);
+        }
+        tracing::info!("Discovery sync complete, {} worker(s) found", instance_count);
 
         let kv_router_config = KvRouterConfig::default();
 
@@ -528,6 +562,51 @@ pub unsafe extern "C" fn router_handles_create(
 
         // Start prefill watcher for dynamic discovery
         spawn_prefill_watcher(drt.clone(), model_manager.clone(), namespace_str.clone());
+
+        // Optionally wait for prefill workers to be discovered
+        if wait_for_prefill {
+            let timeout_secs = if prefill_timeout_secs == 0 {
+                DEFAULT_PREFILL_TIMEOUT_SECS
+            } else {
+                prefill_timeout_secs
+            };
+
+            tracing::info!(
+                timeout_secs = timeout_secs,
+                "Waiting for prefill workers to be discovered..."
+            );
+
+            let start = std::time::Instant::now();
+            let timeout = Duration::from_secs(timeout_secs as u64);
+
+            loop {
+                if prefill_router.is_activated() {
+                    tracing::info!(
+                        elapsed_ms = start.elapsed().as_millis(),
+                        "Prefill router activated successfully"
+                    );
+                    break;
+                }
+
+                if start.elapsed() > timeout {
+                    if enforce_disagg {
+                        tracing::error!(
+                            timeout_secs = timeout_secs,
+                            "Prefill workers not found within timeout and enforce_disagg=true"
+                        );
+                        return Err(QueryRouterResult::ErrInitFailed);
+                    } else {
+                        tracing::warn!(
+                            timeout_secs = timeout_secs,
+                            "Prefill workers not found within timeout, continuing in aggregated mode"
+                        );
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
 
         Ok((prefill_router, decode_router, model_manager, namespace_str))
     });

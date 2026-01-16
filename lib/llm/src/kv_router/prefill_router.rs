@@ -249,7 +249,8 @@ impl PrefillRouter {
         preselected_worker: Option<u64>,
     ) -> Option<(u64, u32, BootstrapInfo)> {
         let endpoint_id = self.endpoint_id.get()?;
-        let prefill_router = self.prefill_router.get()?;
+        // Ensure prefill router is activated (check for disaggregated mode)
+        let _prefill_router = self.prefill_router.get()?;
 
         // Worker selection
         let (worker_id, dp_rank) = if let Some(id) = preselected_worker {
