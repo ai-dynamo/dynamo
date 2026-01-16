@@ -1,0 +1,192 @@
+apiVersion: workloads.x-k8s.io/v1alpha1
+kind: RoleBasedGroup
+metadata:
+  name: dynamo-pd
+spec:
+  roleTemplate:
+    - name: dynamo-common
+      template:
+        spec:
+          volumes:
+            - name: model
+              persistentVolumeClaim:
+                claimName: qwen3-235b
+          containers:
+            - env:
+                - name: ETCD_ENDPOINTS
+                  value: http://etcd:2379
+                - name: NATS_SERVER
+                  value: nats://nats:4222
+                - name: DYNAMO_RP_TIMEOUT
+                  value: "60"
+              image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.7.1
+              name: main
+              volumeMounts:
+                - name: model
+                  mountPath: /models/qwen3-235B
+  roles:
+    - name: frontend
+      replicas: 1
+      templateRef:
+        name: dynamo-common
+      templatePatch:
+        spec:
+          containers:
+            - command:
+                - python
+                - -m
+                - dynamo.frontend
+                - --http-port 8000
+                - --model-path
+                - /models/qwen3-235B/
+                - --model-name
+                - qwen3-32B
+                - --namespace=dynamo
+              name: main
+              ports:
+                - containerPort: 8000
+                  name: http
+                  protocol: TCP
+              readinessProbe:
+                initialDelaySeconds: 30
+                periodSeconds: 30
+                tcpSocket:
+                  port: 8000
+    - name: prefill
+      replicas: 1
+      templateRef:
+        name: dynamo-common
+      templatePatch:
+        spec:
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 100Gi
+          containers:
+            - command:
+                - python3
+                - -m
+                - dynamo.sglang
+                - --model-path
+                - /models/qwen3-235B/
+                - --served-model-name
+                - qwen3-235B
+                - --disaggregation-mode
+                - prefill
+                - --disable-radix-cache
+                - --disaggregation-bootstrap-port
+                - "8991"
+                - --disaggregation-transfer-backend
+                - nixl
+                - --host
+                - "0.0.0.0"
+                - --mem-fraction-static
+                - "0.75"
+                - --tp-size
+                - "8"
+                - --ep-size
+                - "8"
+                - --enable-dp-attention
+                - --dp-size
+                - "8"
+                - --moe-a2a-backend
+                - deepep
+                - --cuda-graph-max-bs
+                - "128"
+                - --chunked-prefill-size
+                - "16000"
+                - --load-balance-method
+                - round_robin
+                - --kv-cache-dtype
+                - fp8_e4m3
+                - --trust-remote-code
+                - --skip-tokenizer-init
+              name: main
+              volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm
+              resources:
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/hca: 1
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/hca: 1
+    - name: decoder
+      replicas: 1
+      workload:
+        apiVersion: leaderworkerset.x-k8s.io/v1
+        kind: LeaderWorkerSet
+      leaderWorkerSet:
+        size: 2
+      templateRef:
+        name: dynamo-common
+      templatePatch:
+        spec:
+          volumes:
+            - name: dshm
+              emptyDir:
+                medium: Memory
+                sizeLimit: 100Gi
+          containers:
+            - command:
+                - python3
+                - -m
+                - dynamo.sglang
+                - --model-path
+                - /models/qwen3-235B/
+                - --served-model-name
+                - qwen3-235B
+                - --disaggregation-mode
+                - decode
+                - --disaggregation-bootstrap-port
+                - "8991"
+                - --disaggregation-transfer-backend
+                - nixl
+                - --disable-radix-cache
+                - --host
+                - "0.0.0.0"
+                - --mem-fraction-static
+                - "0.75"
+                - --tp-size
+                - "16"
+                - --ep-size
+                - "16"
+                - --enable-dp-attention
+                - --dp-size
+                - "16"
+                - --moe-a2a-backend
+                - deepep
+                - --attention-backend
+                - flashinfer
+                - --cuda-graph-max-bs
+                - "32"
+                - --load-balance-method
+                - shortest_queue
+                - --prefill-round-robin-balance
+                - --max-running-requests
+                - "300"
+                - --decode-log-interval
+                - "10"
+                - --kv-cache-dtype
+                - fp8_e4m3
+                - --trust-remote-code
+                - --skip-tokenizer-init
+                - --dist-init-addr
+                - $(LWS_LEADER_ADDRESS):6379
+                - --nnodes
+                - $(LWS_GROUP_SIZE)
+                - --node-rank
+                - $(LWS_WORKER_INDEX)
+              name: main
+              volumeMounts:
+                - mountPath: /dev/shm
+                  name: dshm
+              resources:
+                limits:
+                  nvidia.com/gpu: "8"
+                  rdma/hca: 1
+                requests:
+                  nvidia.com/gpu: "8"
+                  rdma/hca: 1
