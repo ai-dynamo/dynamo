@@ -7,15 +7,17 @@ Production-tested Kubernetes deployment recipes for LLM inference using NVIDIA D
 
 ## Available Recipes
 
-### Feature Comparison Recipe
+### Multi-Feature Recipe
 
-This recipe demonstrates multiple Dynamo features working together, with side-by-side benchmarking:
+This recipe combines multiple Dynamo performance features (disaggregated serving + KV-aware routing):
 
-| Model | Framework | Comparison | GPUs | Features Demonstrated |
-|-------|-----------|------------|------|----------------------|
-| **[Qwen3-32B](qwen3-32b/)** | vLLM | Agg+RoundRobin vs Disagg+KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — includes real-world Mooncake traces and benchmark comparison |
+| Model | Framework | Configuration | GPUs | Features |
+|-------|-----------|---------------|------|----------|
+| **[Qwen3-32B](qwen3-32b/)** | vLLM | Disagg + KV-Router | 16x H200 | **Disaggregated Serving + KV-Aware Routing** — includes benchmark comparison with real-world Mooncake traces |
 
-### Deployment Recipes
+### Aggregated & Disaggregated Recipes
+
+These recipes demonstrate aggregated or disaggregated serving:
 
 | Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes | GAIE |
 |-------|-----------|------|------|------------|------------------|-------|------|
