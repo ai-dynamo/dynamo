@@ -21,6 +21,7 @@ from ..multimodal_utils import (
     MyRequestOutput,
     PatchedTokensPrompt,
     ProcessMixIn,
+    VLLMNativeEncoderRequest,
     vLLMMultimodalRequest,
 )
 
@@ -243,3 +244,140 @@ class PreprocessedHandler(ProcessMixIn):
 
         async for response in self._generate(request, multimodal_inputs, context):
             yield response
+
+
+class ECProcessorHandler(PreprocessedHandler):
+    """
+    Processor handler for ECConnector-based encoder with pre-tokenized input support.
+
+    Inherits from PreprocessedHandler to reuse common pre-tokenized processing logic.
+    Uses ECConnector (vLLM-native encoder) instead of custom RDMA-based encoder.
+    """
+
+    def __init__(
+        self,
+        engine_args: AsyncEngineArgs,
+        encoder_worker_client: Client,
+        pd_worker_client: Client,
+        prompt_template: str = None,
+    ):
+        """
+        Initialize the ECConnector processor.
+
+        Args:
+            engine_args: vLLM engine arguments for model config
+            encoder_worker_client: Client for vLLM-native encoder worker endpoints
+            pd_worker_client: Client for PD worker endpoints (ECConnector consumer)
+            prompt_template: Optional prompt template (for reference, tokenization done by Rust)
+        """
+        # Initialize base class
+        super().__init__(engine_args, encoder_worker_client, pd_worker_client)
+        self.prompt_template = prompt_template
+
+        logger.info(
+            "ECProcessorHandler initialized (inherits PreprocessedHandler, uses ECConnector)"
+        )
+
+    async def _generate(
+        self,
+        raw_request,
+        multimodal_inputs,
+        context,
+    ):
+        """
+        Generate responses using ECConnector encoder.
+
+        Overrides PreprocessedHandler._generate to use VLLMNativeEncoderRequest
+        instead of custom encoder protocol.
+        """
+        # Extract token_ids from request (these contain placeholder tokens like 32000 for <image>)
+        token_ids = raw_request.get("token_ids", [])
+        if not token_ids:
+            raise ValueError("token_ids not found in request")
+
+        logger.info(
+            f"ECProcessor using token_ids (length={len(token_ids)}) with placeholders. "
+            f"Sample: {token_ids[:min(20, len(token_ids))]}"
+        )
+
+        # Check video not supported yet
+        if VIDEO_URL_KEY in multimodal_inputs and multimodal_inputs[VIDEO_URL_KEY]:
+            raise ValueError("Video URL not supported in ECConnector encoder yet")
+
+        request_id = str(uuid.uuid4().hex)
+
+        # Build sampling params from request
+        sampling_params = build_sampling_params(
+            raw_request, self.default_sampling_params
+        )
+
+        # Create multimodal groups for encoder
+        multimodal_groups = []
+        for mm_type, urls in multimodal_inputs.items():
+            for url in urls:
+                multimodal_input = MultiModalInput()
+                if mm_type == IMAGE_URL_KEY:
+                    multimodal_input.image_url = url
+                elif mm_type == VIDEO_URL_KEY:
+                    multimodal_input.video_url = url
+                multimodal_groups.append(
+                    MultiModalGroup(multimodal_input=multimodal_input)
+                )
+
+        logger.info(
+            f"[{request_id}] Encoding {len(multimodal_groups)} multimodal item(s) "
+            f"via vLLM-native encoder (ECConnector)..."
+        )
+
+        # Send to vLLM-native encoder using VLLMNativeEncoderRequest
+        # Pass token_ids which already contain placeholder tokens (e.g., 32000 for <image> in LLaVA)
+        # The encoder worker will use TokensPrompt so vLLM can match placeholder token IDs
+        try:
+            encoder_request = VLLMNativeEncoderRequest(
+                request_id=request_id,
+                token_ids=token_ids,  # Pass pre-tokenized input with placeholder tokens
+                multimodal_inputs=multimodal_groups,
+            )
+
+            request_json = encoder_request.model_dump_json()
+            response_stream = await self.encode_worker_client.round_robin(request_json)
+
+            # Consume encoder responses (embeddings written to ECConnector cache)
+            async for chunk in response_stream:
+                logger.debug(
+                    f"[{request_id}] Received encoder response (embeddings cached)"
+                )
+
+            logger.info(f"[{request_id}] Encoder completed successfully for all items")
+
+        except Exception as e:
+            logger.error(f"[{request_id}] Encoder processing failed: {e}")
+            raise
+
+        # Create worker request with pre-tokenized prompt and ALL multimodal inputs
+        worker_request = vLLMMultimodalRequest(
+            engine_prompt=PatchedTokensPrompt(
+                prompt_token_ids=raw_request["token_ids"]  # Pre-tokenized by Rust!
+            ),
+            sampling_params=sampling_params,
+            request_id=request_id,
+            multimodal_inputs=multimodal_groups,  # ALL images at once
+        )
+
+        logger.info(
+            f"[{request_id}] Sending request with {len(multimodal_groups)} "
+            f"multimodal item(s) to PD worker (ECConnector consumer)..."
+        )
+
+        # Send single request to PD worker with ALL images
+        response_generator = await self.pd_worker_client.round_robin(
+            worker_request.model_dump_json(), context=context
+        )
+
+        # Stream responses back to client (reuse base class method)
+        async for output in self._generate_responses(response_generator):
+            yield output
+
+        logger.info(
+            f"[{request_id}] Completed processing all {len(multimodal_groups)} item(s)"
+        )

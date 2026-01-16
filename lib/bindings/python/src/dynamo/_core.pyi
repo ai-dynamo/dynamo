@@ -527,20 +527,6 @@ class OAIChatPreprocessor:
         """
         ...
 
-class Backend:
-    """
-    LLM Backend engine manages resources and concurrency for executing inference
-    requests in LLM engines (trtllm, vllm, sglang etc)
-    """
-
-    ...
-
-    async def start(self, handler: RequestHandler) -> None:
-        """
-        Start the backend engine and requests to the downstream LLM engine
-        """
-        ...
-
 class OverlapScores:
     """
     A collection of prefix matching scores of workers for a given token ids.
@@ -1655,7 +1641,6 @@ class VirtualConnectorClient:
         ...
 
 __all__ = [
-    "Backend",
     "Client",
     "Component",
     "Context",
