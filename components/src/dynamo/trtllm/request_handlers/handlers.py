@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
+from typing import Optional
+
+from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo._core import Context
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -57,25 +60,32 @@ class EncodeHandler(HandlerBase):
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
+        # Initialize to None by default to avoid AttributeError if multimodal_processor is not set
+        self.model_dir = None
+        self.model_type = None
+        self.tokenizer = None
+        if self.multimodal_processor:
+            self.model_dir = self.multimodal_processor.model_dir
+            self.model_type = self.multimodal_processor.model_type
+            self.tokenizer = self.multimodal_processor.tokenizer
 
     async def generate(self, request: dict, context: Context):
         logging.debug(f"New Request ID: {context.id()}")
-        if self.connector:
-            # Use helper method to process embedding request
-            async for response in EncodeHelper.process_embedding_request(
-                request, self.multimodal_processor, self.connector
-            ):
-                yield response
-            return
-        else:
-            logging.error("encode handler: no Dynamo NIXL connector found")
-            raise RuntimeError("encode handler: no Dynamo NIXL connector found")
+        if self.multimodal_processor is None:
+            logging.error("encode handler: no multimodal_processor configured")
+            raise RuntimeError("encode handler: no multimodal_processor configured")
 
-        if not request.get("streaming", False):
-            yield request
-            return
-
-        yield request
+        async for response in EncodeHelper.process_encode_request(
+            request,
+            self.multimodal_processor,
+            self.connector,
+            self.tokenizer,
+            self.model_dir,
+            self.model_type,
+            self.engine,
+        ):
+            yield response
+        return
 
 
 class PrefillHandler(HandlerBase):
@@ -86,7 +96,39 @@ class PrefillHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
+    async def remote_encode_full_epd(self, request: dict):
+        """
+        Call encode worker for full EPD flow and unpack the response.
+
+        Args:
+            request: Request dict
+
+        Returns:
+            Encoder's DisaggregatedParams to be used by the prefill worker
+        """
+        encode_response = None
+        async for res in await self.encode_client.round_robin(request):
+            encode_response = res.data()
+            break
+
+        if not encode_response:
+            raise RuntimeError("Did not receive a response from the encode worker.")
+
+        ep_disaggregated_params = self._unpack_full_epd_response(
+            encode_response, request
+        )
+        return ep_disaggregated_params
+
     async def remote_encode_with_nixl(self, request: dict):
+        """
+        Call encode worker for NIXL flow to load embeddings and unpack the response.
+
+        Args:
+            request: Request dict
+
+        Returns:
+            Encoder's embeddings tensor to be used by the prefill worker
+        """
         # Get response with shape info and readable metadata
         encode_response = None
         async for res in await self.encode_client.round_robin(request):
@@ -101,6 +143,43 @@ class PrefillHandler(HandlerBase):
             encode_response, self.connector
         )
 
+    def _unpack_full_epd_response(
+        self, encode_response: dict, request: dict
+    ) -> Optional[DisaggregatedParams]:
+        """
+        Unpack encode worker response from full EPD flow.
+
+        Extracts DisaggregatedParams and stores EPD metadata in the request
+        for downstream processing (multimodal_processor, decode worker).
+
+        Args:
+            encode_response: Response dict from encode worker
+            request: Request dict to store metadata in (modified in-place)
+
+        Returns:
+            DisaggregatedParams if present in response, None otherwise
+        """
+        if "ep_disaggregated_params" not in encode_response:
+            return None
+
+        params_dict = encode_response["ep_disaggregated_params"]
+        if params_dict is None:
+            return None
+
+        # Reconstruct DisaggregatedParams object from dict
+        ep_disaggregated_params = DisaggregatedParams(**params_dict)
+        ep_disaggregated_params.request_type = "context_only"
+
+        # Store processed prompt from encoder (includes <image> tokens)
+        if "processed_prompt" in encode_response:
+            request["_epd_processed_prompt"] = encode_response["processed_prompt"]
+
+        # Store prompt_token_ids from encoder for decode worker
+        if "prompt_token_ids" in encode_response:
+            request["_epd_prompt_token_ids"] = encode_response["prompt_token_ids"]
+
+        return ep_disaggregated_params
+
     async def generate(self, request: dict, context: Context):
         """
         Prefill worker: process prompt and return disaggregated_params.
@@ -109,25 +188,42 @@ class PrefillHandler(HandlerBase):
         logging.debug(f"Prefill Request ID: {context.id()}")
         logging.debug(f"PrefillHandler.generate received request: {request}")
         embeddings_tensor = None
+        ep_disaggregated_params = None
 
         if self.multimodal_processor:
             # Extract messages from extra_args (set by Rust preprocessor) or fall back to direct field
             messages = request.get("extra_args", {}).get(
                 "messages", request.get("messages", [])
             )
-            _, _, embedding_paths = self.multimodal_processor.extract_prompt_and_media(
-                messages
-            )
+            (
+                _,
+                image_urls,
+                embedding_paths,
+            ) = self.multimodal_processor.extract_prompt_and_media(messages)
+            # Handle embedding paths (NIXL transfer of pre-computed embeddings)
             if embedding_paths:
                 if self.encode_client and self.connector:
-                    logging.debug(
-                        "PrefillHandler calling Encode Worker via remote_encode_with_nixl"
-                    )
+                    logging.info(f"PrefillHandler: embedding_paths={embedding_paths}")
                     embeddings_tensor = await self.remote_encode_with_nixl(request)
+                else:
+                    # We can still handle embedding_paths without NIXL:
+                    # `MultimodalRequestProcessor.process_openai_request` will load the embeddings
+                    # locally in the prefill worker as a fallback. The encode-worker+NIXL path is
+                    # useful when you want a dedicated I/O stage and/or explicit RDMA transfer.
+                    logging.info(
+                        "PrefillHandler: no encode_client/connector; falling back to local embedding load"
+                    )
 
-        # Generate prefill response locally and return disaggregated_params
+            # Handle image URLs (full E-PD flow with MultimodalEncoder)
+            elif image_urls:
+                if self.encode_client:
+                    ep_disaggregated_params = await self.remote_encode_full_epd(request)
+
+        # Normal flow: Generate the prefill response locally with embeddings
         response_count = 0
-        async for res in self.generate_locally(request, context, embeddings_tensor):
+        async for res in self.generate_locally(
+            request, context, embeddings_tensor, ep_disaggregated_params
+        ):
             response_count += 1
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
