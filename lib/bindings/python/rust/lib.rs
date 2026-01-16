@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::backend::Backend;
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::pipeline::{Operator, SegmentSource, ServiceBackend, Source};
 use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
@@ -335,11 +337,12 @@ fn register_llm<'p>(
             }
 
             // Register the Model Deployment Card via discovery interface
-            let discovery = endpoint.inner.drt().discovery();
+            let inner = &endpoint.inner;
+            let discovery = inner.drt().discovery();
             let spec = rs::discovery::DiscoverySpec::from_model(
-                endpoint.inner.component().namespace().name().to_string(),
-                endpoint.inner.component().name().to_string(),
-                endpoint.inner.name().to_string(),
+                inner.component().namespace().name().to_string(),
+                inner.component().name().to_string(),
+                inner.name().to_string(),
                 &card,
             )
             .map_err(to_pyerr)?;
@@ -377,7 +380,7 @@ fn register_llm<'p>(
             .media_fetcher(media_fetcher.map(|m| m.inner));
 
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        local_model
+        let card = local_model
             .attach(
                 &endpoint.inner,
                 model_type_obj,
@@ -386,6 +389,9 @@ fn register_llm<'p>(
             )
             .await
             .map_err(to_pyerr)?;
+
+        // When we serve_endpoint we will need the tokenizer, so stash the model card
+        *endpoint.model_card.lock() = Some(card);
 
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);
@@ -481,6 +487,7 @@ struct Component {
 struct Endpoint {
     inner: rs::component::Endpoint,
     event_loop: PyObject,
+    model_card: Arc<parking_lot::Mutex<Option<llm_rs::model_card::ModelDeploymentCard>>>,
 }
 
 #[pyclass]
@@ -757,6 +764,7 @@ impl Component {
         Ok(Endpoint {
             inner,
             event_loop: self.event_loop.clone(),
+            model_card: Arc::new(parking_lot::Mutex::new(None)),
         })
     }
 
@@ -782,7 +790,30 @@ impl Endpoint {
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+
+        let ingress = match &self.model_card.lock().take() {
+            Some(card) => {
+                // JSON in and out, to communicate with Python
+                let json_in_out = SegmentSource::<
+                    SingleIn<serde_json::Value>,
+                    ManyOut<RsAnnotated<serde_json::Value>>,
+                >::new();
+                let backend = Backend::from_mdc(card).into_operator();
+
+                let service_backend = ServiceBackend::from_engine(engine.clone());
+                let pipeline = json_in_out
+                    .link(backend.forward_edge())
+                    .map_err(to_pyerr)?
+                    .link(service_backend)
+                    .map_err(to_pyerr)?
+                    .link(backend.backward_edge())
+                    .map_err(to_pyerr)?
+                    .link(json_in_out)
+                    .map_err(to_pyerr)?;
+                JsonServerStreamingIngress::for_pipeline(pipeline).map_err(to_pyerr)?
+            }
+            None => JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?,
+        };
 
         // Convert Python dict to serde_json::Value if provided and validate it's an object
         let health_payload_json = health_check_payload
