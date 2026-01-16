@@ -19,6 +19,7 @@ import logging
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -37,6 +38,16 @@ from .common import TestDeterminism as BaseTestDeterminism
 def _check_command_available(command: str) -> bool:
     """Check if a command is available in PATH."""
     return shutil.which(command) is not None
+
+
+def _find_free_port() -> int:
+    """Find a free port by binding to port 0 and letting the OS assign one."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
 
 
 HAS_VLLM_BENCH = _check_command_available("vllm")
@@ -64,7 +75,13 @@ class LLMServerManager:
         server_type: Optional[str] = ServerType.vllm,
     ):
         self.server_type = server_type
-        self.port = port or int(os.environ.get("KVBM_SERVER_PORT", "8000"))
+        # Use provided port, env var, or find a free port to avoid conflicts
+        if port is not None:
+            self.port = port
+        elif os.environ.get("KVBM_SERVER_PORT"):
+            self.port = int(os.environ["KVBM_SERVER_PORT"])
+        else:
+            self.port = _find_free_port()
         self.base_url = base_url or f"http://localhost:{self.port}"
         self.process: Optional[subprocess.Popen] = None
         self.cpu_cache_blocks = cpu_cache_blocks
