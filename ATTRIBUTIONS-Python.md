@@ -79551,3 +79551,599 @@ USE OR OTHER DEALINGS IN THE SOFTWARE.
   - `Source`: https://github.com/jaraco/zipp
 
 
+
+
+## nvidia-nvtx (13.0.39)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `LICENSE`:
+```
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+   For the full license text, see: http://www.apache.org/licenses/LICENSE-2.0
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nixl-cu13 (0.8.0)
+
+### Licenses
+License: `Apache-2.0`
+
+  - `LICENSE`:
+```
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+   For the full license text, see: http://www.apache.org/licenses/LICENSE-2.0
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-nccl-cu13 (2.27.7)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-nvshmem-cu13 (3.3.24)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cudnn-cu13 (9.13.0.50)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cublas (13.0.0.19)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cuda-cupti (13.0.48)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cuda-nvrtc (13.0.48)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cuda-runtime (13.0.48)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cufft (12.0.0.15)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cufile (1.15.0.42)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-curand (10.4.0.35)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cusolver (12.0.3.29)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cusparse (12.6.2.49)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-nvjitlink (13.0.39)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## nvidia-cusparselt-cu13 (0.8.0)
+
+### Licenses
+License: `LicenseRef-NVIDIA-Proprietary`
+
+  - `LICENSE`:
+```
+LICENSE AGREEMENT FOR NVIDIA SOFTWARE DEVELOPMENT KITS
+
+This license agreement, including exhibits attached ("Agreement") is a legal agreement between you and NVIDIA Corporation ("NVIDIA") and governs your use of a NVIDIA software development kit ("SDK").
+
+Each SDK has its own set of software and materials, but here is a description of the types of items that may be included in a SDK: source code, header files, APIs, data sets and assets (examples include images, textures, models, scenes, videos, native API input/output files), binary software, sample code, libraries, utility programs, programming code and documentation.
+
+This Agreement can be accepted only by an adult of legal age of majority in the country in which the SDK is used.
+
+If you are entering into this Agreement on behalf of a company or other legal entity, you represent that you have the legal authority to bind the entity to this Agreement, in which case "you" will mean the entity you represent.
+
+If you don't have the required age or authority to accept this Agreement, or if you don't accept all the terms and conditions of this Agreement, do not download, install or use the SDK.
+
+You agree to use the SDK only for purposes that are permitted by (a) this Agreement, and (b) any applicable law, regulation or generally accepted practices or guidelines in the relevant jurisdictions.
+
+For the full license terms, please see: https://docs.nvidia.com/cuda/eula/index.html
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## build (1.4.0)
+
+### Licenses
+License: `MIT`
+
+  - `LICENSE`:
+```
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## pyproject-hooks (1.2.0)
+
+### Licenses
+License: `MIT`
+
+  - `LICENSE`:
+```
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## setuptools-scm (9.2.2)
+
+### Licenses
+License: `MIT`
+
+  - `LICENSE`:
+```
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
+
+
+## wheel (0.45.1)
+
+### Licenses
+License: `MIT`
+
+  - `LICENSE`:
+```
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### URLs
+  - `Homepage`: https://developer.nvidia.com/cuda-zone
+
