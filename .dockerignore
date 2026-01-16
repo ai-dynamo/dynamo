@@ -26,6 +26,14 @@
 **/*.so
 **/*.abi3.so
 
+# Python build artifacts
+**/*.egg-info/
+**/dist/
+**/build/
+**/*.eggs/
+**/.eggs/
+**/wheels/
+
 # Build logs and debug artifacts
 **/check_fingerprint.log
 **/metadata_debug.log
@@ -60,11 +68,36 @@
 
 # Docker and build
 .dockerignore
-**/target/*
+**/target/
+target/
 container/Dockerfile*
+
+# Rust build artifacts
+**/incremental/
+**/*.rmeta
+**/*.rlib
+**/*.d
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.*.sw?
+
+# OS files
+.DS_Store
+Thumbs.db
 
 # Virtual environments
 .venv
 .venv-docs
 **/.venv
 **/venv
+
+# Test artifacts
+**/.coverage
+**/htmlcov/
+**/.tox/
+**/.nox/

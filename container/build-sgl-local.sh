@@ -201,9 +201,10 @@ CACHE_FROM=""
 CACHE_TO=""
 
 # Only use cache if --no-cache is not set
+# Using mode=min (default) instead of mode=max to only cache final image layers (much faster export)
 if [[ -z "$NO_CACHE" ]]; then
     CACHE_FROM="--cache-from type=registry,ref=${CACHE_IMAGE}"
-    CACHE_TO="--cache-to type=registry,ref=${CACHE_IMAGE},mode=max"
+    CACHE_TO="--cache-to type=registry,ref=${CACHE_IMAGE}"
 fi
 
 # Build the image
@@ -248,7 +249,6 @@ fi
 
 if [[ "$PUSH" == "true" ]]; then
     # Use buildx for pushing with cache support
-    # Note: --load and --push can't be used together, so we push then pull
     docker buildx build \
         --progress=plain \
         -f "${SCRIPT_DIR}/Dockerfile.sglang-local" \
@@ -263,12 +263,8 @@ if [[ "$PUSH" == "true" ]]; then
         --push \
         "${EXTRA_ARGS[@]}" \
         .
-    # Pull the image locally with the local tag
-    docker pull "${PUSH_TAG}"
-    docker tag "${PUSH_TAG}" "${TAG}"
     echo ""
-    echo "Build complete! Image tagged as: ${TAG}"
-    echo "Pushed to registry as: ${PUSH_TAG}"
+    echo "Build complete! Pushed to registry as: ${PUSH_TAG}"
 else
     # Use regular docker build for local builds
     docker build \
