@@ -23,9 +23,8 @@ enable_chunked_prefill: true
 # Overlap scheduler not currently supported in prefill only workers.
 disable_overlap_scheduler: true
 
-kv_cache_config:
-  free_gpu_memory_fraction: 0.30
-  enable_block_reuse: false
+# Note: kv_cache_config is not needed for encode workers since MultimodalEncoder
+# only runs vision encoder + projector and doesn't need KV cache memory.
 
 cache_transceiver_config:
   backend: DEFAULT
