@@ -649,7 +649,10 @@ class TestDeterminism:
             pytest.skip(f"Spanish prompt not found at {spanish_prompt_path}")
 
         with open(spanish_prompt_path, "r", encoding="utf-8") as f:
-            prompt = f.read().strip()
+            # Strip SPDX license header lines (start with #) from prompt files
+            lines = f.readlines()
+            content_lines = [line for line in lines if not line.startswith("#")]
+            prompt = "".join(content_lines).strip()
 
         print(f"Loaded Spanish prompt: {len(prompt)} chars")
         print(f"Preview: {prompt[:100]}...")

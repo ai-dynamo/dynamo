@@ -439,7 +439,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.xfail(
         reason="Known issue, fixed in PR: https://github.com/ai-dynamo/dynamo/pull/5475"
     )
-    def test_spanish_prompt_determinism_under_load(
+    def test_concurrent_determinism_under_load(
         self, tester, llm_server, runtime_services
     ):
         """Test Spanish prompt determinism under high concurrency load.
@@ -448,7 +448,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
         """
         # Get the Spanish prompt path relative to this test file
         spanish_prompt_path = Path(
-            os.path.join(os.path.dirname(__file__), "spanish-prompt.txt")
+            os.path.join(os.path.dirname(__file__), "es_prompt.txt")
         ).absolute()
 
         # Call the base class implementation
