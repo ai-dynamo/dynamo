@@ -93,6 +93,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "8192",
             "--max-num-tokens",
             "8192",
+            "--free-gpu-memory-fraction",
+            "0.15",  # avoid validation error on TRT-LLM available memory checks
             "--migration-limit",
             str(migration_limit),
         ]
