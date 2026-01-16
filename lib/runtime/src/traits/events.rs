@@ -1,6 +1,15 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+//! Legacy event publishing and subscribing traits.
+//!
+//! **DEPRECATED**: These traits are coupled to NATS and will be removed in next PRs.
+//! Use the new generic event plane instead:
+//!
+//! ```ignore
+//! use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventPublisher, GenericEventSubscriber};
+//! ```
+
 use std::fmt::Debug;
 
 use anyhow::Result;
@@ -15,6 +24,9 @@ use serde::{Deserialize, Serialize};
 /// An [EventPublisher] is an object that can publish events.
 ///
 /// Each implementation of [EventPublisher] will define the root subject.
+///
+/// **DEPRECATED**: This trait is coupled to NATS. Use [`crate::transports::event_plane::GenericEventPublisher`] instead.
+#[deprecated(note = "Use transports::event_plane::GenericEventPublisher instead")]
 #[async_trait]
 pub trait EventPublisher {
     /// The base subject used for this implementation of the [EventPublisher].
@@ -48,6 +60,10 @@ pub trait EventPublisher {
 /// An [EventSubscriber] is an object that can subscribe to events.
 ///
 /// This trait provides methods to subscribe to events published on specific subjects.
+///
+/// **DEPRECATED**: This trait is coupled to NATS (returns `async_nats::Subscriber`).
+/// Use [`crate::transports::event_plane::GenericEventSubscriber`] instead.
+#[deprecated(note = "Use transports::event_plane::GenericEventSubscriber instead")]
 #[async_trait]
 pub trait EventSubscriber {
     /// Subscribe to events with the given event name.

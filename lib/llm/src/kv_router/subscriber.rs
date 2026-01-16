@@ -9,7 +9,7 @@ use dynamo_runtime::{
     config::environment_names::nats as env_nats,
     discovery::{DiscoveryEvent, DiscoveryQuery},
     prelude::*,
-    traits::events::{EventPublisher, EventSubscriber},
+    transports::event_plane::{EventPlane, GenericEventSubscriber},
     transports::nats::{NatsQueue, Slug},
 };
 use futures::StreamExt;
@@ -463,7 +463,12 @@ pub async fn start_kv_router_background(
     router_reset_states: bool,
 ) -> Result<()> {
     // Set up NATS connections
-    let stream_name = Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
+    let event_plane_subject = format!(
+        "namespace.{}.component.{}",
+        component.namespace().name(),
+        component.name()
+    );
+    let stream_name = Slug::slugify(&format!("{}.{}", event_plane_subject, KV_EVENT_SUBJECT))
         .to_string()
         .replace("_", "-");
     let nats_server = std::env::var(env_nats::NATS_SERVER)
@@ -485,7 +490,12 @@ pub async fn start_kv_router_background(
     let nats_client = client_options.connect().await?;
 
     // Create bucket name for snapshots/state
-    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", component.subject()))
+    let event_plane_subject = format!(
+        "namespace.{}.component.{}",
+        component.namespace().name(),
+        component.name()
+    );
+    let bucket_name = Slug::slugify(&format!("{}-{RADIX_STATE_BUCKET}", event_plane_subject))
         .to_string()
         .replace("_", "-");
 
@@ -746,9 +756,12 @@ pub async fn start_kv_router_background_nats_core(
     cancellation_token: CancellationToken,
     worker_query_client: WorkerQueryClient,
 ) -> Result<()> {
-    // Subscribe to KV events using NATS Core
-    let mut subscriber = component.subscribe(KV_EVENT_SUBJECT).await?;
-    let kv_event_subject = format!("{}.{}", component.subject(), KV_EVENT_SUBJECT);
+    // Subscribe to KV events using NATS Core via EventPlane
+    let event_plane = EventPlane::for_component(&component);
+    let mut subscriber = event_plane
+        .subscribe_typed::<RouterEvent>(KV_EVENT_SUBJECT)
+        .await?;
+    let kv_event_subject = format!("{}.{}", event_plane.subject_prefix(), KV_EVENT_SUBJECT);
 
     tracing::info!(
         subject = %kv_event_subject,
@@ -822,17 +835,24 @@ pub async fn start_kv_router_background_nats_core(
                 }
 
                 // Handle event consumption from NATS Core subscription
-                Some(msg) = subscriber.next() => {
-                    let event: RouterEvent = match serde_json::from_slice(&msg.payload) {
-                        Ok(event) => event,
+                Some(result) = subscriber.next() => {
+                    let (envelope, event) = match result {
+                        Ok((envelope, event)) => (envelope, event),
                         Err(e) => {
-                            tracing::warn!("Failed to deserialize RouterEvent from NATS Core: {e:?}");
+                            tracing::warn!("Failed to receive RouterEvent from NATS Core: {e:?}");
                             continue;
                         }
                     };
 
                     let worker_id = event.worker_id;
                     let event_id = event.event.event_id;
+
+                    // Use envelope metadata for additional debugging
+                    tracing::trace!(
+                        "Received event from publisher {} (seq {})",
+                        envelope.publisher_id,
+                        envelope.sequence
+                    );
 
                     // Gap detection: check if event ID is monotonically increasing per worker
                     // Note: event_id <= last_id is duplicate/out-of-order, apply anyway (idempotent)

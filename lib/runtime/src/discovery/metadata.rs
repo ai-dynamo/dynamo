@@ -36,6 +36,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot register non-endpoint instance as endpoint")
             }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as endpoint")
+            }
         }
     }
 
@@ -48,6 +51,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot register non-model-card instance as model card")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot register EventChannel instance as model card")
             }
         }
     }
@@ -62,6 +68,9 @@ impl DiscoveryMetadata {
             DiscoveryInstanceId::Model(_) => {
                 anyhow::bail!("Cannot unregister non-endpoint instance as endpoint")
             }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as endpoint")
+            }
         }
     }
 
@@ -74,6 +83,9 @@ impl DiscoveryMetadata {
             }
             DiscoveryInstanceId::Endpoint(_) => {
                 anyhow::bail!("Cannot unregister non-model-card instance as model card")
+            }
+            DiscoveryInstanceId::EventChannel(_) => {
+                anyhow::bail!("Cannot unregister EventChannel instance as model card")
             }
         }
     }
@@ -109,6 +121,11 @@ impl DiscoveryMetadata {
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
             | DiscoveryQuery::EndpointModels { .. } => self.get_all_model_cards(),
+
+            // EventChannel queries return empty for now - metadata doesn't track event channels
+            DiscoveryQuery::AllEventChannels
+            | DiscoveryQuery::NamespacedEventChannels { .. }
+            | DiscoveryQuery::ComponentEventChannels { .. } => Vec::new(),
         };
 
         filter_instances(all_instances, query)
@@ -202,6 +219,35 @@ fn filter_instances(
                     endpoint: ep,
                     ..
                 } => ns == namespace && comp == component && ep == endpoint,
+                _ => false,
+            })
+            .collect(),
+
+        // EventChannel queries - filter event channel instances
+        DiscoveryQuery::AllEventChannels => instances
+            .into_iter()
+            .filter(|inst| matches!(inst, DiscoveryInstance::EventChannel { .. }))
+            .collect(),
+
+        DiscoveryQuery::NamespacedEventChannels { namespace } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::EventChannel { namespace: ns, .. } => ns == namespace,
+                _ => false,
+            })
+            .collect(),
+
+        DiscoveryQuery::ComponentEventChannels {
+            namespace,
+            component,
+        } => instances
+            .into_iter()
+            .filter(|inst| match inst {
+                DiscoveryInstance::EventChannel {
+                    namespace: ns,
+                    component: comp,
+                    ..
+                } => ns == namespace && comp == component,
                 _ => false,
             })
             .collect(),

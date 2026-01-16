@@ -132,6 +132,20 @@ impl Discovery for KubeDiscoveryClient {
                 );
                 metadata.register_model_card(instance.clone())?;
             }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                ..
+            } => {
+                tracing::info!(
+                    "Registering event channel: namespace={}, component={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    instance_id
+                );
+                // EventChannel registration is not persisted to Kubernetes CR for now
+                // This can be expanded in next PRs
+            }
         }
 
         // Build and apply the CR with the updated metadata
@@ -188,6 +202,20 @@ impl Discovery for KubeDiscoveryClient {
                     instance_id
                 );
                 metadata.unregister_model_card(&instance)?;
+            }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                ..
+            } => {
+                tracing::info!(
+                    "Unregistering event channel: namespace={}, component={}, instance_id={:x}",
+                    namespace,
+                    component,
+                    instance_id
+                );
+                // EventChannel unregistration is not persisted to Kubernetes CR for now
+                // This can be expanded in next PRs to store in metadata
             }
         }
 

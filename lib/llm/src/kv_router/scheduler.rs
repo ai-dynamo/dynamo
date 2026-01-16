@@ -6,7 +6,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::EventPublisher;
+use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventPublisher};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -160,7 +160,7 @@ impl KvScheduler {
         let workers_scheduler = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
-        let ns_clone = component.namespace().clone();
+        let namespace_event_plane = EventPlane::for_namespace(component.namespace());
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -206,7 +206,10 @@ impl KvScheduler {
                             isl_blocks: selection.required_blocks as usize,
                             overlap_blocks: selection.overlap_blocks,
                         };
-                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                        if let Err(e) = namespace_event_plane
+                            .publish(KV_HIT_RATE_SUBJECT, &event)
+                            .await
+                        {
                             tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                         }
 

@@ -23,6 +23,19 @@ pub mod utils;
 use crate::component::TransportType;
 pub use utils::watch_and_extract_field;
 
+/// Transport type for event plane channels.
+/// Kept separate from TransportType (request plane) to distinguish event semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventTransport {
+    /// ZMQ pub/sub - "host:port" format
+    /// This will be implemented in next PRs
+    /// Zmq(String) -- not implemented yet
+    ///
+    /// NATS Core pub/sub - subject prefix for the channel
+    Nats(String),
+}
+
 /// Query key for prefix-based discovery queries
 /// Supports hierarchical queries from all endpoints down to specific endpoints
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,6 +70,17 @@ pub enum DiscoveryQuery {
         component: String,
         endpoint: String,
     },
+    /// Query all event channels in the system
+    AllEventChannels,
+    /// Query all event channels in a specific namespace
+    NamespacedEventChannels {
+        namespace: String,
+    },
+    /// Query all event channels for a namespace/component
+    ComponentEventChannels {
+        namespace: String,
+        component: String,
+    },
 }
 
 /// Specification for registering objects in the discovery plane
@@ -82,6 +106,14 @@ pub enum DiscoverySpec {
         /// Optional suffix appended after instance_id in the key path (e.g., for LoRA adapters)
         /// Key format: {namespace}/{component}/{endpoint}/{instance_id}[/{model_suffix}]
         model_suffix: Option<String>,
+    },
+    /// Event plane channel specification
+    /// Used for registering event publishers/subscribers for discovery
+    EventChannel {
+        namespace: String,
+        component: String,
+        /// Event transport type (NATS subject prefix or ZMQ endpoint)
+        transport: EventTransport,
     },
 }
 
@@ -151,6 +183,16 @@ impl DiscoverySpec {
                 card_json,
                 model_suffix,
             },
+            Self::EventChannel {
+                namespace,
+                component,
+                transport,
+            } => DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                instance_id,
+                transport,
+            },
         }
     }
 }
@@ -174,6 +216,14 @@ pub enum DiscoveryInstance {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_suffix: Option<String>,
     },
+    /// Registered event channel instance for event plane pub/sub
+    EventChannel {
+        namespace: String,
+        component: String,
+        instance_id: u64,
+        /// Event transport type (NATS subject prefix or ZMQ endpoint)
+        transport: EventTransport,
+    },
 }
 
 impl DiscoveryInstance {
@@ -182,6 +232,7 @@ impl DiscoveryInstance {
         match self {
             Self::Endpoint(inst) => inst.instance_id,
             Self::Model { instance_id, .. } => *instance_id,
+            Self::EventChannel { instance_id, .. } => *instance_id,
         }
     }
 
@@ -195,6 +246,9 @@ impl DiscoveryInstance {
             Self::Model { card_json, .. } => Ok(serde_json::from_value(card_json.clone())?),
             Self::Endpoint(_) => {
                 anyhow::bail!("Cannot deserialize model from Endpoint instance")
+            }
+            Self::EventChannel { .. } => {
+                anyhow::bail!("Cannot deserialize model from EventChannel instance")
             }
         }
     }
@@ -222,6 +276,16 @@ impl DiscoveryInstance {
                 endpoint: endpoint.clone(),
                 instance_id: *instance_id,
                 model_suffix: model_suffix.clone(),
+            }),
+            Self::EventChannel {
+                namespace,
+                component,
+                instance_id,
+                ..
+            } => DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                instance_id: *instance_id,
             }),
         }
     }
@@ -276,6 +340,41 @@ pub struct ModelCardInstanceId {
     pub model_suffix: Option<String>,
 }
 
+/// Unique identifier for an event channel instance
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventChannelInstanceId {
+    pub namespace: String,
+    pub component: String,
+    pub instance_id: u64,
+}
+
+impl EventChannelInstanceId {
+    /// Converts to a path string: `{namespace}/{component}/{instance_id:x}`
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/{}/{:x}",
+            self.namespace, self.component, self.instance_id
+        )
+    }
+
+    /// Parses from a path string: `{namespace}/{component}/{instance_id:x}`
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != 3 {
+            anyhow::bail!(
+                "Invalid EventChannelInstanceId path: expected 3 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            namespace: parts[0].to_string(),
+            component: parts[1].to_string(),
+            instance_id: u64::from_str_radix(parts[2], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+        })
+    }
+}
+
 impl ModelCardInstanceId {
     /// Converts to a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]`
     pub fn to_path(&self) -> String {
@@ -316,6 +415,7 @@ impl ModelCardInstanceId {
 pub enum DiscoveryInstanceId {
     Endpoint(EndpointInstanceId),
     Model(ModelCardInstanceId),
+    EventChannel(EventChannelInstanceId),
 }
 
 impl DiscoveryInstanceId {
@@ -324,22 +424,34 @@ impl DiscoveryInstanceId {
         match self {
             Self::Endpoint(eid) => eid.instance_id,
             Self::Model(mid) => mid.instance_id,
+            Self::EventChannel(ecid) => ecid.instance_id,
         }
     }
 
-    /// Extracts the EndpointInstanceId, returning an error if this is a Model variant
+    /// Extracts the EndpointInstanceId, returning an error if this is a Model or EventChannel variant
     pub fn extract_endpoint_id(&self) -> Result<&EndpointInstanceId> {
         match self {
             Self::Endpoint(eid) => Ok(eid),
             Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
+            Self::EventChannel(_) => anyhow::bail!("Expected Endpoint variant, got EventChannel"),
         }
     }
 
-    /// Extracts the ModelCardInstanceId, returning an error if this is an Endpoint variant
+    /// Extracts the ModelCardInstanceId, returning an error if this is an Endpoint or EventChannel variant
     pub fn extract_model_id(&self) -> Result<&ModelCardInstanceId> {
         match self {
             Self::Model(mid) => Ok(mid),
             Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
+            Self::EventChannel(_) => anyhow::bail!("Expected Model variant, got EventChannel"),
+        }
+    }
+
+    /// Extracts the EventChannelInstanceId, returning an error if this is an Endpoint or Model variant
+    pub fn extract_event_channel_id(&self) -> Result<&EventChannelInstanceId> {
+        match self {
+            Self::EventChannel(ecid) => Ok(ecid),
+            Self::Endpoint(_) => anyhow::bail!("Expected EventChannel variant, got Endpoint"),
+            Self::Model(_) => anyhow::bail!("Expected EventChannel variant, got Model"),
         }
     }
 }

@@ -105,20 +105,57 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             },
         ) => inst_ns == namespace && inst_comp == component && inst_ep == endpoint,
 
+        // EventChannel matching
+        (DiscoveryInstance::EventChannel { .. }, DiscoveryQuery::AllEventChannels) => true,
+        (
+            DiscoveryInstance::EventChannel {
+                namespace: inst_ns, ..
+            },
+            DiscoveryQuery::NamespacedEventChannels { namespace },
+        ) => inst_ns == namespace,
+        (
+            DiscoveryInstance::EventChannel {
+                namespace: inst_ns,
+                component: inst_comp,
+                ..
+            },
+            DiscoveryQuery::ComponentEventChannels {
+                namespace,
+                component,
+            },
+        ) => inst_ns == namespace && inst_comp == component,
+
         // Cross-type matches return false
         (
             DiscoveryInstance::Endpoint(_),
             DiscoveryQuery::AllModels
             | DiscoveryQuery::NamespacedModels { .. }
             | DiscoveryQuery::ComponentModels { .. }
-            | DiscoveryQuery::EndpointModels { .. },
+            | DiscoveryQuery::EndpointModels { .. }
+            | DiscoveryQuery::AllEventChannels
+            | DiscoveryQuery::NamespacedEventChannels { .. }
+            | DiscoveryQuery::ComponentEventChannels { .. },
         ) => false,
         (
             DiscoveryInstance::Model { .. },
             DiscoveryQuery::AllEndpoints
             | DiscoveryQuery::NamespacedEndpoints { .. }
             | DiscoveryQuery::ComponentEndpoints { .. }
-            | DiscoveryQuery::Endpoint { .. },
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllEventChannels
+            | DiscoveryQuery::NamespacedEventChannels { .. }
+            | DiscoveryQuery::ComponentEventChannels { .. },
+        ) => false,
+        (
+            DiscoveryInstance::EventChannel { .. },
+            DiscoveryQuery::AllEndpoints
+            | DiscoveryQuery::NamespacedEndpoints { .. }
+            | DiscoveryQuery::ComponentEndpoints { .. }
+            | DiscoveryQuery::Endpoint { .. }
+            | DiscoveryQuery::AllModels
+            | DiscoveryQuery::NamespacedModels { .. }
+            | DiscoveryQuery::ComponentModels { .. }
+            | DiscoveryQuery::EndpointModels { .. },
         ) => false,
     }
 }
@@ -261,6 +298,7 @@ mod tests {
         registry.instances.lock().unwrap().retain(|i| match i {
             DiscoveryInstance::Endpoint(inst) => inst.instance_id != 1,
             DiscoveryInstance::Model { instance_id, .. } => *instance_id != 1,
+            DiscoveryInstance::EventChannel { instance_id, .. } => *instance_id != 1,
         });
 
         let event = stream.next().await.unwrap().unwrap();
