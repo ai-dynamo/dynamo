@@ -4,18 +4,14 @@
 //! Generic Event Plane for transport-agnostic pub/sub communication.
 //!
 //! The event plane provides a unified interface for publishing and subscribing
-//! to events across different transport backends (NATS, ZMQ - to be implemented in next PRs).
+//! to events across different transport backends (NATS).
 //!
-//! # Usage
+//! The transport is selected via the `DYN_EVENT_PLANE` environment variable:
+//! - `"nats"` - Uses NATS transport (Core or JetStream auto-detected)
 //!
 //! ```ignore
-//! // Create an EventPlane scoped to a namespace
 //! let event_plane = EventPlane::for_namespace(&namespace);
 //! event_plane.publish("kv-events", &my_event).await?;
-//!
-//! // Create an EventPlane scoped to a component
-//! let event_plane = EventPlane::for_component(&component);
-//! let mut stream = event_plane.subscribe("kv-events").await?;
 //! ```
 
 pub(crate) mod nats;
@@ -36,7 +32,41 @@ use serde::de::DeserializeOwned;
 
 use crate::DistributedRuntime;
 use crate::component::{Component, Namespace};
+use crate::config::environment_names::event_plane as env;
 use crate::traits::DistributedRuntimeProvider;
+
+/// Event plane transport mode.
+///
+/// This determines which transport backend is used for pub/sub communication.
+/// The mode is selected via the `DYN_EVENT_PLANE` environment variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventPlaneMode {
+    /// NATS transport (Core or JetStream, auto-detected based on worker configuration)
+    Nats,
+}
+
+impl EventPlaneMode {
+    /// Returns NATS if the environment variable is not set (default).
+    /// Panics if the environment variable is set to an invalid value.
+    pub fn from_env() -> Self {
+        match std::env::var(env::DYN_EVENT_PLANE).as_deref() {
+            Ok("nats") => {
+                tracing::debug!("Event plane mode: NATS");
+                Self::Nats
+            }
+            Ok(other) => {
+                panic!(
+                    "Invalid DYN_EVENT_PLANE value '{}'. Only 'nats' is currently supported.",
+                    other
+                );
+            }
+            Err(_) => {
+                tracing::trace!("DYN_EVENT_PLANE not set, defaulting to NATS");
+                Self::Nats
+            }
+        }
+    }
+}
 
 /// Scope of the event plane - determines the subject prefix for pub/sub.
 #[derive(Debug, Clone)]
@@ -67,10 +97,12 @@ impl EventScope {
 
 /// Event plane for transport-agnostic pub/sub communication.
 ///
-/// The EventPlane wraps different transport backends (NATS, ZMQ - to be implemented in next PRs) and provides
+/// The EventPlane wraps different transport backends (NATS) and provides
 /// a unified interface for publishing and subscribing to events with envelope
 /// metadata for sequencing and gap detection.
 pub struct EventPlane {
+    /// The transport mode (NATS)
+    mode: EventPlaneMode,
     /// The scope determines the subject prefix
     scope: EventScope,
     /// Unique identifier for this publisher (from discovery instance_id)
@@ -87,6 +119,8 @@ impl EventPlane {
     /// Events published through this EventPlane will have subjects prefixed
     /// with `namespace.{name}`.
     ///
+    /// The transport mode is determined by the `DYN_EVENT_PLANE` environment variable.
+    ///
     /// # Example
     /// ```ignore
     /// let event_plane = EventPlane::for_namespace(&namespace);
@@ -95,6 +129,7 @@ impl EventPlane {
     /// ```
     pub fn for_namespace(ns: &Namespace) -> Self {
         Self {
+            mode: EventPlaneMode::from_env(),
             scope: EventScope::Namespace { name: ns.name() },
             publisher_id: ns.drt().discovery().instance_id(),
             sequence: AtomicU64::new(0),
@@ -107,6 +142,8 @@ impl EventPlane {
     /// Events published through this EventPlane will have subjects prefixed
     /// with `namespace.{namespace}.component.{component}`.
     ///
+    /// The transport mode is determined by the `DYN_EVENT_PLANE` environment variable.
+    ///
     /// # Example
     /// ```ignore
     /// let event_plane = EventPlane::for_component(&component);
@@ -115,6 +152,7 @@ impl EventPlane {
     /// ```
     pub fn for_component(comp: &Component) -> Self {
         Self {
+            mode: EventPlaneMode::from_env(),
             scope: EventScope::Component {
                 namespace: comp.namespace().name(),
                 component: comp.name().to_string(),
@@ -123,6 +161,11 @@ impl EventPlane {
             sequence: AtomicU64::new(0),
             drt: Arc::new(comp.drt().clone()),
         }
+    }
+
+    /// Get the transport mode of this EventPlane.
+    pub fn mode(&self) -> EventPlaneMode {
+        self.mode
     }
 
     /// Get the scope of this EventPlane.
@@ -306,5 +349,29 @@ mod tests {
         assert_eq!(deserialized.sequence, 10);
         assert_eq!(deserialized.published_at, 1700000000000);
         assert_eq!(deserialized.payload, Bytes::from("test data"));
+    }
+
+    #[test]
+    fn test_event_plane_mode_from_env_nats() {
+        temp_env::with_var(super::env::DYN_EVENT_PLANE, Some("nats"), || {
+            let mode = EventPlaneMode::from_env();
+            assert_eq!(mode, EventPlaneMode::Nats);
+        });
+    }
+
+    #[test]
+    fn test_event_plane_mode_from_env_default() {
+        temp_env::with_var_unset(super::env::DYN_EVENT_PLANE, || {
+            let mode = EventPlaneMode::from_env();
+            assert_eq!(mode, EventPlaneMode::Nats);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid DYN_EVENT_PLANE value")]
+    fn test_event_plane_mode_from_env_invalid() {
+        temp_env::with_var(super::env::DYN_EVENT_PLANE, Some("invalid"), || {
+            EventPlaneMode::from_env();
+        });
     }
 }
