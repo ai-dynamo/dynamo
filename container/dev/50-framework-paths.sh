@@ -37,7 +37,7 @@ ARCH_ALT=$(uname -m | sed 's/aarch64/aarch64/;s/x86_64/x86_64/')
 # PYTHON_VERSION should be set via ENV in container; fail early if missing
 if [ -z "${PYTHON_VERSION}" ]; then
     echo "WARNING: PYTHON_VERSION not set, defaulting to 3.12" >&2
-    PYTHON_VERSION=3.12
+    export PYTHON_VERSION=3.12
 fi
 [ -d "/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib" ] && \
     export LD_LIBRARY_PATH="/opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:${LD_LIBRARY_PATH}"
