@@ -25,7 +25,7 @@ To learn what KVBM is, please check [here](kvbm_architecture.md)
 > - Ensure that `etcd` and `nats` are running before starting.
 > - KVBM only supports TensorRT-LLM’s PyTorch backend.
 > - Disable partial reuse `enable_partial_reuse: false` in the LLM API config’s `kv_connector_config` to increase offloading cache hits.
-> - KVBM requires TensorRT-LLM v1.1.0rc5 or newer.
+> - KVBM requires TensorRT-LLM v1.2.0rc2 or newer.
 > - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
 ## Quick Start
@@ -104,6 +104,16 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
     "max_tokens": 30
   }'
 
+```
+
+KVBM is also supported on the prefill worker of disaggregated serving. To launch the prefill worker, run:
+```bash
+# [DYNAMO] To serve an LLM model with dynamo
+python3 -m dynamo.trtllm \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
+  --extra-engine-args /tmp/kvbm_llm_api_config.yaml
+  --disaggregation-mode prefill &
 ```
 
 Alternatively, can use "trtllm-serve" with KVBM by replacing the above two [DYNAMO] cmds with below:

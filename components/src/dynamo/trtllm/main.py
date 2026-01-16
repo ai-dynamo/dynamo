@@ -28,6 +28,7 @@ from tensorrt_llm.llmapi import (
     SchedulerConfig,
 )
 from tensorrt_llm.llmapi.llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import KvCacheConnectorConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.metrics import MetricsCollector
@@ -107,6 +108,22 @@ async def get_engine_runtime_config(
     return runtime_config
 
 
+def build_kv_connector_config(config: Config):
+    if config.connector is not None:
+        if config.connector == "kvbm":
+            return KvCacheConnectorConfig(
+                connector_module="kvbm.trtllm_integration.connector",
+                connector_scheduler_class="DynamoKVBMConnectorLeader",
+                connector_worker_class="DynamoKVBMConnectorWorker",
+            )
+        elif config.connector == "none":
+            return None
+        else:
+            logging.error(f"Invalid connector: {config.connector}")
+            sys.exit(1)
+    return None
+
+
 async def worker():
     config = cmd_line_args()
 
@@ -166,6 +183,9 @@ async def init(runtime: DistributedRuntime, config: Config):
         free_gpu_memory_fraction=config.free_gpu_memory_fraction
     )
 
+    if config.connector is not None and "kvbm" in config.connector:
+        kv_cache_config.enable_partial_reuse = False
+
     dynamic_batch_config = DynamicBatchConfig(
         enable_batch_size_tuning=True,
         enable_max_num_tokens_tuning=False,
@@ -175,6 +195,8 @@ async def init(runtime: DistributedRuntime, config: Config):
         capacity_scheduler_policy=CapacitySchedulerPolicy.GUARANTEED_NO_EVICT,
         dynamic_batch_config=dynamic_batch_config,
     )
+    kv_connector_config = build_kv_connector_config(config)
+
     modality = getattr(config, "modality", None) or "text"
     arg_map = {
         "model": model_path,
@@ -190,6 +212,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "max_beam_width": config.max_beam_width,
         "max_batch_size": config.max_batch_size,
         "return_perf_metrics": config.publish_events_and_metrics,
+        "kv_connector_config": kv_connector_config,
     }
 
     if config.extra_engine_args != "":
