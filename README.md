@@ -160,6 +160,7 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 ### Deploying Dynamo
 
 - Follow the [Quickstart Guide](docs/kubernetes/README.md) to deploy on Kubernetes.
+- **[Production Recipes](recipes/)** — Ready-to-deploy manifests for popular models (Llama-3-70B, DeepSeek-R1, Qwen3)
 - Check out [Backends](examples/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
