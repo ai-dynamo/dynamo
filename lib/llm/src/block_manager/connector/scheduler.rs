@@ -145,17 +145,39 @@ impl WorkerSchedulerClient {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WorkerSchedulerClientSlot {
     operations: Vec<uuid::Uuid>,
     completed: Arc<AtomicU64>,
+    /// Expected number of immediate (onboard) operations for this slot.
+    /// SHARED with scheduler via Arc so race condition corrections are visible to worker.
+    expected_immediate_ops: Arc<AtomicU64>,
+}
+
+impl Default for WorkerSchedulerClientSlot {
+    fn default() -> Self {
+        Self {
+            operations: Vec::new(),
+            completed: Arc::new(AtomicU64::new(0)),
+            expected_immediate_ops: Arc::new(AtomicU64::new(0)),
+        }
+    }
 }
 
 impl WorkerSchedulerClientSlot {
+    fn new(expected_immediate_ops: u64) -> Self {
+        Self {
+            operations: Vec::new(),
+            completed: Arc::new(AtomicU64::new(0)),
+            expected_immediate_ops: Arc::new(AtomicU64::new(expected_immediate_ops)),
+        }
+    }
+
     fn make_scheduler_slot_request(&self, request_id: String) -> SchedulerCreateSlotDetails {
         SchedulerCreateSlotDetails {
             request_id,
             completed: self.completed.clone(),
+            expected_immediate_ops: self.expected_immediate_ops.clone(),
         }
     }
 
@@ -165,20 +187,31 @@ impl WorkerSchedulerClientSlot {
 }
 
 impl WorkerSchedulerClient {
-    pub fn create_slot(&mut self, request_id: String) -> Result<(), SchedulerError> {
-        // create a request slot with the child token
-        // this will be the local worker slot
-        let slot = WorkerSchedulerClientSlot::default();
+    /// Create a slot with the expected number of immediate (onboard) operations.
+    /// This count is used to properly track completion and must match the number of
+    /// ImmediateTransferResult messages that will be received.
+    pub fn create_slot_with_immediate_ops(
+        &mut self,
+        request_id: String,
+        expected_immediate_ops: u64,
+    ) -> Result<(), SchedulerError> {
+        // create a request slot with expected immediate ops count
+        let slot = WorkerSchedulerClientSlot::new(expected_immediate_ops);
         let request = slot.make_scheduler_slot_request(request_id.clone());
 
         // insert the slot into the local worker slots map
-        self.slots.insert(request_id, slot);
+        self.slots.insert(request_id.clone(), slot);
 
         // send a request to insert the slot into the engine state
         self.scheduler_tx
             .send(SchedulerMessage::CreateSlot(request))
             .map_err(|_| SchedulerError::Disconnected)?;
         Ok(())
+    }
+
+    /// Create a slot with no expected immediate operations (backward compatibility).
+    pub fn create_slot(&mut self, request_id: String) -> Result<(), SchedulerError> {
+        self.create_slot_with_immediate_ops(request_id, 0)
     }
 
     pub fn remove_slot(&mut self, request_id: &String) {
@@ -222,11 +255,8 @@ impl WorkerSchedulerClient {
 
     pub fn is_complete(&self, request_id: &str) -> bool {
         match self.slots.get(request_id) {
-            Some(slot) => slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64,
-            None => {
-                tracing::debug!(request_id, "slot not found - likely aborted");
-                true
-            }
+            Some(slot) => slot.is_complete(),
+            None => true,
         }
     }
 
@@ -382,17 +412,33 @@ impl Scheduler {
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %req.request_id))]
     fn add_slot(&mut self, req: SchedulerCreateSlotDetails) {
         let request_id = req.request_id.clone();
-        debug_assert!(!self.slots.contains_key(&request_id), "slot already exists");
-        tracing::debug!("engine state adding slot");
+
+        // In TP>1, multiple workers send CreateSlot for the same request_id.
+        // Each worker has its OWN completed Arc. ImmediateTransferResults arrive
+        // and get buffered before ANY worker's slot is created.
+        //
+        // We need to apply the buffered count to EVERY worker's slot, not just the first one.
+        // Use `get` instead of `remove` to keep the buffered results available for all workers.
+        // The buffered results will be cleared when the request is removed (finished).
+
         let slot = SchedulerSlot::new(req);
-        if let Some(unprocessed_results) = self.unprocessed_immediate_results.remove(&request_id) {
-            tracing::debug!(
-                "found {} unprocessed immediate results; adding to slot",
-                unprocessed_results.len()
-            );
-            slot.completed
-                .fetch_add(unprocessed_results.len() as u64, Ordering::Relaxed);
+
+        // Check for buffered ImmediateTransferResults that arrived before the slot was created
+        if let Some(unprocessed_results) = self.unprocessed_immediate_results.get(&request_id) {
+            let num_buffered = unprocessed_results.len() as u64;
+            let current_expected = slot.expected_immediate_ops.load(Ordering::Relaxed);
+
+            // If we have buffered results, we know there should be at least that many
+            // immediate operations. Correct if needed (shared Arc visible to worker).
+            if num_buffered > current_expected {
+                slot.expected_immediate_ops
+                    .store(num_buffered, Ordering::Relaxed);
+            }
+
+            // Apply buffered count to this worker's slot
+            slot.completed.fetch_add(num_buffered, Ordering::Relaxed);
         }
+
         self.slots.insert(request_id, slot);
     }
 
@@ -407,11 +453,9 @@ impl Scheduler {
             "any scheduled request should be removed and enqueued/scheduled before the slot is removed"
         );
 
-        let maybe_unprocessed_results = self.unprocessed_immediate_results.remove(&request_id);
-        debug_assert!(
-            maybe_unprocessed_results.is_none() || maybe_unprocessed_results.unwrap().is_empty(),
-            "any unprocessed immediate results should be removed before the slot is removed"
-        );
+        // In TP>1, buffered results are NOT removed in add_slot (they're applied to ALL workers).
+        // Clean them up here when the request is finished.
+        self.unprocessed_immediate_results.remove(&request_id);
 
         tracing::debug!(
             request_id,
@@ -651,16 +695,23 @@ impl ScheduledTaskAsyncResult {
 pub struct SchedulerCreateSlotDetails {
     pub request_id: String,
     pub completed: Arc<AtomicU64>,
+    /// Expected number of immediate (onboard) operations for this slot.
+    /// SHARED with worker via Arc so race condition corrections are visible to worker.
+    pub expected_immediate_ops: Arc<AtomicU64>,
 }
 
 pub struct SchedulerSlot {
     completed: Arc<AtomicU64>,
+    /// Expected number of immediate operations.
+    /// SHARED with worker via Arc - can be updated by scheduler when race condition is detected.
+    expected_immediate_ops: Arc<AtomicU64>,
 }
 
 impl SchedulerSlot {
     fn new(req: SchedulerCreateSlotDetails) -> Self {
         Self {
             completed: req.completed,
+            expected_immediate_ops: req.expected_immediate_ops,
         }
     }
 }
@@ -738,8 +789,10 @@ mod tests {
         scheduler.step().await;
         assert!(scheduler.slots.contains_key("test"));
 
-        // the unprocessed results should now be processed
-        assert_eq!(scheduler.unprocessed_immediate_results.len(), 0);
+        // Buffered results are not removed in add_slot() - cleanup happens in remove_slot()
+        // when the request finishes. This ensures all workers in TP>1 can have the buffered
+        // count applied. The buffered count has already been applied to the slot's completed counter.
+        assert_eq!(scheduler.unprocessed_immediate_results.len(), 1);
 
         // neither the worker nor the scheduler should have observed the completion yet
         // this is because the worker has not yet requested it
@@ -764,6 +817,26 @@ mod tests {
 
         // the worker has not issued any operations yet
         assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 0);
+
+        // enqueue the operation so is_complete() will return true (completed=1, operations.len()=1)
+        let worker_request = WorkerTransferRequest {
+            request_id: "test".to_string(),
+            uuid: operation_id,
+            transfer_type: TransferType::Load,
+            request_type: RequestType::Immediate,
+        };
+        worker_client.enqueue_request(worker_request);
+        assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 1);
+        assert!(worker_client.is_complete("test"));
+
+        // verify that remove_slot() cleans up the buffered results
+        assert_eq!(scheduler.unprocessed_immediate_results.len(), 1);
+        worker_client.remove_slot(&"test".to_string());
+        scheduler.step().await;
+
+        // after remove_slot(), the buffered results should be cleaned up
+        assert_eq!(scheduler.unprocessed_immediate_results.len(), 0);
+        assert!(!scheduler.slots.contains_key("test"));
     }
 
     /// This test verifies that the scheduler can handle the case where the transfer engine's
