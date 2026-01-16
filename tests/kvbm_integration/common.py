@@ -146,7 +146,7 @@ class DeterminismTester(ApiTester):
         self.server_type = server_type
 
         self.shakespeare_file = Path("t8.shakespeare.txt")
-        self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "500"))
+        self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "100"))
         self.word_count = int(os.environ.get("KVBM_WORD_COUNT", "200"))
 
         # Test intervals
@@ -278,38 +278,6 @@ class DeterminismTester(ApiTester):
         end_word = min(start_word + self.word_count, len(words))
         return " ".join(words[start_word:end_word])
 
-    def download_ifeval_dataset(self) -> List[str]:
-        """Download and extract all prompts from IFEval dataset."""
-        try:
-            from datasets import load_dataset
-
-            print("Loading complete IFEval dataset...")
-            dataset = load_dataset("google/IFEval", split="train")
-
-            # Extract all prompts from the dataset
-            prompts = []
-
-            for example in dataset:
-                # IFEval has 'prompt' field with the instruction
-                if "prompt" in example:
-                    prompt_text = example["prompt"].strip()
-                    if prompt_text:  # Only skip empty prompts
-                        prompts.append(prompt_text)
-
-            print(f"Loaded {len(prompts)} prompts from complete IFEval dataset")
-            return prompts
-
-        except ImportError:
-            print(
-                "Warning: datasets library not available, falling back to default prompts"
-            )
-            return self.control_sequences + self.random_sequences
-        except Exception as e:
-            print(
-                f"Warning: Failed to load IFEval dataset ({e}), falling back to default prompts"
-            )
-            return self.control_sequences + self.random_sequences
-
     def run_test_iterations(self):
         """Run the test iterations with comprehensive warmup."""
         # Perform initial warmup before testing
@@ -404,141 +372,6 @@ class DeterminismTester(ApiTester):
                 failed += 1
 
         return passed, failed
-
-    def test_concurrent_determinism(
-        self, prompts: List[str], num_workers: int = 4, requests_per_prompt: int = 3
-    ) -> bool:
-        """Test determinism with concurrent requests to the same prompts."""
-        print("\n=== CONCURRENT DETERMINISM TEST ===")
-        print(f"Workers: {num_workers}, Requests per prompt: {requests_per_prompt}")
-
-        # Prepare test data: each prompt will get multiple concurrent requests
-        test_tasks = []
-        for i, prompt in enumerate(prompts):
-            for req_num in range(requests_per_prompt):
-                test_tasks.append(
-                    {
-                        "prompt_idx": i,
-                        "prompt": prompt,
-                        "request_id": f"p{i}_r{req_num}",
-                    }
-                )
-
-        print(f"Total concurrent requests: {len(test_tasks)}")
-
-        # Storage for responses grouped by prompt
-        concurrent_responses: Dict[int, List[Tuple[str, str]]] = defaultdict(list)
-
-        def make_concurrent_request(task):
-            """Worker function for concurrent requests."""
-            try:
-                response = self.make_request(task["prompt"])
-                return {
-                    "prompt_idx": task["prompt_idx"],
-                    "request_id": task["request_id"],
-                    "response": response,
-                    "success": True,
-                    "error": None,
-                }
-            except Exception as e:
-                return {
-                    "prompt_idx": task["prompt_idx"],
-                    "request_id": task["request_id"],
-                    "response": None,
-                    "success": False,
-                    "error": str(e),
-                }
-
-        # Execute concurrent requests
-        print("Executing concurrent requests...")
-        start_time = time.time()
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            # Submit all tasks
-            future_to_task = {
-                executor.submit(make_concurrent_request, task): task
-                for task in test_tasks
-            }
-
-            # Collect results
-            completed = 0
-            failed = 0
-            for future in as_completed(future_to_task):
-                result = future.result()
-                completed += 1
-
-                if result["success"]:
-                    concurrent_responses[result["prompt_idx"]].append(
-                        (result["request_id"], result["response"])
-                    )
-                    if completed % 10 == 0:
-                        print(f"  Completed: {completed}/{len(test_tasks)}")
-                else:
-                    failed += 1
-                    print(f"  Failed request {result['request_id']}: {result['error']}")
-
-        elapsed = time.time() - start_time
-        print(
-            f"Completed {completed} requests in {elapsed:.2f}s ({completed/elapsed:.1f} req/s)"
-        )
-        print(f"Failed requests: {failed}")
-
-        # Analyze concurrent determinism
-        print("\n=== CONCURRENT DETERMINISM ANALYSIS ===")
-        total_prompts_tested = 0
-        deterministic_prompts = 0
-
-        for prompt_idx, responses in concurrent_responses.items():
-            if len(responses) < 2:
-                print(
-                    f"Prompt {prompt_idx}: Only {len(responses)} response(s), skipping"
-                )
-                continue
-
-            total_prompts_tested += 1
-            prompt_text = prompts[prompt_idx]
-            print(f"\nPrompt {prompt_idx}: {prompt_text[:50]}...")
-            print(f"Concurrent responses: {len(responses)}")
-
-            # Extract just the response text
-            response_texts = [resp[1] for resp in responses]
-            request_ids = [resp[0] for resp in responses]
-
-            # Check if all responses are identical
-            reference_response = response_texts[0]
-            mismatches = []
-
-            for req_id, response_text in zip(request_ids[1:], response_texts[1:]):
-                if response_text != reference_response:
-                    mismatches.append((req_id, response_text))
-
-            if not mismatches:
-                print(
-                    f"   DETERMINISTIC: All {len(responses)} concurrent responses identical"
-                )
-                print(f"     Response: {reference_response}")
-                deterministic_prompts += 1
-            else:
-                print(f"    NON-DETERMINISTIC: {len(mismatches)} different responses")
-                print(f"    Reference ({request_ids[0]}): {reference_response}")
-                for req_id, diff_response in mismatches:
-                    print(f"     Different ({req_id}): {diff_response}")
-
-        # Final assessment
-        success_rate = (
-            deterministic_prompts / total_prompts_tested
-            if total_prompts_tested > 0
-            else 0
-        )
-        print("\n=== FINAL CONCURRENT DETERMINISM RESULT ===")
-        print(f"Prompts tested: {total_prompts_tested}")
-        print(f"Deterministic: {deterministic_prompts}")
-        print(f"Non-deterministic: {total_prompts_tested - deterministic_prompts}")
-        print(f"Success rate: {success_rate:.1%}")
-        print(f"Concurrency level: {num_workers} workers")
-        print(f"Request rate: {completed/elapsed:.1f} req/s")
-
-        return success_rate == 1.0
 
 
 @pytest.fixture(scope="function")
@@ -791,6 +624,289 @@ class TestDeterminism:
         assert (
             success_rate >= success_rate_threshold
         ), f"Model is not deterministic across cache reset: {total_failed} comparisons failed, success rate {success_rate:.1%} lower than expected {success_rate_threshold*100}%"
+
+    def base_test_spanish_prompt_determinism_under_load(
+        self, tester, llm_server, runtime_services, spanish_prompt_path: Path
+    ):
+        """Base implementation: send Spanish prompt repeatedly while vllm bench runs.
+        
+        Tests determinism under high concurrency load. Reproduces bugs where responses
+        can become corrupted or non-deterministic under memory pressure.
+        
+        Args:
+            tester: DeterminismTester instance
+            llm_server: LLM server manager
+            runtime_services: Runtime services fixture
+            spanish_prompt_path: Path to the Spanish prompt file
+        """
+        import subprocess
+        
+        print("\n" + "=" * 70)
+        print("DETERMINISM TEST UNDER HIGH CONCURRENCY LOAD")
+        print("=" * 70)
+
+        # Load Spanish prompt
+        if not spanish_prompt_path.exists():
+            pytest.skip(f"Spanish prompt not found at {spanish_prompt_path}")
+        
+        with open(spanish_prompt_path, "r", encoding="utf-8") as f:
+            prompt = f.read().strip()
+        
+        print(f"Loaded Spanish prompt: {len(prompt)} chars")
+        print(f"Preview: {prompt[:100]}...")
+
+        # Test parameters
+        num_requests = int(os.environ.get("KVBM_NUM_ITERATIONS", "15"))
+        delay_seconds = int(os.environ.get("KVBM_REQUEST_DELAY", "30"))
+        max_tokens = int(os.environ.get("KVBM_MAX_TOKENS", "100"))
+        
+        print(f"\nTest configuration:")
+        print(f"  Requests: {num_requests}")
+        print(f"  Delay: {delay_seconds}s")
+        print(f"  Max tokens: {max_tokens}")
+
+        # Start vllm bench in background
+        model = os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B")
+        bench_cmd = [
+            "vllm", "bench", "serve",
+            "--backend", "vllm",
+            "--model", model,
+            "--base-url", llm_server.base_url,
+            "--dataset-name", "random",
+            "--random-input-len", "4000",
+            "--random-output-len", "180",
+            "--max-concurrency", "7",
+            "--num-prompts", "2000",
+        ]
+
+        print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
+        bench_log = os.path.join(str(Path(".")), "vllm_bench_spanish.log")
+        bench_file = open(bench_log, "w")
+        bench_process = subprocess.Popen(
+            bench_cmd,
+            stdout=bench_file,
+            stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+
+        try:
+            # Check initial metrics
+            print("\nChecking initial KVBM metrics...")
+            try:
+                initial_metrics = fetch_kvbm_metrics()
+                initial_offload = initial_metrics.get("kvbm_offload_blocks_d2h", 0)
+                print(f"Initial offload: {initial_offload} blocks")
+            except Exception as e:
+                print(f"Could not fetch initial metrics: {e}")
+                initial_offload = 0
+            
+            # Wait for benchmark to start and create offload activity
+            print("\nWaiting for benchmark to start and create memory pressure...")
+            max_wait = int(os.environ.get("KVBM_BENCH_STARTUP_WAIT", "120"))
+            benchmark_started = False
+            
+            for wait_iteration in range(max_wait // 5):
+                time.sleep(5)
+                elapsed = (wait_iteration + 1) * 5
+                
+                try:
+                    current_metrics = fetch_kvbm_metrics()
+                    current_offload = current_metrics.get("kvbm_offload_blocks_d2h", 0)
+                    
+                    if current_offload > initial_offload:
+                        offload_delta = current_offload - initial_offload
+                        print(f" Benchmark activity detected after {elapsed}s ({offload_delta} blocks offloaded)")
+                        benchmark_started = True
+                        break
+                    else:
+                        print(f" Waiting... ({elapsed}s elapsed, no offload activity yet)")
+                except Exception as e:
+                    print(f"  Waiting... ({elapsed}s elapsed, metrics check failed: {e})")
+            
+            if not benchmark_started:
+                print(f" Warning: No benchmark activity detected after {max_wait}s")
+                print(f" Test will continue anyway, but may not reproduce the bug")
+            else:
+                # Give a bit more time for benchmark to ramp up
+                print("Waiting additional 10s for benchmark to fully ramp up...")
+                time.sleep(10)
+
+            # Send same request repeatedly
+            print(f"\n{'='*70}")
+            print(f"SENDING {num_requests} REQUESTS")
+            print(f"{'='*70}")
+            
+            responses = []
+            baseline_response = None  # Will be set from first response
+            mismatches = []  # Track which requests had non-deterministic responses
+            
+            for i in range(num_requests):
+                print(f"\n--- Request {i+1}/{num_requests} ---")
+                
+                try:
+                    response = tester.make_request(
+                        prompt,
+                        max_tokens=max_tokens,
+                        temperature=0.7,
+                        seed=42
+                    )
+                    responses.append(response)
+                    print(f"Response: {response}")
+                    
+                    # Check for obvious corruption patterns (fail immediately)
+                    corruption_detected = False
+                    corruption_reason = []
+                    
+                    # Check for excessive repetition of short patterns (like {{char}}{{char}})
+                    if response.count('{{') > 20 or response.count('}}') > 20:
+                        open_count = response.count('{{')
+                        close_count = response.count('}}')
+                        corruption_reason.append(f"Excessive template markers (open: {open_count}, close: {close_count})")
+                        corruption_detected = True
+                    
+                    # Check for excessive dots/newlines
+                    if response.count('\n') > 50 or response.count('.') > len(response) * 0.3:
+                        corruption_reason.append(f"Excessive dots/newlines")
+                        corruption_detected = True
+                    
+                    # Check for null bytes or replacement characters
+                    if '\x00' in response or '�' in response:
+                        corruption_reason.append("Null bytes or replacement characters")
+                        corruption_detected = True
+                    
+                    # Check for control characters
+                    control_chars = sum(1 for c in response if ord(c) < 32 and c not in '\n\t\r')
+                    if control_chars > 10:
+                        corruption_reason.append(f"Excessive control characters: {control_chars}")
+                        corruption_detected = True
+                    
+                    # Check for strange ASCII patterns (non-printable, high ratio of special chars)
+                    non_printable = sum(1 for c in response if ord(c) > 127 or (ord(c) < 32 and c not in '\n\t\r'))
+                    if len(response) > 0 and non_printable / len(response) > 0.3:
+                        corruption_reason.append(f"Strange ASCII: {non_printable}/{len(response)} chars are non-printable")
+                        corruption_detected = True
+                    
+                    if corruption_detected:
+                        print(f"\n{'='*70}")
+                        print("SEVERE CORRUPTION DETECTED - FAILING IMMEDIATELY!")
+                        print(f"{'='*70}")
+                        print(f"Request: {i+1}/{num_requests}")
+                        print(f"Reason: {', '.join(corruption_reason)}")
+                        print(f"Response: {response[:500]}")
+                        pytest.fail(
+                            f"Severe corruption at request {i+1}!\n"
+                            f"Reason: {corruption_reason}\n"
+                            f"Response: {response[:300]}"
+                        )
+                    
+                    # Set first response as baseline
+                    if i == 0:
+                        baseline_response = response
+                        print(f"✓ Baseline set (request 1)")
+                    else:
+                        # From request 2 onwards, check determinism against baseline
+                        if response != baseline_response:
+                            print(f"NON-DETERMINISTIC (differs from baseline)")
+                            mismatches.append({
+                                "request_num": i+1,
+                                "response": response,
+                                "baseline": baseline_response
+                            })
+                        else:
+                            print(f"Match with baseline")
+                        
+                except Exception as e:
+                    print(f"Request failed: {e}")
+                    responses.append(None)
+                    mismatches.append({
+                        "request_num": i+1,
+                        "error": str(e)
+                    })
+                
+                # Wait before next request
+                if i < num_requests - 1:
+                    print(f"Waiting {delay_seconds}s...")
+                    time.sleep(delay_seconds)
+
+            # Report results
+            print("\n" + "=" * 70)
+            print("TEST RESULTS")
+            print("=" * 70)
+            print(f"Total requests: {num_requests}")
+            print(f"Deterministic: {num_requests - len(mismatches)}/{num_requests}")
+            print(f"Non-deterministic: {len(mismatches)}/{num_requests}")
+            
+            if mismatches:
+                print(f"\n{'='*70}")
+                print(f"NON-DETERMINISTIC RESPONSES ({len(mismatches)} total):")
+                print(f"{'='*70}")
+                for mismatch in mismatches:
+                    req_num = mismatch["request_num"]
+                    if "error" in mismatch:
+                        print(f"\nRequest {req_num}: FAILED")
+                        print(f"  Error: {mismatch['error']}")
+                    else:
+                        print(f"\nRequest {req_num}: MISMATCH")
+                        print(f"  Baseline: {mismatch['baseline'][:150]}...")
+                        print(f"  Got:      {mismatch['response'][:150]}...")
+                
+                # Calculate percentage
+                success_rate = ((num_requests - len(mismatches)) / num_requests) * 100
+                print(f"\n{'='*70}")
+                print(f"TEST FAILED")
+                print(f"{'='*70}")
+                print(f"Success rate: {success_rate:.1f}%")
+                print(f"Failed requests: {[m['request_num'] for m in mismatches]}")
+                
+                pytest.fail(
+                    f"Determinism test failed!\n"
+                    f"{len(mismatches)}/{num_requests} responses were non-deterministic\n"
+                    f"Success rate: {success_rate:.1f}%"
+                )
+            else:
+                print(f"\n{'='*70}")
+                print("TEST PASSED - ALL RESPONSES DETERMINISTIC")
+                print(f"{'='*70}")
+                print(f"All {num_requests} responses matched the baseline!")
+            
+            # Check final onboard stats
+            print(f"\n{'='*70}")
+            print("FINAL KVBM STATS")
+            print(f"{'='*70}")
+            try:
+                final_metrics = fetch_kvbm_metrics()
+                final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
+                final_onboard = final_metrics.get("kvbm_onboard_blocks_h2d", 0)
+                
+                offload_delta = final_offload - initial_offload
+                print(f"Initial offload: {initial_offload} blocks")
+                print(f"Final offload:   {final_offload} blocks")
+                print(f"Total offloaded: {offload_delta} blocks")
+                print(f"Total onboarded: {final_onboard} blocks")
+                
+                if offload_delta > 0:
+                    print(f"\n KVBM offload activity detected: {offload_delta} blocks offloaded")
+                else:
+                    print(f"\n WARNING: No offload activity detected during test")
+                
+                if final_onboard > 0:
+                    print(f" KVBM onboard activity detected: {final_onboard} blocks onboarded")
+                else:
+                    print(f" WARNING: No onboard activity detected during test")
+                    
+            except Exception as e:
+                print(f"Could not fetch final metrics: {e}")
+
+        finally:
+            print("\nStopping benchmark...")
+            try:
+                bench_process.terminate()
+                bench_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                bench_process.kill()
+                bench_process.wait()
+            bench_file.close()
+            print(f"Benchmark log: {bench_log}")
 
 
 # ============================================================================

@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional, TextIO
 import pytest
 import requests
 
-from .common import DeterminismTester, ServerType
+from .common import DeterminismTester, ServerType, fetch_kvbm_metrics
 from .common import TestDeterminism as BaseTestDeterminism
 
 # Test markers to align with repository conventions
@@ -82,6 +82,12 @@ class LLMServerManager:
                 # DynamoConnector connection settings
                 "NATS_SERVER": "nats://localhost:4222",
                 "ETCD_ENDPOINTS": "http://localhost:2379",
+                # Enable KVBM metrics for monitoring offload/onboard
+                "DYN_KVBM_METRICS": "true",
+                "DYN_KVBM_METRICS_PORT": "6880",
+                # Enable vLLM batch invariant for deterministic batching
+                "VLLM_BATCH_INVARIANT": "1",
+                "VLLM_ATTENTION_BACKEND": "FLASH_ATTN",
             }
         )
 
@@ -363,7 +369,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.parametrize(
         "llm_server",
         [
-            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
+            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000")), "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048"))},
         ],
         indirect=True,
     )
@@ -379,196 +385,25 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.parametrize(
         "llm_server",
         [
-            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "20000"))},
+            {"cpu_blocks": 20000, "gpu_blocks": 5000},
         ],
         indirect=True,
     )
-    @pytest.mark.parametrize(
-        "num_concurrent",
-        [int(x) for x in os.environ.get("KVBM_CONCURRENT_REQUESTS", "3").split(",")],
-    )
-    @pytest.mark.parametrize(
-        "max_tokens",
-        [int(os.environ.get("KVBM_MAX_TOKENS", "48"))],
-    )
-    @pytest.mark.parametrize(
-        "num_prompts",
-        [int(x) for x in os.environ.get("KVBM_IFEVAL_PROMPTS", "120").split(",")],
-    )
-    @pytest.mark.skip(reason="Flaky test: DIS-665")
-    def test_concurrent_determinism_with_ifeval(
-        self,
-        tester,
-        llm_server,
-        runtime_services,
-        num_concurrent,
-        max_tokens,
-        num_prompts,
+    @pytest.mark.kvbm_concurrency
+    def test_spanish_prompt_determinism_under_load(
+        self, tester, llm_server, runtime_services
     ):
-        """Simple concurrent determinism test: send IFEval prompts concurrently, with cache reset."""
-        print("\n" + "=" * 70)
-        print("CONCURRENT DETERMINISM TEST WITH IFEVAL")
-        print("=" * 70)
-
-        print(f"Using max_tokens={max_tokens} (from KVBM_MAX_TOKENS)")
-
-        # Configuration comes from parametrize
-        print(
-            f"Configuration: {num_concurrent} concurrent requests, {max_tokens} max tokens"
+        """Test Spanish prompt determinism under high concurrency load.
+        
+        Reproduces the bug where Spanish responses become English or corrupted.
+        """
+        # Get the Spanish prompt path relative to this test file
+        spanish_prompt_path = Path(os.path.join(os.path.dirname(__file__), "spanish-prompt.txt")).absolute()
+        
+        # Call the base class implementation
+        super().base_test_spanish_prompt_determinism_under_load(
+            tester, llm_server, runtime_services, spanish_prompt_path
         )
-
-        # Load IFEval prompts
-        ifeval_prompts = tester.download_ifeval_dataset()
-        if not ifeval_prompts:
-            pytest.skip("IFEval dataset not available")
-
-        # Use parametrized number of IFEval prompts
-        test_prompts = ifeval_prompts[:num_prompts]
-        print(
-            f"Using {len(test_prompts)} IFEval prompts for concurrent testing (parametrized: {num_prompts})"
-        )
-        print(f"Concurrency level: {num_concurrent} simultaneous requests")
-
-        # Show sample prompts
-        print("\nSample prompts:")
-        for i, prompt in enumerate(test_prompts[:3]):
-            print(f"  {i+1}. {prompt[:80]}{'...' if len(prompt) > 80 else ''}")
-        if len(test_prompts) > 3:
-            print(f"  ... and {len(test_prompts) - 3} more")
-
-        def run_concurrent_test(phase_name, do_warmup=False):
-            """Run one phase of concurrent testing."""
-            print(f"\n=== {phase_name} ===")
-
-            if do_warmup:
-                # KV Cache warmup - send ALL test prompts to compute KV caches
-                print(
-                    f"Warming up KV caches with all {len(test_prompts)} test prompts..."
-                )
-                warmup_failed = 0
-
-                for i, prompt in enumerate(test_prompts):
-                    if (
-                        i % 5 == 0 or i == len(test_prompts) - 1
-                    ):  # Progress every 5 prompts
-                        print(f"  Warmup progress: {i+1}/{len(test_prompts)}")
-
-                    try:
-                        tester.make_request(prompt)
-                    except Exception as e:
-                        warmup_failed += 1
-                        if warmup_failed <= 3:  # Show first few failures
-                            print(f"    Warmup failed for prompt {i}: {e}")
-
-                if warmup_failed > 0:
-                    print(
-                        f"Warmup completed with {warmup_failed} failures out of {len(test_prompts)} prompts"
-                    )
-                else:
-                    print(
-                        f"Warmup completed successfully - all {len(test_prompts)} KV caches computed"
-                    )
-
-                # Wait for 10 seconds to make sure all transfers are complete
-                time.sleep(10)
-            else:
-                print("Skipping warmup (already done in previous phase)")
-
-            # Run concurrent requests
-            print(
-                f"Sending {len(test_prompts)} requests with {num_concurrent} max concurrent..."
-            )
-            start_time = time.time()
-
-            def make_request_wrapper(prompt_and_idx):
-                idx, prompt = prompt_and_idx
-                try:
-                    response = tester.make_request(prompt)
-                    return {
-                        "idx": idx,
-                        "prompt": prompt,
-                        "response": response,
-                        "success": True,
-                    }
-                except Exception as e:
-                    return {
-                        "idx": idx,
-                        "prompt": prompt,
-                        "error": str(e),
-                        "success": False,
-                    }
-
-            # Execute all requests concurrently
-            with ThreadPoolExecutor(max_workers=num_concurrent) as executor:
-                results = list(
-                    executor.map(make_request_wrapper, enumerate(test_prompts))
-                )
-
-            elapsed = time.time() - start_time
-            successful = [r for r in results if r["success"]]
-            failed = [r for r in results if not r["success"]]
-
-            print(
-                f"Completed in {elapsed:.2f}s - Success: {len(successful)}, Failed: {len(failed)}"
-            )
-
-            if failed:
-                for fail in failed[:3]:  # Show first few failures
-                    print(f"  Failed: {fail['error']}")
-
-            return successful
-
-        # Phase 1: Before cache reset
-        results_before = run_concurrent_test(
-            "PHASE 1: BEFORE CACHE RESET", do_warmup=True
-        )
-
-        # Reset cache
-        print("\n" + "=" * 50)
-        print("RESETTING CACHE")
-        print("=" * 50)
-        tester.reset_prefix_cache()
-
-        # Phase 2: After cache reset
-        results_after = run_concurrent_test("PHASE 2: AFTER CACHE RESET")
-
-        # Compare results between phases
-        print("\n" + "=" * 70)
-        print("DETERMINISM ANALYSIS")
-        print("=" * 70)
-
-        # Create lookup for before results
-        before_responses = {r["idx"]: r["response"] for r in results_before}
-        after_responses = {r["idx"]: r["response"] for r in results_after}
-
-        deterministic_count = 0
-        total_compared = 0
-
-        for idx in before_responses:
-            if idx in after_responses:
-                total_compared += 1
-                before_resp = before_responses[idx]
-                after_resp = after_responses[idx]
-
-                if before_resp == after_resp:
-                    deterministic_count += 1
-                    print(f"   Prompt {idx}: DETERMINISTIC")
-                else:
-                    print(f"   Prompt {idx}: NON-DETERMINISTIC")
-                    print(f"     Before: {before_resp}")
-                    print(f"     After:  {after_resp}")
-
-        # Final assessment
-        success_rate = deterministic_count / total_compared if total_compared > 0 else 0
-        print("\n=== FINAL RESULT ===")
-        print(f"Prompts compared: {total_compared}")
-        print(f"Deterministic: {deterministic_count}")
-        print(f"Success rate: {success_rate:.1%}")
-        print(f"Concurrent requests: {num_concurrent}")
-
-        assert (
-            success_rate == 1.0
-        ), f"Determinism failed: {deterministic_count}/{total_compared} prompts deterministic"
 
 
 if __name__ == "__main__":
