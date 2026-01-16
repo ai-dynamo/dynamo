@@ -470,8 +470,6 @@ impl PrefillRouter {
         }
     }
 
-    /// Query-only methods for EPP integration (no request execution)
-
     /// Check if disaggregated mode is currently active (prefill router activated)
     pub fn is_activated(&self) -> bool {
         self.prefill_router.get().is_some()
