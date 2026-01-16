@@ -97,6 +97,8 @@ Dynamo provides sample DGDR configurations in `benchmarks/profiler/deploy/`. You
 
 Or, you can create your own DGDR for your own needs.
 
+> **Important - Profiling Config Cases**: Prior to 0.8.1, any fields under `profilingConfig.config` are represented in snake_case. Starting 0.8.1, fields under `profilingConfig.config` are represented in camelCase for uniformity. There is backwards compatibility to snake_case, but as all example DGDRs are using camelCase, anyone using a release prior to 0.8.1 must manually update the configs under the examples to have snake_case config fields.
+
 > [!TIP]
 > For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](/docs/benchmarks/sla_driven_profiling.md#dgdr-configuration-reference).
 
@@ -349,9 +351,9 @@ spec:
 
 Profiling still runs against the real backend (via GPUs or AIC) to collect performance data. The mocker deployment then uses this data to simulate realistic timing behavior.
 
-### Using a Model Cache PVC
+### Using a Model Cache PVC (0.8.1 or later)
 
-For large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. See [Model Cache PVC](/docs/benchmarks/sla_driven_profiling.md#model-cache-pvc-advanced) for configuration details.
+Starting in Dynamo 0.8.1, for large models, you can use a pre-populated PVC containing model weights instead of downloading from HuggingFace. See [Model Cache PVC](/docs/benchmarks/sla_driven_profiling.md#model-cache-pvc-advanced) for configuration details.
 
 ### DGDR Immutability
 
