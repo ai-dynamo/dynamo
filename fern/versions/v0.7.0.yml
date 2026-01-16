@@ -19,4 +19,4 @@ navigation:
   - section: Documentation
     contents:
       - page: Coming Soon
-        path: ../pages-v0.7.0/coming-soon.mdx
+        path: ../pages-v0.7.0/coming-soon.md

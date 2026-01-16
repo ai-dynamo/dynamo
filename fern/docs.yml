@@ -18,12 +18,6 @@ instances:
 
 title: NVIDIA Dynamo Documentation
 
-redirects:
-- source: "/*:slug.md" # Matches multiple segments: /old-folder/foo/bar/baz 
-  destination: "/*:slug"
-- source: "/*:slug.mdx" # Matches multiple segments: /old-folder/foo/bar/baz 
-  destination: "/*:slug"
-
 # Version configuration
 versions:
   - display-name: Next
