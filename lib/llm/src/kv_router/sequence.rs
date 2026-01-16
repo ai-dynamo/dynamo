@@ -29,9 +29,7 @@ use dashmap::DashMap;
 use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-#[allow(deprecated)]
-use dynamo_runtime::traits::events::EventSubscriber;
-use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventPublisher};
+use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventPublisher, GenericEventSubscriber};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
@@ -506,7 +504,6 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Background task to subscribe to active sequence events and update all workers
-    #[allow(deprecated)]
     async fn subscribe_to_events(
         senders: Arc<
             DashMap<WorkerWithDpRank, tokio::sync::mpsc::UnboundedSender<UpdateSequences>>,
@@ -516,8 +513,9 @@ impl ActiveSequencesMultiWorker {
         router_id: Uuid,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        let mut subscriber = component
-            .subscribe_with_type::<ActiveSequenceEvent>(ACTIVE_SEQUENCES_SUBJECT)
+        let event_plane = EventPlane::for_component(&component);
+        let mut subscriber = event_plane
+            .subscribe_typed::<ActiveSequenceEvent>(ACTIVE_SEQUENCES_SUBJECT)
             .await?;
 
         loop {
@@ -529,7 +527,7 @@ impl ActiveSequencesMultiWorker {
                         break;
                     };
 
-                    let Ok(event) = result else {
+                    let Ok((_envelope, event)) = result else {
                         tracing::error!(
                             "Error receiving active sequence event: {}",
                             result.unwrap_err()

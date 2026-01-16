@@ -8,8 +8,7 @@ use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-#[allow(deprecated)]
-use dynamo_runtime::traits::events::EventSubscriber;
+use dynamo_runtime::transports::event_plane::{EventPlane, GenericEventSubscriber};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -173,7 +172,6 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
     ///
     /// This is safe to call multiple times (e.g., from cloned monitors shared across
     /// pipelines) - only the first call spawns the background task.
-    #[allow(deprecated)]
     async fn start_monitoring(&self) -> anyhow::Result<()> {
         // Guard: only start once across all clones
         if self.started.swap(true, Ordering::SeqCst) {
@@ -196,8 +194,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 card.runtime_config
             });
 
-        // Subscribe to KV metrics events
-        let mut kv_metrics_rx = component.namespace().subscribe(KV_METRICS_SUBJECT).await?;
+        // Subscribe to KV metrics events using EventPlane
+        let event_plane = EventPlane::for_namespace(component.namespace());
+        let mut kv_metrics_rx = event_plane.subscribe(KV_METRICS_SUBJECT).await?;
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
@@ -237,12 +236,17 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                     // Handle KV metrics updates (ActiveLoad)
                     kv_event = kv_metrics_rx.next() => {
-                        let Some(event) = kv_event else {
+                        let Some(envelope_result) = kv_event else {
                             tracing::debug!("KV metrics stream closed");
                             break;
                         };
 
-                        let Ok(active_load) = serde_json::from_slice::<ActiveLoad>(&event.payload) else {
+                        let Ok(envelope) = envelope_result else {
+                            tracing::error!("Error receiving KV metrics event: {:?}", envelope_result.unwrap_err());
+                            continue;
+                        };
+
+                        let Ok(active_load) = serde_json::from_slice::<ActiveLoad>(&envelope.payload) else {
                             continue;
                         };
 
