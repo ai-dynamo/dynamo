@@ -24,7 +24,7 @@ Dynamo supports multinode deployments through the `multinode` section in resourc
 
 For sophisticated multinode deployments, Dynamo integrates with advanced Kubernetes orchestration systems:
 
-- **[Grove](https://github.com/NVIDIA/grove)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
+- **[Grove](https://github.com/ai-dynamo/grove)**: Network topology-aware gang scheduling and auto-scaling for AI workloads
 - **[KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler)**: Kubernetes native scheduler optimized for AI workloads at scale
 
 These systems provide enhanced scheduling capabilities including topology-aware placement, gang scheduling, and coordinated auto-scaling across multiple nodes.
@@ -50,7 +50,7 @@ These systems provide enhanced scheduling capabilities including topology-aware 
 
 ##### Prerequisites
 
-- [Grove](https://github.com/NVIDIA/grove/blob/main/docs/installation.md) installed on the cluster
+- [Grove](https://github.com/ai-dynamo/grove/blob/main/docs/installation.md) installed on the cluster
 - (Optional) [KAI-Scheduler](https://github.com/NVIDIA/KAI-Scheduler) installed on the cluster with the default queue name `dynamo` created. If no queue annotation is specified on the DGD resource, the operator uses the `dynamo` queue by default. Custom queue names can be specified via the `nvidia.com/kai-scheduler-queue` annotation, but the queue must exist in the cluster before deployment.
 
 KAI-Scheduler is optional but recommended for advanced scheduling capabilities.
