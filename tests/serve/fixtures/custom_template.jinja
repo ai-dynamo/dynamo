@@ -1,0 +1,10 @@
+{%- for message in messages %}
+{%- if message['role'] == 'system' %}
+<|system|>{{ message['content'] }}
+{%- elif message['role'] == 'user' %}
+CUSTOM_TEMPLATE_ACTIVE| {{ message['content'] }}
+{%- elif message['role'] == 'assistant' %}
+<|assistant|>{{ message['content'] }}
+{%- endif %}
+{%- endfor %}
+<|assistant|>

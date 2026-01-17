@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,6 +38,8 @@ class NullStatLogger(StatLoggerBase):
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
+        *args,
+        **kwargs,
     ):
         pass
 
@@ -52,11 +54,9 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self,
         component: Component,
         dp_rank: int,
-        metrics_labels: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self.inner = WorkerMetricsPublisher()
-        metrics_labels = metrics_labels or []
-        self.inner.create_endpoint(component, metrics_labels)
+        self.inner.create_endpoint(component)
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
         self.request_total_slots = 1
@@ -74,6 +74,8 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         scheduler_stats: SchedulerStats,
         iteration_stats: Optional[IterationStats],
         engine_idx: int = 0,
+        *args,
+        **kwargs,
     ):
         # request_total_slots and kv_total_blocks are properties of model + gpu
         # we should only publish them once, not every metric update
@@ -161,9 +163,7 @@ class StatLoggerFactory:
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
-        logger = DynamoStatLoggerPublisher(
-            self.component, dp_rank, metrics_labels=self.metrics_labels
-        )
+        logger = DynamoStatLoggerPublisher(self.component, dp_rank)
         self.created_logger = logger
 
         return logger

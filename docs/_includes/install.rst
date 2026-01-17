@@ -10,7 +10,7 @@ Install a pre-built wheel from PyPI.
    source venv/bin/activate
 
    # Install Dynamo from PyPI (choose one backend extra)
-   uv pip install "ai-dynamo[sglang]==0.4.1"  # or [vllm], [trtllm]
+   uv pip install "ai-dynamo[sglang]==my-tag"  # or [vllm], [trtllm]
 
 
 Pip from source
@@ -41,4 +41,4 @@ Pull and run prebuilt images from NVIDIA NGC (`nvcr.io`).
    docker run --rm -it \
      --gpus all \
      --network host \
-     nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.4.1  # or vllm, tensorrtllm
+     nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag  # or vllm, tensorrtllm

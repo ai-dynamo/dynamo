@@ -1,7 +1,8 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
@@ -44,12 +45,43 @@ impl ModelRuntimeConfig {
         self.inner.reasoning_parser = reasoning_parser;
     }
 
+    #[setter]
+    fn set_data_parallel_size(&mut self, data_parallel_size: u32) {
+        self.inner.data_parallel_size = data_parallel_size;
+    }
+
+    #[setter]
+    fn set_enable_local_indexer(&mut self, enable_local_indexer: bool) {
+        self.inner.enable_local_indexer = enable_local_indexer;
+    }
+
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
         let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
         self.inner
             .set_engine_specific(key, value)
             .map_err(to_pyerr)?;
         Ok(())
+    }
+
+    fn set_tensor_model_config(
+        &mut self,
+        _py: Python<'_>,
+        tensor_model_config: &Bound<'_, PyDict>,
+    ) -> PyResult<()> {
+        let tensor_model_config = pythonize::depythonize(tensor_model_config).map_err(|err| {
+            PyErr::new::<PyException, _>(format!("Failed to convert tensor_model_config: {}", err))
+        })?;
+        self.inner.tensor_model_config = Some(tensor_model_config);
+        Ok(())
+    }
+
+    fn get_tensor_model_config(&self, _py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if let Some(tensor_model_config) = &self.inner.tensor_model_config {
+            let py_obj = pythonize::pythonize(_py, tensor_model_config).map_err(to_pyerr)?;
+            Ok(Some(py_obj.unbind()))
+        } else {
+            Ok(None)
+        }
     }
 
     #[getter]
@@ -78,6 +110,11 @@ impl ModelRuntimeConfig {
     }
 
     #[getter]
+    fn enable_local_indexer(&self) -> bool {
+        self.inner.enable_local_indexer
+    }
+
+    #[getter]
     fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
         let dict = PyDict::new(py);
         for (key, value) in self.inner.runtime_data.clone() {
@@ -88,5 +125,33 @@ impl ModelRuntimeConfig {
 
     fn get_engine_specific(&self, key: &str) -> PyResult<Option<String>> {
         self.inner.get_engine_specific(key).map_err(to_pyerr)
+    }
+
+    #[pyo3(signature = (bootstrap_host=None, bootstrap_port=None))]
+    fn set_disaggregated_endpoint(
+        &mut self,
+        bootstrap_host: Option<String>,
+        bootstrap_port: Option<u16>,
+    ) {
+        self.inner.disaggregated_endpoint = Some(RsDisaggregatedEndpoint {
+            bootstrap_host,
+            bootstrap_port,
+        });
+    }
+
+    #[getter]
+    fn bootstrap_host(&self) -> Option<String> {
+        self.inner
+            .disaggregated_endpoint
+            .as_ref()
+            .and_then(|e| e.bootstrap_host.clone())
+    }
+
+    #[getter]
+    fn bootstrap_port(&self) -> Option<u16> {
+        self.inner
+            .disaggregated_endpoint
+            .as_ref()
+            .and_then(|e| e.bootstrap_port)
     }
 }

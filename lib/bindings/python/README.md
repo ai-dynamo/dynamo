@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -50,7 +50,7 @@ maturin develop --uv
 
 ### Prerequisite
 
-See [README.md](../../../docs/runtime/README.md#prerequisites).
+See [README.md](../../../docs/development/runtime-guide.md#prerequisites).
 
 ### Hello World Example
 

@@ -1,35 +1,23 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 #![cfg(feature = "integration")]
 
 use dynamo_runtime::{
-    pipeline::PushRouter, protocols::annotated::Annotated, DistributedRuntime, Result, Runtime,
+    DistributedRuntime, Result, Runtime, config::environment_names::runtime::system as env_system,
+    pipeline::PushRouter, protocols::annotated::Annotated,
 };
 use futures::StreamExt;
 use rand::Rng;
 use reqwest;
 use std::env;
-use system_metrics::{backend, DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE};
-use tokio::time::{sleep, Duration};
+use system_metrics::{DEFAULT_COMPONENT, DEFAULT_ENDPOINT, DEFAULT_NAMESPACE, backend};
+use tokio::time::{Duration, sleep};
 
 #[tokio::test]
 async fn test_backend_with_metrics() -> Result<()> {
-    // Set environment variables for dynamic port allocation
-    env::set_var("DYN_SYSTEM_ENABLED", "true");
-    env::set_var("DYN_SYSTEM_PORT", "0");
+    // Set environment variable for dynamic port allocation (0 = auto-assign)
+    env::set_var(env_system::DYN_SYSTEM_PORT, "0");
 
     // Generate a random endpoint name to avoid collisions
     let random_suffix = rand::rng().random_range(1000..9999);
@@ -50,9 +38,7 @@ async fn test_backend_with_metrics() -> Result<()> {
             info.port()
         }
         None => {
-            panic!(
-                "System status server not started - check DYN_SYSTEM_ENABLED environment variable"
-            );
+            panic!("System status server not started - check DYN_SYSTEM_PORT environment variable");
         }
     };
 

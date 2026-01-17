@@ -1,21 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 pub mod managed;
 pub use managed::ManagedBlockPool;
 
+use anyhow::Result;
 use derive_builder::Builder;
 use derive_getters::Dissolve;
 use serde::{Deserialize, Serialize};
@@ -27,7 +16,6 @@ use super::block::{
     private, registry::BlockRegistry,
 };
 use super::events::{EventManager, NullEventManager};
-use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
 use crate::block_manager::CacheLevel;
@@ -35,7 +23,6 @@ use crate::block_manager::block::locality::LocalityProvider;
 use crate::tokens::{SequenceHash, TokenBlock};
 
 use async_trait::async_trait;
-use prometheus::Registry;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
@@ -44,8 +31,6 @@ use std::{
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-
-use dynamo_runtime::Result;
 
 // Type aliases to reduce complexity across the module
 type BlockPoolResult<T> = Result<T, BlockPoolError>;

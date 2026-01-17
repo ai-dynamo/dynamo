@@ -1,20 +1,8 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 
 import asyncio
+import os
 from functools import wraps
 from typing import Any, AsyncGenerator, Callable, Type, Union
 
@@ -22,23 +10,33 @@ from pydantic import BaseModel, ValidationError
 
 # List all the classes in the _core module for re-export
 # import * causes "unable to detect undefined names"
-from dynamo._core import Backend as Backend
 from dynamo._core import Client as Client
 from dynamo._core import Component as Component
 from dynamo._core import Context as Context
 from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
-from dynamo._core import EtcdKvCache as EtcdKvCache
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
+from dynamo._core import Namespace as Namespace
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker(static=False):
+def dynamo_worker(enable_nats: bool = True):
+    """
+    Decorator that creates a DistributedRuntime and passes it to the worker function.
+
+    Args:
+        enable_nats: Whether to enable NATS for KV events. Defaults to True.
+                    If request_plane is "nats", NATS is always enabled.
+                    Pass False (via --no-kv-events flag) to disable NATS initialization.
+    """
+
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            runtime = DistributedRuntime(loop, static)
+            request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
+            store_kv = os.environ.get("DYN_STORE_KV", "etcd")
+            runtime = DistributedRuntime(loop, store_kv, request_plane, enable_nats)
 
             await func(runtime, *args, **kwargs)
 

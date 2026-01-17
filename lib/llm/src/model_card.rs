@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # Model Deployment Card
@@ -11,43 +11,76 @@
 //! - Model information (ModelInfoType)
 //! - Tokenizer configuration (TokenizerKind)
 //! - Prompt formatter settings (PromptFormatterArtifact)
-//! - Various metadata like revision, publish time, etc.
 
 use std::fmt;
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
 
 use crate::common::checked_file::CheckedFile;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::model_type::{ModelInput, ModelType};
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
+use dynamo_runtime::{slug::Slug, storage::kv};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 
-use crate::gguf::{Content, ContentConfig, ModelConfigLike};
+use crate::preprocessor::media::{MediaDecoder, MediaFetcher};
 use crate::protocols::TokenIdType;
 
 /// Identify model deployment cards in the key-value store
-pub const ROOT_PATH: &str = "mdc";
-
-/// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
-const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+pub const ROOT_PATH: &str = "v1/mdc";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelInfoType {
     HfConfigJson(CheckedFile),
-    GGUF(PathBuf),
+}
+
+impl ModelInfoType {
+    pub fn checksum(&self) -> String {
+        match self {
+            ModelInfoType::HfConfigJson(c) => c.checksum().to_string(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        match self {
+            ModelInfoType::HfConfigJson(c) => c.is_local(),
+        }
+    }
+
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self {
+            ModelInfoType::HfConfigJson(c) => c.update_dir(dir),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum TokenizerKind {
     HfTokenizerJson(CheckedFile),
-    GGUF(Box<HfTokenizer>),
+}
+
+impl TokenizerKind {
+    pub fn checksum(&self) -> String {
+        match self {
+            TokenizerKind::HfTokenizerJson(c) => c.checksum().to_string(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        match self {
+            TokenizerKind::HfTokenizerJson(c) => c.is_local(),
+        }
+    }
+
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self {
+            TokenizerKind::HfTokenizerJson(c) => c.update_dir(dir),
+        }
+    }
 }
 
 /// Supported types of prompt formatters.
@@ -66,8 +99,38 @@ pub enum TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(CheckedFile),
-    HfChatTemplate(CheckedFile),
-    GGUF(PathBuf),
+    HfChatTemplate { is_custom: bool, file: CheckedFile },
+}
+
+impl PromptFormatterArtifact {
+    pub fn checksum(&self) -> String {
+        match self {
+            PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.checksum().to_string(),
+            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.checksum().to_string(),
+        }
+    }
+
+    /// Is this file available locally
+    pub fn is_local(&self) -> bool {
+        match self {
+            PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.is_local(),
+            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.is_local(),
+        }
+    }
+
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self {
+            PromptFormatterArtifact::HfTokenizerConfigJson(c) => c.update_dir(dir),
+            PromptFormatterArtifact::HfChatTemplate { file: c, .. } => c.update_dir(dir),
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        match self {
+            PromptFormatterArtifact::HfTokenizerConfigJson(_) => false,
+            PromptFormatterArtifact::HfChatTemplate { is_custom, .. } => *is_custom,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -84,7 +147,31 @@ pub enum PromptContextMixin {
 #[serde(rename_all = "snake_case")]
 pub enum GenerationConfig {
     HfGenerationConfigJson(CheckedFile),
-    GGUF(PathBuf),
+}
+
+impl GenerationConfig {
+    pub fn checksum(&self) -> String {
+        match self {
+            GenerationConfig::HfGenerationConfigJson(c) => c.checksum().to_string(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        match self {
+            GenerationConfig::HfGenerationConfigJson(c) => c.is_local(),
+        }
+    }
+
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self {
+            GenerationConfig::HfGenerationConfigJson(c) => c.update_dir(dir),
+        }
+    }
+}
+
+/// Check if our model only has config fields for a Mistral-format model.
+fn is_exclusively_mistral_model(directory: &Path) -> bool {
+    !directory.join("config.json").exists() && directory.join("params.json").exists()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
@@ -94,6 +181,13 @@ pub struct ModelDeploymentCard {
 
     // Cache the Slugified display_name so we can share references to it
     slug: Slug,
+
+    /// Original HuggingFace repository path for downloading model files.
+    /// When `display_name` is customized (e.g., via `--served-model-name`),
+    /// this field preserves the original repository path needed for downloads.
+    /// Falls back to `display_name` if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
 
     /// Model information
     pub model_info: Option<ModelInfoType>,
@@ -117,13 +211,6 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_context: Option<Vec<PromptContextMixin>>,
 
-    /// When this card was last advertised by a worker. None if not yet published.
-    pub last_published: Option<chrono::DateTime<chrono::Utc>>,
-
-    /// Incrementing count of how many times we published this card
-    #[serde(default, skip_serializing)]
-    pub revision: u64,
-
     /// Max context (in number of tokens) this model can handle
     pub context_length: u32,
 
@@ -135,12 +222,31 @@ pub struct ModelDeploymentCard {
     /// connection to the current worker.
     pub migration_limit: u32,
 
+    /// Specifies whether the model is a chat, completions, etc model.
+    pub model_type: ModelType,
+
+    /// Specifies the model input type.
+    /// `Tokens` for engines that expect pre-processed input.
+    /// `Text` for engines that take care of pre-processing themselves.
+    pub model_input: ModelInput,
+
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
 
     #[serde(default)]
     pub runtime_config: ModelRuntimeConfig,
+
+    /// Media decoding configuration
+    #[serde(default)]
+    pub media_decoder: Option<MediaDecoder>,
+
+    /// Media fetching configuration
+    #[serde(default)]
+    pub media_fetcher: Option<MediaFetcher>,
+
+    #[serde(skip, default)]
+    checksum: OnceLock<String>,
 }
 
 impl ModelDeploymentCard {
@@ -161,25 +267,18 @@ impl ModelDeploymentCard {
         }
     }
 
-    /// How often we should check if a model deployment card expired because it's workers are gone
-    pub fn expiry_check_period() -> Duration {
-        match CARD_MAX_AGE.to_std() {
-            Ok(duration) => duration / 3,
-            Err(_) => {
-                // Only happens if CARD_MAX_AGE is negative, which it isn't
-                unreachable!("Cannot run card expiry watcher, invalid CARD_MAX_AGE");
-            }
-        }
-    }
-
     /// Load a model deployment card from a JSON file
     pub fn load_from_json_file<P: AsRef<Path>>(file: P) -> std::io::Result<Self> {
-        Ok(serde_json::from_str(&std::fs::read_to_string(file)?)?)
+        let contents = std::fs::read_to_string(&file)?;
+        Ok(serde_json::from_str(&contents).inspect_err(|err| {
+            crate::log_json_err(&file.as_ref().display().to_string(), &contents, err)
+        })?)
     }
 
     /// Load a model deployment card from a JSON string
-    pub fn load_from_json_str(json: &str) -> Result<Self, anyhow::Error> {
-        Ok(serde_json::from_str(json)?)
+    pub fn load_from_json_str(contents: &str) -> Result<Self, anyhow::Error> {
+        Ok(serde_json::from_str(contents)
+            .inspect_err(|err| crate::log_json_err("unknown", contents, err))?)
     }
 
     //
@@ -192,6 +291,12 @@ impl ModelDeploymentCard {
         Ok(())
     }
 
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.display_name
+    }
+
+    #[inline]
     pub fn slug(&self) -> &Slug {
         &self.slug
     }
@@ -201,18 +306,48 @@ impl ModelDeploymentCard {
         Ok(serde_json::to_string(self)?)
     }
 
-    pub fn mdcsum(&self) -> String {
-        let json = self.to_json().unwrap();
-        format!("{}", blake3::hash(json.as_bytes()))
-    }
+    pub fn mdcsum(&self) -> &str {
+        self.checksum
+            .get_or_init(|| {
+                // Only include the important fields
+                let mut bytes_to_hash: Vec<u8> = Vec::with_capacity(512);
+                bytes_to_hash.extend(self.display_name.as_bytes());
+                if let Some(source_path) = self.source_path.as_ref() {
+                    bytes_to_hash.extend(source_path.as_bytes());
+                }
 
-    /// Was this card last published a long time ago, suggesting the worker is gone?
-    pub fn is_expired(&self) -> bool {
-        if let Some(last_published) = self.last_published.as_ref() {
-            chrono::Utc::now() - last_published > CARD_MAX_AGE
-        } else {
-            false
-        }
+                // The files can be either a URL or a local path, so we ignore that and hash their
+                // checksum instead, which won't change wherever they are.
+
+                if let Some(model_info) = self.model_info.as_ref() {
+                    bytes_to_hash.extend(model_info.checksum().as_bytes());
+                }
+                if let Some(tokenizer) = self.tokenizer.as_ref() {
+                    bytes_to_hash.extend(tokenizer.checksum().as_bytes());
+                }
+                if let Some(prompt_formatter) = self.prompt_formatter.as_ref() {
+                    bytes_to_hash.extend(prompt_formatter.checksum().as_bytes());
+                }
+                if let Some(chat_template) = self.chat_template_file.as_ref() {
+                    bytes_to_hash.extend(chat_template.checksum().as_bytes());
+                }
+                if let Some(gen_config) = self.gen_config.as_ref() {
+                    bytes_to_hash.extend(gen_config.checksum().as_bytes());
+                }
+
+                if let Some(prompt_context_vec) = self.prompt_context.as_ref() {
+                    // Paste it as the bytes of the debug format. It's a Vec of enum, so this should be
+                    // fine. If the debug representation changes that only happens in a new release.
+                    bytes_to_hash.extend(format!("{prompt_context_vec:?}").as_bytes());
+                }
+                bytes_to_hash.extend(self.context_length.to_be_bytes());
+                bytes_to_hash.extend(self.kv_cache_block_size.to_be_bytes());
+
+                // TODO: Do we want any of user_data or runtime_config?
+
+                blake3::hash(&bytes_to_hash).to_string()
+            })
+            .as_ref()
     }
 
     /// Is this a full model card with tokenizer?
@@ -224,145 +359,30 @@ impl ModelDeploymentCard {
     pub fn tokenizer_hf(&self) -> anyhow::Result<HfTokenizer> {
         match &self.tokenizer {
             Some(TokenizerKind::HfTokenizerJson(checked_file)) => {
-                let p = checked_file.path().ok_or_else(||
-                    anyhow::anyhow!("Tokenizer is URL-backed ({:?}); call move_from_nats() before tokenizer_hf()", checked_file.url())
-                )?;
-                HfTokenizer::from_file(p).map_err(anyhow::Error::msg)
+                let p = checked_file.path().ok_or_else(|| {
+                    anyhow::anyhow!("Tokenizer is URL-backed ({:?})", checked_file.url())
+                })?;
+                HfTokenizer::from_file(p)
+                    .inspect_err(|err| {
+                        if let Some(serde_err) = err.downcast_ref::<serde_json::Error>()
+                            && let Ok(contents) = std::fs::read_to_string(p)
+                        {
+                            crate::log_json_err(&p.display().to_string(), &contents, serde_err);
+                        }
+                    })
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| p.display().to_string())
             }
-            Some(TokenizerKind::GGUF(t)) => Ok(*t.clone()),
             None => {
-                anyhow::bail!("Blank ModelDeploymentCard does not have a tokenizer");
+                anyhow::bail!(
+                    "Blank ModelDeploymentCard does not have a tokenizer. Is this a mistral model? If so, the `--use-<framework>-tokenizer` flag in the engine command is required."
+                );
             }
         }
     }
 
-    pub fn is_gguf(&self) -> bool {
-        match &self.model_info {
-            Some(info) => info.is_gguf(),
-            None => false,
-        }
-    }
-
-    /// Move the files this MDC uses into the NATS object store.
-    /// Updates the URI's to point to NATS.
-    pub async fn move_to_nats(&mut self, nats_client: nats::Client) -> Result<()> {
-        let nats_addr = nats_client.addr();
-        let bucket_name = self.slug().clone();
-        tracing::debug!(
-            nats_addr,
-            %bucket_name,
-            "Uploading model deployment card fields to NATS"
-        );
-
-        macro_rules! nats_upload {
-            ($field:expr, $enum_variant:path, $filename:literal) => {
-                if let Some($enum_variant(src_file)) = $field.as_mut()
-                    && let Some(path) = src_file.path()
-                {
-                    let target = format!("nats://{nats_addr}/{bucket_name}/{}", $filename);
-                    let dest = url::Url::parse(&target)?;
-                    nats_client.object_store_upload(path, &dest).await?;
-                    src_file.move_to_url(dest);
-                }
-            };
-        }
-
-        nats_upload!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
-        nats_upload!(
-            self.gen_config,
-            GenerationConfig::HfGenerationConfigJson,
-            "generation_config.json"
-        );
-        nats_upload!(
-            self.prompt_formatter,
-            PromptFormatterArtifact::HfTokenizerConfigJson,
-            "tokenizer_config.json"
-        );
-        nats_upload!(
-            self.chat_template_file,
-            PromptFormatterArtifact::HfChatTemplate,
-            "chat_template.jinja"
-        );
-        nats_upload!(
-            self.tokenizer,
-            TokenizerKind::HfTokenizerJson,
-            "tokenizer.json"
-        );
-
-        Ok(())
-    }
-
-    /// Move the files this MDC uses from the NATS object store to local disk.
-    /// Updates the URI's to point to the created files.
-    ///
-    /// The returned TempDir must be kept alive, it cleans up on drop.
-    pub async fn move_from_nats(&mut self, nats_client: nats::Client) -> Result<tempfile::TempDir> {
-        let nats_addr = nats_client.addr();
-        let bucket_name = self.slug();
-        let target_dir = tempfile::TempDir::with_prefix(bucket_name.to_string())?;
-        tracing::debug!(
-            nats_addr,
-            %bucket_name,
-            target_dir = %target_dir.path().display(),
-            "Downloading model deployment card fields from NATS"
-        );
-
-        macro_rules! nats_download {
-            ($field:expr, $enum_variant:path, $filename:literal) => {
-                if let Some($enum_variant(src_file)) = $field.as_mut()
-                    && let Some(src_url) = src_file.url()
-                {
-                    let target = target_dir.path().join($filename);
-                    nats_client.object_store_download(src_url, &target).await?;
-                    if !src_file.checksum_matches(&target) {
-                        anyhow::bail!(
-                            "Invalid {} in NATS for {}, checksum does not match.",
-                            $filename,
-                            self.display_name
-                        );
-                    }
-                    src_file.move_to_disk(target);
-                }
-            };
-        }
-
-        nats_download!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
-        nats_download!(
-            self.gen_config,
-            GenerationConfig::HfGenerationConfigJson,
-            "generation_config.json"
-        );
-        nats_download!(
-            self.prompt_formatter,
-            PromptFormatterArtifact::HfTokenizerConfigJson,
-            "tokenizer_config.json"
-        );
-        nats_download!(
-            self.chat_template_file,
-            PromptFormatterArtifact::HfChatTemplate,
-            "chat_template.jinja"
-        );
-        nats_download!(
-            self.tokenizer,
-            TokenizerKind::HfTokenizerJson,
-            "tokenizer.json"
-        );
-
-        Ok(target_dir)
-    }
-
-    /// Delete this card from the key-value store and it's URLs from the object store
-    pub async fn delete_from_nats(&mut self, nats_client: nats::Client) -> Result<()> {
-        let nats_addr = nats_client.addr();
-        let bucket_name = self.slug();
-        tracing::trace!(
-            nats_addr,
-            %bucket_name,
-            "Delete model deployment card from NATS"
-        );
-        nats_client
-            .object_store_delete_bucket(bucket_name.as_ref())
-            .await
+    pub(crate) fn set_source_path(&mut self, source_path: PathBuf) {
+        self.source_path = Some(source_path.display().to_string());
     }
 
     /// Allow user to override the name we register this model under.
@@ -372,23 +392,162 @@ impl ModelDeploymentCard {
         self.slug = Slug::from_string(name);
     }
 
-    /// Build an in-memory ModelDeploymentCard from either:
-    /// - a folder containing config.json, tokenizer.json and token_config.json
-    /// - a GGUF file
-    ///   With an optional custom template
-    pub fn load(
+    pub fn source_path(&self) -> &str {
+        self.source_path.as_ref().unwrap_or(&self.display_name)
+    }
+
+    /// Build an in-memory ModelDeploymentCard from a folder containing config.json,
+    /// tokenizer.json and tokenizer_config.json (i.e. a huggingface repo checkout).
+    /// Optional custom template.
+    pub fn load_from_disk(
         config_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<ModelDeploymentCard> {
-        let config_path = config_path.as_ref();
-        if config_path.is_dir() {
-            Self::from_local_path(config_path, custom_template_path)
-        } else {
-            // GGUF files don't support custom templates yet
-            if custom_template_path.is_some() {
-                anyhow::bail!("Custom templates are not supported for GGUF files");
+        Self::from_local_path(config_path.as_ref(), custom_template_path)
+    }
+
+    pub fn requires_preprocessing(&self) -> bool {
+        matches!(self.model_input, ModelInput::Tokens)
+    }
+
+    /// Download the files this card needs to work: config.json, tokenizer.json, etc.
+    pub async fn download_config(&mut self) -> anyhow::Result<()> {
+        if self.has_local_files() {
+            tracing::trace!("All model config is local, not downloading");
+            return Ok(());
+        }
+
+        // For TensorBased models, config files are not used - they handle everything in the backend
+        if self.model_type.supports_tensor() {
+            tracing::debug!(
+                display_name = %self.display_name,
+                "Skipping config download for TensorBased model"
+            );
+            return Ok(());
+        }
+
+        let ignore_weights = true;
+        let local_path = crate::hub::from_hf(self.source_path(), ignore_weights).await?;
+
+        self.update_dir(&local_path);
+        Ok(())
+    }
+
+    /// Re-write all the local disk paths as a URL. Do this before publishing the MDC.
+    /// The opposite of `move_to_url` is `update_dir`.
+    pub fn move_to_url(&mut self, base_url: &str) -> anyhow::Result<()> {
+        macro_rules! change {
+            ($field:expr, $enum_variant:path) => {
+                if let Some($enum_variant(src_file)) = $field.as_mut()
+                    && let Some(filename) = src_file
+                        .path()
+                        .and_then(|p| p.file_name())
+                        .and_then(|f| f.to_str())
+                        .map(|f| f.to_string())
+                {
+                    let hf_url = url::Url::parse(base_url)
+                        .and_then(|u| u.join(filename.as_ref()))
+                        .context(filename)?;
+                    src_file.move_to_url(hf_url);
+                }
+            };
+        }
+
+        // config.json
+        change!(self.model_info, ModelInfoType::HfConfigJson);
+
+        // generation_config.json
+        change!(self.gen_config, GenerationConfig::HfGenerationConfigJson);
+
+        // tokenizer_config.json
+        change!(
+            self.prompt_formatter,
+            PromptFormatterArtifact::HfTokenizerConfigJson
+        );
+
+        // tokenizer.json
+        change!(self.tokenizer, TokenizerKind::HfTokenizerJson);
+
+        // We only "move" the chat template if it came form the repo. If we have a custom template
+        // file we cannot download that from HF.
+        if let Some(PromptFormatterArtifact::HfChatTemplate {
+            file: src_file,
+            is_custom,
+        }) = self.chat_template_file.as_mut()
+        {
+            if *is_custom {
+                tracing::info!(
+                    "Detected custom chat template. Ensure file exists in the same location on all hosts."
+                );
+            } else if let Some(filename) = src_file
+                .path()
+                .and_then(|p| p.file_name())
+                .and_then(|f| f.to_str())
+                .map(|f| f.to_string())
+            {
+                let hf_url = url::Url::parse(base_url)
+                    .and_then(|u| u.join(filename.as_ref()))
+                    .context(filename)?;
+                src_file.move_to_url(hf_url);
             }
-            Self::from_gguf(config_path)
+        }
+        Ok(())
+    }
+
+    /// Are all the files we need (tokenizer.json, etc) available locally?
+    fn has_local_files(&self) -> bool {
+        let has_model_info = self
+            .model_info
+            .as_ref()
+            .map(|p| p.is_local())
+            .unwrap_or(true);
+        let has_tokenizer = self
+            .tokenizer
+            .as_ref()
+            .map(|p| p.is_local())
+            .unwrap_or(true);
+        let has_prompt_formatter = self
+            .prompt_formatter
+            .as_ref()
+            .map(|p| p.is_local())
+            .unwrap_or(true);
+        let has_chat_template_file = self
+            .chat_template_file
+            .as_ref()
+            .map(|p| p.is_local())
+            .unwrap_or(true);
+        let has_gen_config = self
+            .gen_config
+            .as_ref()
+            .map(|p| p.is_local())
+            .unwrap_or(true);
+
+        has_model_info
+            && has_tokenizer
+            && has_prompt_formatter
+            && has_chat_template_file
+            && has_gen_config
+    }
+
+    /// Update the directory for files like tokenizer.json be in here.
+    fn update_dir(&mut self, dir: &Path) {
+        if let Some(model_info) = self.model_info.as_mut() {
+            model_info.update_dir(dir);
+        }
+        if let Some(tk) = self.tokenizer.as_mut() {
+            tk.update_dir(dir);
+        }
+        if let Some(pf) = self.prompt_formatter.as_mut() {
+            pf.update_dir(dir);
+        }
+        if let Some(gc) = self.gen_config.as_mut() {
+            gc.update_dir(dir);
+        }
+        // If it's a custom chat template we didn't download it, so leave the path untouched
+        if let Some(ct) = self.chat_template_file.as_mut()
+            && !ct.is_custom()
+        {
+            ct.update_dir(dir);
         }
     }
 
@@ -408,85 +567,49 @@ impl ModelDeploymentCard {
     /// - The path contains invalid Unicode characters
     /// - Required model files are missing or invalid
     fn from_local_path(
-        local_root_dir: impl AsRef<Path>,
+        local_path: impl AsRef<Path>,
         custom_template_path: Option<&Path>,
     ) -> anyhow::Result<Self> {
-        let local_root_dir = local_root_dir.as_ref();
-        check_valid_local_repo_path(local_root_dir)?;
-        let repo_id = local_root_dir
-            .canonicalize()?
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("Path contains invalid Unicode"))?
-            .to_string();
-        let model_name = local_root_dir
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid model directory name"))?;
-
-        Self::from_repo(&repo_id, model_name, custom_template_path)
+        check_valid_local_repo_path(&local_path)?;
+        Self::from_repo_checkout(&local_path, custom_template_path)
     }
 
-    fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
-        let model_name = gguf_file
-            .iter()
-            .next_back()
-            .map(|n| n.to_string_lossy().to_string());
-        let Some(model_name) = model_name else {
-            // I think this would only happy on an empty path
-            anyhow::bail!(
-                "Could not extract model name from path '{}'",
-                gguf_file.display()
-            );
+    fn from_repo_checkout(
+        local_path: impl AsRef<Path>,
+        custom_template_path: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let local_path = local_path.as_ref();
+
+        // This is usually the right choice
+        let context_length =
+            crate::file_json_field(&local_path.join("config.json"), "max_position_embeddings")
+                // But sometimes this is
+                .or_else(|_| {
+                    crate::file_json_field(
+                        &local_path.join("tokenizer_config.json"),
+                        "model_max_length",
+                    )
+                })
+                // If neither of those are present let the engine default it
+                .unwrap_or(0);
+
+        let is_mistral_model = is_exclusively_mistral_model(local_path);
+
+        let (model_info, tokenizer, gen_config, prompt_formatter) = if !is_mistral_model {
+            (
+                Some(ModelInfoType::from_disk(local_path)?),
+                Some(TokenizerKind::from_disk(local_path)?),
+                GenerationConfig::from_disk(local_path).ok(),
+                PromptFormatterArtifact::from_disk(local_path)?,
+            )
+        } else {
+            (None, None, None, None)
         };
 
-        // TODO: we do this in HFConfig also, unify
-        let content = load_gguf(gguf_file)?;
-        let context_length = content.get_metadata()[&format!("{}.context_length", content.arch())]
-            .to_u32()
-            .unwrap_or(0);
-        tracing::debug!(context_length, "Loaded context length from GGUF");
-
-        Ok(Self {
-            display_name: model_name.to_string(),
-            slug: Slug::from_string(model_name),
-            model_info: Some(ModelInfoType::GGUF(gguf_file.to_path_buf())),
-            tokenizer: Some(TokenizerKind::from_gguf(gguf_file)?),
-            gen_config: None, // AFAICT there is no equivalent in a GGUF
-            prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
-            chat_template_file: None,
-            prompt_context: None, // TODO - auto-detect prompt context
-            revision: 0,
-            last_published: None,
-            context_length,
-            kv_cache_block_size: 0,
-            migration_limit: 0,
-            user_data: None,
-            runtime_config: ModelRuntimeConfig::default(),
-        })
-    }
-
-    fn from_repo(
-        repo_id: &str,
-        model_name: &str,
-        custom_template_path: Option<&Path>,
-    ) -> anyhow::Result<Self> {
-        // This is usually the right choice
-        let context_length = crate::file_json_field(
-            &PathBuf::from(repo_id).join("config.json"),
-            "max_position_embeddings",
-        )
-        // But sometimes this is
-        .or_else(|_| {
-            crate::file_json_field(
-                &PathBuf::from(repo_id).join("tokenizer_config.json"),
-                "model_max_length",
-            )
-        })
-        // If neither of those are present let the engine default it
-        .unwrap_or(0);
-
         // Load chat template - either custom or from repo
-        let chat_template_file = if let Some(template_path) = custom_template_path {
+        let chat_template_file = if is_mistral_model {
+            None
+        } else if let Some(template_path) = custom_template_path {
             if !template_path.exists() {
                 anyhow::bail!(
                     "Custom template file does not exist: {}",
@@ -502,42 +625,54 @@ impl ModelDeploymentCard {
                 )
             })?;
 
-            Some(PromptFormatterArtifact::HfChatTemplate(
-                CheckedFile::from_disk(template_path)?,
-            ))
+            Some(PromptFormatterArtifact::HfChatTemplate {
+                is_custom: custom_template_path.is_some(),
+                file: CheckedFile::from_disk(template_path)?,
+            })
         } else {
-            PromptFormatterArtifact::chat_template_from_repo(repo_id)?
+            PromptFormatterArtifact::chat_template_from_disk(local_path)?
         };
 
+        // This gets replaced when we `set_name`
+        let display_name = local_path.display().to_string();
+
         Ok(Self {
-            display_name: model_name.to_string(),
-            slug: Slug::from_string(model_name),
-            model_info: Some(ModelInfoType::from_repo(repo_id)?),
-            tokenizer: Some(TokenizerKind::from_repo(repo_id)?),
-            gen_config: GenerationConfig::from_repo(repo_id).ok(), // optional
-            prompt_formatter: PromptFormatterArtifact::from_repo(repo_id)?,
+            slug: Slug::from_string(&display_name),
+            display_name,
+            source_path: None,
+            model_info,
+            tokenizer,
+            gen_config,
+            prompt_formatter,
             chat_template_file,
             prompt_context: None, // TODO - auto-detect prompt context
-            revision: 0,
-            last_published: None,
             context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
+            model_type: Default::default(),  // set later
+            model_input: Default::default(), // set later
             user_data: None,
             runtime_config: ModelRuntimeConfig::default(),
+            media_decoder: None,
+            media_fetcher: None,
+            checksum: OnceLock::new(),
         })
     }
 }
 
-impl Versioned for ModelDeploymentCard {
+impl PartialEq for ModelDeploymentCard {
+    fn eq(&self, other: &ModelDeploymentCard) -> bool {
+        self.mdcsum() == other.mdcsum()
+    }
+}
+
+/// A ModelDeploymentCard is published a single time per instance and never updated.
+impl kv::Versioned for ModelDeploymentCard {
     fn revision(&self) -> u64 {
-        self.revision
+        0
     }
 
-    fn set_revision(&mut self, revision: u64) {
-        self.last_published = Some(chrono::Utc::now());
-        self.revision = revision;
-    }
+    fn set_revision(&mut self, _revision: u64) {}
 }
 
 impl fmt::Display for ModelDeploymentCard {
@@ -549,8 +684,8 @@ pub trait ModelInfo: Send + Sync {
     /// Model type
     fn model_type(&self) -> String;
 
-    /// Token ID for the beginning of sequence
-    fn bos_token_id(&self) -> TokenIdType;
+    /// Token ID for the beginning of sequence (optional - not all models have it)
+    fn bos_token_id(&self) -> Option<TokenIdType>;
 
     /// Token ID for the end of sequence
     fn eos_token_ids(&self) -> Vec<TokenIdType>;
@@ -573,11 +708,7 @@ impl ModelInfoType {
                 };
                 Ok(HFConfig::from_json_file(path)?)
             }
-            Self::GGUF(path) => Ok(HFConfig::from_gguf(path)?),
         }
-    }
-    pub fn is_gguf(&self) -> bool {
-        matches!(self, Self::GGUF(_))
     }
 }
 
@@ -598,12 +729,8 @@ struct HFConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HFTextConfig {
-    // It can take multiple attempts to load this, so Option
+    // Optional - not all models have a bos_token_id
     bos_token_id: Option<TokenIdType>,
-
-    // We set this once bos_token_id is loaded so we don't have to deal with Option
-    #[serde(default)]
-    final_bos_token_id: TokenIdType,
 
     eos_token_id: Option<serde_json::Value>,
 
@@ -614,7 +741,8 @@ struct HFTextConfig {
     max_position_embeddings: Option<usize>,
 
     /// number of layers in the model
-    num_hidden_layers: usize,
+    /// Optional because some multimodal models (e.g., LLaVA) don't include this in text_config
+    num_hidden_layers: Option<usize>,
 
     /// number of attention heads in the model
     num_attention_heads: Option<usize>,
@@ -627,12 +755,18 @@ impl HFConfig {
     fn from_json_file<P: AsRef<Path>>(file: P) -> Result<Arc<dyn ModelInfo>> {
         let file_path = file.as_ref();
         let contents = std::fs::read_to_string(file_path)?;
-        let mut config: Self = serde_json::from_str(&contents)?;
+        let mut config: Self = json_five::from_str(&contents)
+            .inspect_err(|err| {
+                tracing::error!(path=%file_path.display(), %err, "Failed to parse config.json as JSON5");
+            })?;
         if config.text_config.is_none() {
-            let text_config: HFTextConfig = serde_json::from_str(&contents)?;
+            let text_config: HFTextConfig = json_five::from_str(&contents)
+                .inspect_err(|err| {
+                    tracing::error!(path=%file_path.display(), %err, "Failed to parse text config from config.json as JSON5");
+                })?;
             config.text_config = Some(text_config);
         }
-        // Sometimes bos_token_id is in generation_config.json not config.json
+
         let Some(text_config) = config.text_config.as_mut() else {
             anyhow::bail!(
                 "Missing text config fields (model_type, eos_token_ids, etc) in config.json"
@@ -643,55 +777,71 @@ impl HFConfig {
             .parent()
             .unwrap_or_else(|| Path::new(""))
             .join("generation_config.json");
+
+        // bos_token_id is optional - not all models have it
+        // Try to load from generation_config.json if not in config.json
         if text_config.bos_token_id.is_none() {
-            let bos_token_id = crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id")
-                .context(
-                    "missing bos_token_id in generation_config.json and config.json, cannot load",
-                )?;
-            text_config.bos_token_id = Some(bos_token_id);
+            text_config.bos_token_id =
+                crate::file_json_field::<TokenIdType>(&gencfg_path, "bos_token_id").ok();
         }
-        // Now that we have it for sure, set it in the non-Option field
-        let final_bos_token_id = text_config.bos_token_id.take().unwrap();
-        text_config.final_bos_token_id = final_bos_token_id;
 
         // TODO: refactor this when we switch to per-architecture tokenization
-        let final_eos_token_ids: Vec<TokenIdType> = config
-            .eos_token_id
-            .as_ref()
-            .or(text_config.eos_token_id.as_ref())
-            .and_then(|v| {
-                if v.is_number() {
-                    v.as_number()
-                        .and_then(|n| n.as_u64())
-                        .map(|n| vec![n as TokenIdType])
-                } else if v.is_array() {
-                    let arr = v.as_array().unwrap(); // Safety: We just checked
-                    Some(
-                        arr.iter()
-                            .filter_map(|inner_v| {
-                                inner_v
-                                    .as_number()
-                                    .and_then(|n| n.as_u64())
-                                    .map(|n| n as TokenIdType)
-                            })
-                            .collect(),
-                    )
-                } else {
-                    tracing::error!(
-                        ?v,
-                        path = %file_path.display(),
-                        "eos_token_id is not a number or an array, cannot use"
-                    );
-                    None
-                }
-            })
-            .or_else(|| {
-                // Maybe it's in generation_config.json
-                crate::file_json_field(&gencfg_path, "eos_token_id")
+        // eos_token_id can appear in multiple places, and as suggested by HuggingFace
+        // community that the priority should be:
+        // 1. generation_config.json;
+        // 2. config.json, or text_config field in config.json.
+        // https://github.com/huggingface/transformers/issues/25395#issuecomment-1671863257
+        let final_eos_token_ids: Vec<TokenIdType> = {
+                // Firstly check the generation_config.json
+                crate::file_json_field::<serde_json::Value>(&gencfg_path, "eos_token_id")
                 .inspect_err(
                     |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
-                .ok()
+                .ok().and_then(|v| {
+                    if v.is_number() {
+                        v.as_number()
+                            .and_then(|n| n.as_u64())
+                            .map(|n| vec![n as TokenIdType])
+                    } else if v.is_array() {
+                        let arr = v.as_array().unwrap();
+                        Some(
+                            arr.iter()
+                                .filter_map(|inner_v| {
+                                    inner_v
+                                        .as_number()
+                                        .and_then(|n| n.as_u64())
+                                        .map(|n| n as TokenIdType)
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    }
+                })
+            }.or_else(|| {
+                // Check config.json and text_config
+                config
+                .eos_token_id
+                .as_ref()
+                .or(text_config.eos_token_id.as_ref())
+                .and_then(|v| {
+                    if v.is_number() {
+                        v.as_number()
+                            .and_then(|n| n.as_u64())
+                            .map(|n| vec![n as TokenIdType])
+                    } else {
+                        serde_json::from_value(v.clone())
+                            .map(Some)
+                            .unwrap_or_else(|err| {
+                                tracing::error!(
+                                    ?v,
+                                    path = %file_path.display(),
+                                    "eos_token_id is not a number or an array, cannot deserialize: {err}",
+                                );
+                                None
+                            })
+                    }
+                })
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -702,44 +852,6 @@ impl HFConfig {
 
         Ok(Arc::new(config))
     }
-    fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
-        let content = load_gguf(gguf_file)?;
-        let model_config_metadata: ContentConfig = (&content).into();
-        let num_hidden_layers =
-            content.get_metadata()[&format!("{}.block_count", content.arch())].to_u32()? as usize;
-
-        let bos_token_id = content.get_metadata()["tokenizer.ggml.bos_token_id"].to_u32()?;
-        let eos_token_id = content.get_metadata()["tokenizer.ggml.eos_token_id"].to_u32()?;
-
-        // to_vec returns a Vec that's already there, so it's cheap
-        let vocab_size = content.get_metadata()["tokenizer.ggml.tokens"]
-            .to_vec()?
-            .len();
-
-        let arch = content.arch().to_string();
-        Ok(Arc::new(HFConfig {
-            architectures: vec![format!("{}ForCausalLM", capitalize(&arch))],
-            // "general.architecture"
-            model_type: arch,
-            text_config: Some(HFTextConfig {
-                bos_token_id: None,
-                final_bos_token_id: bos_token_id,
-
-                eos_token_id: None,
-                final_eos_token_ids: vec![eos_token_id],
-
-                // "llama.context_length"
-                max_position_embeddings: Some(model_config_metadata.max_seq_len()),
-                // "llama.block_count"
-                num_hidden_layers,
-                // "llama.attention.head_count"
-                num_attention_heads: Some(model_config_metadata.num_attn_heads()),
-                // "tokenizer.ggml.tokens".len()
-                vocab_size: Some(vocab_size),
-            }),
-            eos_token_id: None,
-        }))
-    }
 }
 
 impl ModelInfo for HFConfig {
@@ -747,8 +859,8 @@ impl ModelInfo for HFConfig {
         self.model_type.clone()
     }
 
-    fn bos_token_id(&self) -> TokenIdType {
-        self.text_config.as_ref().unwrap().final_bos_token_id
+    fn bos_token_id(&self) -> Option<TokenIdType> {
+        self.text_config.as_ref().and_then(|tc| tc.bos_token_id)
     }
 
     fn eos_token_ids(&self) -> Vec<TokenIdType> {
@@ -768,69 +880,61 @@ impl ModelInfo for HFConfig {
     }
 }
 
-impl TokenizerKind {
-    pub fn from_gguf(gguf_file: &Path) -> anyhow::Result<Self> {
-        let content = load_gguf(gguf_file)?;
-        let out = crate::gguf::convert_gguf_to_hf_tokenizer(&content)
-            .with_context(|| gguf_file.display().to_string())?;
-        Ok(TokenizerKind::GGUF(Box::new(out.tokenizer)))
-    }
-}
-
-pub(crate) fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
-    let filename = gguf_file.display().to_string();
-    let mut f = File::open(gguf_file).with_context(|| filename.clone())?;
-    // vec because GGUF can be split into multiple files (shards)
-    let mut readers = vec![&mut f];
-    crate::gguf::Content::from_readers(&mut readers).with_context(|| filename.clone())
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
-    }
-}
-
 impl ModelInfoType {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("config.json"))
-            .with_context(|| format!("unable to extract config.json from repo {repo_id}"))?;
+    pub fn from_disk(directory: &Path) -> Result<Self> {
+        let f = CheckedFile::from_disk(directory.join("config.json")).with_context(|| {
+            format!(
+                "unable to extract config.json from directory {}",
+                directory.display()
+            )
+        })?;
         Ok(Self::HfConfigJson(f))
     }
 }
 
 impl GenerationConfig {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("generation_config.json"))
-            .with_context(|| format!("unable to extract generation_config from repo {repo_id}"))?;
+    pub fn from_disk(directory: &Path) -> Result<Self> {
+        let f = CheckedFile::from_disk(directory.join("generation_config.json")).with_context(
+            || {
+                format!(
+                    "unable to extract generation_config from directory {}",
+                    directory.display()
+                )
+            },
+        )?;
         Ok(Self::HfGenerationConfigJson(f))
     }
 }
 
 impl PromptFormatterArtifact {
-    pub fn from_repo(repo_id: &str) -> Result<Option<Self>> {
+    pub fn from_disk(directory: &Path) -> Result<Option<Self>> {
         // we should only error if we expect a prompt formatter and it's not found
         // right now, we don't know when to expect it, so we just return Ok(Some/None)
-        match CheckedFile::from_disk(PathBuf::from(repo_id).join("tokenizer_config.json")) {
+        match CheckedFile::from_disk(directory.join("tokenizer_config.json")) {
             Ok(f) => Ok(Some(Self::HfTokenizerConfigJson(f))),
             Err(_) => Ok(None),
         }
     }
 
-    pub fn chat_template_from_repo(repo_id: &str) -> Result<Option<Self>> {
-        match CheckedFile::from_disk(PathBuf::from(repo_id).join("chat_template.jinja")) {
-            Ok(f) => Ok(Some(Self::HfChatTemplate(f))),
+    pub fn chat_template_from_disk(directory: &Path) -> Result<Option<Self>> {
+        match CheckedFile::from_disk(directory.join("chat_template.jinja")) {
+            Ok(f) => Ok(Some(Self::HfChatTemplate {
+                file: f,
+                is_custom: false,
+            })),
             Err(_) => Ok(None),
         }
     }
 }
 
 impl TokenizerKind {
-    pub fn from_repo(repo_id: &str) -> Result<Self> {
-        let f = CheckedFile::from_disk(PathBuf::from(repo_id).join("tokenizer.json"))
-            .with_context(|| format!("unable to extract tokenizer kind from repo {repo_id}"))?;
+    pub fn from_disk(directory: &Path) -> Result<Self> {
+        let f = CheckedFile::from_disk(directory.join("tokenizer.json")).with_context(|| {
+            format!(
+                "unable to extract tokenizer kind from directory {}",
+                directory.display()
+            )
+        })?;
         Ok(Self::HfTokenizerJson(f))
     }
 }
@@ -863,6 +967,7 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::HFConfig;
+    use std::collections::HashSet;
     use std::path::Path;
 
     #[test]
@@ -870,7 +975,10 @@ mod tests {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/mock-llama-3.1-8b-instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
-        assert_eq!(config.bos_token_id(), 128000);
+        assert_eq!(config.bos_token_id(), Some(128000));
+        // eos_token_ids can be in any order as long as the set is correct
+        let eos_token_id_set: HashSet<_> = config.eos_token_ids().iter().cloned().collect();
+        assert_eq!(eos_token_id_set, vec![128001, 128009].into_iter().collect());
         Ok(())
     }
 
@@ -879,7 +987,17 @@ mod tests {
         let config_file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/data/sample-models/Llama-4-Scout-17B-16E-Instruct/config.json");
         let config = HFConfig::from_json_file(&config_file)?;
-        assert_eq!(config.bos_token_id(), 200000);
+        assert_eq!(config.bos_token_id(), Some(200000));
         Ok(())
+    }
+
+    /// The Python JSON parser accepts `Infinity` as a numeric value. This is explicitly against the
+    /// JSON spec, but inevitably people rely on it, so we have to allow it.
+    /// We treat that file as JSON5 (a lenient superset of JSON) to be able to parse it.
+    #[test]
+    fn test_invalid_json_but_py_accepts_it() {
+        dynamo_runtime::logging::init();
+        let path = "tests/data/sample-models/NVIDIA-Nemotron-Nano-12B-v2-Base/config.json";
+        let _ = HFConfig::from_json_file(path).unwrap();
     }
 }

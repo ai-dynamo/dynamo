@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 /// This module provides a high-performance interface that bridges Python
@@ -6,9 +6,6 @@
 ///
 /// It is organized into several specialized sub-modules, each responsible for a particular aspect of the system:
 ///
-/// - `backend`:
-///   Wraps low-level interfaces for LLM inference, manages resource allocation,
-///   and integrates with specialized hardware for optimized execution.
 /// - `disagg_route`:
 ///   Implements distributed routing of inference requests with dynamic
 ///   load balancing and efficient resource allocation across clusters.
@@ -26,14 +23,9 @@
 /// integration between Python tools and the Dynamo runtime.
 use super::*;
 
-pub mod backend;
-pub mod disagg_router;
 pub mod entrypoint;
 pub mod kv;
 pub mod local_model;
+pub mod lora;
 pub mod model_card;
-pub mod nats;
 pub mod preprocessor;
-
-#[cfg(feature = "block-manager")]
-pub mod block_manager;

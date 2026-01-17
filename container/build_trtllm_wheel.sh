@@ -1,5 +1,5 @@
 #!/bin/bash -e
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -89,15 +89,6 @@ sed -i "s/__version__ = \"\(.*\)\"/__version__ = \"\1+dev${COMMIT_VERSION}\"/" "
 
 echo "Updated version:"
 grep "__version__" "$VERSION_FILE"
-
-echo "Copying install_nixl.sh from $MAIN_DIR to ${PWD}/docker/common/"
-# Copy install_nixl.sh to docker/common/
-cp $MAIN_DIR/deps/trtllm/install_nixl.sh docker/common/install_nixl.sh
-# Update NIXL_COMMIT in install_nixl.sh to use the parameter passed to this script
-sed -i "s/NIXL_COMMIT=\"[^\"]*\"/NIXL_COMMIT=\"${NIXL_COMMIT}\"/" docker/common/install_nixl.sh
-
-
-
 
 if [ "$ARCH" = "amd64" ]; then
     # Need to build in the Triton Devel Image for NIXL support.

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -69,7 +69,7 @@ async def worker(runtime: DistributedRuntime):
     host: str = "localhost"
     port: int = 8000
     service: HttpService = HttpService(port=port)
-    service.add_chat_completions_model(served_model_name, engine)
+    service.add_chat_completions_model(served_model_name, "mdcsum", engine)
 
     print("Starting service...")
     shutdown_signal = service.run(runtime.child_token())

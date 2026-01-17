@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
@@ -33,7 +33,7 @@ pub struct Checksum {
     algorithm: CryptographicHashMethods,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CryptographicHashMethods {
     #[serde(rename = "blake3")]
     BLAKE3,
@@ -82,10 +82,6 @@ impl CheckedFile {
         }
     }
 
-    pub fn is_nats_url(&self) -> bool {
-        matches!(self.path.as_ref(), Either::Right(u) if u.scheme() == "nats")
-    }
-
     pub fn checksum(&self) -> &Checksum {
         &self.checksum
     }
@@ -97,6 +93,37 @@ impl CheckedFile {
             Err(error) => {
                 tracing::error!(disk_file = %disk_file.as_ref().display(), checked_file = self.to_string(), %error, "Checksum does not match");
                 false
+            }
+        }
+    }
+
+    /// Is the CheckedFile a path on disk that exists?
+    pub fn is_local(&self) -> bool {
+        match self.path.as_ref() {
+            Either::Left(path) => path.exists(),
+            Either::Right(_) => false, // is a Url
+        }
+    }
+
+    /// Keep the filename but change it's containing directory to `dir`.
+    /// This is used to point at a model file (e.g. `tokenizer.json`) in the HF cache dir.
+    pub fn update_dir(&mut self, dir: &Path) {
+        match self.path.as_mut() {
+            Either::Left(path) => {
+                if let Some(file_name) = path.file_name() {
+                    let mut new_path = PathBuf::from(dir);
+                    new_path.push(file_name);
+                    *path = new_path;
+                }
+            }
+            Either::Right(url) => {
+                let Some(filename) = url.path().split('/').next_back().filter(|s| !s.is_empty())
+                else {
+                    tracing::warn!(%url, "Cannot update directory on invalid URL");
+                    return;
+                };
+                let p = dir.join(filename);
+                self.path = Either::Left(p);
             }
         }
     }
@@ -256,6 +283,15 @@ impl TryFrom<&str> for Checksum {
         };
 
         Ok(Checksum::new(parts[1], algo))
+    }
+}
+
+impl Default for Checksum {
+    fn default() -> Self {
+        Self {
+            hash: "".to_string(),
+            algorithm: CryptographicHashMethods::BLAKE3,
+        }
     }
 }
 

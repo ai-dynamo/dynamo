@@ -1,0 +1,146 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-dsr1
+spec:
+  backendFramework: vllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 1800
+            failureThreshold: 60
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+    decode:
+      componentType: worker
+      subComponentType: decode
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            rdma/ib: "8"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/dynamo
+          env:
+            - name: VLLM_USE_DEEP_GEMM
+              value: "1"
+            - name: VLLM_MOE_DP_CHUNK_SIZE
+              value: "384"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: enabled
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              exec python3 -m dynamo.vllm \
+                --model /model-cache/deepseek-r1 \
+                --served-model-name deepseek-ai/DeepSeek-R1 \
+                --all2all-backend deepep_low_latency \
+                --data-parallel-hybrid-lb \
+                --tensor-parallel-size 1 \
+                --data-parallel-size 16 \
+                --enable-expert-parallel \
+                --max-model-len 16384 \
+                --enable-dbo \
+                --dbo-decode-token-threshold 32 \
+                --async-scheduling \
+                --enable-eplb \
+                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
+                --max-num-seqs 512 \
+                --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    prefill:
+      componentType: worker
+      subComponentType: prefill
+      replicas: 1
+      multinode:
+        nodeCount: 2
+      resources:
+        limits:
+          gpu: "8"
+          custom:
+            rdma/ib: "8"
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 600
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/dynamo
+          env:
+            - name: VLLM_USE_DEEP_GEMM
+              value: "1"
+            - name: VLLM_SKIP_P2P_CHECK
+              value: "1"
+            - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
+              value: "1"
+            - name: NVIDIA_GDRCOPY
+              value: enabled
+            - name: GLOO_SOCKET_IFNAME
+              value: eth0
+          command:
+            - /bin/bash
+            - -c
+          args:
+            - |
+              exec python3 -m dynamo.vllm \
+                --model /model-cache/deepseek-r1 \
+                --is-prefill-worker \
+                --served-model-name deepseek-ai/DeepSeek-R1 \
+                --all2all-backend deepep_high_throughput \
+                --data-parallel-hybrid-lb \
+                --tensor-parallel-size 1 \
+                --data-parallel-size 16 \
+                --enable-expert-parallel \
+                --max-model-len 16384 \
+                --enable-dbo \
+                --dbo-decode-token-threshold 32 \
+                --async-scheduling \
+                --enable-eplb \
+                --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
+                --max-num-seqs 512

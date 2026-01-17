@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Nightly CI Pipeline
+
+on:
+  schedule:
+    - cron: '0 8 * * *' # Every day at 12:00 AM PST (08:00 UTC)
+  workflow_dispatch:  # Allow manual triggering for testing
+
+permissions:
+  contents: read
+
+jobs:
+  ci-pipeline:
+    name: Nightly CI
+    uses: ./.github/workflows/ci-test-suite.yml
+    with:
+      pipeline_type: nightly
+      include_nightly_marks: true
+      image_prefix: nightly
+      enable_slack_notification: true
+    secrets:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      NGC_CI_ACCESS_TOKEN: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+      SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL: ${{ secrets.SLACK_NOTIFY_NIGHTLY_WEBHOOK_URL }}
+      SLACK_OPS_SUPPORT_GROUP_ID: ${{ secrets.SLACK_OPS_SUPPORT_GROUP_ID }}
+      AZURE_AKS_CI_KUBECONFIG_B64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}

@@ -1,7 +1,7 @@
 :orphan:
 
 ..
-    SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
     SPDX-License-Identifier: Apache-2.0
 
 .. This hidden toctree includes readmes etc that aren't meant to be in the main table of contents but should be accounted for in the sphinx project structure
@@ -11,43 +11,80 @@
    :maxdepth: 2
    :hidden:
 
-   runtime/README.md
-   API/nixl_connect/connector.md
-   API/nixl_connect/descriptor.md
-   API/nixl_connect/device.md
-   API/nixl_connect/device_kind.md
-   API/nixl_connect/operation_status.md
-   API/nixl_connect/rdma_metadata.md
-   API/nixl_connect/readable_operation.md
-   API/nixl_connect/writable_operation.md
-   API/nixl_connect/read_operation.md
-   API/nixl_connect/write_operation.md
-   API/nixl_connect/README.md
+   development/runtime-guide.md
+   api/nixl_connect/connector.md
+   api/nixl_connect/descriptor.md
+   api/nixl_connect/device.md
+   api/nixl_connect/device_kind.md
+   api/nixl_connect/operation_status.md
+   api/nixl_connect/rdma_metadata.md
+   api/nixl_connect/readable_operation.md
+   api/nixl_connect/writable_operation.md
+   api/nixl_connect/read_operation.md
+   api/nixl_connect/write_operation.md
+   api/nixl_connect/README.md
 
-   guides/dynamo_deploy/create_deployment.md
-   guides/dynamo_deploy/sla_planner_deployment.md
-   guides/dynamo_deploy/gke_setup.md
-   guides/dynamo_deploy/grove.md
-   guides/dynamo_deploy/k8s_metrics.md
-   guides/dynamo_deploy/model_caching_with_fluid.md
-   guides/dynamo_deploy/README.md
-   guides/dynamo_run.md
-   guides/metrics.md
-   guides/run_kvbm_in_vllm.md
+   kubernetes/api_reference.md
+   kubernetes/deployment/create_deployment.md
+   kubernetes/deployment/dynamomodel-guide.md
 
-   architecture/kv_cache_routing.md
-   architecture/load_planner.md
-   architecture/request_migration.md
+   kubernetes/fluxcd.md
+   kubernetes/grove.md
+   kubernetes/model_caching_with_fluid.md
+   kubernetes/README.md
+   reference/cli.md
+   observability/metrics.md
+   kvbm/vllm-setup.md
+   kvbm/trtllm-setup.md
+   agents/tool-calling.md
+   development/jail_stream.md
 
-   components/backends/trtllm/multinode/multinode-examples.md
-   components/backends/sglang/docs/multinode-examples.md
+   router/kv_cache_routing.md
+   router/kv_events.md
+   planner/load_planner.md
+   fault_tolerance/README.md
+   fault_tolerance/request_migration.md
+   fault_tolerance/request_cancellation.md
+   fault_tolerance/graceful_shutdown.md
+   fault_tolerance/request_rejection.md
+   fault_tolerance/testing.md
+   design_docs/request_plane.md
+   design_docs/event_plane.md
+
+   backends/trtllm/multinode/multinode-examples.md
+   backends/trtllm/llama4_plus_eagle.md
+   backends/trtllm/kv-cache-transfer.md
+   backends/trtllm/gemma3_sliding_window_attention.md
+   backends/trtllm/gpt-oss.md
+   backends/trtllm/prometheus.md
+
+   backends/sglang/expert-distribution-eplb.md
+   backends/sglang/gpt-oss.md
+   backends/sglang/profiling.md
+   backends/sglang/sgl-hicache-example.md
+   backends/sglang/sglang-disaggregation.md
+   backends/sglang/prometheus.md
 
    examples/README.md
    examples/runtime/hello_world/README.md
 
-   architecture/distributed_runtime.md
-   architecture/dynamo_flow.md
+   design_docs/distributed_runtime.md
+   design_docs/dynamo_flow.md
 
+   backends/vllm/deepseek-r1.md
+   backends/vllm/gpt-oss.md
+   backends/vllm/LMCache_Integration.md
+   backends/vllm/multi-node.md
+   backends/vllm/prometheus.md
+   backends/vllm/prompt-embeddings.md
+   backends/vllm/speculative_decoding.md
+
+   benchmarks/kv-router-ab-testing.md
+
+   frontends/kserve.md
+   _sections/frontends.rst
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
      have some outdated names/references and need a refresh.
+..   TODO: Add an OpenAI frontend doc to complement the KServe GRPC doc
+     in the Frontends section.

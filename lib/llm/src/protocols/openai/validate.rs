@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::fmt::Display;
 
@@ -33,6 +21,13 @@ pub const MAX_TOP_P: f32 = 1.0;
 /// Allowed range of values for OpenAI's `top_p` sampling option
 pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
 
+/// Minimum allowed value for `min_p`
+pub const MIN_MIN_P: f32 = 0.0;
+/// Maximum allowed value for `min_p`
+pub const MAX_MIN_P: f32 = 1.0;
+/// Allowed range of values for `min_p`
+pub const MIN_P_RANGE: (f32, f32) = (MIN_MIN_P, MAX_MIN_P);
+
 /// Minimum allowed value for OpenAI's `frequency_penalty` sampling option
 pub const MIN_FREQUENCY_PENALTY: f32 = -2.0;
 /// Maximum allowed value for OpenAI's `frequency_penalty` sampling option
@@ -46,6 +41,13 @@ pub const MIN_PRESENCE_PENALTY: f32 = -2.0;
 pub const MAX_PRESENCE_PENALTY: f32 = 2.0;
 /// Allowed range of values for OpenAI's `presence_penalty` sampling option
 pub const PRESENCE_PENALTY_RANGE: (f32, f32) = (MIN_PRESENCE_PENALTY, MAX_PRESENCE_PENALTY);
+
+/// Minimum allowed value for `length_penalty`
+pub const MIN_LENGTH_PENALTY: f32 = -2.0;
+/// Maximum allowed value for `length_penalty`
+pub const MAX_LENGTH_PENALTY: f32 = 2.0;
+/// Allowed range of values for `length_penalty`
+pub const LENGTH_PENALTY_RANGE: (f32, f32) = (MIN_LENGTH_PENALTY, MAX_LENGTH_PENALTY);
 
 /// Maximum allowed value for `top_logprobs`
 pub const MIN_TOP_LOGPROBS: u8 = 0;
@@ -61,6 +63,11 @@ pub const MAX_LOGPROBS: u8 = 5;
 pub const MIN_N: u8 = 1;
 /// Maximum allowed value for `n` (number of choices)
 pub const MAX_N: u8 = 128;
+/// Allowed range of values for `n` (number of choices)
+pub const N_RANGE: (u8, u8) = (MIN_N, MAX_N);
+
+/// Maximum allowed total number of choices (batch_size × n)
+pub const MAX_TOTAL_CHOICES: usize = 128;
 
 /// Minimum allowed value for OpenAI's `logit_bias` values
 pub const MIN_LOGIT_BIAS: f32 = -100.0;
@@ -71,25 +78,74 @@ pub const MAX_LOGIT_BIAS: f32 = 100.0;
 pub const MIN_BEST_OF: u8 = 0;
 /// Maximum allowed value for `best_of`
 pub const MAX_BEST_OF: u8 = 20;
+/// Allowed range of values for `best_of`
+pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 
 /// Maximum allowed number of stop sequences
 pub const MAX_STOP_SEQUENCES: usize = 4;
 /// Maximum allowed number of tools
 pub const MAX_TOOLS: usize = 128;
-/// Maximum allowed number of metadata key-value pairs
-pub const MAX_METADATA_PAIRS: usize = 16;
-/// Maximum allowed length for metadata keys
-pub const MAX_METADATA_KEY_LENGTH: usize = 64;
-/// Maximum allowed length for metadata values
-pub const MAX_METADATA_VALUE_LENGTH: usize = 512;
+// Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
 pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
-/// Maximum allowed value for Prompt IntegerArray elements
-pub const MAX_PROMPT_TOKEN_ID: u32 = 50256;
+/// Minimum allowed value for `repetition_penalty`
+pub const MIN_REPETITION_PENALTY: f32 = 0.0;
+/// Maximum allowed value for `repetition_penalty`
+pub const MAX_REPETITION_PENALTY: f32 = 2.0;
 
 //
 // Shared Fields
 //
+
+/// Validates that no unsupported fields are present in the request
+pub fn validate_no_unsupported_fields(
+    unsupported_fields: &std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), anyhow::Error> {
+    if !unsupported_fields.is_empty() {
+        let fields: Vec<_> = unsupported_fields
+            .keys()
+            .map(|s| format!("`{}`", s))
+            .collect();
+        anyhow::bail!("Unsupported parameter(s): {}", fields.join(", "));
+    }
+    Ok(())
+}
+
+/// Validates response_format for chat completions.
+///
+/// Dynamo currently supports translating:
+/// - `{"type":"json_object"}` -> guided decoding JSON object schema
+/// - `{"type":"json_schema","json_schema":{"schema": ...}}` -> guided decoding JSON schema
+///
+/// `{"type":"text"}` is accepted and means no structured constraint.
+pub fn validate_response_format(
+    response_format: &Option<dynamo_async_openai::types::ResponseFormat>,
+) -> Result<(), anyhow::Error> {
+    use dynamo_async_openai::types::ResponseFormat;
+
+    let Some(fmt) = response_format else {
+        return Ok(());
+    };
+
+    match fmt {
+        ResponseFormat::Text => Ok(()),
+        ResponseFormat::JsonObject => Ok(()),
+        ResponseFormat::JsonSchema { json_schema } => {
+            // Validate name field format
+            if json_schema.name.is_empty() {
+                anyhow::bail!("`response_format.json_schema.name` cannot be empty");
+            }
+
+            // Validate schema presence
+            if json_schema.schema.is_none() {
+                anyhow::bail!(
+                    "`response_format.json_schema.schema` is required when `response_format.type` is `json_schema`"
+                );
+            }
+            Ok(())
+        }
+    }
+}
 
 /// Validates the temperature parameter
 pub fn validate_temperature(temperature: Option<f32>) -> Result<(), anyhow::Error> {
@@ -119,6 +175,15 @@ pub fn validate_top_p(top_p: Option<f32>) -> Result<(), anyhow::Error> {
         );
     }
     Ok(())
+}
+
+// Validate top_k
+pub fn validate_top_k(top_k: Option<i32>) -> Result<(), anyhow::Error> {
+    match top_k {
+        None => Ok(()),
+        Some(k) if k == -1 || k >= 1 => Ok(()),
+        _ => anyhow::bail!("Top_k must be null, -1, or greater than or equal to 1"),
+    }
 }
 
 /// Validates mutual exclusion of temperature and top_p
@@ -164,6 +229,36 @@ pub fn validate_presence_penalty(presence_penalty: Option<f32>) -> Result<(), an
     Ok(())
 }
 
+pub fn validate_repetition_penalty(repetition_penalty: Option<f32>) -> Result<(), anyhow::Error> {
+    // It should be greater than 0.0 and less than equal to 2.0
+    if let Some(penalty) = repetition_penalty
+        && (penalty <= MIN_REPETITION_PENALTY || penalty > MAX_REPETITION_PENALTY)
+    {
+        anyhow::bail!(
+            "Repetition penalty must be between {} and {}, got {}",
+            MIN_REPETITION_PENALTY,
+            MAX_REPETITION_PENALTY,
+            penalty
+        );
+    }
+    Ok(())
+}
+
+/// Validates min_p parameter
+pub fn validate_min_p(min_p: Option<f32>) -> Result<(), anyhow::Error> {
+    if let Some(p) = min_p
+        && !(MIN_MIN_P..=MAX_MIN_P).contains(&p)
+    {
+        anyhow::bail!(
+            "Min_p must be between {} and {}, got {}",
+            MIN_MIN_P,
+            MAX_MIN_P,
+            p
+        );
+    }
+    Ok(())
+}
+
 /// Validates logit bias map
 pub fn validate_logit_bias(
     logit_bias: &Option<std::collections::HashMap<String, serde_json::Value>>,
@@ -201,6 +296,42 @@ pub fn validate_n(n: Option<u8>) -> Result<(), anyhow::Error> {
         && !(MIN_N..=MAX_N).contains(&value)
     {
         anyhow::bail!("n must be between {} and {}, got {}", MIN_N, MAX_N, value);
+    }
+    Ok(())
+}
+
+/// Validates total choices (batch_size × n) doesn't exceed maximum
+pub fn validate_total_choices(batch_size: usize, n: u8) -> Result<(), anyhow::Error> {
+    let total_choices = batch_size * (n as usize);
+    if total_choices > MAX_TOTAL_CHOICES {
+        anyhow::bail!(
+            "Total choices (batch_size × n = {} × {} = {}) exceeds maximum of {}",
+            batch_size,
+            n,
+            total_choices,
+            MAX_TOTAL_CHOICES
+        );
+    }
+    Ok(())
+}
+
+/// Validates n and temperature interaction
+/// When n > 1, temperature must be > 0 to ensure diverse outputs
+pub fn validate_n_with_temperature(
+    n: Option<u8>,
+    temperature: Option<f32>,
+) -> Result<(), anyhow::Error> {
+    if let Some(n_value) = n
+        && n_value > 1
+    {
+        let temp = temperature.unwrap_or(1.0);
+        if temp == 0.0 {
+            anyhow::bail!(
+                "When n > 1, temperature must be greater than 0 to ensure diverse outputs. Got n={}, temperature={}",
+                n_value,
+                temp
+            );
+        }
     }
     Ok(())
 }
@@ -315,45 +446,6 @@ pub fn validate_tools(
     Ok(())
 }
 
-/// Validates metadata
-pub fn validate_metadata(metadata: &Option<serde_json::Value>) -> Result<(), anyhow::Error> {
-    let metadata = match metadata {
-        Some(val) => val,
-        None => return Ok(()),
-    };
-
-    if let Some(obj) = metadata.as_object() {
-        if obj.len() > MAX_METADATA_PAIRS {
-            anyhow::bail!(
-                "Metadata cannot have more than {} key-value pairs, got {}",
-                MAX_METADATA_PAIRS,
-                obj.len()
-            );
-        }
-
-        for (key, value) in obj {
-            if key.len() > MAX_METADATA_KEY_LENGTH {
-                anyhow::bail!(
-                    "Metadata key '{}' exceeds {} character limit",
-                    key,
-                    MAX_METADATA_KEY_LENGTH
-                );
-            }
-
-            if let Some(value_str) = value.as_str()
-                && value_str.len() > MAX_METADATA_VALUE_LENGTH
-            {
-                anyhow::bail!(
-                    "Metadata value for key '{}' exceeds {} character limit",
-                    key,
-                    MAX_METADATA_VALUE_LENGTH
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Validates reasoning effort parameter
 pub fn validate_reasoning_effort(
     _reasoning_effort: &Option<dynamo_async_openai::types::ReasoningEffort>,
@@ -400,16 +492,6 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
             if arr.is_empty() {
                 anyhow::bail!("Prompt integer array cannot be empty");
             }
-            for (i, &token_id) in arr.iter().enumerate() {
-                if token_id > MAX_PROMPT_TOKEN_ID {
-                    anyhow::bail!(
-                        "Token ID at index {} must be between 0 and {}, got {}",
-                        i,
-                        MAX_PROMPT_TOKEN_ID,
-                        token_id
-                    );
-                }
-            }
         }
         dynamo_async_openai::types::Prompt::ArrayOfIntegerArray(arr) => {
             if arr.is_empty() {
@@ -419,19 +501,77 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
                 if inner_arr.is_empty() {
                     anyhow::bail!("Prompt integer array at index {} cannot be empty", i);
                 }
-                for (j, &token_id) in inner_arr.iter().enumerate() {
-                    if token_id > MAX_PROMPT_TOKEN_ID {
-                        anyhow::bail!(
-                            "Token ID at index [{}][{}] must be between 0 and {}, got {}",
-                            i,
-                            j,
-                            MAX_PROMPT_TOKEN_ID,
-                            token_id
-                        );
-                    }
-                }
             }
         }
+    }
+    Ok(())
+}
+
+/// Validates prompt and prompt_embeds fields together.
+///
+/// This function consolidates all prompt-related validation:
+/// - Ensures at least one of prompt or prompt_embeds is provided
+/// - If prompt_embeds is provided, validates its format (base64, size limits)
+/// - If prompt_embeds is NOT provided, validates that prompt is non-empty
+///
+/// Format for prompt_embeds: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_or_embeds(
+    prompt: Option<&dynamo_async_openai::types::Prompt>,
+    prompt_embeds: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // Check that at least one is provided
+    if prompt.is_none() && prompt_embeds.is_none() {
+        anyhow::bail!("At least one of 'prompt' or 'prompt_embeds' must be provided");
+    }
+
+    // If prompt_embeds is provided, validate it
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
+    } else if let Some(p) = prompt {
+        // Only validate prompt content if prompt_embeds is NOT provided
+        // When embeddings are present, prompt can be empty/placeholder
+        validate_prompt(p)?;
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds format (internal helper)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+fn validate_prompt_embeds_format(embeds: &str) -> Result<(), anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose};
+
+    // Validate base64 encoding first
+    let decoded = general_purpose::STANDARD
+        .decode(embeds)
+        .map_err(|_| anyhow::anyhow!("prompt_embeds must be valid base64-encoded data"))?;
+
+    // Check minimum size on decoded bytes (100 bytes)
+    const MIN_SIZE: usize = 100;
+    if decoded.len() < MIN_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data must be at least {MIN_SIZE} bytes, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    // Check maximum size on decoded bytes (10MB)
+    const MAX_SIZE: usize = 10 * 1024 * 1024;
+    if decoded.len() > MAX_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data exceeds maximum size of 10MB, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds field (public wrapper for standalone validation)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow::Error> {
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
     }
     Ok(())
 }

@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+data:
+  config.yaml: |
+    enable_attention_dp: true
+    cuda_graph_config:
+        max_batch_size: 800
+        enable_padding: true
+    kv_cache_config:
+      enable_block_reuse: false
+    stream_interval: 20
+    moe_config:
+        backend: CUTLASS
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: gpt-oss-agg
+spec:
+  backendFramework: trtllm
+  pvcs:
+    - name: model-cache
+      create: false
+  services:
+    Frontend:
+      componentType: frontend
+      extraPodSpec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                - key: nvidia.com/dynamo-graph-deployment-name
+                  operator: In
+                  values:
+                  - gpt-oss-agg-frontend
+              topologyKey: kubernetes.io/hostname
+        mainContainer:
+          args:
+          - python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+          command:
+          - /bin/sh
+          - -c
+          image: my-registry/tensorrtllm-runtime:my-tag
+      replicas: 1
+    TrtllmWorker:
+      componentType: main
+      envFromSecret: hf-token-secret
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /opt/models
+      sharedMemory:
+        size: 80Gi
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+              - matchExpressions:
+                - key: nvidia.com/gpu.present
+                  operator: In
+                  values:
+                  - "true"
+        mainContainer:
+          args:
+          - |
+            python3 -m dynamo.trtllm \
+              --model-path "${MODEL_PATH}" \
+              --served-model-name "openai/gpt-oss-120b" \
+              --extra-engine-args "${ENGINE_ARGS}" \
+              --tensor-parallel-size 4 \
+              --expert-parallel-size 4 \
+              --max-batch-size 800 \
+              --free-gpu-memory-fraction 0.9
+          command:
+          - /bin/sh
+          - -c
+          image: my-registry/tensorrtllm-runtime:my-tag
+          env:
+          - name: TRTLLM_ENABLE_PDL
+            value: "1"
+          - name: TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL
+            value: "True"
+          - name: SERVED_MODEL_NAME
+            value: "openai/gpt-oss-120b"
+          - name: ENGINE_ARGS
+            value: "/opt/dynamo/configs/config.yaml"
+          - name: MODEL_PATH
+            value: "/opt/models/hub/models--openai--gpt-oss-120b/snapshots/b5c939de8f754692c1647ca79fbf85e8c1e70f8a"
+          - name: HF_HOME
+            value: /opt/models
+          volumeMounts:
+          - mountPath: /opt/dynamo/configs
+            name: llm-config
+            readOnly: true
+          workingDir: /workspace/examples/backends/trtllm
+        volumes:
+        - configMap:
+            name: llm-config
+          name: llm-config
+      replicas: 1
+      resources:
+        limits:
+          gpu: "4"
+        requests:
+          gpu: "4"

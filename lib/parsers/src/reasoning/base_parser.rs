@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::{ParserResult, ReasoningParser};
@@ -119,7 +119,7 @@ impl ReasoningParser for BasicReasoningParser {
             };
             return ParserResult {
                 normal_text: normal_text.to_string(),
-                reasoning_text: reasoning_text.trim().to_string(),
+                reasoning_text: reasoning_text.to_string(),
             };
         }
         // Continue with reasoning content

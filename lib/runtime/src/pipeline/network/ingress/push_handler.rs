@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::*;
 use crate::metrics::prometheus_names::work_handler;
@@ -59,38 +47,39 @@ impl WorkHandlerMetrics {
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let metrics_labels = metrics_labels.unwrap_or(&[]);
-        let request_counter = endpoint.create_intcounter(
+        let metrics = endpoint.metrics();
+        let request_counter = metrics.create_intcounter(
             work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
             metrics_labels,
         )?;
 
-        let request_duration = endpoint.create_histogram(
+        let request_duration = metrics.create_histogram(
             work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
             None,
         )?;
 
-        let inflight_requests = endpoint.create_intgauge(
+        let inflight_requests = metrics.create_intgauge(
             work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
             metrics_labels,
         )?;
 
-        let request_bytes = endpoint.create_intcounter(
+        let request_bytes = metrics.create_intcounter(
             work_handler::REQUEST_BYTES_TOTAL,
             "Total number of bytes received in requests by work handler",
             metrics_labels,
         )?;
 
-        let response_bytes = endpoint.create_intcounter(
+        let response_bytes = metrics.create_intcounter(
             work_handler::RESPONSE_BYTES_TOTAL,
             "Total number of bytes sent in responses by work handler",
             metrics_labels,
         )?;
 
-        let error_counter = endpoint.create_intcountervec(
+        let error_counter = metrics.create_intcountervec(
             work_handler::ERRORS_TOTAL,
             "Total number of errors in work handler processing",
             &[work_handler::ERROR_TYPE_LABEL],
@@ -136,6 +125,14 @@ where
         // Call the Ingress-specific add_metrics implementation
         use crate::pipeline::network::Ingress;
         Ingress::add_metrics(self, endpoint, metrics_labels)
+    }
+
+    fn set_endpoint_health_check_notifier(&self, notifier: Arc<tokio::sync::Notify>) -> Result<()> {
+        use crate::pipeline::network::Ingress;
+        self.endpoint_health_check_notifier
+            .set(notifier)
+            .map_err(|_| anyhow::anyhow!("Endpoint health check notifier already set"))?;
+        Ok(())
     }
 
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
@@ -268,13 +265,12 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            if let Some(err) = resp.err() {
-                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
-                if format!("{:?}", err) == STREAM_ERR_MSG {
-                    tracing::warn!(STREAM_ERR_MSG);
-                    send_complete_final = false;
-                    break;
-                }
+            if let Some(err) = resp.err()
+                && format!("{:?}", err) == STREAM_ERR_MSG
+            {
+                tracing::warn!(STREAM_ERR_MSG);
+                send_complete_final = false;
+                break;
             }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
@@ -286,9 +282,24 @@ where
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!("Failed to publish response for stream {}", context.id());
-                context.stop_generating();
                 send_complete_final = false;
+                if context.is_stopped() {
+                    // Say there are 2 threads accessing `context`, the sequence can be either:
+                    // 1. context.stop_generating (other) -> publisher.send failure (this)
+                    //    -> context.is_stopped (this)
+                    // 2. publisher.send failure (this) -> context.stop_generating (other)
+                    //    -> context.is_stopped (this)
+                    // Case 1 can happen when client closed the connection after receiving the
+                    // complete response from frontend. Hence, send failure can be expected in this
+                    // case.
+                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                } else {
+                    // Otherwise, this is an error.
+                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    context.stop_generating();
+                }
+                // Account errors in all cases, including cancellation. Therefore this metric can be
+                // inflated.
                 if let Some(m) = self.metrics() {
                     m.error_counter
                         .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])
@@ -317,6 +328,11 @@ where
                         .with_label_values(&[work_handler::error_types::PUBLISH_FINAL])
                         .inc();
                 }
+            }
+            // Notify the health check manager that the stream has finished.
+            // This resets the timer, delaying the next canary health check.
+            if let Some(notifier) = self.endpoint_health_check_notifier.get() {
+                notifier.notify_one();
             }
         }
 

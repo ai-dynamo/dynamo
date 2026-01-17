@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::backend::Backend;
@@ -6,7 +6,8 @@ use dynamo_llm::model_card::ModelDeploymentCard;
 
 #[test]
 fn test_sequence_factory() {
-    let mdc = ModelDeploymentCard::load("tests/data/sample-models/TinyLlama_v1.1", None).unwrap();
+    let mdc = ModelDeploymentCard::load_from_disk("tests/data/sample-models/TinyLlama_v1.1", None)
+        .unwrap();
 
     let operator = Backend::from_mdc(&mdc);
 

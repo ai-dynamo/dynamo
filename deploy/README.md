@@ -1,1 +1,1 @@
-../docs/guides/dynamo_deploy/README.md
+../docs/kubernetes/README.md

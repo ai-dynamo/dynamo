@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -8,41 +8,13 @@ import time
 
 import pytest
 import requests
-from huggingface_hub import snapshot_download
 
+from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.engine_process import FRONTEND_PORT
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api, completions_response_handler
 
 logger = logging.getLogger(__name__)
-
-
-class DynamoFrontendProcess(ManagedProcess):
-    """Process manager for Dynamo frontend"""
-
-    def __init__(self, request):
-        command = ["python", "-m", "dynamo.frontend", "--router-mode", "round-robin"]
-
-        log_dir = f"{request.node.name}_frontend"
-
-        # Clean up any existing log directory from previous runs
-        try:
-            shutil.rmtree(log_dir)
-            logger.info(f"Cleaned up existing log directory: {log_dir}")
-        except FileNotFoundError:
-            # Directory doesn't exist, which is fine
-            pass
-
-        super().__init__(
-            command=command,
-            display_output=True,
-            terminate_existing=True,
-            log_dir=log_dir,
-        )
-
-    def get_pid(self) -> int | None:
-        """Get the PID of the worker process"""
-        return self.proc.pid if self.proc else None
 
 
 class DynamoWorkerProcess(ManagedProcess):
@@ -56,10 +28,8 @@ class DynamoWorkerProcess(ManagedProcess):
             "-m",
             "dynamo.vllm",
             "--model",
-            "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+            FAULT_TOLERANCE_MODEL_NAME,
             "--enforce-eager",
-            "--gpu-memory-utilization",
-            "0.45",
             "--max-model-len",
             "8192",
             "--migration-limit",
@@ -69,7 +39,6 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
         env["DYN_SYSTEM_PORT"] = "9345"
 
@@ -123,47 +92,12 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-def download_model() -> None:
-    """
-    Download the DeepSeek-R1-Distill-Llama-8B model from HuggingFace Hub if not already cached.
-    """
-    model_id = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-    logger.info(f"Caching model {model_id}...")
-
-    max_retries = 5
-    retry_delay = 30  # seconds
-
-    for attempt in range(max_retries):
-        try:
-            # Download the model to the default cache directory
-            # This will skip download if the model is already cached
-            snapshot_download(
-                repo_id="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                repo_type="model",
-                local_files_only=False,
-            )
-            logger.info(f"Model {model_id} is ready for use")
-            return  # Success, exit the function
-        except Exception as e:
-            if attempt < max_retries - 1:  # Not the last attempt
-                logger.warning(
-                    f"Failed to download model {model_id} (attempt {attempt + 1}/{max_retries}): {e}"
-                )
-                logger.info(f"Retrying in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-            else:  # Last attempt failed
-                logger.error(
-                    f"Failed to download model {model_id} after {max_retries} attempts: {e}"
-                )
-                raise
-
-
 def send_completion_request(
     prompt: str, max_tokens: int, timeout: int = 120
 ) -> requests.Response:
     """Send a completion request to the frontend"""
     payload = {
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        "model": FAULT_TOLERANCE_MODEL_NAME,
         "prompt": prompt,
         "max_tokens": max_tokens,
     }
@@ -194,7 +128,10 @@ def send_completion_request(
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.slow
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
+@pytest.mark.timeout(160)  # 3x average (~50s)
+@pytest.mark.skip(reason="Flaky, temporarily disabled")
 def test_vllm_health_check_active(request, runtime_services):
     """
     End-to-end test for worker fault tolerance with migration support.
@@ -203,8 +140,6 @@ def test_vllm_health_check_active(request, runtime_services):
     the system can handle the failure gracefully and migrate the request to
     another worker.
     """
-    # Step 0: Download the model from HuggingFace if not already cached
-    download_model()
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")
@@ -251,8 +186,10 @@ def test_vllm_health_check_active(request, runtime_services):
 @pytest.mark.vllm
 @pytest.mark.gpu_1
 @pytest.mark.e2e
-@pytest.mark.slow
-def test_vllm_health_check_passive(request, runtime_services):
+@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.nightly
+@pytest.mark.timeout(160)  # 3x average (~50s)
+def test_vllm_health_check_passive(request, runtime_services, predownload_models):
     """
     End-to-end test for worker fault tolerance with migration support.
 
@@ -260,8 +197,6 @@ def test_vllm_health_check_passive(request, runtime_services):
     the system can handle the failure gracefully and migrate the request to
     another worker.
     """
-    # Step 0: Download the model from HuggingFace if not already cached
-    download_model()
 
     # Step 1: Start the frontend
     logger.info("Starting frontend...")

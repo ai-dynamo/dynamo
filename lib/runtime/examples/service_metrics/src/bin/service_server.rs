@@ -1,38 +1,26 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-use service_metrics::{MyStats, DEFAULT_NAMESPACE};
+use service_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
-    logging,
+    DistributedRuntime, Runtime, Worker, logging,
     pipeline::{
-        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
-        ResponseStream, SingleIn,
+        AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, ResponseStream, SingleIn,
+        async_trait, network::Ingress,
     },
     protocols::annotated::Annotated,
-    stream, DistributedRuntime, Result, Runtime, Worker,
+    stream,
 };
 use std::sync::Arc;
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     logging::init();
     let worker = Worker::from_settings()?;
     worker.execute(app)
 }
 
-async fn app(runtime: Runtime) -> Result<()> {
+async fn app(runtime: Runtime) -> anyhow::Result<()> {
     let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
     backend(distributed).await
 }
@@ -47,7 +35,10 @@ impl RequestHandler {
 
 #[async_trait]
 impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for RequestHandler {
-    async fn generate(&self, input: SingleIn<String>) -> Result<ManyOut<Annotated<String>>> {
+    async fn generate(
+        &self,
+        input: SingleIn<String>,
+    ) -> anyhow::Result<ManyOut<Annotated<String>>> {
         let (data, ctx) = input.into_parts();
 
         let chars = data
@@ -61,26 +52,17 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
     }
 }
 
-async fn backend(runtime: DistributedRuntime) -> Result<()> {
+async fn backend(runtime: DistributedRuntime) -> anyhow::Result<()> {
     // attach an ingress to an engine
     let ingress = Ingress::for_engine(RequestHandler::new())?;
 
     // make the ingress discoverable via a component service
     // we must first create a service, then we can attach one more more endpoints
 
-    runtime
-        .namespace(DEFAULT_NAMESPACE)?
-        .component("backend")?
-        .service_builder()
-        .create()
-        .await?
+    let component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
+    component
         .endpoint("generate")
         .endpoint_builder()
-        .stats_handler(|stats| {
-            println!("stats: {:?}", stats);
-            let stats = MyStats { val: 10 };
-            serde_json::to_value(stats).unwrap()
-        })
         .handler(ingress)
         .start()
         .await

@@ -1,14 +1,16 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
 mod base_parser;
 mod gpt_oss_parser;
+mod granite_parser;
 
 // Re-export main types and functions for convenience
 pub use base_parser::BasicReasoningParser;
 pub use gpt_oss_parser::GptOssReasoningParser;
+pub use granite_parser::GraniteReasoningParser;
 
 static REASONING_PARSER_MAP: OnceLock<HashMap<&'static str, ReasoningParserType>> = OnceLock::new();
 
@@ -24,6 +26,8 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("kimi", ReasoningParserType::Kimi);
         map.insert("step3", ReasoningParserType::Step3);
         map.insert("mistral", ReasoningParserType::Mistral);
+        map.insert("granite", ReasoningParserType::Granite);
+        map.insert("nemotron_nano", ReasoningParserType::NemotronDeci); // nemotron nano is <think>...</think>
         map
     })
 }
@@ -87,6 +91,7 @@ pub enum ReasoningParserType {
     NemotronDeci,
     Kimi,
     Mistral,
+    Granite,
 }
 
 #[derive(std::fmt::Debug)]
@@ -165,6 +170,9 @@ impl ReasoningParserType {
                     }
                 }
             },
+            ReasoningParserType::Granite => ReasoningParserWrapper {
+                parser: Box::new(GraniteReasoningParser::new()),
+            },
         }
     }
 
@@ -205,6 +213,8 @@ mod tests {
             "kimi",
             "step3",
             "mistral",
+            "granite",
+            "nemotron_nano",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));

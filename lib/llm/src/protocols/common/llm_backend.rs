@@ -1,23 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use serde::{Deserialize, Serialize};
 
 pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
+use dynamo_async_openai::types::CompletionUsage;
+use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
@@ -55,11 +45,25 @@ pub struct BackendOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+
     // Model Deployment Card checksum
     //pub mdcsum: String,
 
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,
+
+    // Token usage information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_usage: Option<CompletionUsage>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -70,7 +74,7 @@ pub struct BackendOutput {
 ///
 /// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
 /// levels of post-processing before the BackendOutput is returns
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
     // new token_ids
     pub token_ids: Vec<TokenIdType>,
@@ -94,8 +98,25 @@ pub struct LLMEngineOutput {
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
 
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,
+
+    /// Disaggregated execution parameters (for prefill/decode separation)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disaggregated_params: Option<serde_json::Value>,
+
+    /// Additional arguments for extensibility
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<serde_json::Value>,
+
+    // Token usage information
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_usage: Option<CompletionUsage>,
 }
 
 impl LLMEngineOutput {
@@ -108,7 +129,11 @@ impl LLMEngineOutput {
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Cancelled),
+            stop_reason: None,
             index: None,
+            disaggregated_params: None,
+            extra_args: None,
+            completion_usage: None,
         }
     }
 
@@ -120,8 +145,12 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             top_logprobs: None,
             index: None,
+            disaggregated_params: None,
+            extra_args: None,
+            completion_usage: None,
         }
     }
 
@@ -134,7 +163,11 @@ impl LLMEngineOutput {
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Length),
+            stop_reason: None,
             index: None,
+            disaggregated_params: None,
+            extra_args: None,
+            completion_usage: None,
         }
     }
 
@@ -147,7 +180,11 @@ impl LLMEngineOutput {
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
+            stop_reason: None,
             index: None,
+            disaggregated_params: None,
+            extra_args: None,
+            completion_usage: None,
         }
     }
 }

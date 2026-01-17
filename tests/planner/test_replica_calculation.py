@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -9,6 +9,7 @@ testing load prediction, interpolation, or correction factors.
 """
 
 import argparse
+import asyncio
 import math
 import os
 
@@ -39,6 +40,8 @@ from dynamo.planner.utils.planner_core import Metrics, Planner  # noqa: E402
 
 
 @pytest.fixture
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
 def planner():
     """Set up test environment with mocked dependencies."""
     # Create mock arguments
@@ -48,11 +51,13 @@ def planner():
     args.decode_engine_num_gpu = 1
     args.min_endpoint = 1
     args.max_gpu_budget = 10
-    args.ttft = 80  # ms
-    args.itl = 10  # ms
+    args.ttft = 80.0  # ms
+    args.itl = 10.0  # ms
     args.backend = "vllm"
     args.no_operation = True  # Don't actually scale
-    args.prometheus_port = 0  # 0 means disabled
+    args.no_correction = False  # Allow correction factors
+    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"  # dummy endpoint
+    args.metric_reporting_prometheus_port = 0  # 0 means disabled
     args.load_predictor = "constant"
     args.load_prediction_window_size = 10
     args.profile_results_dir = os.path.join(
@@ -60,6 +65,8 @@ def planner():
         "profiling_results/H200_TP1P_TP1D",
     )
     args.environment = "kubernetes"
+    args.namespace = "test-namespace"  # Required for Planner.__init__
+    args.no_correction = False  # Required for Planner.__init__
 
     # Mock the runtime
     mock_runtime = Mock()
@@ -100,6 +107,9 @@ def planner():
 class TestReplicaCalculation:
     """Test replica calculation formulas in isolation."""
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_prefill_replica_calculation_basic(self, planner):
         """Test basic prefill replica calculation."""
         # Setup test data
@@ -151,8 +161,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run the calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Extract the calculated values from the log calls or by checking the mock calls
@@ -171,6 +179,9 @@ class TestReplicaCalculation:
                 == calculated_prefill_replicas
             )
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_decode_replica_calculation_basic(self, planner):
         """Test basic decode replica calculation."""
         # Setup test data
@@ -216,8 +227,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run the calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Check the results
@@ -242,6 +251,9 @@ class TestReplicaCalculation:
             (500, 1000, 1, 2),  # high_load_500_req_per_second (lower decode throughput)
         ],
     )
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_scaling_scenario_low_to_high_load(
         self, planner, num_req, decode_thpt, expected_p, expected_d
     ):
@@ -289,8 +301,6 @@ class TestReplicaCalculation:
         planner.connector.reset_mock()
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify results
@@ -309,6 +319,9 @@ class TestReplicaCalculation:
                 decode_replicas == expected_d
             ), f"Decode replicas mismatch: expected {expected_d}, got {decode_replicas}"
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_gpu_budget_constraint(self, planner):
         """Test that GPU budget constraints are properly applied."""
         # Set a low GPU budget
@@ -343,8 +356,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify that total GPU usage doesn't exceed budget
@@ -367,6 +378,9 @@ class TestReplicaCalculation:
                 total_gpus <= planner.args.max_gpu_budget
             ), "Total GPU usage exceeds budget"
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_min_endpoint_constraint(self, planner):
         """Test that minimum endpoint constraints are respected."""
         planner.args.min_endpoint = 2
@@ -400,8 +414,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify minimum constraints are respected
@@ -420,6 +432,9 @@ class TestReplicaCalculation:
                 decode_replicas >= planner.args.min_endpoint
             ), "Decode replicas below minimum"
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_prefill_correction_factor_clamping(self, planner):
         """Test that prefill correction factor > 1 is clamped to 1."""
         # Set a high correction factor > 1
@@ -464,8 +479,6 @@ class TestReplicaCalculation:
         )
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         # Verify that correction factor was effectively clamped
@@ -481,6 +494,9 @@ class TestReplicaCalculation:
                 expected_prefill_replicas, planner.args.min_endpoint
             ), "Prefill correction factor should be clamped to 1"
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_decode_correction_factor_zero_handling(self, planner):
         """Test handling of d_correction_factor <= 0."""
         # Test both 0 and negative values
@@ -525,8 +541,6 @@ class TestReplicaCalculation:
                 planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
                 # Run calculation
-                import asyncio
-
                 asyncio.run(planner.make_adjustments())
 
                 # Should handle gracefully without crashing
@@ -544,6 +558,9 @@ class TestReplicaCalculation:
                         decode_replicas >= 1
                     ), f"Should handle correction factor {correction_factor} gracefully"
 
+    @pytest.mark.nightly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_multi_gpu_engines(self, planner):
         """Test replica calculation with multi-GPU engines."""
         # Set multi-GPU configuration
@@ -589,8 +606,6 @@ class TestReplicaCalculation:
         )  # 4 GPUs per engine
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         if planner.connector.set_component_replicas.called:
@@ -611,6 +626,9 @@ class TestReplicaCalculation:
                 expected_decode_replicas, planner.args.min_endpoint
             )
 
+    @pytest.mark.weekly
+    @pytest.mark.gpu_2
+    @pytest.mark.performance
     def test_complex_gpu_budget_scaling(self, planner):
         """Test complex GPU budget scaling with proportional reduction and decode adjustment."""
         # Set tight GPU budget that will trigger complex scaling
@@ -648,8 +666,6 @@ class TestReplicaCalculation:
         planner.decode_interpolator.interpolate_itl.return_value = 10.0
 
         # Run calculation
-        import asyncio
-
         asyncio.run(planner.make_adjustments())
 
         if planner.connector.set_component_replicas.called:

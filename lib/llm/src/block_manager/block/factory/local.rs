@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -8,6 +8,7 @@ pub struct LocalBlockDataFactory<S: Storage> {
     layout: Arc<dyn BlockLayout<StorageType = S>>,
     block_set_idx: usize,
     worker_id: WorkerID,
+    offload_filter: Option<Arc<dyn OffloadFilter>>,
 }
 
 impl<S: Storage> LocalBlockDataFactory<S> {
@@ -15,11 +16,13 @@ impl<S: Storage> LocalBlockDataFactory<S> {
         layout: Arc<dyn BlockLayout<StorageType = S>>,
         block_set_idx: usize,
         worker_id: WorkerID,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
     ) -> Self {
         Self {
             layout,
             block_set_idx,
             worker_id,
+            offload_filter,
         }
     }
 }
@@ -45,6 +48,10 @@ impl<S: Storage> BlockFactory<S, locality::Local> for LocalBlockDataFactory<S> {
 
     fn layout_config(&self) -> &LayoutConfig {
         self.layout.config()
+    }
+
+    fn offload_filter(&self) -> Option<Arc<dyn OffloadFilter>> {
+        self.offload_filter.clone()
     }
 }
 

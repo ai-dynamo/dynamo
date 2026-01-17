@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 // cargo test --test soak integration::main --features integration
 //!
@@ -30,7 +18,9 @@ mod integration {
     pub const DEFAULT_NAMESPACE: &str = "dynamo";
 
     use dynamo_runtime::{
-        DistributedRuntime, ErrorContext, Result, Runtime, Worker, logging,
+        DistributedRuntime, Runtime, Worker,
+        config::environment_names::testing as env_testing,
+        logging,
         pipeline::{
             AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
             SingleIn, async_trait, network::Ingress,
@@ -38,6 +28,8 @@ mod integration {
         protocols::annotated::Annotated,
         stream,
     };
+
+    use anyhow::{Context, Result};
     use futures::StreamExt;
     use std::{
         sync::Arc,
@@ -119,7 +111,7 @@ mod integration {
     async fn backend(runtime: DistributedRuntime) -> Result<Arc<RequestHandler>> {
         // get the queued up processing setting from env (not delayed)
         let queued_up_processing =
-            std::env::var("DYN_QUEUED_UP_PROCESSING").unwrap_or("false".to_string());
+            std::env::var(env_testing::DYN_QUEUED_UP_PROCESSING).unwrap_or("false".to_string());
         let queued_up_processing: bool = queued_up_processing.parse().unwrap_or(false);
 
         // attach an ingress to an engine
@@ -128,12 +120,8 @@ mod integration {
 
         // // make the ingress discoverable via a component service
         // // we must first create a service, then we can attach one more more endpoints
-        runtime
-            .namespace(DEFAULT_NAMESPACE)?
-            .component("backend")?
-            .service_builder()
-            .create()
-            .await?
+        let component = runtime.namespace(DEFAULT_NAMESPACE)?.component("backend")?;
+        component
             .endpoint("generate")
             .endpoint_builder()
             .handler(ingress)
@@ -145,11 +133,13 @@ mod integration {
 
     async fn client(runtime: DistributedRuntime) -> Result<()> {
         // get the run duration from env
-        let run_duration = std::env::var("DYN_SOAK_RUN_DURATION").unwrap_or("3s".to_string());
+        let run_duration =
+            std::env::var(env_testing::DYN_SOAK_RUN_DURATION).unwrap_or("3s".to_string());
         let run_duration =
             humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(3));
 
-        let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or("100".to_string());
+        let batch_load =
+            std::env::var(env_testing::DYN_SOAK_BATCH_LOAD).unwrap_or("100".to_string());
         let batch_load: usize = batch_load.parse().unwrap_or(100);
 
         let client = runtime

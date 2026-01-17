@@ -1,31 +1,18 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
-use pyo3::{exceptions::PyException, prelude::*};
+use anyhow::{Error, Result, anyhow as error};
+use pyo3::prelude::*;
 
-use crate::{engine::*, to_pyerr, CancellationToken};
+use crate::{CancellationToken, engine::*, to_pyerr};
 
 pub use dynamo_llm::endpoint_type::EndpointType;
 pub use dynamo_llm::http::service::{error as http_error, service_v2};
 pub use dynamo_runtime::{
-    error,
-    pipeline::{async_trait, AsyncEngine, Data, ManyOut, SingleIn},
+    pipeline::{AsyncEngine, Data, ManyOut, SingleIn, async_trait},
     protocols::annotated::Annotated,
-    Error, Result,
 };
 
 #[pyclass]
@@ -43,23 +30,29 @@ impl HttpService {
         Ok(Self { inner })
     }
 
-    pub fn add_completions_model(&self, model: String, engine: HttpAsyncEngine) -> PyResult<()> {
+    pub fn add_completions_model(
+        &self,
+        model: String,
+        checksum: String,
+        engine: HttpAsyncEngine,
+    ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
             .model_manager()
-            .add_completions_model(&model, engine)
+            .add_completions_model(&model, &checksum, engine)
             .map_err(to_pyerr)
     }
 
     pub fn add_chat_completions_model(
         &self,
         model: String,
+        checksum: String,
         engine: HttpAsyncEngine,
     ) -> PyResult<()> {
         let engine = Arc::new(engine);
         self.inner
             .model_manager()
-            .add_chat_completions_model(&model, engine)
+            .add_chat_completions_model(&model, &checksum, engine)
             .map_err(to_pyerr)
     }
 
@@ -115,31 +108,6 @@ impl HttpService {
     }
 }
 
-/// Python Exception for HTTP errors
-#[pyclass(extends=PyException)]
-pub struct HttpError {
-    code: u16,
-    message: String,
-}
-
-#[pymethods]
-impl HttpError {
-    #[new]
-    pub fn new(code: u16, message: String) -> Self {
-        HttpError { code, message }
-    }
-
-    #[getter]
-    fn code(&self) -> u16 {
-        self.code
-    }
-
-    #[getter]
-    fn message(&self) -> &str {
-        &self.message
-    }
-}
-
 #[pyclass]
 #[derive(Clone)]
 pub struct HttpAsyncEngine(pub PythonAsyncEngine);
@@ -170,6 +138,12 @@ impl HttpAsyncEngine {
     }
 }
 
+#[derive(FromPyObject)]
+struct HttpError {
+    code: u16,
+    message: String,
+}
+
 #[async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for HttpAsyncEngine
 where
@@ -185,18 +159,15 @@ where
             Err(e) => {
                 if let Some(py_err) = e.downcast_ref::<PyErr>() {
                     Python::with_gil(|py| {
-                        if let Ok(http_error_instance) = py_err
-                            .clone_ref(py)
-                            .into_value(py)
-                            .extract::<PyRef<HttpError>>(py)
-                        {
-                            Err(http_error::HttpError {
-                                code: http_error_instance.code,
-                                message: http_error_instance.message.clone(),
-                            })?
-                        } else {
-                            Err(error!("Python Error: {}", py_err.to_string()))
+                        // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
+                        // implement the exception in Python and assume that it's an HttpError if the code and message
+                        // are present.
+                        if let Ok(HttpError { code, message }) = py_err.value(py).extract() {
+                            // SSE panics if there are carriage returns or newlines
+                            let message = message.replace(['\r', '\n'], "");
+                            return Err(http_error::HttpError { code, message })?;
                         }
+                        Err(error!("Python Error: {}", py_err))
                     })
                 } else {
                     Err(e)

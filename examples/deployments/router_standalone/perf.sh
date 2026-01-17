@@ -1,5 +1,5 @@
 #/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,7 +28,7 @@ num_unique_prompts=10
 
 seed=42
 
-genai-perf profile \
+aiperf profile \
   --model ${model} \
   --tokenizer ${model} \
   --endpoint-type ${type} \
@@ -47,8 +47,5 @@ genai-perf profile \
   --request-count ${num_requests} \
   --num-dataset-entries ${num_unique_prompts} \
   --random-seed ${seed} \
-  -- \
-  -v \
-  --max-threads 256 \
   -H 'Authorization: Bearer NOT USED' \
   -H 'Accept: text/event-stream'

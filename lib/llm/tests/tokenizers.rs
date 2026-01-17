@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Tokenizer Tests
 //!
@@ -189,4 +177,32 @@ fn test_long_sequence_incremental_decode_with_prefill() {
 
         assert_eq!(output.trim(), output_text.to_string());
     }
+}
+
+#[test]
+fn test_decode_with_skip_special_tokens() {
+    let tokenizer = HuggingFaceTokenizer::from_file(TINYLLAMA_TOKENIZER_PATH)
+        .expect("Failed to load remote HuggingFace tokenizer");
+
+    // Create a sequence with special tokens:
+    // <s> (token_id: 1) + "Hello world" + </s> (token_id: 2)
+    let text = "Hello world";
+    let encoding = tokenizer.encode(text).expect("Failed to encode text");
+    let mut token_ids = vec![1]; // <s>
+    token_ids.extend(encoding.token_ids());
+    token_ids.push(2); // </s>
+
+    // Decode with skip_special_tokens = false (should keep special tokens)
+    let decoded_with_special = tokenizer
+        .decode(&token_ids, false)
+        .expect("Failed to decode with skip_special_tokens=false");
+
+    // Decode with skip_special_tokens = true (should remove special tokens)
+    let decoded_without_special = tokenizer
+        .decode(&token_ids, true)
+        .expect("Failed to decode with skip_special_tokens=true");
+
+    // Validate exact matches on the entire decoded strings
+    assert_eq!(decoded_with_special, "<s> Hello world</s>");
+    assert_eq!(decoded_without_special, "Hello world");
 }

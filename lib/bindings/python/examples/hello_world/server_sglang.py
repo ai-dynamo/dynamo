@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 #
@@ -21,6 +21,7 @@
 
 import argparse
 import asyncio
+import os
 import sys
 
 import sglang
@@ -30,7 +31,8 @@ from sglang.srt.server_args import ServerArgs
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
+DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 DEFAULT_TEMPERATURE = 0.7
 
@@ -78,7 +80,7 @@ class RequestHandler:
             num_output_tokens_so_far = next_total_toks
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
 
@@ -88,7 +90,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
     await register_llm(

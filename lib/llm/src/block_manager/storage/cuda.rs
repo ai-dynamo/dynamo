@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! # CUDA Storage Support
 //!
@@ -87,6 +75,35 @@ use std::{
 };
 
 use cudarc::driver::{CudaContext, sys};
+
+use crate::block_manager::numa_allocator;
+
+/// Allocates pinned host memory, preferring write-combined if supported.
+///
+/// Write-combined (WC) memory is optimal for PCIe DMA transfers but may not be
+/// supported on systems with cache-coherent CPU-GPU interconnects (e.g., Grace
+/// Hopper/Blackwell with NVLink-C2C). This function tries WC first and falls
+/// back to regular pinned memory if not supported.
+///
+/// # Safety
+///
+/// Caller must ensure a valid CUDA context is bound to the current thread.
+unsafe fn malloc_host_prefer_writecombined(size: usize) -> Result<*mut u8, StorageError> {
+    // First, try write-combined allocation (optimal for PCIe systems)
+    // SAFETY: Caller guarantees a valid CUDA context is bound to the current thread
+    match unsafe { cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED) } {
+        Ok(ptr) => Ok(ptr as *mut u8),
+        Err(_) => {
+            // Write-combined not supported (e.g., Grace Hopper/Blackwell),
+            // fall back to regular pinned memory
+            tracing::debug!("Write-combined memory not supported, using regular pinned memory");
+            // SAFETY: Same as above - caller guarantees valid CUDA context
+            unsafe { cudarc::driver::result::malloc_host(size, 0) }
+                .map(|ptr| ptr as *mut u8)
+                .map_err(StorageError::Cuda)
+        }
+    }
+}
 
 /// Trait for [Storage] types that can be accessed by CUDA
 pub trait CudaAccessible: Storage {}
@@ -188,10 +205,22 @@ impl PinnedStorage {
         unsafe {
             ctx.bind_to_thread().map_err(StorageError::Cuda)?;
 
-            let ptr = cudarc::driver::result::malloc_host(size, sys::CU_MEMHOSTALLOC_WRITECOMBINED)
-                .map_err(StorageError::Cuda)?;
+            // Try NUMA-aware allocation if enabled, otherwise use direct allocation
+            let ptr = if numa_allocator::is_numa_enabled() {
+                let device_id = ctx.cu_device() as u32;
+                match numa_allocator::worker_pool::NumaWorkerPool::global()
+                    .allocate_pinned_for_gpu(size, device_id)
+                {
+                    Ok(ptr) => ptr,
+                    Err(e) => {
+                        tracing::warn!("NUMA allocation failed: {}, using direct allocation", e);
+                        malloc_host_prefer_writecombined(size)?
+                    }
+                }
+            } else {
+                malloc_host_prefer_writecombined(size)?
+            };
 
-            let ptr = ptr as *mut u8;
             assert!(!ptr.is_null(), "Failed to allocate pinned memory");
             assert!(ptr.is_aligned(), "Pinned memory is not aligned");
             assert!(size < isize::MAX as usize);
@@ -562,5 +591,80 @@ mod tests {
 
         let result = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malloc_host_prefer_writecombined_allocates_memory() {
+        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let size = 4096; // One page
+
+        unsafe {
+            ctx.bind_to_thread().expect("Failed to bind CUDA context");
+
+            // Test allocation succeeds (either write-combined or fallback)
+            let ptr = malloc_host_prefer_writecombined(size)
+                .expect("malloc_host_prefer_writecombined should succeed");
+
+            // Verify pointer is valid and non-null
+            assert!(!ptr.is_null(), "Allocated pointer should not be null");
+
+            // Verify memory is accessible by writing and reading
+            std::ptr::write_volatile(ptr, 0xAB);
+            let val = std::ptr::read_volatile(ptr);
+            assert_eq!(val, 0xAB, "Should be able to write and read pinned memory");
+
+            // Clean up
+            cudarc::driver::result::free_host(ptr as _).expect("Failed to free pinned memory");
+        }
+    }
+
+    /// Test PinnedStorage::new with NUMA disabled (the direct allocation path)
+    ///
+    /// This test confirms that when `DYN_KVBM_ENABLE_NUMA` is not set,
+    /// PinnedStorage::new uses the direct malloc_host_prefer_writecombined path
+    /// (lines 222-224 in the source).
+    #[test]
+    // `remove_var` is not thread-safe, so we need to run this test in a serial context
+    // #[serial]
+    fn test_pinned_storage_new_without_numa() {
+        // Verify NUMA is actually disabled for this test
+        assert!(
+            !numa_allocator::is_numa_enabled(),
+            "NUMA should be disabled for this test"
+        );
+
+        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let size = 8192;
+
+        // Create PinnedStorage - this should take the non-NUMA path
+        let mut storage =
+            PinnedStorage::new(&ctx, size).expect("PinnedStorage::new should succeed");
+
+        // Verify storage properties
+        assert_eq!(storage.size(), size);
+        assert_eq!(storage.storage_type(), StorageType::Pinned);
+        assert_ne!(storage.addr(), 0, "Address should be non-zero");
+
+        // Verify memory is accessible
+        unsafe {
+            let ptr = storage.as_mut_ptr();
+            assert!(!ptr.is_null(), "Pointer should not be null");
+
+            // Write a pattern to verify memory is usable
+            for i in 0..size {
+                std::ptr::write_volatile(ptr.add(i), (i & 0xFF) as u8);
+            }
+
+            // Read back and verify
+            for i in 0..size {
+                let val = std::ptr::read_volatile(ptr.add(i));
+                assert_eq!(
+                    val,
+                    (i & 0xFF) as u8,
+                    "Memory content mismatch at offset {}",
+                    i
+                );
+            }
+        }
     }
 }

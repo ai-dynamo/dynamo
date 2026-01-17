@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{collections::HashSet, sync::Arc};
@@ -18,6 +18,18 @@ use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub fn from_mdc(mdc: &ModelDeploymentCard) -> Result<PromptFormatter> {
+        // Special handling for DeepSeek-V3.2(-Speciale) which doesn't provide Jinja chat_template
+        let name_lower = mdc.display_name.to_lowercase();
+        if name_lower.contains("deepseek")
+            && name_lower.contains("v3.2")
+            && !name_lower.contains("exp")
+        {
+            tracing::info!("Detected DeepSeek V3.2 model (non-Exp), using native Rust formatter");
+            return Ok(Self::OAI(Arc::new(
+                super::deepseek_v32::DeepSeekV32Formatter::new_thinking(),
+            )));
+        }
+
         match mdc
             .prompt_formatter
             .as_ref()
@@ -30,16 +42,24 @@ impl PromptFormatter {
                         mdc.display_name
                     );
                 };
-                let content = std::fs::read_to_string(file)
-                    .with_context(|| format!("fs:read_to_string '{}'", file.display()))?;
-                let mut config: ChatTemplate = serde_json::from_str(&content)?;
+                let contents = std::fs::read_to_string(file).with_context(|| {
+                    format!(
+                        "PromptFormatter.from_mdc fs:read_to_string '{}'",
+                        file.display()
+                    )
+                })?;
+                let mut config: ChatTemplate =
+                    serde_json::from_str(&contents).inspect_err(|err| {
+                        crate::log_json_err(&file.display().to_string(), &contents, err)
+                    })?;
 
                 // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
                 // stores the chat template in a separate file, we check if the file exists and
                 // put the chat template into config as normalization.
                 // This may also be a custom template provided via CLI flag.
-                if let Some(PromptFormatterArtifact::HfChatTemplate(checked_file)) =
-                    mdc.chat_template_file.as_ref()
+                if let Some(PromptFormatterArtifact::HfChatTemplate {
+                    file: checked_file, ..
+                }) = mdc.chat_template_file.as_ref()
                 {
                     let Some(chat_template_file) = checked_file.path() else {
                         anyhow::bail!(
@@ -62,13 +82,9 @@ impl PromptFormatter {
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
                 )
             }
-            PromptFormatterArtifact::HfChatTemplate(_) => Err(anyhow::anyhow!(
+            PromptFormatterArtifact::HfChatTemplate { .. } => Err(anyhow::anyhow!(
                 "prompt_formatter should not have type HfChatTemplate"
             )),
-            PromptFormatterArtifact::GGUF(gguf_path) => {
-                let config = ChatTemplate::from_gguf(gguf_path)?;
-                Self::from_parts(config, ContextMixins::default())
-            }
         }
     }
 
@@ -107,6 +123,7 @@ struct HfTokenizerConfigJsonFormatter {
     config: ChatTemplate,
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
+    requires_content_arrays: bool,
 }
 
 // /// OpenAI Standard Prompt Formatter

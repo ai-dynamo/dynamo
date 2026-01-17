@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -17,7 +17,7 @@ impl ModelDeploymentCard {
     // Previously called "from_local_path"
     #[staticmethod]
     fn load(path: String, model_name: String) -> PyResult<ModelDeploymentCard> {
-        let mut card = RsModelDeploymentCard::load(&path, None).map_err(to_pyerr)?;
+        let mut card = RsModelDeploymentCard::load_from_disk(&path, None).map_err(to_pyerr)?;
         card.set_name(&model_name);
         Ok(ModelDeploymentCard { inner: card })
     }

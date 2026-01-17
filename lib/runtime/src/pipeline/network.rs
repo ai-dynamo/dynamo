@@ -1,25 +1,20 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-//! TODO - we need to reconcile what is in this crate with distributed::transports
+//! Network layer for distributed communication
+//!
+//! Provides request distribution across multiple transport protocols:
+//! - HTTP/2 for standard deployments
+//! - TCP with length-prefixed protocol for high-performance scenarios
+//! - NATS for legacy/messaging-based deployments
 
 pub mod codec;
 pub mod egress;
 pub mod ingress;
+pub mod manager;
 pub mod tcp;
 
+use crate::SystemHealth;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
@@ -38,8 +33,11 @@ use super::{
 };
 use ingress::push_handler::WorkHandlerMetrics;
 
+// Define stream error message constant
+pub const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
+
 // Add Prometheus metrics types
-use crate::metrics::MetricsRegistry;
+use crate::metrics::MetricsHierarchy;
 use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
@@ -284,6 +282,8 @@ struct RequestControlMessage {
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
     metrics: OnceLock<Arc<WorkHandlerMetrics>>,
+    /// Endpoint-specific notifier for health check timer resets
+    endpoint_health_check_notifier: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -291,6 +291,7 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Arc::new(Self {
             segment: OnceLock::new(),
             metrics: OnceLock::new(),
+            endpoint_health_check_notifier: OnceLock::new(),
         })
     }
 
@@ -354,6 +355,15 @@ pub trait PushWorkHandler: Send + Sync {
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<()>;
+
+    /// Set the endpoint-specific notifier for health check timer resets
+    fn set_endpoint_health_check_notifier(
+        &self,
+        _notifier: Arc<tokio::sync::Notify>,
+    ) -> Result<()> {
+        // Default implementation for backwards compatibility
+        Ok(())
+    }
 }
 
 /*

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@
 
 # You can set these variables from the command line, and also
 # from the environment for the first two.
-SPHINXOPTS        ?=
+SPHINXOPTS        ?= -W
 SPHINXBUILD       ?= sphinx-build
 SOURCEDIR          = .
 BUILDDIR           = build
@@ -52,7 +52,7 @@ HELM_DOCS ?= $(LOCALBIN)/helm-docs-$(HELM_DOCS_VERSION)
 helm-docs-install: $(HELM_DOCS) ## Download helm-docs locally if necessary
 $(HELM_DOCS): $(LOCALBIN)
 	@echo "📥 Downloading helm-docs $(HELM_DOCS_VERSION)..."
-	@ARCH=$$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/'); \
+	@ARCH=$$(uname -m); \
 	OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
 	curl -sSL "https://github.com/norwoodj/helm-docs/releases/download/v$(HELM_DOCS_VERSION)/helm-docs_$(HELM_DOCS_VERSION)_$${OS}_$${ARCH}.tar.gz" | \
 	tar xz -C $(LOCALBIN) helm-docs && \
@@ -62,24 +62,24 @@ $(HELM_DOCS): $(LOCALBIN)
 .PHONY: generate-helm-docs
 generate-helm-docs: helm-docs-install ## Generate README.md for Helm charts from values.yaml
 	@echo "📚 Generating Helm chart documentation..."
-	@cd ../deploy/cloud/helm/platform && $(realpath $(HELM_DOCS)) \
+	@cd ../deploy/helm/charts/platform && $(realpath $(HELM_DOCS)) \
 		--template-files=README.md.gotmpl \
 		--output-file=README.md \
 		--sort-values-order=file \
 		--chart-to-generate=. \
 		--ignore-non-descriptions
-	@echo "✅ Generated documentation at ../deploy/cloud/helm/platform/README.md"
+	@echo "✅ Generated documentation at ../deploy/helm/charts/platform/README.md"
 
 .PHONY: helm-docs-clean
 helm-docs-clean: ## Remove generated helm documentation
 	@echo "🧹 Cleaning generated helm documentation..."
-	@rm -f ../deploy/cloud/helm/platform/README.md
+	@rm -f ../deploy/helm/charts/platform/README.md
 	@echo "✅ Cleaned helm documentation"
 
 .PHONY: generate-crd-docs
 generate-crd-docs: ## Generate CRD API reference documentation
 	@echo "📚 Generating CRD API reference documentation..."
-	@cd ../deploy/cloud/operator && make generate-api-docs
+	@cd ../deploy/operator && make generate-api-docs
 	@echo "✅ CRD API reference generated"
 
 .PHONY: docs-all

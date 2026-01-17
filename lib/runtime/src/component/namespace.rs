@@ -1,25 +1,17 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use anyhow::Context;
+use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
+use serde::Deserialize;
+use serde::Serialize;
 
-use super::*;
-use crate::metrics::MetricsRegistry;
+use crate::component::Namespace;
+use crate::metrics::{MetricsHierarchy, MetricsRegistry};
+use crate::traits::DistributedRuntimeProvider;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -43,12 +35,10 @@ impl EventPublisher for Namespace {
         bytes: Vec<u8>,
     ) -> Result<()> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self
-            .drt()
-            .nats_client()
-            .client()
-            .publish(subject, bytes.into())
-            .await?)
+        self.drt()
+            .kv_router_nats_publish(subject, bytes.into())
+            .await?;
+        Ok(())
     }
 }
 
@@ -59,7 +49,7 @@ impl EventSubscriber for Namespace {
         event_name: impl AsRef<str> + Send + Sync,
     ) -> Result<async_nats::Subscriber> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self.drt().nats_client().client().subscribe(subject).await?)
+        Ok(self.drt().kv_router_nats_subscribe(subject).await?)
     }
 
     async fn subscribe_with_type<T: for<'de> Deserialize<'de> + Send + 'static>(
@@ -78,31 +68,39 @@ impl EventSubscriber for Namespace {
     }
 }
 
-impl MetricsRegistry for Namespace {
+impl MetricsHierarchy for Namespace {
     fn basename(&self) -> String {
         self.name.clone()
     }
 
-    fn parent_hierarchy(&self) -> Vec<String> {
-        // Build as: [ "" (DRT), non-empty parent basenames from root -> leaf ]
-        let mut names = vec![String::new()]; // Start with empty string for DRT
+    fn parent_hierarchies(&self) -> Vec<&dyn MetricsHierarchy> {
+        let mut parents = vec![];
 
-        // Collect parent basenames from root to leaf
-        let parent_names: Vec<String> =
-            std::iter::successors(self.parent.as_deref(), |ns| ns.parent.as_deref())
-                .map(|ns| ns.basename())
-                .filter(|name| !name.is_empty())
-                .collect();
+        // Walk up the namespace parent chain (grandparents to immediate parent)
+        let parent_chain: Vec<&Namespace> =
+            std::iter::successors(self.parent.as_deref(), |ns| ns.parent.as_deref()).collect();
 
-        // Append parent names in reverse order (root to leaf)
-        names.extend(parent_names.into_iter().rev());
-        names
+        // Add DRT first (root)
+        parents.push(&*self.runtime as &dyn MetricsHierarchy);
+
+        // Then add parent namespaces in reverse order (root -> leaf)
+        for parent_ns in parent_chain.iter().rev() {
+            parents.push(*parent_ns as &dyn MetricsHierarchy);
+        }
+
+        parents
+    }
+
+    fn get_metrics_registry(&self) -> &MetricsRegistry {
+        &self.metrics_registry
     }
 }
 
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
+    use crate::{DistributedRuntime, Runtime};
+
     use super::*;
 
     // todo - make a distributed runtime fixture

@@ -1,10 +1,57 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Prometheus metric name constants and sanitization utilities
 //!
 //! This module provides centralized Prometheus metric name constants and sanitization functions
 //! for various components to ensure consistency and avoid duplication across the codebase.
+//!
+//! ⚠️  **CRITICAL: REGENERATE PYTHON FILE AFTER CHANGES** ⚠️
+//! When modifying constants in this file, regenerate the Python module:
+//!     cargo run -p dynamo-codegen --bin gen-python-prometheus-names
+//!
+//! This generates `lib/bindings/python/src/dynamo/prometheus_names.py`
+//! with pure Python constants (no Rust bindings needed).
+//!
+//! ## Naming Conventions
+//!
+//! All metric names should follow: `{prefix}_{name}_{suffix}`
+//!
+//! **Prefix**: Component identifier (`dynamo_component_`, `dynamo_frontend_`, etc.)
+//! **Name**: Descriptive snake_case name indicating what is measured
+//! **Suffix**:
+//!   - Units: `_seconds`, `_bytes`, `_ms`, `_percent`, `_messages`, `_connections`
+//!   - Counters: `_total` (not `total_` prefix) - for cumulative metrics that only increase
+//!   - Gauges: No `_total` suffix - for current state metrics that can go up and down
+//!   - Note: Do not use `_counter`, `_gauge`, `_time`, or `_size` in Prometheus names (too vague)
+//!
+//! **Common Transformations**:
+//! - ❌ `_counter` → ✅ `_total`
+//! - ❌ `_sum` → ✅ `_total`
+//! - ❌ `_gauge` → ✅ (no suffix needed for current values)
+//! - ❌ `_time` → ✅ `_seconds`, `_ms`, `_hours`, `_duration_seconds`
+//! - ❌ `_time_total` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
+//! - ❌ `_total_time` → ✅ `_seconds_total`, `_ms_total`, `_hours_total`
+//! - ❌ `_total_time_seconds` → ✅ `_seconds_total`
+//! - ❌ `_average_time` → ✅ `_seconds_avg`, `_ms_avg`
+//! - ❌ `_size` → ✅ `_bytes`, `_total`, `_length`
+//! - ❌ `_some_request_size` → ✅ `_some_request_bytes_avg`
+//! - ❌ `_rate` → ✅ `_per_second`, `_per_minute`
+//! - ❌ `disconnected_clients_total` → ✅ `disconnected_clients` (gauge, not counter)
+//! - ❌ `inflight_requests_total` → ✅ `inflight_requests` (gauge, not counter)
+//! - ❌ `connections_total` → ✅ `current_connections` (gauge, not counter)
+//!
+//! **Examples**:
+//! - ✅ `dynamo_frontend_requests_total` - Total request counter (not `incoming_requests`)
+//! - ✅ `dynamo_frontend_request_duration_seconds` - Request duration histogram (not `response_time`)
+//! - ✅ `dynamo_component_errors_total` - Total error counter (not `total_errors`)
+//! - ✅ `dynamo_component_memory_usage_bytes` - Memory usage gauge
+//! - ✅ `dynamo_frontend_inflight_requests` - Current inflight requests gauge
+//! - ✅ `nats_client_connection_duration_ms` - Connection time in milliseconds
+//! - ✅ `dynamo_component_cpu_usage_percent` - CPU usage percentage
+//! - ✅ `dynamo_frontend_tokens_per_second` - Token generation rate
+//! - ✅ `nats_client_current_connections` - Current active connections gauge
+//! - ✅ `nats_client_in_messages` - Total messages received counter
 //!
 //! ## Key Differences: Prometheus Metric Names vs Prometheus Label Names
 //!
@@ -36,6 +83,8 @@ pub mod labels {
 }
 
 /// Frontend service metrics (LLM HTTP service)
+///
+/// ⚠️  Python codegen: Run gen-python-prometheus-names after changes
 pub mod frontend_service {
     // TODO: Move DYN_METRICS_PREFIX and other environment variable names to environment_names.rs
     // for centralized environment variable constant management across the codebase
@@ -45,8 +94,15 @@ pub mod frontend_service {
     /// Total number of LLM requests processed
     pub const REQUESTS_TOTAL: &str = "requests_total";
 
-    /// Number of inflight requests
+    /// Number of requests waiting in HTTP queue before receiving the first response (gauge)
+    pub const QUEUED_REQUESTS: &str = "queued_requests";
+
+    /// Number of inflight/concurrent requests going to the engine (vLLM, SGLang, ...)
+    /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
+
+    /// Number of disconnected clients (gauge that can go up and down)
+    pub const DISCONNECTED_CLIENTS: &str = "disconnected_clients";
 
     /// Duration of LLM requests
     pub const REQUEST_DURATION_SECONDS: &str = "request_duration_seconds";
@@ -57,11 +113,54 @@ pub mod frontend_service {
     /// Output sequence length in tokens
     pub const OUTPUT_SEQUENCE_TOKENS: &str = "output_sequence_tokens";
 
+    /// Number of cached tokens (prefix cache hits) per request
+    pub const CACHED_TOKENS: &str = "cached_tokens";
+
+    /// Total number of output tokens generated (counter that updates in real-time)
+    pub const OUTPUT_TOKENS_TOTAL: &str = "output_tokens_total";
+
     /// Time to first token in seconds
     pub const TIME_TO_FIRST_TOKEN_SECONDS: &str = "time_to_first_token_seconds";
 
     /// Inter-token latency in seconds
     pub const INTER_TOKEN_LATENCY_SECONDS: &str = "inter_token_latency_seconds";
+
+    /// Model configuration metrics
+    ///
+    /// Runtime config metrics (from ModelRuntimeConfig):
+    /// Total KV blocks available for a worker serving the model
+    pub const MODEL_TOTAL_KV_BLOCKS: &str = "model_total_kv_blocks";
+
+    /// Maximum number of sequences for a worker serving the model (runtime config)
+    pub const MODEL_MAX_NUM_SEQS: &str = "model_max_num_seqs";
+
+    /// Maximum number of batched tokens for a worker serving the model (runtime config)
+    pub const MODEL_MAX_NUM_BATCHED_TOKENS: &str = "model_max_num_batched_tokens";
+
+    /// MDC metrics (from ModelDeploymentCard):
+    /// Maximum context length for a worker serving the model (MDC)
+    pub const MODEL_CONTEXT_LENGTH: &str = "model_context_length";
+
+    /// KV cache block size for a worker serving the model (MDC)
+    pub const MODEL_KV_CACHE_BLOCK_SIZE: &str = "model_kv_cache_block_size";
+
+    /// Request migration limit for a worker serving the model (MDC)
+    pub const MODEL_MIGRATION_LIMIT: &str = "model_migration_limit";
+
+    /// Total number of request migrations due to worker unavailability
+    pub const MODEL_MIGRATION_TOTAL: &str = "model_migration_total";
+
+    /// Label name for the type of migration
+    pub const MIGRATION_TYPE_LABEL: &str = "migration_type";
+
+    /// Migration type label values
+    pub mod migration_type {
+        /// Migration during initial stream creation (NoResponders error)
+        pub const NEW_REQUEST: &str = "new_request";
+
+        /// Migration during ongoing request (stream disconnected)
+        pub const ONGOING_REQUEST: &str = "ongoing_request";
+    }
 
     /// Status label values
     pub mod status {
@@ -94,6 +193,7 @@ pub mod work_handler {
     pub const RESPONSE_BYTES_TOTAL: &str = "response_bytes_total";
 
     /// Number of requests currently being processed by work handler
+    /// Note: This is a gauge metric (current state) that can go up and down, so no _total suffix
     pub const INFLIGHT_REQUESTS: &str = "inflight_requests";
 
     /// Time spent processing requests by work handler (histogram)
@@ -127,89 +227,6 @@ pub mod work_handler {
     }
 }
 
-/// NATS client metrics. DistributedRuntime contains a NATS client shared by all children)
-pub mod nats_client {
-    /// Macro to generate NATS client metric names with the prefix
-    macro_rules! nats_client_name {
-        ($name:expr) => {
-            concat!("nats_client_", $name)
-        };
-    }
-
-    /// Prefix for all NATS client metrics
-    pub const PREFIX: &str = nats_client_name!("");
-
-    /// Total number of bytes received by NATS client
-    pub const IN_TOTAL_BYTES: &str = nats_client_name!("in_total_bytes");
-
-    /// Total number of bytes sent by NATS client
-    pub const OUT_OVERHEAD_BYTES: &str = nats_client_name!("out_overhead_bytes");
-
-    /// Total number of messages received by NATS client
-    pub const IN_MESSAGES: &str = nats_client_name!("in_messages");
-
-    /// Total number of messages sent by NATS client
-    pub const OUT_MESSAGES: &str = nats_client_name!("out_messages");
-
-    /// Total number of connections established by NATS client
-    pub const CONNECTS: &str = nats_client_name!("connects");
-
-    /// Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
-    pub const CONNECTION_STATE: &str = nats_client_name!("connection_state");
-}
-
-/// NATS service metrics, from the $SRV.STATS.<service_name> requests on NATS server
-pub mod nats_service {
-    /// Macro to generate NATS service metric names with the prefix
-    macro_rules! nats_service_name {
-        ($name:expr) => {
-            concat!("nats_service_", $name)
-        };
-    }
-
-    /// Prefix for all NATS service metrics
-    pub const PREFIX: &str = nats_service_name!("");
-
-    /// Average processing time in milliseconds (maps to: average_processing_time in ms)
-    pub const AVG_PROCESSING_MS: &str = nats_service_name!("avg_processing_time_ms");
-
-    /// Total errors across all endpoints (maps to: num_errors)
-    pub const TOTAL_ERRORS: &str = nats_service_name!("total_errors");
-
-    /// Total requests across all endpoints (maps to: num_requests)
-    pub const TOTAL_REQUESTS: &str = nats_service_name!("total_requests");
-
-    /// Total processing time in milliseconds (maps to: processing_time in ms)
-    pub const TOTAL_PROCESSING_MS: &str = nats_service_name!("total_processing_time_ms");
-
-    /// Number of active services (derived from ServiceSet.services)
-    pub const ACTIVE_SERVICES: &str = nats_service_name!("active_services");
-
-    /// Number of active endpoints (derived from ServiceInfo.endpoints)
-    pub const ACTIVE_ENDPOINTS: &str = nats_service_name!("active_endpoints");
-}
-
-/// All NATS client Prometheus metric names as an array for iteration/validation
-pub const DRT_NATS_METRICS: &[&str] = &[
-    nats_client::CONNECTION_STATE,
-    nats_client::CONNECTS,
-    nats_client::IN_TOTAL_BYTES,
-    nats_client::IN_MESSAGES,
-    nats_client::OUT_OVERHEAD_BYTES,
-    nats_client::OUT_MESSAGES,
-];
-
-/// All component service Prometheus metric names as an array for iteration/validation
-/// (ordered to match NatsStatsMetrics fields)
-pub const COMPONENT_NATS_METRICS: &[&str] = &[
-    nats_service::AVG_PROCESSING_MS, // maps to: average_processing_time (nanoseconds)
-    nats_service::TOTAL_ERRORS,      // maps to: num_errors
-    nats_service::TOTAL_REQUESTS,    // maps to: num_requests
-    nats_service::TOTAL_PROCESSING_MS, // maps to: processing_time (nanoseconds)
-    nats_service::ACTIVE_SERVICES,   // derived from ServiceSet.services
-    nats_service::ACTIVE_ENDPOINTS,  // derived from ServiceInfo.endpoints
-];
-
 /// Task tracker Prometheus metric name suffixes
 pub mod task_tracker {
     /// Total number of tasks issued/submitted
@@ -237,13 +254,52 @@ pub mod distributed_runtime {
     pub const UPTIME_SECONDS: &str = "uptime_seconds";
 }
 
-/// KVBM connector
-pub mod kvbm_connector {
-    /// KVBM connector leader
-    pub const KVBM_CONNECTOR_LEADER: &str = "kvbm_connector_leader";
+/// KVBM
+pub mod kvbm {
+    /// The number of offload blocks from device to host
+    pub const OFFLOAD_BLOCKS_D2H: &str = "offload_blocks_d2h";
 
-    /// KVBM connector worker
-    pub const KVBM_CONNECTOR_WORKER: &str = "kvbm_connector_worker";
+    /// The number of offload blocks from host to disk
+    pub const OFFLOAD_BLOCKS_H2D: &str = "offload_blocks_h2d";
+
+    /// The number of offload blocks from device to disk (bypassing host memory)
+    pub const OFFLOAD_BLOCKS_D2D: &str = "offload_blocks_d2d";
+
+    /// The number of onboard blocks from host to device
+    pub const ONBOARD_BLOCKS_H2D: &str = "onboard_blocks_h2d";
+
+    /// The number of onboard blocks from disk to device
+    pub const ONBOARD_BLOCKS_D2D: &str = "onboard_blocks_d2d";
+
+    /// The number of matched tokens
+    pub const MATCHED_TOKENS: &str = "matched_tokens";
+
+    /// Host cache hit rate (0.0-1.0) from the sliding window
+    pub const HOST_CACHE_HIT_RATE: &str = "host_cache_hit_rate";
+
+    /// Disk cache hit rate (0.0-1.0) from the sliding window
+    pub const DISK_CACHE_HIT_RATE: &str = "disk_cache_hit_rate";
+
+    /// Object storage cache hit rate (0.0-1.0) from the sliding window
+    pub const OBJECT_CACHE_HIT_RATE: &str = "object_cache_hit_rate";
+
+    /// Number of blocks offloaded from device to object storage
+    pub const OFFLOAD_BLOCKS_D2O: &str = "offload_blocks_d2o";
+
+    /// Number of blocks onboarded from object storage to device
+    pub const ONBOARD_BLOCKS_O2D: &str = "onboard_blocks_o2d";
+
+    /// Bytes transferred to object storage (offload)
+    pub const OFFLOAD_BYTES_OBJECT: &str = "offload_bytes_object";
+
+    /// Bytes transferred from object storage (onboard)
+    pub const ONBOARD_BYTES_OBJECT: &str = "onboard_bytes_object";
+
+    /// Number of failed object storage read operations (blocks)
+    pub const OBJECT_READ_FAILURES: &str = "object_read_failures";
+
+    /// Number of failed object storage write operations (blocks)
+    pub const OBJECT_WRITE_FAILURES: &str = "object_write_failures";
 }
 
 /// KvStats metrics from LLM workers
@@ -278,6 +334,12 @@ pub const KVSTATS_METRICS: &[&str] = &[
     kvstats::GPU_CACHE_USAGE_PERCENT,
     kvstats::GPU_PREFIX_CACHE_HIT_RATE,
 ];
+
+// KvRouter (including KvInexer) Prometheus metric names
+pub mod kvrouter {
+    /// Number of KV cache events applied to the index (including status)
+    pub const KV_CACHE_EVENTS_APPLIED: &str = "kv_cache_events_applied";
+}
 
 // Shared regex patterns for Prometheus sanitization
 static METRIC_INVALID_CHARS_PATTERN: Lazy<Regex> =
@@ -382,6 +444,33 @@ pub fn build_component_metric_name(metric_name: &str) -> String {
     let sanitized_name =
         sanitize_prometheus_name(metric_name).expect("metric name should be valid or sanitizable");
     format!("{}_{}", name_prefix::COMPONENT, sanitized_name)
+}
+
+/// Safely converts a u64 value to i64 for Prometheus metrics
+///
+/// Since Prometheus IntGaugeVec uses i64 but our data types use u64,
+/// this function clamps large u64 values to i64::MAX to prevent overflow
+/// and ensure metrics remain positive.
+///
+/// # Arguments
+/// * `value` - The u64 value to convert
+///
+/// # Returns
+/// An i64 value, clamped to i64::MAX if the input exceeds i64::MAX
+///
+/// # Examples
+/// ```
+/// use dynamo_runtime::metrics::prometheus_names::clamp_u64_to_i64;
+///
+/// assert_eq!(clamp_u64_to_i64(100), 100);
+/// assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
+/// ```
+pub fn clamp_u64_to_i64(value: u64) -> i64 {
+    if value > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        value as i64
+    }
 }
 
 #[cfg(test)]
@@ -607,5 +696,21 @@ mod tests {
     fn test_build_component_metric_name_panics_on_empty_input() {
         // Test that empty input panics with clear message
         build_component_metric_name("");
+    }
+
+    #[test]
+    fn test_clamp_u64_to_i64() {
+        // Test normal values within i64 range
+        assert_eq!(clamp_u64_to_i64(0), 0);
+        assert_eq!(clamp_u64_to_i64(100), 100);
+        assert_eq!(clamp_u64_to_i64(1000000), 1000000);
+
+        // Test maximum i64 value
+        assert_eq!(clamp_u64_to_i64(i64::MAX as u64), i64::MAX);
+
+        // Test values that exceed i64::MAX
+        assert_eq!(clamp_u64_to_i64(u64::MAX), i64::MAX);
+        assert_eq!(clamp_u64_to_i64((i64::MAX as u64) + 1), i64::MAX);
+        assert_eq!(clamp_u64_to_i64((i64::MAX as u64) + 1000), i64::MAX);
     }
 }

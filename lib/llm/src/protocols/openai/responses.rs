@@ -1,17 +1,5 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use dynamo_async_openai::types::responses::{
     Content, Input, OutputContent, OutputMessage, OutputStatus, OutputText, Response,
@@ -23,6 +11,7 @@ use dynamo_async_openai::types::{
 };
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -30,8 +19,9 @@ use super::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatComplet
 use super::nvext::{NvExt, NvExtProvider};
 use super::{OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider};
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateResponse {
+    /// Flattened CreateResponse fields (model, input, temperature, etc.)
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::CreateResponse,
 
@@ -39,10 +29,15 @@ pub struct NvCreateResponse {
     pub nvext: Option<NvExt>,
 }
 
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvResponse {
+    /// Flattened Response fields.
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::responses::Response,
+
+    /// NVIDIA extension field for response metadata (worker IDs, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 /// Implements `NvExtProvider` for `NvCreateResponse`,
@@ -111,6 +106,18 @@ impl OpenAISamplingOptionsProvider for NvCreateResponse {
     /// Returns a reference to the optional `NvExt` extension, if available.
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    fn get_seed(&self) -> Option<i64> {
+        None // TODO setting as None for now
+    }
+
+    fn get_n(&self) -> Option<u8> {
+        None // TODO setting as None for now
+    }
+
+    fn get_best_of(&self) -> Option<u8> {
+        None // TODO setting as None for now
     }
 }
 
@@ -182,11 +189,15 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
                 top_logprobs,
+                metadata: resp.inner.metadata,
                 stream: Some(true), // Set this to Some(True) by default to aggregate stream
                 ..Default::default()
             },
             common: Default::default(),
             nvext: resp.nvext,
+            chat_template_args: None,
+            media_io_kwargs: None,
+            unsupported_fields: Default::default(),
         })
     }
 }
@@ -200,6 +211,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
 
     fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
         let chat_resp = nv_resp;
+
+        // Preserve nvext field from chat completion response
+        let nvext = chat_resp.nvext.clone();
+
         let content_text = chat_resp
             .choices
             .into_iter()
@@ -250,7 +265,10 @@ impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
             user: None,
         };
 
-        Ok(NvResponse { inner: response })
+        Ok(NvResponse {
+            inner: response,
+            nvext,
+        })
     }
 }
 
@@ -354,6 +372,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 finish_reason: None,
+                stop_reason: None,
                 logprobs: None,
             }],
             created: now,
@@ -362,6 +381,7 @@ mod tests {
             system_fingerprint: None,
             object: "chat.completion".to_string(),
             usage: None,
+            nvext: None,
         };
 
         let wrapped: NvResponse = chat_resp.try_into().unwrap();

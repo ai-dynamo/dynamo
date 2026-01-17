@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{RouteDoc, service_v2};
@@ -38,8 +38,19 @@ pub fn live_check_router(
 }
 
 async fn live_handler(
-    axum::extract::State(_state): axum::extract::State<Arc<service_v2::State>>,
+    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
+    // Check if the http service is being cancelled/shutdown
+    if state.is_cancelled() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "shutting_down",
+                "message": "Service is shutting down"
+            })),
+        );
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -52,40 +63,25 @@ async fn live_handler(
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    let model_entries = state.manager().get_model_entries();
-    let instances = if let Some(etcd_client) = state.etcd_client() {
-        match list_all_instances(etcd_client).await {
-            Ok(instances) => instances,
-            Err(err) => {
-                tracing::warn!("Failed to fetch instances from etcd: {}", err);
-                vec![]
-            }
+    let instances = match list_all_instances(state.discovery()).await {
+        Ok(instances) => instances,
+        Err(err) => {
+            tracing::warn!(%err, "Failed to fetch instances from discovery");
+            vec![]
         }
-    } else {
-        vec![]
     };
-
-    if model_entries.is_empty() {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "unhealthy",
-                "message": "No endpoints available",
-                "instances": instances
-            })),
-        )
-    } else {
-        let endpoints: Vec<String> = model_entries
-            .iter()
-            .map(|entry| entry.endpoint_id.as_url())
-            .collect();
-        (
-            StatusCode::OK,
-            Json(json!({
-                "status": "healthy",
-                "endpoints": endpoints,
-                "instances": instances
-            })),
-        )
-    }
+    let mut endpoints: Vec<String> = instances
+        .iter()
+        .map(|instance| instance.endpoint_id().as_url())
+        .collect();
+    endpoints.sort();
+    endpoints.dedup();
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "healthy",
+            "endpoints": endpoints,
+            "instances": instances
+        })),
+    )
 }

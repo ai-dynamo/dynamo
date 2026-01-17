@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -27,7 +27,7 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def get_genai_perf_cmd(
+def get_aiperf_cmd(
     model,
     tokenizer,  # Add tokenizer parameter
     prefix_ratio,
@@ -40,12 +40,12 @@ def get_genai_perf_cmd(
     artifact_dir,
     url="http://localhost:8888",
 ):
-    """Build genai-perf command based on prefix ratio"""
+    """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
 
     return [
-        "genai-perf",
+        "aiperf",
         "profile",
         "--model",
         model,
@@ -84,10 +84,8 @@ def get_genai_perf_cmd(
         str(num_prefix_prompts),
         "--artifact-dir",
         artifact_dir,
-        "--",
-        "-v",
-        "--max-threads",
-        "256",
+        "--dataset-sampling-strategy",
+        "shuffle",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
@@ -95,17 +93,17 @@ def get_genai_perf_cmd(
     ]
 
 
-def get_gap_result(artifact_dir: str) -> dict:
-    """Parse genai-perf results from JSON file"""
+def get_aiperf_result(artifact_dir: str) -> dict:
+    """Parse aiperf results from JSON file"""
     json_file_path = None
     for root, _, files in os.walk(artifact_dir):
-        if "profile_export_genai_perf.json" in files:
-            json_file_path = os.path.join(root, "profile_export_genai_perf.json")
+        if "profile_export_aiperf.json" in files:
+            json_file_path = os.path.join(root, "profile_export_aiperf.json")
             break
 
     if json_file_path is None:
         raise FileNotFoundError(
-            f"profile_export_genai_perf.json not found in {artifact_dir}"
+            f"profile_export_aiperf.json not found in {artifact_dir}"
         )
 
     with open(json_file_path, "r") as f:
@@ -125,8 +123,8 @@ def run_benchmark_single_url(
     artifact_dir,
     url,
 ) -> Optional[Dict]:
-    """Run genai-perf benchmark for a single URL"""
-    genai_perf_cmd = get_genai_perf_cmd(
+    """Run aiperf benchmark for a single URL"""
+    aiperf_cmd = get_aiperf_cmd(
         model,
         tokenizer,  # Pass tokenizer parameter
         prefix_ratio,
@@ -140,22 +138,19 @@ def run_benchmark_single_url(
         url,
     )
 
-    logger.info(f"Running command for URL {url}: {' '.join(genai_perf_cmd)}")
+    logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
 
     try:
-        gap_process = subprocess.run(
-            genai_perf_cmd, capture_output=True, text=True, check=True
-        )
+        # Run aiperf and let it output directly to terminal
+        subprocess.run(aiperf_cmd, check=True)
 
-        logger.info(f"Genai-perf profiling completed successfully for URL {url}")
-        logger.info(gap_process.stdout)
+        logger.info(f"AIPerf profiling completed successfully for URL {url}")
 
-        gap_result = get_gap_result(artifact_dir)
-        return gap_result
+        aiperf_result = get_aiperf_result(artifact_dir)
+        return aiperf_result
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Genai-perf failed for URL {url} with error code: {e.returncode}")
-        logger.error(f"stderr: {e.stderr}")
+        logger.error(f"AIPerf failed for URL {url} with error code: {e.returncode}")
         return None
 
 
@@ -164,20 +159,30 @@ def aggregate_results(results: List[Optional[Dict]]) -> Optional[Dict]:
     if not results:
         return None
 
-    # For TTFT, we take the average across all URLs
-    # For throughput, we sum across all URLs (total system throughput)
-    ttft_values = [r["time_to_first_token"]["avg"] for r in results if r is not None]
-    throughput_values = [
-        r["output_token_throughput"]["avg"] for r in results if r is not None
-    ]
-
-    if not ttft_values or not throughput_values:
+    valid_results = [r for r in results if r is not None]
+    if not valid_results:
         return None
 
+    # For TTFT percentiles, average across URLs
+    ttft_p25_values = [r["time_to_first_token"]["p25"] for r in valid_results]
+    ttft_p50_values = [r["time_to_first_token"]["p50"] for r in valid_results]
+    ttft_p75_values = [r["time_to_first_token"]["p75"] for r in valid_results]
+
+    # For ITL percentiles, average across URLs
+    itl_p25_values = [r["inter_token_latency"]["p25"] for r in valid_results]
+    itl_p50_values = [r["inter_token_latency"]["p50"] for r in valid_results]
+    itl_p75_values = [r["inter_token_latency"]["p75"] for r in valid_results]
+
     aggregated = {
-        "time_to_first_token": {"avg": sum(ttft_values) / len(ttft_values)},
-        "output_token_throughput": {
-            "avg": sum(throughput_values)  # Total throughput across all URLs
+        "time_to_first_token": {
+            "p25": sum(ttft_p25_values) / len(ttft_p25_values),
+            "p50": sum(ttft_p50_values) / len(ttft_p50_values),
+            "p75": sum(ttft_p75_values) / len(ttft_p75_values),
+        },
+        "inter_token_latency": {
+            "p25": sum(itl_p25_values) / len(itl_p25_values),
+            "p50": sum(itl_p50_values) / len(itl_p50_values),
+            "p75": sum(itl_p75_values) / len(itl_p75_values),
         },
     }
 
@@ -197,7 +202,7 @@ def run_benchmark(
     output_dir,
     urls,
 ) -> Optional[Dict]:
-    """Run genai-perf benchmark for a specific prefix ratio"""
+    """Run aiperf benchmark for a specific prefix ratio"""
     logger.info(
         f"Running benchmark with prefix_ratio={prefix_ratio}, seed={seed}, URLs={urls}"
     )
@@ -242,7 +247,7 @@ def run_benchmark(
         os.makedirs(artifact_dir, exist_ok=True)
         artifact_dirs.append(artifact_dir)
 
-        genai_perf_cmd = get_genai_perf_cmd(
+        aiperf_cmd = get_aiperf_cmd(
             model,
             tokenizer,  # Pass tokenizer parameter
             prefix_ratio,
@@ -256,33 +261,28 @@ def run_benchmark(
             url,
         )
 
-        logger.info(f"Launching process for URL {url}: {' '.join(genai_perf_cmd)}")
+        logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
 
-        process = subprocess.Popen(
-            genai_perf_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
+        # Run process without capturing output - let it stream to terminal
+        process = subprocess.Popen(aiperf_cmd)
         processes.append((process, url, artifact_dir))
 
     # Wait for all processes to complete and collect results
     results: List[Optional[Dict]] = []
     for process, url, artifact_dir in processes:
-        stdout, stderr = process.communicate()
+        return_code = process.wait()
 
-        if process.returncode == 0:
-            logger.info(f"Genai-perf completed successfully for URL {url}")
-            logger.info(stdout)
+        if return_code == 0:
+            logger.info(f"AIPerf completed successfully for URL {url}")
 
             try:
-                gap_result = get_gap_result(artifact_dir)
-                results.append(gap_result)
+                aiperf_result = get_aiperf_result(artifact_dir)
+                results.append(aiperf_result)
             except Exception as e:
                 logger.error(f"Failed to get results for URL {url}: {e}")
                 results.append(None)
         else:
-            logger.error(
-                f"Genai-perf failed for URL {url} with error code: {process.returncode}"
-            )
-            logger.error(f"stderr: {stderr}")
+            logger.error(f"AIPerf failed for URL {url} with error code: {return_code}")
             results.append(None)
 
     # Aggregate results
@@ -309,7 +309,7 @@ def main():
         "--url",
         type=str,
         nargs="+",  # Accept multiple URLs
-        default=["http://localhost:8080"],
+        default=["http://localhost:8000"],
         # default=["http://localhost:8090", "http://localhost:8090"],
         help="Server URL(s). Can specify multiple URLs for parallel benchmarking",
     )
@@ -324,7 +324,7 @@ def main():
     parser.add_argument("--osl", type=int, default=200, help="Output sequence length")
     parser.add_argument("--requests", type=int, default=200, help="Number of requests")
     parser.add_argument("--concurrency", type=int, default=20, help="Concurrency level")
-    parser.add_argument("--seed", type=int, default=420, help="Initial random seed")
+    parser.add_argument("--seed", type=int, default=0, help="Initial random seed")
     parser.add_argument(
         "--prefix-ratios",
         type=float,
@@ -340,8 +340,12 @@ def main():
 
     # Store results
     prefix_ratios = []
-    ttft_values = []
-    throughput_values = []
+    ttft_p25_values = []
+    ttft_p50_values = []
+    ttft_p75_values = []
+    itl_p25_values = []
+    itl_p50_values = []
+    itl_p75_values = []
 
     current_seed = args.seed
 
@@ -362,50 +366,82 @@ def main():
         )
 
         if result is not None:
-            ttft = result["time_to_first_token"]["avg"]
-            throughput = result["output_token_throughput"]["avg"]
+            ttft = result["time_to_first_token"]
+            itl = result["inter_token_latency"]
 
             prefix_ratios.append(prefix_ratio)
-            ttft_values.append(ttft)
-            throughput_values.append(throughput)
+            ttft_p25_values.append(ttft["p25"])
+            ttft_p50_values.append(ttft["p50"])
+            ttft_p75_values.append(ttft["p75"])
+            itl_p25_values.append(itl["p25"])
+            itl_p50_values.append(itl["p50"])
+            itl_p75_values.append(itl["p75"])
 
             logger.info(
-                f"Prefix ratio {prefix_ratio}: TTFT={ttft:.2f}ms, Throughput={throughput:.2f} tokens/s"
+                f"Prefix ratio {prefix_ratio}: TTFT p50={ttft['p50']:.2f}ms (p25={ttft['p25']:.2f}, p75={ttft['p75']:.2f}), "
+                f"ITL p50={itl['p50']:.2f}ms (p25={itl['p25']:.2f}, p75={itl['p75']:.2f})"
             )
 
         current_seed += 1
 
     # Create plots
-    if prefix_ratios and ttft_values and throughput_values:
-        # Plot TTFT vs Prefix Ratio
+    if prefix_ratios and ttft_p50_values and itl_p50_values:
         plt.figure(figsize=(12, 5))
 
+        # Plot TTFT vs Prefix Ratio with shaded p25-p75 region
         plt.subplot(1, 2, 1)
-        plt.plot(prefix_ratios, ttft_values, "bo-", linewidth=2, markersize=8)
+        plt.fill_between(
+            prefix_ratios,
+            ttft_p25_values,
+            ttft_p75_values,
+            alpha=0.3,
+            color="blue",
+            label="p25-p75",
+        )
+        plt.plot(
+            prefix_ratios,
+            ttft_p50_values,
+            "bo-",
+            linewidth=2,
+            markersize=8,
+            label="p50",
+        )
         plt.xlabel("Prefix Ratio")
         plt.ylabel("Time to First Token (ms)")
         plt.title("TTFT vs Prefix Ratio")
         plt.grid(True, alpha=0.3)
-        for i, (pr, ttft) in enumerate(zip(prefix_ratios, ttft_values)):
+        plt.legend()
+        for i, (pr, p50) in enumerate(zip(prefix_ratios, ttft_p50_values)):
             plt.annotate(
-                f"{ttft:.1f}ms",
-                (pr, ttft),
+                f"{p50:.1f}ms",
+                (pr, p50),
                 textcoords="offset points",
                 xytext=(0, 10),
                 ha="center",
             )
 
-        # Plot Throughput vs Prefix Ratio
+        # Plot ITL vs Prefix Ratio with shaded p25-p75 region
         plt.subplot(1, 2, 2)
-        plt.plot(prefix_ratios, throughput_values, "ro-", linewidth=2, markersize=8)
+        plt.fill_between(
+            prefix_ratios,
+            itl_p25_values,
+            itl_p75_values,
+            alpha=0.3,
+            color="red",
+            label="p25-p75",
+        )
+        plt.plot(
+            prefix_ratios, itl_p50_values, "ro-", linewidth=2, markersize=8, label="p50"
+        )
         plt.xlabel("Prefix Ratio")
-        plt.ylabel("Output Token Throughput (tokens/s)")
-        plt.title("Throughput vs Prefix Ratio")
+        plt.ylabel("Inter-Token Latency (ms)")
+        plt.title("ITL vs Prefix Ratio")
         plt.grid(True, alpha=0.3)
-        for i, (pr, thpt) in enumerate(zip(prefix_ratios, throughput_values)):
+        plt.legend()
+        for i, (pr, p50) in enumerate(zip(prefix_ratios, itl_p50_values)):
             plt.annotate(
-                f"{thpt:.1f}",
-                (pr, thpt),
+                f"{p50:.1f}ms",
+                (pr, p50),
                 textcoords="offset points",
                 xytext=(0, 10),
                 ha="center",
@@ -421,8 +457,12 @@ def main():
         # Save results to JSON
         results_data = {
             "prefix_ratios": prefix_ratios,
-            "ttft_values": ttft_values,
-            "throughput_values": throughput_values,
+            "ttft_p25_values": ttft_p25_values,
+            "ttft_p50_values": ttft_p50_values,
+            "ttft_p75_values": ttft_p75_values,
+            "itl_p25_values": itl_p25_values,
+            "itl_p50_values": itl_p50_values,
+            "itl_p75_values": itl_p75_values,
             "config": {
                 "model": args.model,
                 "tokenizer": args.tokenizer,

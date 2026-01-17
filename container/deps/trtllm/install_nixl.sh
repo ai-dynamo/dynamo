@@ -1,5 +1,5 @@
 #!/bin/bash -e
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,11 +23,11 @@ set -ex
 
 GITHUB_URL="https://github.com"
 
-UCX_VERSION="v1.18.1"
+UCX_VERSION="1.20.0"
 UCX_INSTALL_PATH="/usr/local/ucx/"
 CUDA_PATH="/usr/local/cuda"
 
-NIXL_COMMIT="16348080f5bdeb9fe6058a23be140cec020ef3f3"
+NIXL_COMMIT="97c9b5b48e2ed3f1f2539c461c4971a7db8b1197"
 
 UCX_REPO="https://github.com/openucx/ucx.git"
 NIXL_REPO="https://github.com/ai-dynamo/nixl.git"

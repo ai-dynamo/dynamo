@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -59,7 +59,10 @@ impl ControlClient {
     }
 
     async fn execute<T: DeserializeOwned>(&self, message: ControlMessage) -> Result<T> {
-        let mut stream = self.client.direct(message.into(), self.instance_id).await?;
+        let mut stream = self
+            .client
+            .direct(message.into(), self.instance_id as u64)
+            .await?;
         let resp = stream
             .next()
             .await

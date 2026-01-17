@@ -1,12 +1,12 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Default values for dynamo-gaie.
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# This is the Dynamo namespace where the dynamo model is deployed
-dynamoNamespace: "vllm-agg"
+# Name of the DynamoGraphDeployment (DGD) backing this model deployment.
+dynamoGraphDeploymentName: "vllm-agg"
 
 # This is the port on which the model is exposed
 model:

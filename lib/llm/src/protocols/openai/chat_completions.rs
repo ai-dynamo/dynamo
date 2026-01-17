@@ -1,36 +1,25 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 use crate::engines::ValidateRequest;
+use crate::preprocessor::media::MediaDecoder;
 
 use super::{
     OpenAIOutputOptionsProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-    common_ext::{
-        CommonExt, CommonExtProvider, choose_with_deprecation, emit_nvext_deprecation_warning,
-    },
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt,
     nvext::NvExtProvider,
-    validate,
+    tools, validate,
 };
 
 pub mod aggregator;
 mod delta;
+pub mod jail;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
@@ -43,7 +32,7 @@ pub use delta::DeltaGenerator;
 /// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
 /// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
 ///   Note: If ignore_eos is specified in both common and nvext, the common (root-level) value takes precedence.
-#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     pub inner: dynamo_async_openai::types::CreateChatCompletionRequest,
@@ -53,6 +42,25 @@ pub struct NvCreateChatCompletionRequest {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
+
+    /// Extra args to pass to the chat template rendering context
+    /// Also accepts "chat_template_kwargs" as an alias for compatibility
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "chat_template_kwargs"
+    )]
+    pub chat_template_args: Option<std::collections::HashMap<String, serde_json::Value>>,
+
+    /// Runtime media decoding parameters.
+    /// When provided, these override the MDC defaults
+    /// Example: `{"video": {"num_frames": 16}}`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_io_kwargs: Option<MediaDecoder>,
+
+    /// Catch-all for unsupported fields - checked during validation
+    #[serde(flatten, default, skip_serializing)]
+    pub unsupported_fields: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// A response structure for unary chat completion responses, embedding OpenAI's
@@ -139,6 +147,20 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
+    /// Retrieves the seed value for random number generation, if set.
+    fn get_seed(&self) -> Option<i64> {
+        self.inner.seed
+    }
+
+    /// Retrieves the number of completions to generate for each prompt, if set.
+    fn get_n(&self) -> Option<u8> {
+        self.inner.n
+    }
+
+    /// Retrieves the best_of parameter, if set.
+    fn get_best_of(&self) -> Option<u8> {
+        None // Not supported in chat completions
+    }
 }
 
 /// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
@@ -150,75 +172,88 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
     }
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value> {
-        // Note: This one needs special handling since it returns a reference
-        if let Some(nvext) = &self.nvext
-            && nvext.guided_json.is_some()
-        {
-            emit_nvext_deprecation_warning("guided_json", true, self.common.guided_json.is_some());
+    fn get_guided_json(&self) -> Option<serde_json::Value> {
+        if let Some(value) = self.common.guided_json.clone() {
+            return Some(value);
         }
-        self.common
-            .guided_json
-            .as_ref()
-            .or_else(|| self.nvext.as_ref().and_then(|nv| nv.guided_json.as_ref()))
+
+        // 1) Tool-call guided decoding (highest precedence after explicit guided_json)
+        if let (Some(tool_choice), Some(tools)) =
+            (self.inner.tool_choice.as_ref(), self.inner.tools.as_deref())
+        {
+            match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
+                Ok(Some(schema)) => return Some(schema),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to derive guided_json from tool_choice"
+                    );
+                }
+            }
+        }
+
+        // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
+        if let Some(response_format) = self.inner.response_format.as_ref() {
+            use dynamo_async_openai::types::ResponseFormat;
+            match response_format {
+                ResponseFormat::Text => {}
+                ResponseFormat::JsonObject => {
+                    // Minimal JSON Schema for "any JSON object"
+                    return Some(serde_json::json!({
+                        "type": "object"
+                    }));
+                }
+                ResponseFormat::JsonSchema { json_schema } => {
+                    // validate_response_format ensures schema is present when type=json_schema
+                    if let Some(schema) = json_schema.schema.clone() {
+                        return Some(schema);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn get_guided_regex(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_regex",
-            self.common.guided_regex.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.guided_regex.as_ref()),
-        )
+        self.common.guided_regex.clone()
     }
 
     fn get_guided_grammar(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_grammar",
-            self.common.guided_grammar.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_grammar.as_ref()),
-        )
+        self.common.guided_grammar.clone()
     }
 
     fn get_guided_choice(&self) -> Option<Vec<String>> {
-        choose_with_deprecation(
-            "guided_choice",
-            self.common.guided_choice.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.guided_choice.as_ref()),
-        )
+        self.common.guided_choice.clone()
     }
 
     fn get_guided_decoding_backend(&self) -> Option<String> {
-        choose_with_deprecation(
-            "guided_decoding_backend",
-            self.common.guided_decoding_backend.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.guided_decoding_backend.as_ref()),
-        )
+        self.common.guided_decoding_backend.clone()
+    }
+
+    fn get_guided_whitespace_pattern(&self) -> Option<String> {
+        self.common.guided_whitespace_pattern.clone()
     }
 
     fn get_top_k(&self) -> Option<i32> {
-        choose_with_deprecation(
-            "top_k",
-            self.common.top_k.as_ref(),
-            self.nvext.as_ref().and_then(|nv| nv.top_k.as_ref()),
-        )
+        self.common.top_k
+    }
+
+    fn get_min_p(&self) -> Option<f32> {
+        self.common.min_p
     }
 
     fn get_repetition_penalty(&self) -> Option<f32> {
-        choose_with_deprecation(
-            "repetition_penalty",
-            self.common.repetition_penalty.as_ref(),
-            self.nvext
-                .as_ref()
-                .and_then(|nv| nv.repetition_penalty.as_ref()),
-        )
+        self.common.repetition_penalty
     }
 
     fn get_include_stop_str_in_output(&self) -> Option<bool> {
         self.common.include_stop_str_in_output
+    }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        self.common.skip_special_tokens
     }
 }
 
@@ -262,14 +297,9 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
         self.common.ignore_eos
     }
 
-    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// CommonExt (root-level) takes precedence over NvExt.
+    /// Get the effective ignore_eos value from CommonExt.
     fn get_ignore_eos(&self) -> Option<bool> {
-        choose_with_deprecation(
-            "ignore_eos",
-            self.get_common_ignore_eos().as_ref(),
-            NvExtProvider::nvext(self).and_then(|nv| nv.ignore_eos.as_ref()),
-        )
+        self.common.ignore_eos
     }
 }
 
@@ -290,7 +320,7 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {
-        None
+        CommonExtProvider::get_skip_special_tokens(self)
     }
 
     fn get_formatted_prompt(&self) -> Option<bool> {
@@ -302,11 +332,12 @@ impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateChatCompletionRequest {
     fn validate(&self) -> Result<(), anyhow::Error> {
+        validate::validate_no_unsupported_fields(&self.unsupported_fields)?;
         validate::validate_messages(&self.inner.messages)?;
         validate::validate_model(&self.inner.model)?;
         // none for store
         validate::validate_reasoning_effort(&self.inner.reasoning_effort)?;
-        validate::validate_metadata(&self.inner.metadata)?;
+        // none for metadata
         validate::validate_frequency_penalty(self.inner.frequency_penalty)?;
         validate::validate_logit_bias(&self.inner.logit_bias)?;
         // none for logprobs
@@ -318,7 +349,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for prediction
         // none for audio
         validate::validate_presence_penalty(self.inner.presence_penalty)?;
-        // none for response_format
+        validate::validate_response_format(&self.inner.response_format)?;
         // none for seed
         validate::validate_service_tier(&self.inner.service_tier)?;
         validate::validate_stop(&self.inner.stop)?;
@@ -332,7 +363,63 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         validate::validate_user(self.inner.user.as_deref())?;
         // none for function call
         // none for functions
+        // Common Ext
+        validate::validate_repetition_penalty(self.get_repetition_penalty())?;
+        validate::validate_min_p(self.get_min_p())?;
+        validate::validate_top_k(self.get_top_k())?;
+        // Cross-field validation
+        validate::validate_n_with_temperature(self.inner.n, self.inner.temperature)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::common::OutputOptionsProvider;
+    use serde_json::json;
+
+    #[test]
+    fn test_skip_special_tokens_none() {
+        let json_str = json!({
+            "model": "test-model",
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let request: NvCreateChatCompletionRequest =
+            serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+        assert_eq!(request.common.skip_special_tokens, None);
+
+        let output_options = request
+            .extract_output_options()
+            .expect("Failed to extract output options");
+
+        assert_eq!(output_options.skip_special_tokens, None);
+    }
+
+    #[test]
+    fn test_skip_special_tokens_propagates() {
+        for skip_value in [true, false] {
+            let json_str = json!({
+                "model": "test-model",
+                "messages": [
+                    {"role": "user", "content": "Hello"}
+                ],
+                "skip_special_tokens": skip_value
+            });
+
+            let request: NvCreateChatCompletionRequest =
+                serde_json::from_value(json_str).expect("Failed to deserialize request");
+
+            let output_options = request
+                .extract_output_options()
+                .expect("Failed to extract output options");
+
+            assert_eq!(output_options.skip_special_tokens, Some(skip_value));
+        }
     }
 }

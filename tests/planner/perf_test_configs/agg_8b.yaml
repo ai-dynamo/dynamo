@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg
       componentType: main
       replicas: 1
       livenessProbe:
@@ -38,15 +37,14 @@ spec:
           memory: "100Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0825-01
-          workingDir: /workspace/components/backends/vllm
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
     VllmDecodeWorker:
-      dynamoNamespace: vllm-agg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -74,12 +72,10 @@ spec:
           memory: "100Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
-        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-          value: "[\"generate\"]"
         - name: DYN_SYSTEM_PORT
           value: "9090"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -88,8 +84,8 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0825-01
-          workingDir: /workspace/components/backends/vllm
+          image: my-registry/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c

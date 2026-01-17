@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -27,7 +15,7 @@ import uvloop
 from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs.data import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
 import dynamo.nixl_connect as connect
@@ -40,7 +28,7 @@ from publisher import StatLoggerFactory
 from utils.args import (
     Config,
     base_parse_args,
-    configure_ports_with_etcd,
+    configure_ports,
     overwrite_args,
     parse_endpoint,
 )
@@ -84,17 +72,23 @@ class VllmBaseWorker:
 
         # use endpoint_overwrite to set the default endpoint based on worker type
         def endpoint_overwrite(args):
+            DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
             # default endpoint for this worker
             if args.worker_type == "prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.llm.generate"
+                args.endpoint = args.endpoint or f"dyn://{DYN_NAMESPACE}.llm.generate"
             elif args.worker_type == "decode":
-                args.endpoint = args.endpoint or "dyn://dynamo.decoder.generate"
+                args.endpoint = (
+                    args.endpoint or f"dyn://{DYN_NAMESPACE}.decoder.generate"
+                )
             elif args.worker_type == "encode_prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.encoder.generate"
+                args.endpoint = (
+                    args.endpoint or f"dyn://{DYN_NAMESPACE}.encoder.generate"
+                )
             # set downstream endpoint for disaggregated workers
             if args.enable_disagg:
                 args.downstream_endpoint = (
-                    args.downstream_endpoint or "dyn://dynamo.decoder.generate"
+                    args.downstream_endpoint
+                    or f"dyn://{DYN_NAMESPACE}.decoder.generate"
                 )
 
             return args
@@ -148,7 +142,7 @@ class VllmBaseWorker:
             vllm_config=vllm_config,
             usage_context=usage_context,
             stat_loggers=[self.stats_logger],
-            disable_log_requests=self.engine_args.disable_log_requests,
+            enable_log_requests=self.engine_args.enable_log_requests,
             disable_log_stats=self.engine_args.disable_log_stats,
         )
 
@@ -169,7 +163,7 @@ class VllmBaseWorker:
         ).replace("*", "127.0.0.1")
 
         zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=endpoint.lease_id(),
+            worker_id=endpoint.connection_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
@@ -257,7 +251,6 @@ class VllmPDWorker(VllmBaseWorker):
         # We'll needs this to move data between this worker and remote workers efficiently.
         parsed_namespace, _, _ = parse_endpoint(self.endpoint)
         self._connector = connect.Connector()
-        await self._connector.initialize()
 
         self.image_loader = ImageLoader()
 
@@ -272,21 +265,20 @@ class VllmPDWorker(VllmBaseWorker):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        embeddings, descriptor = None, None
-
-        # Process embeddings using the connector
-        # Create a descriptor based on the embedding shape.
-        embeddings = torch.empty(
-            request.embeddings_shape,
-            dtype=self.EMBEDDINGS_DTYPE,
-            device=self.EMBEDDINGS_DEVICE,
-        )
-        descriptor = connect.Descriptor(embeddings)
-
         if (
             request.multimodal_input.image_url is None
             and request.multimodal_input.video_url is None
+            and request.multimodal_input.audio_url is None
         ):
+            # Process embeddings using the connector
+            # Create a descriptor based on the embedding shape.
+            embeddings = torch.empty(
+                request.embeddings_shape,
+                dtype=self.EMBEDDINGS_DTYPE,
+                device=self.EMBEDDINGS_DEVICE,
+            )
+            descriptor = connect.Descriptor(embeddings)
+
             if descriptor is None:
                 raise RuntimeError(
                     "Descriptor is None in PD worker - cannot process embeddings"
@@ -302,6 +294,12 @@ class VllmPDWorker(VllmBaseWorker):
                     self.engine_args.model,
                     self.EMBEDDINGS_DTYPE,
                     video_numpy=video_numpy,
+                )
+            elif "audio" in self.engine_args.model.lower():
+                multi_modal_data = construct_mm_data(
+                    self.engine_args.model,
+                    self.EMBEDDINGS_DTYPE,
+                    audio_embeds=embeddings,
                 )
             else:
                 multi_modal_data = construct_mm_data(
@@ -321,6 +319,7 @@ class VllmPDWorker(VllmBaseWorker):
         # Remove the image features from the request as they are not required
         request.multimodal_input.image_url = None
         request.multimodal_input.video_url = None
+        request.multimodal_input.audio_url = None
         request.serialized_request = None
 
         pd_request = copy.deepcopy(request)
@@ -408,7 +407,7 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Runtime setup
     # Set up signal handler for graceful shutdown
@@ -426,8 +425,7 @@ async def worker(runtime: DistributedRuntime):
     args, config = VllmBaseWorker.parse_args()
 
     # vLLM config overwrites
-    etcd_client = runtime.etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
+    configure_ports(config)
     overwrite_args(config)
     await init(runtime, args, config)
 
@@ -438,7 +436,6 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")

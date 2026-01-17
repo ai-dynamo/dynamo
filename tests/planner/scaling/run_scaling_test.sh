@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Run SLA planner scaling end-to-end test
@@ -14,7 +14,9 @@ set -e
 
 # Configuration
 NAMESPACE=${NAMESPACE:-default}
-YAML_FILE="disagg_planner.yaml"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAML_FILE="$SCRIPT_DIR/disagg_planner.yaml"
+TEST_FILE="$SCRIPT_DIR/../test_scaling_e2e.py"
 FRONTEND_PORT=8000
 LOCAL_PORT=8000
 DEPLOYMENT_NAME="vllm-disagg-planner"
@@ -48,7 +50,7 @@ check_prerequisites() {
     log_info "Checking prerequisites..."
 
     if ! command -v kubectl &> /dev/null; then
-        log_error "kubectl not found. Please install kubectl."
+        log_error "kubectl not found. Please ensure it is installed and in your PATH."
         exit 1
     fi
 
@@ -62,29 +64,11 @@ check_prerequisites() {
         exit 1
     fi
 
-    if [ ! -f "test_scaling_e2e.py" ]; then
-        log_error "test_scaling_e2e.py not found. Make sure you're in the tests/planner directory."
+    # Check for aiperf
+    if ! command -v aiperf &> /dev/null; then
+        log_error "aiperf not found. This tool is required for load generation."
+        log_error "Please install the required dependencies by following the instructions in tests/planner/README.md"
         exit 1
-    fi
-
-    # Check for genai-perf
-    if ! command -v genai-perf &> /dev/null; then
-        log_warning "genai-perf not found. This tool is required for load generation."
-        echo -n "Would you like us to install it for you? (y/n): "
-        read -r response
-        if [[ "$response" =~ ^[Yy]$ ]]; then
-            log_info "Installing genai-perf and perf_analyzer..."
-            # Install specific versions for reproducibility and security
-            if pip install 'nvidia-ml-py3>=12.0.0' 'genai-perf>=0.0.4' 'tritonclient[all]>=2.48.0'; then
-                log_success "genai-perf and perf_analyzer installed successfully"
-            else
-                log_error "Failed to install genai-perf. Please install it manually: pip install 'nvidia-ml-py3>=12.0.0' 'genai-perf>=0.0.4' 'tritonclient[all]>=2.48.0'"
-                exit 1
-            fi
-        else
-            log_error "genai-perf is required for the scaling test. Please install it: pip install 'nvidia-ml-py3>=12.0.0' 'genai-perf>=0.0.4' 'tritonclient[all]>=2.48.0'"
-            exit 1
-        fi
     fi
 
     log_success "Prerequisites check passed"
@@ -103,7 +87,8 @@ check_existing_deployment() {
         status=$(kubectl get dynamographdeployment "$DEPLOYMENT_NAME" -n "$NAMESPACE" -o jsonpath='{.status.state}')
         if [ "$status" = "successful" ]; then
             # Check if frontend pod is running
-            if kubectl get pods -n "$NAMESPACE" -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=vllm-disagg-planner" --field-selector=status.phase=Running | grep -q .; then
+            # Note: operator automatically prefixes k8s namespace to dynamo-namespace
+            if kubectl get pods -n "$NAMESPACE" -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=${NAMESPACE}-vllm-disagg-planner" --field-selector=status.phase=Running | grep -q .; then
                 log_success "Existing deployment is ready"
                 return 0
             else
@@ -148,7 +133,8 @@ deploy_planner() {
     log_info "Waiting for pods to be running (this may take several minutes for image pulls)..."
 
     log_info "Waiting for frontend pod..."
-    if kubectl wait --for=condition=Ready pod -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=vllm-disagg-planner" -n "$NAMESPACE" --timeout=900s; then
+    # Note: operator automatically prefixes k8s namespace to dynamo-namespace
+    if kubectl wait --for=condition=Ready pod -l "nvidia.com/dynamo-component-type=frontend,nvidia.com/dynamo-namespace=${NAMESPACE}-vllm-disagg-planner" -n "$NAMESPACE" --timeout=900s; then
         log_success "Frontend pod is ready"
     else
         log_error "Frontend pod failed to become ready within timeout"
@@ -212,7 +198,7 @@ cleanup_deployment() {
 }
 
 run_test() {
-    log_info "Running scaling test (graduated 8->15->25 req/s)..."
+    log_info "Running scaling test (graduated 8->18 req/s)..."
 
     local python_cmd="python3"
     if ! command -v python3 &> /dev/null; then
@@ -225,7 +211,7 @@ run_test() {
         log_info "Results will be saved to tests/planner/e2e_scaling_results"
     fi
 
-    if $python_cmd test_scaling_e2e.py $test_args; then
+    if $python_cmd "$TEST_FILE" $test_args; then
         log_success "Scaling test PASSED"
         return 0
     else
@@ -266,7 +252,7 @@ main() {
 
     log_info "SLA Planner Scaling Test"
     log_info "Namespace: $NAMESPACE"
-    log_info "Scenario: Graduated 8->15->25 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
+    log_info "Scenario: Graduated 8->18 req/s (1P1D -> 2P1D prefill scaling, ISL=4000/OSL=150)"
 
     check_prerequisites
 

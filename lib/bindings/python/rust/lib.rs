@@ -1,23 +1,34 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::local_model::LocalModel;
+use dynamo_runtime::distributed::{DistributedConfig, RequestPlaneMode};
+use dynamo_runtime::storage::kv;
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
-use pyo3::exceptions::PyStopAsyncIteration;
-use pyo3::types::PyBytes;
-use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::IntoPyObjectExt;
+use pyo3::exceptions::PyStopAsyncIteration;
+use pyo3::types::PyCapsule;
+use pyo3::types::{PyDict, PyString};
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
+use std::ffi::CString;
+use std::fs;
 use std::path::PathBuf;
-use std::{fmt::Display, sync::Arc};
+use std::{
+    fmt::Display,
+    sync::{Arc, Weak},
+};
 use tokio::sync::Mutex;
+use tracing::Instrument;
 
+use dynamo_runtime::config;
+use dynamo_runtime::config::environment_names::logging::otlp as env_otlp;
 use dynamo_runtime::{
     self as rs, logging,
     pipeline::{
-        context::Context as RsContext, network::egress::push_router::RouterMode as RsRouterMode,
-        EngineStream, ManyOut, SingleIn,
+        AsyncEngineContextProvider, EngineStream, ManyOut, SingleIn, context::Context as RsContext,
+        network::egress::push_router::RouterMode as RsRouterMode,
     },
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
@@ -27,6 +38,7 @@ use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::local_model::ModelRuntimeConfig;
+use crate::llm::preprocessor::{MediaDecoder, MediaFetcher};
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -49,8 +61,11 @@ impl From<RouterMode> for RsRouterMode {
 mod context;
 mod engine;
 mod http;
+mod kserve_grpc;
 mod llm;
 mod parsers;
+mod planner;
+mod prometheus_metrics;
 
 type JsonServerStreamingIngress =
     Ingress<SingleIn<serde_json::Value>, ManyOut<RsAnnotated<serde_json::Value>>>;
@@ -59,15 +74,73 @@ static INIT: OnceCell<()> = OnceCell::new();
 
 const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 
+// Helper to get appropriate span for instrumentation - always emit spans
+fn get_span_for_context(context: &context::Context, operation: &str) -> tracing::Span {
+    logging::make_client_request_span(
+        operation,
+        context.inner().id(),
+        context.trace_context(),
+        None,
+    )
+}
+
+// Helper to create span for direct method with instance_id
+fn get_span_for_direct_context(
+    context: &context::Context,
+    operation: &str,
+    instance_id: &str,
+) -> tracing::Span {
+    logging::make_client_request_span(
+        operation,
+        context.inner().id(),
+        context.trace_context(),
+        Some(instance_id),
+    )
+}
+
+// Helper to create request context with proper linking and cancellation handling
+fn create_request_context(
+    request: serde_json::Value,
+    parent_ctx: &Option<context::Context>,
+) -> RsContext<serde_json::Value> {
+    match parent_ctx {
+        // If there is a parent context, link the request as a child context of it
+        Some(parent_ctx) => {
+            let child_ctx = RsContext::with_id(request, parent_ctx.inner().id().to_string());
+            parent_ctx.inner().link_child(child_ctx.context());
+            if parent_ctx.inner().is_stopped() || parent_ctx.inner().is_killed() {
+                // Let the server handle the cancellation for now since not all backends are
+                // properly handling request exceptions
+                // TODO: (DIS-830) Return an error if context is cancelled
+                child_ctx.context().stop_generating();
+            }
+            child_ctx
+        }
+        // Otherwise if there is no parent context, use the request as-is
+        _ => request.into(),
+    }
+}
+
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    logging::init();
+    // Initialize logging early unless OTEL export is enabled (which requires tokio runtime)
+    if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
+        eprintln!(
+            "Warning: OTEL_EXPORT_ENABLED detected. Logging initialization deferred until runtime is available. Early logs may be dropped."
+        );
+    } else {
+        rs::logging::init();
+    }
+
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lora_name_to_id, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(unregister_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(fetch_llm, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -77,9 +150,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<Client>()?;
-    m.add_class::<EtcdClient>()?;
     m.add_class::<AsyncResponseStream>()?;
-    m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
@@ -89,25 +160,21 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
-    m.add_class::<llm::backend::Backend>()?;
+    m.add_class::<llm::preprocessor::MediaDecoder>()?;
+    m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
     m.add_class::<llm::kv::ApproxKvIndexer>()?;
-    m.add_class::<llm::kv::EndpointKvMetrics>()?;
-    m.add_class::<llm::kv::AggregatedMetrics>()?;
-    m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
     m.add_class::<llm::kv::RadixTree>()?;
     m.add_class::<llm::kv::ZmqKvEventListener>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;
-    m.add_class::<llm::nats::NatsQueue>()?;
+    m.add_class::<llm::lora::LoRADownloader>()?;
     m.add_class::<http::HttpService>()?;
-    m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<context::Context>()?;
-    m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;
@@ -117,12 +184,19 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
+    m.add_class::<kserve_grpc::KserveGrpcService>()?;
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add_class::<planner::VirtualConnectorCoordinator>()?;
+    m.add_class::<planner::VirtualConnectorClient>()?;
+    m.add_class::<planner::PlannerDecision>()?;
 
     engine::add_to_module(m)?;
     parsers::add_to_module(m)?;
 
-    #[cfg(feature = "block-manager")]
-    llm::block_manager::add_to_module(m)?;
+    m.add_class::<prometheus_metrics::RuntimeMetrics>()?;
+    let prometheus_metrics = PyModule::new(m.py(), "prometheus_metrics")?;
+    prometheus_metrics::add_to_module(&prometheus_metrics)?;
+    m.add_submodule(&prometheus_metrics)?;
 
     Ok(())
 }
@@ -141,8 +215,24 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
     logging::log_message(level, message, module, file, line);
 }
 
+/// Generate a deterministic signed int32 ID from a LoRA name using blake3 hash.
 #[pyfunction]
-#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None))]
+#[pyo3(text_signature = "(lora_name)")]
+fn lora_name_to_id(lora_name: &str) -> i32 {
+    llm_rs::utils::lora_name_to_id(lora_name)
+}
+
+/// Create an engine and attach it to an endpoint to make it visible to the frontend.
+/// This is the main way you create a Dynamo worker / backend.
+///
+/// If `lora_name` is provided, this function will publish a LoRA adapter instead of a base model:
+/// - LoRA path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}
+/// - Base model path: v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}
+///
+/// For LoRA mode, both `lora_name` and `base_model_path` must be provided together.
+/// Providing only one of them will result in an error.
+#[pyfunction]
+#[pyo3(signature = (model_input, model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None, custom_template_path=None, media_decoder=None, media_fetcher=None, lora_name=None, base_model_path=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -158,11 +248,32 @@ fn register_llm<'p>(
     runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
     custom_template_path: Option<&str>,
+    media_decoder: Option<MediaDecoder>,
+    media_fetcher: Option<MediaFetcher>,
+    lora_name: Option<&str>,
+    base_model_path: Option<&str>,
 ) -> PyResult<Bound<'p, PyAny>> {
+    // Validate Prefill model type requirements
+    if model_type.inner == llm_rs::model_type::ModelType::Prefill {
+        if !matches!(model_input, ModelInput::Tokens) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires model_input to be ModelInput::Tokens",
+            ));
+        }
+        if migration_limit != 0 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ModelType::Prefill requires migration_limit to be 0",
+            ));
+        }
+    }
+
     let model_input = match model_input {
         ModelInput::Text => llm_rs::model_type::ModelInput::Text,
         ModelInput::Tokens => llm_rs::model_type::ModelInput::Tokens,
+        ModelInput::Tensor => llm_rs::model_type::ModelInput::Tensor,
     };
+
+    let is_tensor_based = model_type.inner.supports_tensor();
 
     let model_type_obj = model_type.inner;
 
@@ -191,34 +302,144 @@ fn register_llm<'p>(
             PyErr::new::<PyException, _>(format!("Failed to convert user_data: {}", err))
         })?;
 
+    // Validate LoRA parameters: both or neither must be provided
+    if lora_name.is_some() ^ base_model_path.is_some() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "lora_name and base_model_path must both be provided together, or neither",
+        ));
+    }
+
+    // Determine source_path and lora_identifier based on registration mode
+    let (source_path, lora_identifier) = match (lora_name, base_model_path) {
+        (Some(lora), Some(base)) => (base.to_string(), Some(lora.to_string())),
+        _ => (inner_path, None),
+    };
+
+    // Model name: use lora name if present, otherwise provided name or default to source path
+    let model_name = lora_identifier
+        .clone()
+        .or(model_name)
+        .or_else(|| Some(source_path.clone()));
+
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // For TensorBased models, skip HuggingFace downloads and register directly
+        if is_tensor_based {
+            let model_name = model_name.unwrap_or_else(|| source_path.clone());
+            let mut card = llm_rs::model_card::ModelDeploymentCard::with_name_only(&model_name);
+            card.model_type = model_type_obj;
+            card.model_input = model_input;
+            card.user_data = user_data_json;
+
+            if let Some(cfg) = runtime_config {
+                card.runtime_config = cfg.inner;
+            }
+
+            // Register the Model Deployment Card via discovery interface
+            let discovery = endpoint.inner.drt().discovery();
+            let spec = rs::discovery::DiscoverySpec::from_model(
+                endpoint.inner.component().namespace().name().to_string(),
+                endpoint.inner.component().name().to_string(),
+                endpoint.inner.name().to_string(),
+                &card,
+            )
+            .map_err(to_pyerr)?;
+            discovery.register(spec).await.map_err(to_pyerr)?;
+
+            return Ok(());
+        }
+
+        // For non-TensorBased models, resolve the model path (local or fetch from HuggingFace)
+        let model_path = if fs::exists(&source_path)? {
+            PathBuf::from(&source_path)
+        } else {
+            LocalModel::fetch(&source_path, false)
+                .await
+                .map_err(to_pyerr)?
+        };
+
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
-            .model_path(Some(PathBuf::from(inner_path)))
-            .model_name(model_name)
+            // model path is the physical path on disk of the downloaded model
+            .model_path(model_path)
+            // source path is what the user gave as `--model-path`, either a real path (in which
+            // case it matches model_path above), or an HF repo.
+            .source_path(source_path.clone().into())
+            // --served_model_name
+            .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
             .migration_limit(Some(migration_limit))
             .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json)
-            .custom_template_path(custom_template_path_owned);
-        // Download from HF, load the ModelDeploymentCard
+            .custom_template_path(custom_template_path_owned)
+            .media_decoder(media_decoder.map(|m| m.inner))
+            .media_fetcher(media_fetcher.map(|m| m.inner));
+
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
-        // Advertise ourself on etcd so ingress can find us
         local_model
-            .attach(&endpoint.inner, model_type_obj, model_input)
+            .attach(
+                &endpoint.inner,
+                model_type_obj,
+                model_input,
+                lora_identifier.as_deref(),
+            )
             .await
             .map_err(to_pyerr)?;
+
+        if let Some(lora_name) = lora_identifier {
+            tracing::info!("Registered LoRA '{}' MDC", lora_name);
+        } else {
+            tracing::info!(
+                "Registered base model '{}' MDC",
+                model_name.unwrap_or(source_path)
+            );
+        }
 
         Ok(())
     })
 }
 
-#[pyclass]
-#[derive(Clone)]
-struct EtcdKvCache {
-    inner: Arc<rs::transports::etcd::KvCache>,
+/// Unregister a Model Deployment Card (MDC) from the service registry
+///
+/// This removes an LLM deployment from the discovery system.
+///
+/// # Arguments
+///
+/// * `endpoint` - The endpoint where the model is registered
+/// * `lora_name` - Optional LoRA adapter name (if unregistering a LoRA deployment)
+///
+/// # MDC Path Format
+///
+/// - Base model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}`
+/// - LoRA model: `v1/mdc/{namespace}/{component}/{endpoint}/{instance_id}/{lora_slug}`
+#[pyfunction]
+#[pyo3(signature = (endpoint, lora_name=None))]
+fn unregister_llm<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    lora_name: Option<&str>,
+) -> PyResult<Bound<'p, PyAny>> {
+    let lora_name_owned = lora_name.map(|s| s.to_string());
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // Unified detach method handles both base models and LoRA adapters
+        LocalModel::detach_from_endpoint(&endpoint.inner, lora_name_owned.as_deref())
+            .await
+            .map_err(to_pyerr)?;
+        Ok(())
+    })
+}
+
+/// Download a model from Hugging Face, returning it's local path
+/// Example: `model_path = await fetch_llm("Qwen/Qwen3-0.6B")`
+#[pyfunction]
+#[pyo3(signature = (remote_name))]
+fn fetch_llm<'p>(py: Python<'p>, remote_name: &str) -> PyResult<Bound<'p, PyAny>> {
+    let repo = remote_name.to_string();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        LocalModel::fetch(&repo, false).await.map_err(to_pyerr)
+    })
 }
 
 #[pyclass]
@@ -230,15 +451,9 @@ pub struct DistributedRuntime {
 
 impl DistributedRuntime {
     #[allow(dead_code)]
-    fn inner(&self) -> &rs::DistributedRuntime {
+    pub(crate) fn inner(&self) -> &rs::DistributedRuntime {
         &self.inner
     }
-}
-
-#[pyclass]
-#[derive(Clone)]
-struct EtcdClient {
-    inner: rs::transports::etcd::Client,
 }
 
 #[pyclass]
@@ -295,6 +510,14 @@ impl ModelType {
     const Embedding: Self = ModelType {
         inner: llm_rs::model_type::ModelType::Embedding,
     };
+    #[classattr]
+    const TensorBased: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::TensorBased,
+    };
+    #[classattr]
+    const Prefill: Self = ModelType {
+        inner: llm_rs::model_type::ModelType::Prefill,
+    };
 
     fn __or__(&self, other: &Self) -> Self {
         ModelType {
@@ -312,34 +535,73 @@ impl ModelType {
 enum ModelInput {
     Text = 1,
     Tokens = 2,
+    Tensor = 3,
 }
 
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
-        let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
-        INIT.get_or_try_init(|| {
-            let primary = worker.tokio_runtime()?;
-            pyo3_async_runtimes::tokio::init_with_runtime(primary)
-                .map_err(|e| rs::error!("failed to initialize pyo3 static runtime: {:?}", e))?;
-            rs::OK(())
-        })
-        .map_err(to_pyerr)?;
+    #[pyo3(signature = (event_loop, store_kv, request_plane, enable_nats=None))]
+    fn new(
+        event_loop: PyObject,
+        store_kv: String,
+        request_plane: String,
+        enable_nats: Option<bool>,
+    ) -> PyResult<Self> {
+        let selected_kv_store: kv::Selector = store_kv.parse().map_err(to_pyerr)?;
+        let request_plane: RequestPlaneMode = request_plane.parse().map_err(to_pyerr)?;
 
-        let runtime = worker.runtime().clone();
+        // Try to get existing runtime first, create new Worker only if needed
+        // This allows multiple DistributedRuntime instances to share the same tokio runtime
+        let runtime = rs::Worker::runtime_from_existing()
+            .or_else(|_| -> anyhow::Result<rs::Runtime> {
+                // No existing Worker, create new one
+                let worker = rs::Worker::from_settings()?;
 
-        let inner =
-            if is_static {
-                runtime.secondary().block_on(
-                    rs::DistributedRuntime::from_settings_without_discovery(runtime),
-                )
+                // Initialize pyo3 bridge (only happens once per process)
+                INIT.get_or_try_init(|| -> anyhow::Result<()> {
+                    let primary = worker.tokio_runtime()?;
+                    pyo3_async_runtimes::tokio::init_with_runtime(primary).map_err(|e| {
+                        anyhow::anyhow!("failed to initialize pyo3 static runtime: {:?}", e)
+                    })?;
+                    Ok(())
+                })?;
+
+                Ok(worker.runtime().clone())
+            })
+            .map_err(to_pyerr)?;
+
+        // Initialize logging in context where tokio runtime is available
+        // otel exporter requires it
+        if config::env_is_truthy(env_otlp::OTEL_EXPORT_ENABLED) {
+            runtime.secondary().block_on(async {
+                rs::logging::init();
+            });
+        }
+
+        // NATS is used for more than just the NATS request-plane:
+        // - KV router events (JetStream or NATS core + local indexer)
+        // - inter-router replica sync (NATS core)
+        //
+        // NATS initialization logic:
+        // 1. If request_plane is NATS, always enable NATS
+        // 2. Otherwise, use enable_nats parameter (defaults to true for backward compat)
+        //    Pass false to disable NATS (e.g., for approximate KV routing mode)
+        let enable_nats = enable_nats.unwrap_or(true); // Default to true
+
+        let runtime_config = DistributedConfig {
+            store_backend: selected_kv_store,
+            nats_config: if request_plane.is_nats() || enable_nats {
+                Some(dynamo_runtime::transports::nats::ClientOptions::default())
             } else {
-                runtime
-                    .secondary()
-                    .block_on(rs::DistributedRuntime::from_settings(runtime))
-            };
-        let inner = inner.map_err(to_pyerr)?;
+                None
+            },
+            request_plane,
+        };
+        let inner = runtime
+            .secondary()
+            .block_on(rs::DistributedRuntime::new(runtime, runtime_config))
+            .map_err(to_pyerr)?;
 
         Ok(DistributedRuntime { inner, event_loop })
     }
@@ -366,166 +628,110 @@ impl DistributedRuntime {
         })
     }
 
-    fn etcd_client(&self) -> PyResult<Option<EtcdClient>> {
-        match self.inner.etcd_client().clone() {
-            Some(etcd_client) => Ok(Some(EtcdClient { inner: etcd_client })),
-            None => Ok(None),
-        }
-    }
-
     fn shutdown(&self) {
-        self.inner.runtime().shutdown();
+        self.inner.shutdown();
     }
 
     fn event_loop(&self) -> PyObject {
         self.event_loop.clone()
     }
-}
 
-#[pymethods]
-impl EtcdKvCache {
-    #[new]
-    fn py_new(
-        _etcd_client: &EtcdClient,
-        _prefix: String,
-        _initial_values: &Bound<'_, PyDict>,
-    ) -> PyResult<Self> {
-        // We can't create the KvCache here because it's async, so we'll return an error
-        Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "EtcdKvCache must be created using the 'new' class method",
-        ))
+    fn child_token(&self) -> CancellationToken {
+        let inner = self.inner.runtime().child_token();
+        CancellationToken { inner }
     }
 
-    #[staticmethod]
-    #[allow(clippy::new_ret_no_self)]
-    fn create<'p>(
-        py: Python<'p>,
-        etcd_client: &EtcdClient,
-        prefix: String,
-        initial_values: &Bound<'p, PyDict>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = etcd_client.inner.clone();
-
-        // Convert Python dict to Rust HashMap
-        let mut rust_initial_values = std::collections::HashMap::new();
-        for (key, value) in initial_values.iter() {
-            let key_str = key.extract::<String>()?;
-
-            // Handle both string and bytes values
-            let value_bytes = if let Ok(bytes) = value.extract::<Vec<u8>>() {
-                bytes
-            } else if let Ok(string) = value.extract::<String>() {
-                string.into_bytes()
-            } else {
-                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                    "Values must be either strings or bytes",
-                ));
-            };
-
-            rust_initial_values.insert(key_str, value_bytes);
-        }
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let kv_cache = rs::transports::etcd::KvCache::new(client, prefix, rust_initial_values)
-                .await
-                .map_err(to_pyerr)?;
-
-            Ok(EtcdKvCache {
-                inner: Arc::new(kv_cache),
-            })
-        })
-    }
-
-    fn get<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            if let Some(value) = inner.get(&key).await {
-                match Python::with_gil(|py| {
-                    let py_obj = PyBytes::new(py, &value).into_pyobject(py)?;
-                    Ok(py_obj.unbind().into_any())
-                }) {
-                    Ok(result) => Ok(result),
-                    Err(e) => Err(e),
-                }
-            } else {
-                Ok(Python::with_gil(|py| py.None()))
-            }
-        })
-    }
-
-    fn get_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let all_values = inner.get_all().await;
-
-            Python::with_gil(|py| {
-                let dict = PyDict::new(py);
-                for (key, value) in all_values {
-                    // Strip the prefix from the key
-                    let stripped_key = if let Some(stripped) = key.strip_prefix(&inner.prefix) {
-                        stripped.to_string()
-                    } else {
-                        key
-                    };
-                    dict.set_item(stripped_key, PyBytes::new(py, &value))?;
-                }
-                let py_obj = dict.into_pyobject(py)?;
-                Ok(py_obj.unbind().into_any())
-            })
-        })
-    }
-
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn put<'p>(
+    /// Register an async Python callback for /engine/{route_name}
+    ///
+    /// Args:
+    ///     route_name: Route path (e.g., "start_profile" → /engine/start_profile)
+    ///     callback: Async function with signature: async def(body: dict) -> dict
+    ///
+    /// Example:
+    /// ```python
+    /// async def start_profile(body: dict) -> dict:
+    ///     await engine.start_profile(**body)
+    ///     return {"status": "ok"}
+    ///
+    /// runtime.register_engine_route("start_profile", start_profile)
+    /// ```
+    #[pyo3(signature = (route_name, callback))]
+    fn register_engine_route(
         &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
+        py: Python<'_>,
+        route_name: String,
+        callback: PyObject,
+    ) -> PyResult<()> {
+        // Capture TaskLocals at registration time when Python's event loop is running.
+        // This is needed because later, when the callback is invoked from an HTTP request,
+        // we'll be on a Rust thread without a running Python event loop.
+        let locals =
+            Arc::new(pyo3_async_runtimes::tokio::get_current_locals(py).map_err(to_pyerr)?);
+        let callback = Arc::new(callback);
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.put(&key, value, lease_id).await.map_err(to_pyerr)?;
-            Ok(())
-        })
+        // Wrap Python async callback in Rust async closure
+        let rust_callback: rs::engine_routes::EngineRouteCallback =
+            Arc::new(move |body: serde_json::Value| {
+                let callback = callback.clone();
+                let locals = locals.clone();
+
+                // Return a boxed future
+                Box::pin(async move {
+                    // Acquire GIL to call Python callback and convert coroutine to future
+                    let py_future = Python::with_gil(|py| {
+                        // Convert body to Python dict
+                        let py_body = pythonize::pythonize(py, &body).map_err(|e| {
+                            anyhow::anyhow!("Failed to convert request body to Python: {}", e)
+                        })?;
+
+                        // Call Python async function to get a coroutine
+                        let coroutine = callback.call1(py, (py_body,)).map_err(|e| {
+                            anyhow::anyhow!("Failed to call Python callback: {}", e)
+                        })?;
+
+                        // Use the TaskLocals captured at registration time
+                        pyo3_async_runtimes::into_future_with_locals(
+                            &locals,
+                            coroutine.into_bound(py),
+                        )
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
+                        })
+                    })?;
+
+                    // Await the Python coroutine (GIL is released during await)
+                    let py_result = py_future
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Python callback failed: {}", e))?;
+
+                    // Convert result back to serde_json::Value
+                    Python::with_gil(|py| {
+                        pythonize::depythonize::<serde_json::Value>(py_result.bind(py))
+                            .map_err(|e| anyhow::anyhow!("Failed to serialize response: {}", e))
+                    })
+                })
+            });
+
+        self.inner
+            .engine_routes()
+            .register(&route_name, rust_callback);
+        tracing::debug!("Registered engine route: /engine/{}", route_name);
+        Ok(())
     }
 
-    fn delete<'p>(&self, py: Python<'p>, key: String) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
+    // This is used to pass the DistributedRuntime from the dynamo-runtime bindings
+    // to the KVBM bindings, since KVBM cannot directly use the struct from this cdylib.
+    // TODO: Create a separate crate "dynamo-python" so that all binding crates can import
+    // from it and share the same crate path. This will allow PyO3 to automatically
+    // recognize that both bindings use the same PyClass.
+    #[pyo3(name = "to_capsule")]
+    fn to_capsule<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyCapsule>> {
+        let arc: Arc<rs::DistributedRuntime> = Arc::new(self.inner.clone());
+        let weak: Weak<rs::DistributedRuntime> = Arc::downgrade(&arc);
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            inner.delete(&key).await.map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
+        let name = CString::new("dynamo.runtime.weak").expect("valid capsule name");
 
-    fn clear_all<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let inner = self.inner.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Get all keys with the prefix
-            let all_keys = inner
-                .get_all()
-                .await
-                .keys()
-                .cloned()
-                .collect::<Vec<String>>();
-
-            // Delete each key
-            for key in all_keys {
-                // Strip the prefix from the key before deleting
-                if let Some(stripped_key) = key.strip_prefix(&inner.prefix) {
-                    inner.delete(stripped_key).await.map_err(to_pyerr)?;
-                } else {
-                    inner.delete(&key).await.map_err(to_pyerr)?;
-                }
-            }
-
-            Ok(())
-        })
+        PyCapsule::new(py, weak, Some(name))
     }
 }
 
@@ -554,35 +760,63 @@ impl Component {
         })
     }
 
-    fn create_service<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
-        let builder = self.inner.service_builder();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let _ = builder.create().await.map_err(to_pyerr)?;
-            Ok(())
-        })
+    /// Get a RuntimeMetrics helper for creating Prometheus metrics
+    #[getter]
+    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
+        prometheus_metrics::RuntimeMetrics::from_component(self.inner.clone())
     }
 }
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None))]
+    #[pyo3(signature = (generator, graceful_shutdown = true, metrics_labels = None, health_check_payload = None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
         graceful_shutdown: Option<bool>,
         metrics_labels: Option<Vec<(String, String)>>,
+        health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
             self.event_loop.clone(),
         )?);
-        let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
-        let builder = self
+        let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
+
+        // Convert Python dict to serde_json::Value if provided and validate it's an object
+        let health_payload_json = health_check_payload
+            .map(|dict| pythonize::depythonize::<serde_json::Value>(dict))
+            .transpose()
+            .map_err(|err| {
+                pyo3::exceptions::PyTypeError::new_err(format!(
+                    "Failed to convert health_check_payload: {}",
+                    err
+                ))
+            })?;
+
+        // Require an object/dict
+        if let Some(ref payload) = health_payload_json
+            && !payload.is_object()
+        {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "health_check_payload must be a JSON object (dict)",
+            ));
+        }
+
+        let mut builder = self
             .inner
             .endpoint_builder()
             .metrics_labels(metrics_labels)
             .handler(ingress);
+
+        if let Some(payload) = health_payload_json {
+            builder = builder.health_check_payload(payload);
+        }
+
+        // Register the engine in the local endpoint registry for in-process calls
+        builder = builder.register_local_engine(engine).map_err(to_pyerr)?;
+
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder
@@ -610,12 +844,15 @@ impl Endpoint {
         })
     }
 
-    fn lease_id(&self) -> i64 {
-        self.inner
-            .drt()
-            .primary_lease()
-            .map(|l| l.id())
-            .unwrap_or(0)
+    // Opaque unique ID for this worker. May change over worker lifetime.
+    fn connection_id(&self) -> u64 {
+        self.inner.drt().connection_id()
+    }
+
+    /// Get a RuntimeMetrics helper for creating Prometheus metrics
+    #[getter]
+    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
+        prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
     }
 }
 
@@ -628,102 +865,11 @@ impl Namespace {
             event_loop: self.event_loop.clone(),
         })
     }
-}
 
-#[pymethods]
-impl EtcdClient {
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn kv_create<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client
-                .kv_create(&key, value, lease_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn kv_create_or_validate<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client
-                .kv_create_or_validate(key, value, lease_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn primary_lease_id(&self) -> i64 {
-        self.inner.lease_id()
-    }
-
-    #[pyo3(signature = (key, value, lease_id=None))]
-    fn kv_put<'p>(
-        &self,
-        py: Python<'p>,
-        key: String,
-        value: Vec<u8>,
-        lease_id: Option<i64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client
-                .kv_put(key, value, lease_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(())
-        })
-    }
-
-    fn kv_get_prefix<'p>(&self, py: Python<'p>, prefix: String) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = client
-                .kv_get_prefix(prefix)
-                .await
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-
-            // Convert Vec<KeyValue> to a list of dictionaries
-            let py_list = Python::with_gil(|py| {
-                let list = PyList::empty(py);
-                for kv in result {
-                    let dict = PyDict::new(py);
-                    dict.set_item("key", String::from_utf8_lossy(kv.key()).to_string())?;
-                    dict.set_item("value", PyBytes::new(py, kv.value()))?;
-                    dict.set_item("create_revision", kv.create_revision())?;
-                    dict.set_item("mod_revision", kv.mod_revision())?;
-                    dict.set_item("version", kv.version())?;
-                    dict.set_item("lease", kv.lease())?;
-                    list.append(dict)?;
-                }
-                Ok::<Py<PyList>, PyErr>(list.into())
-            })?;
-
-            Ok(py_list)
-        })
-    }
-
-    fn revoke_lease<'p>(&self, py: Python<'p>, lease_id: i64) -> PyResult<Bound<'p, PyAny>> {
-        let client = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            client.revoke_lease(lease_id).await.map_err(to_pyerr)?;
-            Ok(())
-        })
+    /// Get a RuntimeMetrics helper for creating Prometheus metrics
+    #[getter]
+    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
+        prometheus_metrics::RuntimeMetrics::from_namespace(self.inner.clone())
     }
 }
 
@@ -731,7 +877,7 @@ impl EtcdClient {
 impl Client {
     /// Get list of current instances.
     /// Replaces endpoint_ids.
-    fn instance_ids(&self) -> Vec<i64> {
+    fn instance_ids(&self) -> Vec<u64> {
         self.router.client.instance_ids()
     }
 
@@ -743,7 +889,7 @@ impl Client {
             inner
                 .wait_for_instances()
                 .await
-                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<i64>>())
+                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<u64>>())
                 .map_err(to_pyerr)
         })
     }
@@ -757,11 +903,7 @@ impl Client {
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        if self.router.client.is_static() {
-            self.r#static(py, request, annotated, context)
-        } else {
-            self.random(py, request, annotated, context)
-        }
+        self.random(py, request, annotated, context)
     }
 
     /// Send a request to the next endpoint in a round-robin fashion.
@@ -774,6 +916,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -782,12 +925,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.round_robin(request).await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    // Always instrument with appropriate span (none if no trace context)
+                    let span = get_span_for_context(&context, "round_robin");
+                    client
+                        .round_robin(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.round_robin(request.into()).await.map_err(to_pyerr)?,
+                _ => client.round_robin(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -807,6 +953,7 @@ impl Client {
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -815,12 +962,15 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.random(request).await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                    // Always instrument with appropriate span (none if no trace context)
+                    let span = get_span_for_context(&context, "random");
+                    client
+                        .random(request_ctx)
+                        .instrument(span)
+                        .await
+                        .map_err(to_pyerr)?
                 }
-                _ => client.random(request.into()).await.map_err(to_pyerr)?,
+                _ => client.random(request_ctx).await.map_err(to_pyerr)?,
             };
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream {
@@ -836,11 +986,12 @@ impl Client {
         &self,
         py: Python<'p>,
         request: PyObject,
-        instance_id: i64,
+        instance_id: u64,
         annotated: Option<bool>,
         context: Option<context::Context>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
+        let request_ctx = create_request_context(request, &context);
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -849,53 +1000,19 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = match context {
                 Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client
-                        .direct(request, instance_id)
+                    // Always instrument with appropriate span (none if no trace context)
+                    let span =
+                        get_span_for_direct_context(&context, "direct", &instance_id.to_string());
+                    client
+                        .direct(request_ctx, instance_id)
+                        .instrument(span)
                         .await
-                        .map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
+                        .map_err(to_pyerr)?
                 }
                 _ => client
-                    .direct(request.into(), instance_id)
+                    .direct(request_ctx, instance_id)
                     .await
                     .map_err(to_pyerr)?,
-            };
-
-            tokio::spawn(process_stream(stream, tx));
-
-            Ok(AsyncResponseStream {
-                rx: Arc::new(Mutex::new(rx)),
-                annotated,
-            })
-        })
-    }
-
-    /// Directly send a request to a pre-defined static worker
-    #[pyo3(signature = (request, annotated=DEFAULT_ANNOTATED_SETTING, context=None))]
-    fn r#static<'p>(
-        &self,
-        py: Python<'p>,
-        request: PyObject,
-        annotated: Option<bool>,
-        context: Option<context::Context>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let request: serde_json::Value = pythonize::depythonize(&request.into_bound(py))?;
-        let annotated = annotated.unwrap_or(false);
-
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let client = self.router.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = match context {
-                Some(context) => {
-                    let request = RsContext::with_id(request, context.inner().id().to_string());
-                    let stream = client.r#static(request).await.map_err(to_pyerr)?;
-                    context.inner().link_child(stream.context());
-                    stream
-                }
-                _ => client.r#static(request.into()).await.map_err(to_pyerr)?,
             };
 
             tokio::spawn(process_stream(stream, tx));
@@ -917,11 +1034,10 @@ async fn process_stream(
         // Convert the response to a PyObject using Python's GIL
         let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
-            let result = Python::with_gil(|py| match pythonize::pythonize(py, &data) {
+            Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),
                 Err(e) => Err(e.to_string()),
-            });
-            result
+            })
         });
 
         let is_error = annotated.is_error();

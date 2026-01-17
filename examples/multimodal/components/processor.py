@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import argparse
 import asyncio
@@ -29,8 +17,8 @@ from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import FlexibleArgumentParser
+from vllm.tokenizers import TokenizerLike as AnyTokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo.llm import ModelInput, ModelType, register_llm
 from dynamo.runtime import Client, DistributedRuntime, dynamo_worker
@@ -39,6 +27,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from utils.args import Config, base_parse_args, parse_endpoint
+from utils.chat_message_utils import extract_user_text
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import (
     MultiModalInput,
@@ -63,8 +52,9 @@ class Processor(ProcessMixIn):
 
     @classmethod
     def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
-        DEFAULT_ENDPOINT = "dyn://dynamo.processor.generate"
-        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.encoder.generate"
+        DYN_NAMESPACE = os.environ.get("DYN_NAMESPACE", "dynamo")
+        DEFAULT_ENDPOINT = f"dyn://{DYN_NAMESPACE}.processor.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = f"dyn://{DYN_NAMESPACE}.encoder.generate"
 
         parser = FlexibleArgumentParser(
             description="vLLM based processor for Dynamo LLM."
@@ -145,7 +135,6 @@ class Processor(ProcessMixIn):
         (
             request,
             conversation,
-            prompt,
             engine_prompt,
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
@@ -215,11 +204,7 @@ class Processor(ProcessMixIn):
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
-        # Safely extract user text
-        try:
-            user_text = raw_request.messages[0].content[0].text
-        except (IndexError, AttributeError) as e:
-            raise ValueError(f"Invalid message structure: {e}")
+        user_text = extract_user_text(raw_request.messages)
 
         prompt = template.replace("<prompt>", user_text)
 
@@ -228,10 +213,13 @@ class Processor(ProcessMixIn):
             "content": prompt,
         }
 
+        # Set stream=True - the http frontend will handle aggregation of
+        # streamed chunks into a single http response, or stream them
+        # back as SSE responses based on the stream flag in the request.
         chat_request = ChatCompletionRequest(
             model=raw_request.model,
             messages=[msg],
-            stream=raw_request.stream,
+            stream=True,
             max_tokens=raw_request.max_tokens,
             temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
@@ -246,9 +234,20 @@ class Processor(ProcessMixIn):
                     if multimodal_input.image_url is not None:
                         raise ValueError("Cannot provide both image and video URLs")
                     multimodal_input.video_url = item.video_url.url
+                elif item.type == "audio_url":
+                    if (
+                        multimodal_input.image_url is not None
+                        or multimodal_input.video_url is not None
+                    ):
+                        raise ValueError("Cannot mix image, video and audio URLs")
+                    multimodal_input.audio_url = item.audio_url.url
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
-            raise ValueError("Either image URL or video URL is required")
+        if (
+            multimodal_input.image_url is None
+            and multimodal_input.video_url is None
+            and multimodal_input.audio_url is None
+        ):
+            raise ValueError("Either image URL or video URL or audio URL is required")
 
         async for response in self._generate(
             chat_request, multimodal_input, RequestType.CHAT
@@ -275,7 +274,7 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     # Runtime setup
     # Set up signal handler for graceful shutdown
@@ -300,7 +299,6 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     """
 
     component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
 
     generate_endpoint = component.endpoint(config.endpoint)
 

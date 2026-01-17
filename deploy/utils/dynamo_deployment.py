@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,10 +21,11 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-import aiofiles  # type: ignore[import-untyped]
+import aiofiles
 import httpx  # added for HTTP requests
 import kubernetes_asyncio as kubernetes
 import yaml
@@ -114,9 +115,9 @@ class DynamoDeploymentClient:
             service_name: Service name for connecting to the service, defaults to {deployment_name}-frontend
         """
         self.namespace = namespace
-        self.deployment_name = deployment_name
+        self.deployment_name = f"{deployment_name}-{str(uuid.uuid4())[:4]}"
         self.model_name = model_name
-        self.service_name = service_name or f"{deployment_name}-frontend"
+        self.service_name = service_name or f"{self.deployment_name}-frontend"
         self.components: List[str] = []  # Will store component names from CR
         self.deployment_spec: Optional[
             Dict[str, Any]
@@ -247,12 +248,25 @@ class DynamoDeploymentClient:
         self.deployment_spec["metadata"]["name"] = self.deployment_name
         self.deployment_spec["metadata"]["namespace"] = self.namespace
 
-        # Disable grove as it will cause the deployment to not report ready
-        if "annotations" not in self.deployment_spec["metadata"]:
-            self.deployment_spec["metadata"]["annotations"] = {}
-        self.deployment_spec["metadata"]["annotations"][
-            "nvidia.com/enable-grove"
-        ] = "false"
+        # Add ownerReference if env vars are set (for temporary DGDs during profiling)
+        # This makes the DGD auto-delete when the DGDR is deleted
+        dgdr_name = os.environ.get("DGDR_NAME")
+        dgdr_namespace = os.environ.get("DGDR_NAMESPACE")
+        dgdr_uid = os.environ.get("DGDR_UID")
+
+        if dgdr_name and dgdr_namespace and dgdr_uid:
+            if self.namespace == dgdr_namespace:
+                self.deployment_spec["metadata"]["ownerReferences"] = [
+                    {
+                        "apiVersion": "nvidia.com/v1alpha1",
+                        "kind": "DynamoGraphDeploymentRequest",
+                        "name": dgdr_name,
+                        "uid": dgdr_uid,
+                        "controller": False,
+                        "blockOwnerDeletion": True,
+                    }
+                ]
+                print(f"Added ownerReference to DGDR {dgdr_name} for auto-cleanup")
 
         try:
             await self.custom_api.create_namespaced_custom_object(
@@ -579,6 +593,6 @@ async def main():
 
 
 # run with:
-# uv run benchmarks/profiler/utils/dynamo_deployment.py -n mo-dyn-cloud -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
+# uv run benchmarks/profiler/utils/dynamo_deployment.py -n mo-dyn -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
 if __name__ == "__main__":
     asyncio.run(main())

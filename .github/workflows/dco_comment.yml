@@ -1,0 +1,39 @@
+name: DCO Commenter
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  issues: write
+  checks: read
+
+jobs:
+  dco-comment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get DCO status
+        id: dco
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { data: checks } = await github.rest.checks.listForRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: context.payload.pull_request.head.sha,
+            });
+
+            const dco = checks.check_runs.find(run => run.name === "DCO");
+            core.setOutput("conclusion", dco ? dco.conclusion : "not_found");
+
+      - name: Comment if DCO failed (deduped)
+        if: steps.dco.outputs.conclusion == 'failure'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body: |
+            ⚠️ Your pull request failed the DCO check.
+            Don’t worry! Check out our [DCO Troubleshooting Guide](https://github.com/ai-dynamo/dynamo/blob/main/DCO.md) for step-by-step instructions to fix it quickly.
+          edit-mode: replace
