@@ -1184,10 +1184,9 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		// This uses GenerateBasePodSpec to ensure same config as worker pods (image pull secrets, etc.)
 		// Pass framework from checkpoint identity for accurate backend detection
 		podTemplate, err := r.buildCheckpointJobPodTemplate(
+			dynamoDeployment,
 			component,
 			serviceName,
-			dynamoDeployment.Namespace,
-			dynamoDeployment.Name,
 			identity.BackendFramework, // Use framework from checkpoint identity
 		)
 		if err != nil {
@@ -1224,10 +1223,9 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 // It reuses GenerateBasePodSpec to ensure checkpoint jobs have the same configuration as regular pods,
 // including auto-discovered image pull secrets, envFromSecret, resources, security context, etc.
 func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
+	dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment,
 	component *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec,
 	serviceName string,
-	namespace string,
-	dgdName string,
 	framework string, // From checkpoint identity (e.g., "vllm", "sglang", "trtllm")
 ) (corev1.PodTemplateSpec, error) {
 	// Parse framework string to BackendFramework type
@@ -1241,6 +1239,11 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 	componentForJob := component.DeepCopy()
 	componentForJob.Checkpoint = nil
 
+	// Ensure DYN_NAMESPACE is set for checkpoint job using the same logic as regular pods
+	// This is required for service discovery and distributed coordination
+	dynamoNamespace := dynamo.GetDynamoNamespace(dynamoDeployment, component)
+	componentForJob.DynamoNamespace = &dynamoNamespace
+
 	// Generate base PodSpec using the same logic as regular worker pods
 	// This includes: image pull secrets (auto-discovered + explicit), envFromSecret,
 	// resources, security context, tolerations, node selectors, etc.
@@ -1252,8 +1255,8 @@ func (r *DynamoGraphDeploymentReconciler) buildCheckpointJobPodTemplate(
 		componentForJob,
 		backendFramework,
 		r.DockerSecretRetriever,
-		dgdName,
-		namespace,
+		dynamoDeployment.Name,
+		dynamoDeployment.Namespace,
 		dynamo.RoleCheckpoint, // Use checkpoint role
 		1,                     // Single node for checkpoint job
 		r.Config,
