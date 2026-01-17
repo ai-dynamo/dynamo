@@ -309,7 +309,7 @@ impl Worker for KvConnectorWorker {
         if self.layers_complete == self.kv_cache_layers.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
 
-            tracing::info!(
+            tracing::trace!(
                 iteration = self.iteration,
                 num_operations = offloading_operations.len(),
                 "All layers complete, enqueuing {} offload operations",

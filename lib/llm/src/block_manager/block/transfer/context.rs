@@ -3,15 +3,62 @@
 
 use super::*;
 
-use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
+use cudarc::driver::{CudaEvent, CudaStream, sys::{CUevent_flags, CUstream}};
 use nixl_sys::Agent as NixlAgent;
 
 use dynamo_runtime::utils::pool::{Returnable, SyncPool, SyncPoolItem};
+use dynamo_memory::pool::CudaMemPool;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
+
+// ============================================================================
+// CUDA Pool Buffer Cleanup Guard
+// ============================================================================
+
+/// RAII guard for CUDA pool buffers that frees them back to the pool on drop.
+/// Used to defer buffer cleanup until after event synchronization.
+pub struct CudaPoolBufferGuard {
+    src_buffer: u64,
+    dst_buffer: u64,
+    stream: usize,  // Store as usize to make it Send
+    pool: Arc<CudaMemPool>,
+}
+
+impl CudaPoolBufferGuard {
+    pub fn new(src_buffer: u64, dst_buffer: u64, stream: CUstream, pool: Arc<CudaMemPool>) -> Self {
+        Self {
+            src_buffer,
+            dst_buffer,
+            stream: stream as usize,
+            pool,
+        }
+    }
+}
+
+impl Drop for CudaPoolBufferGuard {
+    fn drop(&mut self) {
+        tracing::debug!(
+            "Freeing CUDA pool buffers after event sync: src=0x{:x}, dst=0x{:x}",
+            self.src_buffer,
+            self.dst_buffer
+        );
+
+        let stream = self.stream as CUstream;
+        if let Err(e) = self.pool.free_async(self.src_buffer, stream) {
+            tracing::error!("Failed to free src buffer from CUDA pool: {}", e);
+        }
+        if let Err(e) = self.pool.free_async(self.dst_buffer, stream) {
+            tracing::error!("Failed to free dst buffer from CUDA pool: {}", e);
+        }
+    }
+}
+
+// ============================================================================
+// Legacy: Pinned Buffer Resource for Old Pooling (to be removed)
+// ============================================================================
 
 // Pinned Buffer Resource for Pooling
 #[derive(Debug)]
@@ -169,9 +216,13 @@ pub struct TransferContext {
     stream: Arc<CudaStream>,
     async_rt_handle: Handle,
 
+    // NEW: CUDA memory pool for stream-ordered host memory allocation
+    cuda_mem_pool: Option<Arc<CudaMemPool>>,
+
+    // LEGACY: Old pinned buffer pool (to be removed after migration)
     pinned_buffer_pool: Option<SyncPinnedBufferPool>,
 
-    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
+    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>, Option<CudaPoolBufferGuard>)>,
     cuda_event_worker: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
 }
@@ -184,13 +235,13 @@ impl TransferContext {
         config: Option<PoolConfig>,
     ) -> Self {
         let (cuda_event_tx, cuda_event_rx) =
-            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
+            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>, Option<CudaPoolBufferGuard>)>();
 
         let cancel_token = CancellationToken::new();
 
         let cancel_token_clone = cancel_token.clone();
         let cuda_event_worker = Self::setup_cuda_event_worker(cuda_event_rx, cancel_token_clone);
-        let pool = if let Some(config) = config {
+        let pool = if let Some(ref config) = config {
             if config.enable_pool {
                 let pool_size = config.max_concurrent_transfers * 2 + 2;
                 // Calculate buffer size for worst-case scenario
@@ -280,10 +331,56 @@ impl TransferContext {
             None
         };
 
+        // Create CUDA memory pool for stream-ordered allocation
+        let cuda_mem_pool = if let Some(ref cfg) = config {
+            if cfg.enable_pool {
+                // Calculate total reserve size for pre-warming
+                let num_buffers = cfg.max_concurrent_transfers * 2 + 2;
+                let buffer_size = cfg.max_transfer_batch_size
+                    * cfg.num_outer_components
+                    * cfg.num_layers
+                    * std::mem::size_of::<u64>();
+                let reserve_size = num_buffers * buffer_size;
+
+                tracing::info!(
+                    "Creating CUDA memory pool: {} buffers × {}KB = {}MB total",
+                    num_buffers,
+                    buffer_size / 1024,
+                    reserve_size / (1024 * 1024)
+                );
+
+                match CudaMemPool::builder(stream.context().clone(), reserve_size)
+                    .use_device_memory()  // Use DEVICE memory (GPU VRAM) with H2D memcpy
+                    .release_threshold(128 * 1024 * 1024) // Release memory above 128MB back to OS
+                    .build()
+                {
+                    Ok(pool) => {
+                        tracing::info!("CUDA memory pool created successfully (DEVICE memory, stream-ordered allocation, pre-warmed with {}MB)",
+                            reserve_size / (1024 * 1024));
+                        Some(Arc::new(pool))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to create CUDA memory pool: {}. Falling back to legacy pool.",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::debug!("CUDA memory pool disabled by configuration");
+                None
+            }
+        } else {
+            tracing::debug!("No pool configuration provided - CUDA memory pool disabled");
+            None
+        };
+
         Self {
             nixl_agent,
             stream,
             async_rt_handle,
+            cuda_mem_pool,
             pinned_buffer_pool: pool,
             cuda_event_tx,
             cuda_event_worker: Some(cuda_event_worker),
@@ -292,7 +389,7 @@ impl TransferContext {
     }
 
     fn setup_cuda_event_worker(
-        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>)>,
+        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>, Option<CudaPoolBufferGuard>)>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -304,11 +401,13 @@ impl TransferContext {
             runtime.block_on(async move {
                 loop {
                     tokio::select! {
-                        Some((event, tx)) = cuda_event_rx.recv() => {
+                        Some((event, tx, cleanup_guard)) = cuda_event_rx.recv() => {
                             if let Err(e) = event.synchronize() {
                                 tracing::error!("Error synchronizing CUDA event: {}", e);
                             }
                             let _ = tx.send(());
+                            // cleanup_guard is dropped here, freeing buffers back to pool
+                            drop(cleanup_guard);
                         }
                         _ = cancel_token.cancelled() => {
                             break;
@@ -331,14 +430,27 @@ impl TransferContext {
         &self.async_rt_handle
     }
 
+    /// Get the CUDA memory pool for stream-ordered allocations
+    pub fn cuda_mem_pool(&self) -> Option<&Arc<CudaMemPool>> {
+        self.cuda_mem_pool.as_ref()
+    }
+
     pub fn cuda_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
+        self.cuda_event_with_cleanup(tx, None)
+    }
+
+    pub fn cuda_event_with_cleanup(
+        &self,
+        tx: oneshot::Sender<()>,
+        cleanup: Option<CudaPoolBufferGuard>,
+    ) -> Result<(), TransferError> {
         let event = self
             .stream
             .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
             .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
 
         self.cuda_event_tx
-            .send((event, tx))
+            .send((event, tx, cleanup))
             .map_err(|_| TransferError::ExecutionError("CUDA event worker exited.".into()))?;
         Ok(())
     }

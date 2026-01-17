@@ -11,8 +11,11 @@ when given the same inputs with fixed seed and temperature=0.
 The test uses comprehensive server warmup (sending all test prompts
 before validation) to avoid server initialization effects that could
 impact determinism measurements.
+
+This is a TensorRTLLM only test.
 """
 
+import importlib.util
 import logging
 import os
 import shutil
@@ -25,6 +28,20 @@ from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 
 logger = logging.getLogger(__name__)
+
+
+def _check_engine_available(module_name: str) -> bool:
+    """Check if an engine module is available and importable."""
+    if importlib.util.find_spec(module_name) is None:
+        return False
+    try:
+        importlib.import_module(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+HAS_TRTLLM = _check_engine_available("tensorrt_llm")
 
 # Just need a model to show the config works rather than any stress of the system.
 MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -151,6 +168,7 @@ def send_completion_request(
 @pytest.mark.nightly
 @pytest.mark.slow
 @pytest.mark.gpu_1
+@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config not defined and
@@ -187,6 +205,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 @pytest.mark.slow
 @pytest.mark.nightly
 @pytest.mark.gpu_1
+@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config defined and

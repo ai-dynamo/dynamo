@@ -222,7 +222,7 @@ where
                 let transfer_mode =
                     resolve_cuda_transfer_mode(RB::write_to_strategy(), is_contiguous);
 
-                match transfer_mode {
+                let cleanup_guard = match transfer_mode {
                     CudaTransferMode::Custom => {
                         let selected_stream = ctx.stream();
                         cuda::copy_blocks_with_customized_kernel(
@@ -230,7 +230,7 @@ where
                             targets,
                             selected_stream.as_ref(),
                             &ctx,
-                        )?;
+                        )?
                     }
                     CudaTransferMode::Default => {
                         for (src, dst) in sources.iter().zip(targets.iter_mut()) {
@@ -241,9 +241,10 @@ where
                                 RB::write_to_strategy(),
                             )?;
                         }
+                        None
                     }
-                }
-                ctx.cuda_event(tx)?;
+                };
+                ctx.cuda_event_with_cleanup(tx, cleanup_guard)?;
 
                 Ok(rx)
             } else {

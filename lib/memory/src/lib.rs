@@ -13,6 +13,7 @@ pub mod actions;
 pub mod arena;
 pub mod nixl;
 pub mod offset;
+pub mod pool;
 pub mod prelude;
 
 mod device;

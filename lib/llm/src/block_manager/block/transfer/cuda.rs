@@ -13,6 +13,7 @@ use dynamo_runtime::config::environment_names::cuda as env_cuda;
 use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use cudarc::driver::sys::{cuMemcpyHtoDAsync_v2, CUresult};
 
 /// Simple pinned memory allocation
 pub fn allocate_pinned_memory(size: usize) -> Result<u64, TransferError> {
@@ -104,8 +105,25 @@ where
                 let dst_view = dst_data.layer_view(layer_idx, outer_idx)?;
 
                 unsafe {
-                    src_addresses.push(src_view.as_ptr() as u64);
-                    dst_addresses.push(dst_view.as_ptr() as u64);
+                    let src_addr = src_view.as_ptr() as u64;
+                    let dst_addr = dst_view.as_ptr() as u64;
+
+                    // Validate addresses are not NULL
+                    if src_addr == 0 {
+                        return Err(TransferError::ExecutionError(format!(
+                            "NULL source address at layer {} outer_dim {}",
+                            layer_idx, outer_idx
+                        )));
+                    }
+                    if dst_addr == 0 {
+                        return Err(TransferError::ExecutionError(format!(
+                            "NULL destination address at layer {} outer_dim {}",
+                            layer_idx, outer_idx
+                        )));
+                    }
+
+                    src_addresses.push(src_addr);
+                    dst_addresses.push(dst_addr);
                 }
             }
         }
@@ -169,13 +187,21 @@ unsafe fn launch_copy_kernel_direct(
     };
 
     if result != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-        tracing::error!("Kernel launch failed: {:?}", result);
+        tracing::error!(
+            "Kernel launch failed: {:?} - kernel params: {} pairs, layer_size={}, src=0x{:x}, dst=0x{:x}",
+            result,
+            address_count,
+            layer_size,
+            src_pinned_ptr,
+            dst_pinned_ptr
+        );
         return Err(TransferError::ExecutionError(format!(
-            "CUDA kernel launch failed: {:?}",
-            result
+            "CUDA kernel launch failed: {:?} (address_count={}, layer_size={})",
+            result, address_count, layer_size
         )));
     }
 
+    tracing::debug!("Kernel launched successfully, waiting for completion");
     Ok(())
 }
 
@@ -217,7 +243,7 @@ pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
     destinations: &'a mut [Destination],
     stream: &CudaStream,
     ctx: &crate::block_manager::block::transfer::TransferContext,
-) -> Result<Option<(Vec<u64>, usize)>, TransferError>
+) -> Result<Option<crate::block_manager::block::transfer::context::CudaPoolBufferGuard>, TransferError>
 where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
@@ -239,35 +265,117 @@ where
         src_addresses.len()
     );
 
-    // Use pool-based approach with TransferResources
-    let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
-        ctx,
-        src_addresses.len()
-    )?;
+    let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    // Copy addresses to pinned buffers
-    resources.copy_addresses_to_buffers(&src_addresses, &dst_addresses)?;
+    if ctx.cuda_mem_pool().is_some() {  // CUDA pool path (DEVICE memory with H2D memcpy)
+        let pool = ctx.cuda_mem_pool().unwrap();
+        tracing::trace!("CUDA pool path: DEVICE memory with H2D memcpy ({} addresses)", src_addresses.len());
 
-    tracing::debug!(
-        " Using pooled pinned buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
-        resources.src_ptr(),
-        resources.dst_ptr(),
-        src_addresses.len()
-    );
+        // Allocate DEVICE memory from pool (stream-ordered)
+        let src_buffer = pool.alloc_async(size, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
+        let dst_buffer = pool.alloc_async(size, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
 
-    // Launch kernel with pooled resources (addresses already copied)
-    unsafe {
-        launch_copy_kernel_direct(
+        tracing::trace!(
+            "Allocated DEVICE buffers from pool: src=0x{:x}, dst=0x{:x} ({} bytes each)",
+            src_buffer,
+            dst_buffer,
+            size
+        );
+
+        // Copy address buffers from host to device using stream-ordered H2D memcpy
+        // This provides proper memory visibility guarantees
+        tracing::debug!("Copying {} address pairs to device via H2D memcpy", src_addresses.len());
+
+        let result_src = unsafe {
+            cuMemcpyHtoDAsync_v2(
+                src_buffer,
+                src_addresses.as_ptr() as *const std::ffi::c_void,
+                size,
+                stream.cu_stream(),
+            )
+        };
+        if result_src != CUresult::CUDA_SUCCESS {
+            return Err(TransferError::ExecutionError(format!(
+                "H2D memcpy for src buffer failed: {:?}",
+                result_src
+            )));
+        }
+
+        let result_dst = unsafe {
+            cuMemcpyHtoDAsync_v2(
+                dst_buffer,
+                dst_addresses.as_ptr() as *const std::ffi::c_void,
+                size,
+                stream.cu_stream(),
+            )
+        };
+        if result_dst != CUresult::CUDA_SUCCESS {
+            return Err(TransferError::ExecutionError(format!(
+                "H2D memcpy for dst buffer failed: {:?}",
+                result_dst
+            )));
+        }
+
+        tracing::debug!("H2D memcpy completed (stream-ordered)");
+
+        // Launch kernel
+        unsafe {
+            launch_copy_kernel_direct(
+                src_buffer,
+                dst_buffer,
+                src_addresses.len(),
+                dims.layer_size,
+                stream,
+            )?;
+        }
+
+        tracing::debug!("Kernel launched - reading from DEVICE memory");
+
+        // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
+        pool.free_async(src_buffer, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
+        pool.free_async(dst_buffer, stream.cu_stream())
+            .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
+
+        tracing::trace!("CUDA pool path complete: DEVICE buffers freed (stream-ordered)");
+        Ok(None)  // No guard needed - stream ordering handles cleanup
+    } else {
+        // LEGACY PATH: Use TransferResources pool (fallback when CUDA pool not available)
+        tracing::warn!("LEGACY PATH: CUDA pool not available, using TransferResources fallback ({} addresses)", src_addresses.len());
+
+        let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
+            ctx,
+            src_addresses.len()
+        )?;
+
+        resources.copy_addresses_to_buffers(&src_addresses, &dst_addresses)?;
+
+        tracing::warn!(
+            "Legacy pool: Addresses copied to buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
             resources.src_ptr(),
             resources.dst_ptr(),
-            src_addresses.len(),
-            dims.layer_size,
-            stream,
-        )?;
-    }
+            src_addresses.len()
+        );
 
-    tracing::debug!("vectorized_copy completed - resources will be returned to pool automatically");
-    Ok(None) // No manual cleanup needed - TransferResources handles it via Drop
+        tracing::trace!("Legacy buffers: src=0x{:x}, dst=0x{:x}", resources.src_ptr(), resources.dst_ptr());
+
+        tracing::trace!("Legacy path: launching kernel with {} address pairs", src_addresses.len());
+
+        unsafe {
+            launch_copy_kernel_direct(
+                resources.src_ptr(),
+                resources.dst_ptr(),
+                src_addresses.len(),
+                dims.layer_size,
+                stream,
+            )?;
+        }
+
+        tracing::debug!("Legacy path: Kernel launched, waiting for completion in event worker");
+        Ok(None)
+    }
 }
 
 /// Copy a block from a source to a destination using CUDA memcpy
