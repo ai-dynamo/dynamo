@@ -179,6 +179,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - dynamocheckpoints
   - dynamocomponentdeployments
   - dynamographdeploymentrequests
   - dynamographdeployments
@@ -195,6 +196,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - dynamocheckpoints/finalizers
   - dynamocomponentdeployments/finalizers
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
@@ -204,6 +206,7 @@ rules:
 - apiGroups:
   - nvidia.com
   resources:
+  - dynamocheckpoints/status
   - dynamocomponentdeployments/status
   - dynamographdeploymentrequests/status
   - dynamographdeployments/status

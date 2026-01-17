@@ -3665,7 +3665,7 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil, nil, nil, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -3717,7 +3717,7 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespace(t *testing.T) {
 		},
 	}
 
-	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil)
+	got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controller_common.Config{}, nil, nil, nil, nil)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -3880,6 +3880,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4037,6 +4038,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4123,6 +4125,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"worker",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -4800,7 +4803,7 @@ func TestGenerateGrovePodCliqueSet_StartsAfterDependencies(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever, nil, nil, nil)
 			if err != nil {
 				t.Errorf("GenerateGrovePodCliqueSet() error = %v", err)
 				return
@@ -4909,6 +4912,7 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if (err != nil) != tt.wantErr {
@@ -4984,6 +4988,7 @@ func TestGenerateBasePodSpec_PlannerServiceAccount(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5106,6 +5111,7 @@ func TestGenerateBasePodSpec_DisableImagePullSecretDiscovery(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5201,6 +5207,7 @@ func TestGenerateBasePodSpec_DiscoverBackend(t *testing.T) {
 				tt.controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 			if !assert.NoError(t, err) {
 				return
@@ -5360,6 +5367,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -5456,6 +5464,7 @@ func TestGenerateBasePodSpec_VolumeMounts(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5691,6 +5700,7 @@ func TestGenerateBasePodSpec_ResourceClaims(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -5902,6 +5912,7 @@ func TestGenerateBasePodSpec_UseAsCompilationCache_BackendSupport(t *testing.T) 
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if tt.expectError {
@@ -6087,6 +6098,7 @@ func TestGenerateBasePodSpec_SecurityContext(t *testing.T) {
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
 				"test-service",
+				nil, // No checkpoint info in tests
 			)
 
 			if err != nil {
@@ -6581,7 +6593,7 @@ func TestGenerateGrovePodCliqueSet_RestartAnnotations(t *testing.T) {
 				NatsAddress: "nats-address",
 			}
 
-			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil)
+			got, err := GenerateGrovePodCliqueSet(context.Background(), dgd, controllerConfig, nil, tt.restartState, nil, nil)
 			if err != nil {
 				t.Fatalf("GenerateGrovePodCliqueSet() error = %v", err)
 			}
