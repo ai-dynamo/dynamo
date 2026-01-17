@@ -8,15 +8,16 @@ SPDX-License-Identifier: Apache-2.0
 ## Overview
 
 Dynamo provides structured logging in both text as well as JSONL. When
-JSONL is enabled logs additionally contain `span` creation and exit
-events as well as support for `trace_id` and `span_id` fields for
-distributed tracing.
+JSONL is enabled, logs support `trace_id` and `span_id` fields for
+distributed tracing. Span creation and exit events can be optionally
+enabled via the `DYN_LOGGING_SPAN_EVENTS` environment variable.
 
 ## Environment Variables
 
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `DYN_LOGGING_JSONL` | Enable JSONL logging format | `false` | `true` |
+| `DYN_LOGGING_SPAN_EVENTS` | Enable span entry/close event logging (`SPAN_FIRST_ENTRY`, `SPAN_CLOSED` messages) | `false` | `true` |
 | `DYN_LOG` | Log levels per target `<default_level>,<module_path>=<level>,<module_path>=<level>` | `info` | `DYN_LOG=info,dynamo_runtime::system_status_server:trace` |
 | `DYN_LOG_USE_LOCAL_TZ` | Use local timezone for timestamps (default is UTC) | `false` | `true` |
 | `DYN_LOGGING_CONFIG_PATH` | Path to custom TOML logging configuration | none | `/path/to/config.toml` |

@@ -3,7 +3,10 @@
 
 import copy
 import logging
+import os
+from collections import defaultdict
 
+import safetensors
 import torch
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -21,6 +24,8 @@ from ..multimodal_utils import (
 from ..multimodal_utils.model import construct_qwen_decode_mm_data, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
+
+TRANSFER_LOCAL = int(os.getenv("TRANSFER_LOCAL", 1))
 
 
 class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
@@ -164,86 +169,118 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        # ECConnector consumer mode: vLLM loads embeddings automatically from disk
-        # We need to pass multimodal_input so vLLM can generate mm_hash and look up cache
-        if self.config.ec_consumer_mode:
-            logger.debug(
-                f"[{request.request_id}] ECConnector consumer mode: "
-                f"vLLM will load embeddings from cache using mm_hash"
-            )
-            # Use PIL image loading - vLLM will detect it's already in EC cache
-            # and load from disk instead of reprocessing
-            if request.multimodal_input and request.multimodal_input.image_url:
-                multi_modal_data = {
-                    "image": await self.image_loader.load_image(
-                        request.multimodal_input.image_url
+        multi_modal_data = defaultdict(list)
+        for mi in request.multimodal_inputs:
+            # ECConnector consumer mode: vLLM loads embeddings automatically from disk
+            # We need to pass multimodal_input so vLLM can generate mm_hash and look up cache
+            if self.config.ec_consumer_mode:
+                logger.debug(
+                    f"[{request.request_id}] ECConnector consumer mode: "
+                    f"vLLM will load embeddings from cache using mm_hash"
+                )
+                # Use PIL image loading - vLLM will detect it's already in EC cache
+                # and load from disk instead of reprocessing
+                if mi.multimodal_input.image_url:
+                    multi_modal_data["image"].append(
+                        await self.image_loader.load_image(
+                            mi.multimodal_input.image_url
+                        )
                     )
-                }
-            elif request.multimodal_input and request.multimodal_input.video_url:
-                # For video, load as image placeholder (vLLM will use EC cache)
-                multi_modal_data = {
-                    "image": await self.image_loader.load_image(
-                        request.multimodal_input.video_url
+                elif mi.multimodal_input.video_url:
+                    # For video, load as image placeholder (vLLM will use EC cache)
+                    multi_modal_data["image"].append(
+                        await self.image_loader.load_image(
+                            request.multimodal_input.video_url
+                        )
                     )
-                }
+                else:
+                    raise ValueError(
+                        "ECConnector mode requires multimodal_input with image/video URL"
+                    )
+            elif (
+                mi.multimodal_input.image_url is None
+                and mi.multimodal_input.video_url is None
+            ):
+                # Process embeddings using the connector
+                # Create a descriptor based on the embedding shape.
+                if TRANSFER_LOCAL:
+                    logger.info("PD: Loading local safetensors file")
+                    embeddings = safetensors.torch.load_file(mi.serialized_request)[
+                        "ec_cache"
+                    ]
+                else:
+                    embeddings = torch.empty(
+                        mi.embeddings_shape,
+                        dtype=self.EMBEDDINGS_DTYPE,
+                        device=self.EMBEDDINGS_DEVICE,
+                    )
+                    descriptor = connect.Descriptor(embeddings)
+
+                    if descriptor is None:
+                        raise RuntimeError(
+                            "Descriptor is None in PD worker - cannot process embeddings"
+                        )
+
+                    read_op = await self._connector.begin_read(
+                        mi.serialized_request, descriptor
+                    )
+                    await read_op.wait_for_completion()
+                if "video" in self.config.model.lower():
+                    video_numpy = embeddings.numpy()
+                    mm_data = construct_mm_data(
+                        self.config.model,
+                        self.EMBEDDINGS_DTYPE,
+                        video_numpy=video_numpy,
+                    )
+                    multi_modal_data["video"].append(mm_data["video"])
+                else:
+                    mm_data = construct_mm_data(
+                        self.config.model,
+                        self.EMBEDDINGS_DTYPE,
+                        image_embeds=embeddings,
+                        image_grid_thw=mi.image_grid_thw,
+                    )
+                    if isinstance(mm_data["image"], dict):
+                        if multi_modal_data["image"] == []:
+                            multi_modal_data["image"] = mm_data["image"]
+                        else:
+                            # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
+                            # Merging tensors
+                            multi_modal_data["image"]["image_embeds"] = torch.cat(
+                                (
+                                    multi_modal_data["image"]["image_embeds"],
+                                    mm_data["image"]["image_embeds"],
+                                )
+                            )
+                            multi_modal_data["image"]["image_grid_thw"] = torch.cat(
+                                (
+                                    multi_modal_data["image"]["image_grid_thw"],
+                                    mm_data["image"]["image_grid_thw"],
+                                )
+                            )
+                    else:
+                        logger.info(f"Get embedding of shape {mm_data['image'].shape}")
+                        # [gluo FIXME] embedding with multiple images?
+                        if multi_modal_data["image"] == []:
+                            multi_modal_data["image"] = mm_data["image"]
+                        else:
+                            multi_modal_data["image"] = torch.cat(
+                                (multi_modal_data["image"], mm_data["image"])
+                            )
             else:
-                raise ValueError(
-                    "ECConnector mode requires multimodal_input with image/video URL"
-                )
-        elif (
-            request.multimodal_input is not None
-            and request.multimodal_input.image_url is None
-            and request.multimodal_input.video_url is None
-        ):
-            # Network transfer mode: receive embeddings via connector from encoder worker
-            # Create a descriptor based on the embedding shape.
-            embeddings = torch.empty(
-                request.embeddings_shape,
-                dtype=self.EMBEDDINGS_DTYPE,
-                device=self.EMBEDDINGS_DEVICE,
-            )
-            descriptor = connect.Descriptor(embeddings)
-
-            if descriptor is None:
-                raise RuntimeError(
-                    "Descriptor is None in PD worker - cannot process embeddings"
+                # Use PIL image instead of image embeddings
+                multi_modal_data["image"].append(
+                    await self.image_loader.load_image(mi.multimodal_input.image_url)
                 )
 
-            read_op = await self._connector.begin_read(
-                request.serialized_request, descriptor
-            )
-            await read_op.wait_for_completion()
-            if "video" in self.config.model.lower():
-                video_numpy = embeddings.numpy()
-                multi_modal_data = construct_mm_data(
-                    self.config.model,
-                    self.EMBEDDINGS_DTYPE,
-                    video_numpy=video_numpy,
-                )
-            else:
-                multi_modal_data = construct_mm_data(
-                    self.config.model,
-                    self.EMBEDDINGS_DTYPE,
-                    image_embeds=embeddings,
-                    image_grid_thw=request.image_grid_thw,
-                )
-        elif request.multimodal_input is not None:
-            # Native mode: Use PIL image instead of image embeddings
-            multi_modal_data = {
-                "image": await self.image_loader.load_image(
-                    request.multimodal_input.image_url
-                )
-            }
-        else:
-            raise ValueError(
-                "Invalid request: multimodal_input is None but not in ec_consumer_mode"
-            )
+        # Remove the image features from the request as they are not required
+        request.multimodal_inputs = None
 
-        # Clear multimodal_input fields if present (not needed for engine)
-        if request.multimodal_input is not None:
-            request.multimodal_input.image_url = None
-            request.multimodal_input.video_url = None
-        request.serialized_request = None
+        logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+        logger.info(f"{multi_modal_data}")
+
+        # Deepcopy the request to avoid modifying the original
+        # when we adjust sampling params for prefill
 
         pd_request = copy.deepcopy(request)
         # Do prefill and remote decode if enable_disagg is true
@@ -311,6 +348,10 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 logger.debug(
                     f"Response kv_transfer_params: {response.kv_transfer_params}"
                 )
+                logger.debug(
+                    f"length of expanded prompt ids: {len(response.prompt_token_ids)}"
+                )
+                # logger.info(f"Response outputs: {response.outputs}")
                 yield MyRequestOutput(
                     request_id=response.request_id,
                     prompt=response.prompt,
