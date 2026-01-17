@@ -934,12 +934,12 @@ impl KvIndexer {
                             metrics.increment_event_applied(event_type, result);
 
                             tracing::info!(
-                                event_type = event_type,
-                                event_id = event.event.event_id,
-                                worker_id = %event.worker_id,
-                                success = result_is_ok,
-                                global_radix_tree_size = trie.current_size(),
-                                "Applied KV event to global radix tree"
+                                "Applied KV event to global radix tree: event_type={:?}, event_id={}, worker_id={}, success={}, global_radix_tree_size={}",
+                                event_type,
+                                event.event.event_id,
+                                event.worker_id,
+                                result_is_ok,
+                                trie.current_size()
                             );
 
                             // Track blocks in PruneManager if TTL is enabled and event was stored successfully

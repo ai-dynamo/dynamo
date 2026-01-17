@@ -134,6 +134,12 @@ pub mod nats {
     pub mod stream {
         /// Maximum age for messages in NATS stream (in seconds)
         pub const DYN_NATS_STREAM_MAX_AGE: &str = "DYN_NATS_STREAM_MAX_AGE";
+
+        /// Maximum number of messages in NATS stream 
+        pub const DYN_NATS_STREAM_MAX_MESSAGES: &str = "DYN_NATS_STREAM_MAX_MESSAGES";
+
+        /// Maximum total bytes in NATS stream 
+        pub const DYN_NATS_STREAM_MAX_BYTES: &str = "DYN_NATS_STREAM_MAX_BYTES";
     }
 }
 
@@ -371,6 +377,8 @@ mod tests {
             nats::auth::NATS_AUTH_NKEY,
             nats::auth::NATS_AUTH_CREDENTIALS_FILE,
             nats::stream::DYN_NATS_STREAM_MAX_AGE,
+            nats::stream::DYN_NATS_STREAM_MAX_MESSAGES,
+            nats::stream::DYN_NATS_STREAM_MAX_BYTES,
             // ETCD
             etcd::ETCD_ENDPOINTS,
             etcd::auth::ETCD_AUTH_USERNAME,

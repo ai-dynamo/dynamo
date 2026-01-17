@@ -520,10 +520,24 @@ impl NatsQueue {
                 .map(time::Duration::from_secs)
                 .unwrap_or_else(|| time::Duration::from_secs(60 * 60));
 
+            // Optional: maximum number of messages in stream (0 = unlimited)
+            let max_messages = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_MESSAGES)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+
+            // Optional: maximum total bytes in stream (0 = unlimited)
+            let max_bytes = std::env::var(env_nats::stream::DYN_NATS_STREAM_MAX_BYTES)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(0);
+
             let stream_config = jetstream::stream::Config {
                 name: self.stream_name.clone(),
                 subjects: vec![self.subject.clone()],
                 max_age,
+                max_messages,
+                max_bytes,
                 ..Default::default()
             };
 
