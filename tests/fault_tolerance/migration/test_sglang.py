@@ -5,6 +5,7 @@
 Test Execution Times (Last Run: 2026-01-13):
 - test_request_migration_sglang_aggregated: ~75s
 - test_request_migration_sglang_prefill: N/A
+- test_request_migration_sglang_kv_transfer: N/A
 - test_request_migration_sglang_decode: ~75s
 """
 
@@ -19,7 +20,7 @@ from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_models_api
 from tests.utils.port_utils import allocate_port, deallocate_port
 
-# Import utilities from the refactored utils module
+# Customized utils for migration tests
 from .utils import DynamoFrontendProcess, run_migration_test
 
 logger = logging.getLogger(__name__)
