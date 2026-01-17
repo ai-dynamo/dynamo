@@ -343,7 +343,7 @@ impl RadixTree {
                 for block_data in op.blocks {
                     let mut parent_mut = current.borrow_mut();
                     let child = match parent_mut.children.get(&block_data.tokens_hash) {
-                        Some(child) => child.clone(),
+                        Some(block) => block.clone(),
                         None => {
                             // create new block - automatically added to the lookup table
                             let new_block = worker_lookup
