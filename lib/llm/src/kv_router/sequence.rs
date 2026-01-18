@@ -36,6 +36,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use super::protocols::{
     ActiveLoad, ActiveSequenceEvent, ActiveSequenceEventData, WorkerWithDpRank,

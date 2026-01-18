@@ -443,7 +443,7 @@ impl KvRouter {
                 );
 
                 // Convert router_id to string for NATS consumer naming
-                let consumer_id = format!("{:x}", router_id);
+                let consumer_id = router_id.to_string();
                 start_kv_router_background(
                     component.clone(),
                     consumer_id,
