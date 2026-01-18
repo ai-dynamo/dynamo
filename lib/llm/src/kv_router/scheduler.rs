@@ -99,7 +99,7 @@ impl KvScheduler {
         workers_with_configs: Arc<RuntimeConfigsWithNotify>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
-        router_uuid: String,
+        router_id: u64,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -116,7 +116,7 @@ impl KvScheduler {
             block_size as usize,
             initial_workers,
             replica_sync,
-            router_uuid,
+            router_id,
         ));
 
         // Spawn background task to sync slots with DashMap when notified of changes.
