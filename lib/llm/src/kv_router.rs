@@ -138,6 +138,11 @@ pub struct KvRouterConfig {
     /// Whether to track active blocks in the router (default: true)
     pub router_track_active_blocks: bool,
 
+    /// Whether to track output blocks during generation (default: false)
+    /// When enabled, the router adds placeholder blocks as tokens are generated
+    /// and applies fractional decay based on progress toward expected_output_tokens.
+    pub router_track_output_blocks: bool,
+
     /// Whether to assume KV cache reuse when tracking active blocks (default: true).
     /// When true, computes actual block hashes for sequence tracking.
     /// When false, generates random hashes (assuming no KV cache reuse).
@@ -167,6 +172,7 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             router_track_active_blocks: true,
+            router_track_output_blocks: false,
             router_assume_kv_reuse: true,
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
@@ -187,6 +193,7 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         track_active_blocks: Option<bool>,
+        track_output_blocks: Option<bool>,
         assume_kv_reuse: Option<bool>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
@@ -202,6 +209,8 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             router_track_active_blocks: track_active_blocks
                 .unwrap_or(default.router_track_active_blocks),
+            router_track_output_blocks: track_output_blocks
+                .unwrap_or(default.router_track_output_blocks),
             router_assume_kv_reuse: assume_kv_reuse.unwrap_or(default.router_assume_kv_reuse),
             router_snapshot_threshold: router_snapshot_threshold
                 .unwrap_or(default.router_snapshot_threshold),
@@ -522,6 +531,7 @@ impl KvRouter {
         request_id: String,
         tokens: &[u32],
         overlap_blocks: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) {
         let isl_tokens = tokens.len();
@@ -537,6 +547,7 @@ impl KvRouter {
                 maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
+                expected_output_tokens,
                 worker,
             )
             .await
@@ -551,6 +562,16 @@ impl KvRouter {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    pub async fn add_output_block(
+        &self,
+        request_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        self.scheduler
+            .add_output_block(request_id, decay_fraction)
+            .await
     }
 
     pub fn block_size(&self) -> u32 {
@@ -763,6 +784,12 @@ impl KvPushRouter {
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
+        // Extract expected_output_tokens from routing hints
+        let expected_output_tokens = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.expected_output_tokens);
+
         // Perform add_request if this router handles local updates
         if !is_query_only && handle_local_updates {
             self.chooser
@@ -770,6 +797,7 @@ impl KvPushRouter {
                     context_id.to_string(),
                     &request.token_ids,
                     overlap_blocks,
+                    expected_output_tokens,
                     worker,
                 )
                 .await;
@@ -912,6 +940,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Route to worker
+        let isl_tokens = request.token_ids.len();
+        let expected_output_tokens = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.expected_output_tokens);
+        let track_output_blocks =
+            self.chooser.kv_router_config.router_track_output_blocks && handle_local_updates;
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -926,6 +962,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
+
+            // Output block tracking state
+            let mut cumulative_osl: usize = 0;
+            let mut current_total_blocks = isl_tokens.div_ceil(block_size);
 
             loop {
                 tokio::select! {
@@ -952,6 +992,29 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                                     tracing::warn!("Failed to mark prefill completed for request {context_id}: {e}");
                                 }
                                 prefill_marked = true;
+                            }
+                        }
+
+                        // Track output blocks if enabled
+                        if track_output_blocks {
+                            let new_tokens = item.data.as_ref()
+                                .map(|d| d.token_ids.len())
+                                .unwrap_or(0);
+                            cumulative_osl += new_tokens;
+
+                            let new_total_blocks = (isl_tokens + cumulative_osl).div_ceil(block_size);
+                            if new_total_blocks > current_total_blocks {
+                                // New block boundary crossed - add output block with decay
+                                // Clamp eot to min 1 to avoid division by zero, and result to min 0.0
+                                let decay_fraction = expected_output_tokens.map(|eot| {
+                                    (1.0 - (cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
+                                });
+                                if let Err(e) = chooser.add_output_block(&context_id, decay_fraction).await {
+                                    tracing::warn!(
+                                        "Failed to add output block for request {context_id}: {e}"
+                                    );
+                                }
+                                current_total_blocks = new_total_blocks;
                             }
                         }
 
