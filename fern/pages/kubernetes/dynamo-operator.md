@@ -1,4 +1,8 @@
-# Working with Dynamo Kubernetes Operator
+---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+title: "Working with Dynamo Kubernetes Operator"
+---
 
 ## Overview
 
@@ -86,7 +90,6 @@ helm install dynamo-test dynamo-platform-${RELEASE_VERSION}.tgz \
   --create-namespace \
   --set dynamo-operator.namespaceRestriction.enabled=true \
   --set dynamo-operator.controllerManager.manager.image.tag=v2.0.0-beta
-```
 
 **Observability:**
 
@@ -110,11 +113,11 @@ Dynamo provides the following Custom Resources:
 
 For the complete technical API reference for Dynamo Custom Resource Definitions, see:
 
-**📖 [Dynamo CRD API Reference](./api_reference.md)**
+**📖 [Dynamo CRD API Reference](api-reference.md)**
 
 For a user-focused guide on deploying and managing models with DynamoModel, see:
 
-**📖 [Managing Models with DynamoModel Guide](./deployment/dynamomodel-guide.md)**
+**📖 [Managing Models with DynamoModel Guide](deployment/dynamomodel-guide.md)**
 
 ## Webhooks
 
@@ -129,7 +132,7 @@ The Dynamo Operator uses **Kubernetes admission webhooks** for real-time validat
 
 For complete documentation on webhooks, certificate management, and troubleshooting, see:
 
-**📖 [Webhooks Guide](./webhooks.md)**
+**📖 [Webhooks Guide](webhooks.md)**
 
 ## Installation
 
@@ -173,7 +176,7 @@ helm install dynamo-platform ./platform/ \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}"
 ```
 
-For detailed installation options, see the [Installation Guide](./installation_guide.md)
+For detailed installation options, see the [Installation Guide](installation-guide.md)
 
 
 ## Development
