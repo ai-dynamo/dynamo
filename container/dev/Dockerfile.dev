@@ -323,8 +323,8 @@ RUN if [ "${FRAMEWORK}" = "sglang" ]; then \
         # Copy all packages from runtime stage system site-packages into venv
         # This includes ai-dynamo-runtime, kubernetes, and all other dependencies
         # Use --no-preserve=mode so copied files inherit umask 002 (group-writable)
-        cp -r --no-preserve=mode /usr/local/lib/python3.12/dist-packages/* \
-              /opt/dynamo/venv/lib/python3.12/site-packages/; \
+        cp -r --no-preserve=mode /usr/local/lib/python${PYTHON_VERSION}/dist-packages/* \
+              /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/; \
         # Ensure `uv` is available on PATH for subsequent `uv pip ...` steps.
         cp /tmp/uv-binary /opt/dynamo/venv/bin/uv && \
         chmod +x /opt/dynamo/venv/bin/uv && \
