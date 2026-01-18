@@ -2439,7 +2439,7 @@ mod tests {
             let len = 1 << i;
             let worker_id = i;
             tracing::info!("Testing sequence of length {}", len);
-            let sequence = (1..len).collect::<Vec<u64>>();
+            let sequence = (1..len + 1).collect::<Vec<u64>>();
             trie.apply_event(create_store_event(worker_id, 1, sequence, None))
                 .unwrap();
         }
