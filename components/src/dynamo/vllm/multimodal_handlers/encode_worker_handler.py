@@ -10,7 +10,7 @@ from typing import AsyncGenerator, AsyncIterator
 import safetensors
 from transformers import AutoImageProcessor
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs.data import TextPrompt
+from vllm.inputs import TokensPrompt
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.sampling_params import SamplingParams
 
@@ -255,11 +255,11 @@ class VLLMEncodeWorkerHandler:
         Process encoder request and trigger vLLM encoder execution.
 
         Args:
-            request: VLLMNativeEncoderRequest with multimodal_input
+            request: VLLMNativeEncoderRequest with multimodal_inputs (list of MultiModalGroup)
             context: Request context from Dynamo runtime
 
         Yields:
-            JSON-encoded VLLMNativeEncoderResponse with mm_hash and connector metadata
+            JSON-encoded VLLMNativeEncoderResponse for each processed item
         """
         # Parse request
         if not isinstance(request, VLLMNativeEncoderRequest):
@@ -268,65 +268,88 @@ class VLLMEncodeWorkerHandler:
             else:
                 request = VLLMNativeEncoderRequest.model_validate(request)
 
-        # Load media (image/video/audio)
-        # TODO: Add support for video_url and audio
-        if request.multimodal_input.image_url:
-            media = await self.image_loader.load_image(
-                request.multimodal_input.image_url
-            )
-            media_key = "image"
-        else:
-            raise ValueError(
-                "No media URL provided. Specify image_url in multimodal_input."
-            )
+        if not request.multimodal_inputs:
+            raise ValueError("No multimodal inputs provided in request")
 
-        # Compute mm_hash using vLLM's hasher
-        try:
-            mm_hash = MultiModalHasher.hash_kwargs(
-                model_id=self.config.model, **{media_key: media}
-            )
-            logger.debug(f"Computed mm_hash: {mm_hash}")
-        except Exception as e:
-            logger.error(f"Failed to compute mm_hash: {e}")
-            raise
-
-        try:
-            # Prompt can be a random string as the encoder is only interested in the multimodal data
-            prompt_dict = TextPrompt(
-                prompt=request.prompt, multi_modal_data={media_key: media}
-            )
-
-            gen = self.engine_client.generate(
-                prompt=prompt_dict,
-                sampling_params=SamplingParams(max_tokens=1, min_tokens=0),
-                request_id=request.request_id,
-            )
-
-            # Consume generator to trigger encoder execution
-            async for _ in gen:
-                pass
-
-            logger.info(
-                f"Encoder execution completed for request_id={request.request_id}"
-            )
-
-        except Exception as e:
-            logger.error(f"Encoder execution failed: {e}")
-            raise
-
-        # Return metadata for PD workers
-        response = VLLMNativeEncoderResponse(
-            request_id=request.request_id,
-            mm_hash=mm_hash,
-            modality=request.modality,
-            connector_metadata={
-                "ec_connector": self.config.ec_connector_backend,
-                "storage_path": self.config.ec_storage_path,
-            },
+        logger.info(
+            f"Processing {len(request.multimodal_inputs)} multimodal item(s) "
+            f"for request_id={request.request_id}"
         )
 
-        logger.debug(f"Returning response: {response}")
-        yield response.model_dump_json()
+        # Process each multimodal input
+        for idx, mm_group in enumerate(request.multimodal_inputs):
+            mm_input = mm_group.multimodal_input
+            item_request_id = f"{request.request_id}_mm_{idx}"
+
+            # Load media (image/video/audio)
+            # TODO: Add support for video_url and audio
+            if mm_input.image_url:
+                media = await self.image_loader.load_image(mm_input.image_url)
+                media_key = "image"
+                modality = "image"
+            elif mm_input.video_url:
+                # TODO: Implement video loading
+                raise NotImplementedError("Video encoding not yet supported")
+            else:
+                raise ValueError(
+                    f"No media URL provided in multimodal_input[{idx}]. "
+                    "Specify image_url or video_url."
+                )
+
+            # Compute mm_hash using vLLM's hasher
+            try:
+                mm_hash = MultiModalHasher.hash_kwargs(
+                    model_id=self.config.model, **{media_key: media}
+                )
+                logger.debug(f"[{item_request_id}] Computed mm_hash: {mm_hash}")
+            except Exception as e:
+                logger.error(f"[{item_request_id}] Failed to compute mm_hash: {e}")
+                raise
+
+            try:
+                prompt_dict = TokensPrompt(
+                    prompt_token_ids=request.token_ids,
+                    multi_modal_data={media_key: media},
+                )
+
+                gen = self.engine_client.generate(
+                    prompt=prompt_dict,
+                    sampling_params=SamplingParams(max_tokens=1, min_tokens=0),
+                    request_id=item_request_id,
+                )
+
+                # Consume generator to trigger encoder execution
+                async for _ in gen:
+                    pass
+
+                logger.info(
+                    f"[{item_request_id}] Encoder execution completed "
+                    f"({idx + 1}/{len(request.multimodal_inputs)})"
+                )
+
+            except Exception as e:
+                logger.error(f"[{item_request_id}] Encoder execution failed: {e}")
+                raise
+
+            # Yield metadata for each item (PD workers can use these to lookup from cache)
+            # Right now this is not used. Can be used for logging purpose later.
+            response = VLLMNativeEncoderResponse(
+                request_id=item_request_id,
+                mm_hash=mm_hash,
+                modality=modality,
+                connector_metadata={
+                    "ec_connector": self.config.ec_connector_backend,
+                    "storage_path": self.config.ec_storage_path,
+                },
+            )
+
+            logger.debug(f"[{item_request_id}] Returning response: {response}")
+            yield response.model_dump_json()
+
+        logger.info(
+            f"All {len(request.multimodal_inputs)} multimodal items processed "
+            f"for request_id={request.request_id}"
+        )
 
     def cleanup(self):
         """Cleanup resources."""

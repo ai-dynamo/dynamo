@@ -861,9 +861,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
     await encoder_client.wait_for_instances()
     await pd_client.wait_for_instances()
 
-    # Register the endpoint as entrypoint to a model (same as regular processor)
+    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
         config.model,

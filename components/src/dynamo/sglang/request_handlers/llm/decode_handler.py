@@ -141,12 +141,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            # Extract image URLs for multimodal requests. SGLang's mm_data_processor
+            # handles loading/preprocessing, and the scheduler does vision encoding.
+            image_data = None
+            image_items = request.get("multi_modal_data", {}).get("image_url")
+            if image_items:
+                image_data = []
+                for item in image_items:
+                    if isinstance(item, str):
+                        image_data.append(item)
+                    elif isinstance(item, dict) and "Url" in item:
+                        image_data.append(item["Url"])
+                image_data = image_data or None
+
             trace_header = (
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
             agg = await self.engine.async_generate(
                 **input_param,
+                image_data=image_data,
                 sampling_params=sampling_params,
                 stream=True,
                 external_trace_header=trace_header,
