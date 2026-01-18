@@ -80,7 +80,15 @@ pub struct ActiveSequences {
 
     prefill_tokens: HashMap<RequestId, usize>,
 
+    /// Expected output tokens per request (used for resource estimation)
+    expected_output_tokens: HashMap<RequestId, u32>,
+
     unique_blocks: HashMap<SequenceHash, Weak<()>>,
+
+    /// Fractional block counts for blocks that are partially cached
+    /// When a block is in both unique_blocks and fractional_blocks,
+    /// it contributes the fractional value instead of 1 to active_blocks()
+    fractional_blocks: HashMap<SequenceHash, f64>,
 
     #[getter(copy)]
     block_size: usize,
@@ -104,7 +112,9 @@ impl ActiveSequences {
         Self {
             active_seqs: HashMap::new(),
             prefill_tokens: HashMap::new(),
+            expected_output_tokens: HashMap::new(),
             unique_blocks: HashMap::new(),
+            fractional_blocks: HashMap::new(),
             block_size,
             active_tokens: 0,
             expiry_timer: Instant::now() + EXPIRY_DURATION,
@@ -129,11 +139,37 @@ impl ActiveSequences {
             && weak.strong_count() == 0
         {
             self.unique_blocks.remove(block);
+            self.fractional_blocks.remove(block);
         }
     }
 
     pub fn active_blocks(&self) -> usize {
-        self.unique_blocks.len()
+        let mut count = self.unique_blocks.len() as f64;
+        for (hash, frac) in &self.fractional_blocks {
+            if self.unique_blocks.contains_key(hash) {
+                // Subtract 1 (the full block) and add the fractional value
+                count = count - 1.0 + frac;
+            }
+        }
+        count.round() as usize
+    }
+
+    /// Find all blocks in a request that have only a single strong reference (only used by this request)
+    /// and insert them into fractional_blocks with the given fraction value.
+    pub fn set_single_ref_blocks_as_fractional(&mut self, request_id: &RequestId, fraction: f64) {
+        let Some(blocks) = self.active_seqs.get(request_id) else {
+            tracing::warn!(
+                "Request {request_id} not found for set_single_ref_blocks_as_fractional"
+            );
+            return;
+        };
+
+        for (hash, rc) in blocks {
+            // A block with strong_count == 1 means only this request holds a reference
+            if Rc::strong_count(rc) == 1 {
+                self.fractional_blocks.insert(*hash, fraction);
+            }
+        }
     }
 
     /// Add a new request with its initial tokens
@@ -144,6 +180,7 @@ impl ActiveSequences {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
     ) -> HashSet<RequestId> {
         // Check for double-add and log error, returning early
         if self.active_seqs.contains_key(&request_id) {
@@ -158,6 +195,12 @@ impl ActiveSequences {
         self.prefill_tokens
             .insert(request_id.clone(), prefill_tokens);
         self.active_tokens += prefill_tokens;
+
+        // Store expected output tokens if provided
+        if let Some(tokens) = expected_output_tokens {
+            self.expected_output_tokens
+                .insert(request_id.clone(), tokens);
+        }
 
         if let Some(sequence) = token_sequence {
             let sequence_with_refs: Vec<(SequenceHash, Rc<()>)> = sequence
@@ -231,6 +274,9 @@ impl ActiveSequences {
 
         self.expiry_requests.remove(request_id);
 
+        // Remove expected output tokens tracking
+        self.expected_output_tokens.remove(request_id);
+
         // Remove from active_seqs and get the token sequence
         let token_seq = match self.active_seqs.remove(request_id) {
             Some(seq) => seq,
@@ -247,6 +293,46 @@ impl ActiveSequences {
         }
 
         self.active_blocks()
+    }
+
+    /// Add an output block with a random hash and optional fractional decay weight.
+    ///
+    /// This is used during generation to track output blocks as they are created.
+    /// The decay_fraction (if provided) represents how "temporary" the block is:
+    /// - 1.0 means fully counted (early in generation)
+    /// - 0.0 means not counted (near end of expected output)
+    /// - Computed as: 1 - (current_osl / expected_output_tokens)
+    ///
+    /// Returns true if the block was added, false if the request was not found.
+    pub fn add_output_block(
+        &mut self,
+        request_id: &RequestId,
+        decay_fraction: Option<f64>,
+    ) -> bool {
+        // Check if request exists first (immutable borrow)
+        if !self.active_seqs.contains_key(request_id) {
+            tracing::warn!("Request {request_id} not found for add_output_block");
+            return false;
+        }
+
+        // Generate a random block hash using UUID
+        let random_hash: SequenceHash = Uuid::new_v4().as_u64_pair().0;
+
+        // Touch the block (adds to unique_blocks)
+        let rc = self.touch_block(&random_hash);
+
+        // Now we can safely get_mut and push
+        self.active_seqs
+            .get_mut(request_id)
+            .unwrap()
+            .push((random_hash, rc));
+
+        // Apply fractional decay to all single-ref blocks in this request if provided
+        if let Some(frac) = decay_fraction {
+            self.set_single_ref_blocks_as_fractional(request_id, frac);
+        }
+
+        true
     }
 
     /// Force expiry of stale requests if the timer has elapsed
@@ -279,6 +365,7 @@ enum UpdateSequences {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
         resp_tx: tokio::sync::oneshot::Sender<HashSet<RequestId>>,
     },
     Free {
@@ -286,6 +373,11 @@ enum UpdateSequences {
     },
     MarkPrefillCompleted {
         request_id: RequestId,
+    },
+    AddOutputBlock {
+        request_id: RequestId,
+        decay_fraction: Option<f64>,
+        resp_tx: tokio::sync::oneshot::Sender<bool>,
     },
     NewBlocks {
         token_sequence: Arc<Vec<SequenceHash>>,
@@ -428,9 +520,10 @@ impl ActiveSequencesMultiWorker {
                                     token_sequence,
                                     isl,
                                     overlap,
+                                    expected_output_tokens,
                                     resp_tx,
                                 } => {
-                                    let removed = active_sequences.add_request(request_id, token_sequence, isl, overlap);
+                                    let removed = active_sequences.add_request(request_id, token_sequence, isl, overlap, expected_output_tokens);
                                     let _ = resp_tx.send(removed);
                                 }
                                 UpdateSequences::Free { request_id } => {
@@ -438,6 +531,14 @@ impl ActiveSequencesMultiWorker {
                                 }
                                 UpdateSequences::MarkPrefillCompleted { request_id } => {
                                     active_sequences.mark_prefill_completed(&request_id);
+                                }
+                                UpdateSequences::AddOutputBlock {
+                                    request_id,
+                                    decay_fraction,
+                                    resp_tx,
+                                } => {
+                                    let success = active_sequences.add_output_block(&request_id, decay_fraction);
+                                    let _ = resp_tx.send(success);
                                 }
                                 UpdateSequences::NewBlocks {
                                     token_sequence,
@@ -535,6 +636,7 @@ impl ActiveSequencesMultiWorker {
                             token_sequence,
                             isl,
                             overlap,
+                            expected_output_tokens,
                         } => {
                             request_to_worker.insert(event.request_id.clone(), event.worker);
 
@@ -546,6 +648,7 @@ impl ActiveSequencesMultiWorker {
                                     token_sequence: token_sequence.clone(),
                                     isl: *isl,
                                     overlap: *overlap,
+                                    expected_output_tokens: *expected_output_tokens,
                                     resp_tx,
                                 });
                             } else {
@@ -643,6 +746,7 @@ impl ActiveSequencesMultiWorker {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         // Check for worker existence
@@ -670,6 +774,7 @@ impl ActiveSequencesMultiWorker {
                     token_sequence: token_sequence.clone(),
                     isl,
                     overlap,
+                    expected_output_tokens,
                 },
                 router_id: self.router_id,
             };
@@ -689,6 +794,7 @@ impl ActiveSequencesMultiWorker {
                 token_sequence,
                 isl,
                 overlap,
+                expected_output_tokens,
                 resp_tx,
             })
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
@@ -797,6 +903,59 @@ impl ActiveSequencesMultiWorker {
                 request_id: request_id.clone(),
             })
             .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        // Publish ActiveLoad metrics for this worker
+        self.publish_active_load_for_worker(worker).await;
+
+        Ok(())
+    }
+
+    /// Add an output block with optional fractional decay weight
+    ///
+    /// This is used during generation to track output blocks as they are created.
+    /// The decay_fraction represents how "temporary" the block is based on generation progress.
+    pub async fn add_output_block(
+        &self,
+        request_id: &RequestId,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        let worker = self
+            .request_to_worker
+            .get(request_id)
+            .map(|entry| *entry)
+            .ok_or_else(|| SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            })?;
+
+        // Verify worker still exists
+        if !self.senders.contains_key(&worker) {
+            return Err(SequenceError::WorkerNotFound { worker });
+        }
+
+        // Create response channel
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+
+        // Send command to worker
+        self.senders
+            .get(&worker)
+            .unwrap()
+            .send(UpdateSequences::AddOutputBlock {
+                request_id: request_id.clone(),
+                decay_fraction,
+                resp_tx,
+            })
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        // Wait for response
+        let success = resp_rx
+            .await
+            .map_err(|_| SequenceError::WorkerChannelClosed)?;
+
+        if !success {
+            return Err(SequenceError::RequestNotFound {
+                request_id: request_id.clone(),
+            });
+        }
 
         // Publish ActiveLoad metrics for this worker
         self.publish_active_load_for_worker(worker).await;
@@ -1028,15 +1187,15 @@ mod tests {
         let block_size = 4;
         let mut seq_manager = ActiveSequences::new(block_size);
 
-        seq_manager.add_request("request_1".to_string(), Some(vec![1, 2, 3]), 12, 0);
+        seq_manager.add_request("request_1".to_string(), Some(vec![1, 2, 3]), 12, 0, None);
         assert_eq!(seq_manager.active_blocks(), 3);
         assert_eq!(seq_manager.active_tokens(), 12);
 
-        seq_manager.add_request("request_2".to_string(), Some(vec![4]), 4, 0);
+        seq_manager.add_request("request_2".to_string(), Some(vec![4]), 4, 0, None);
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(), 16);
 
-        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 4);
+        seq_manager.add_request("request_3".to_string(), Some(vec![1, 2, 3, 4]), 16, 4, None);
         assert_eq!(seq_manager.active_blocks(), 4);
         assert_eq!(seq_manager.active_tokens(), 16);
 
@@ -1110,8 +1269,9 @@ mod tests {
             .add_request(
                 "request_0".to_string(),
                 Some(vec![0, 1, 2]),
-                12, // ISL (3 blocks * 4 block_size)
-                0,  // no overlap
+                12,   // ISL (3 blocks * 4 block_size)
+                0,    // no overlap
+                None, // expected_output_tokens
                 WorkerWithDpRank::new(0, 0),
             )
             .await?;
@@ -1121,8 +1281,9 @@ mod tests {
             .add_request(
                 "request_1".to_string(),
                 Some(vec![3, 4]),
-                8, // ISL (2 blocks * 4 block_size)
-                0, // no overlap
+                8,    // ISL (2 blocks * 4 block_size)
+                0,    // no overlap
+                None, // expected_output_tokens
                 WorkerWithDpRank::new(0, 1),
             )
             .await?;
@@ -1132,8 +1293,9 @@ mod tests {
             .add_request(
                 "request_2".to_string(),
                 Some(vec![0, 1, 2, 3]),
-                16, // ISL (4 blocks * 4 block_size)
-                0,  // no overlap
+                16,   // ISL (4 blocks * 4 block_size)
+                0,    // no overlap
+                None, // expected_output_tokens
                 WorkerWithDpRank::new(1, 0),
             )
             .await?;
@@ -1268,6 +1430,7 @@ mod tests {
                 None, // No token sequence
                 12,   // ISL (12 tokens)
                 0,    // no overlap
+                None, // expected_output_tokens
                 WorkerWithDpRank::from_worker_id(0),
             )
             .await?;
@@ -1279,6 +1442,7 @@ mod tests {
                 None, // No token sequence
                 8,    // ISL (8 tokens)
                 0,    // no overlap
+                None, // expected_output_tokens
                 WorkerWithDpRank::from_worker_id(1),
             )
             .await?;
@@ -1290,6 +1454,7 @@ mod tests {
                 None, // No token sequence
                 16,   // ISL (16 tokens)
                 0,    // no overlap
+                None, // expected_output_tokens
                 WorkerWithDpRank::from_worker_id(2),
             )
             .await?;
