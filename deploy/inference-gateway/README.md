@@ -125,7 +125,8 @@ You need to build your own Dynamo EPP custom image
 ```bash
 # export env vars
 export DOCKER_SERVER=ghcr.io/nvidia/dynamo	# Container registry
-export IMAGE_TAG=YOUR=TAG # Auto from git tag
+export IMAGE_TAG=YOUR-TAG # Or auto from git tag
+cd deploy/inference-gateway/epp
 make all # Do everything in one command
 # or make all-push to also push
 
@@ -152,7 +153,7 @@ The Inference Gateway is configured through the `inference-gateway-resources.yam
 Deploy the Inference Gateway resources to your Kubernetes cluster by running the command below.
 
 ```bash
-cd deploy/inference-gateway
+cd deploy/
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
