@@ -6,6 +6,7 @@ name: Build Frontend Image
 on:
   push:
     branches:
+    - ops-2753 # todo: remove
     - main
     - release/*.*.*
     - "pull-request/[0-9]+"
@@ -21,8 +22,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: p-builder-amd-v1  }
+          - { arch: arm64, runner: p-builder-arm-v1 }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
