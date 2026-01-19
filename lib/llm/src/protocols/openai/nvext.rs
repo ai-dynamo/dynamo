@@ -84,10 +84,7 @@ where
 /// 1. Resolves routing values (header priority, nvext fallback)
 /// 2. Applies the resolved values to the nvext
 /// 3. Returns the nvext (creating one if it was None and hints were found)
-pub fn resolve_and_apply_routing_hints(
-    nvext: Option<NvExt>,
-    headers: &HeaderMap,
-) -> Option<NvExt> {
+pub fn resolve_and_apply_routing_hints(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
     let hints = ResolvedRoutingHints::resolve(headers, nvext.as_ref());
 
     // Only create/modify nvext if we have any resolved hints
