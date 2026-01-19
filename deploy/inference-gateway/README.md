@@ -26,8 +26,8 @@ Currently, these setups are only supported with the kGateway based Inference Gat
   - [5. Install Dynamo GAIE helm chart](#5-install-dynamo-gaie-helm-chart)
   - [6. Verify Installation](#6-verify-installation)
   - [7. Usage](#7-usage)
-  - [7. Deleting the installation](#7-deleting-the-installation)
-- [Gateway API Inference Extension](#gateway-api-inference-extension-integration)
+  - [8. Deleting the installation](#8-deleting-the-installation)
+- [Gateway API Inference Extension Details](#gateway-api-inference-extension-integration)
   - [v1.2.1 API Changes](#v121-api-changes)
   - [Building for v1.2.1](#building-for-v121)
   - [Header-Only Routing for v1.2.1](#header-only-routing-for-v121)
@@ -346,7 +346,7 @@ Sample inference output:
 }
 ```
 
-### 7. Deleting the installation ###
+### 8. Deleting the installation ###
 
 If you need to uninstall run:
 
