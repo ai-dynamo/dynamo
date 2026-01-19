@@ -84,10 +84,10 @@ pub const BEST_OF_RANGE: (u8, u8) = (MIN_BEST_OF, MAX_BEST_OF);
 /// Maximum allowed number of stop sequences. While OpenAI supports fewer, dynamo customers are more advanced and require more.
 pub const MAX_STOP_SEQUENCES: usize = 32;
 /// Maximum allowed number of tools. While OpenAI supports fewer, dynamo customers are more advanced and require more.
-pub const MAX_TOOLS: usize = 1024;
+pub const MAX_TOOLS: usize = 1536;
 // Metadata validation constants removed - we are no longer restricting the metadata field char limits
 /// Maximum allowed length for function names
-pub const MAX_FUNCTION_NAME_LENGTH: usize = 64;
+pub const MAX_FUNCTION_NAME_LENGTH: usize = 96;
 /// Minimum allowed value for `repetition_penalty`
 pub const MIN_REPETITION_PENALTY: f32 = 0.0;
 /// Maximum allowed value for `repetition_penalty`
