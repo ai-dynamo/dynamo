@@ -23,6 +23,7 @@ from urllib.request import urlopen
 
 import torch
 from tensorrt_llm.inputs import default_multimodal_input_loader
+from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -54,11 +55,16 @@ class MultimodalRequestProcessor:
     ):
         self.model_type = model_type
         self.model_dir = model_dir
-        self.tokenizer = tokenizer
         self.modality = ""
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+
+        # Initialize tokenizer ONCE at startup to avoid per-request overhead
+        if tokenizer is not None:
+            self.tokenizer = tokenizer
+        else:
+            self.tokenizer = tokenizer_factory(model_dir)
 
     def is_url(self, path: str) -> bool:
         """Check if a path is a URL."""
@@ -189,8 +195,10 @@ class MultimodalRequestProcessor:
             logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
 
         # Process with default_multimodal_input_loader
+        # Pass self.tokenizer to reuse the pre-initialized tokenizer instead of
+        # creating a new one per request
         processed_inputs = default_multimodal_input_loader(
-            tokenizer=None,
+            tokenizer=self.tokenizer,
             model_dir=self.model_dir,
             model_type=self.model_type,
             modality=self.modality,

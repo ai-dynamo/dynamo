@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -157,6 +158,8 @@ class DynamoArgs:
     dump_config_to: Optional[str] = None
     # local indexer option
     enable_local_indexer: bool = False
+    # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
+    use_kv_events: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -469,6 +472,51 @@ async def parse_args(args: list[str]) -> Config:
                 f"Custom Jinja template file not found: {expanded_template_path}"
             )
 
+    model_path = parsed_args.model_path
+    # Name the model
+    if not parsed_args.served_model_name:
+        parsed_args.served_model_name = model_path
+    # Download the model if necessary using modelexpress.
+    # We don't set `parsed_args.model_path` to the local path fetch_llm returns
+    # because sglang will send this to its pipeline-parallel workers, which may
+    # not have the local path.
+    # sglang will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
+    if not os.path.exists(model_path):
+        await fetch_llm(model_path)
+
+    # TODO: sglang downloads the model in `from_cli_args`, which means we had to
+    # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
+    # contain code to download a model, it should only parse the args.
+    server_args = ServerArgs.from_cli_args(parsed_args)
+
+    if parsed_args.use_sglang_tokenizer:
+        logging.info(
+            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
+        )
+        server_args.skip_tokenizer_init = False
+    else:
+        logging.info(
+            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
+        )
+        server_args.skip_tokenizer_init = True
+
+    # Derive use_kv_events from server_args.kv_events_config
+    # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)
+    use_kv_events = False
+    if server_args.kv_events_config:
+        try:
+            kv_cfg = json.loads(server_args.kv_events_config)
+            use_kv_events = kv_cfg.get("publisher", "null") != "null"
+        except json.JSONDecodeError:
+            logging.warning(
+                f"Failed to parse kv_events_config: {server_args.kv_events_config}"
+            )
+    logging.info(
+        f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
+    )
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -487,29 +535,9 @@ async def parse_args(args: list[str]) -> Config:
         embedding_worker=parsed_args.embedding_worker,
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        use_kv_events=use_kv_events,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
-
-    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
-    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
-    model_path = parsed_args.model_path
-    if not parsed_args.served_model_name:
-        parsed_args.served_model_name = model_path
-    if not os.path.exists(model_path):
-        parsed_args.model_path = await fetch_llm(model_path)
-
-    server_args = ServerArgs.from_cli_args(parsed_args)
-
-    if parsed_args.use_sglang_tokenizer:
-        logging.info(
-            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
-        )
-        server_args.skip_tokenizer_init = False
-    else:
-        logging.info(
-            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
-        )
-        server_args.skip_tokenizer_init = True
 
     return Config(server_args, dynamo_args)
 

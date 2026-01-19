@@ -198,6 +198,150 @@ impl DiscoveryInstance {
             }
         }
     }
+
+    /// Extracts the unique identifier for this discovery instance
+    /// Used for tracking, diffing, and removal events
+    pub fn id(&self) -> DiscoveryInstanceId {
+        match self {
+            Self::Endpoint(inst) => DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+                namespace: inst.namespace.clone(),
+                component: inst.component.clone(),
+                endpoint: inst.endpoint.clone(),
+                instance_id: inst.instance_id,
+            }),
+            Self::Model {
+                namespace,
+                component,
+                endpoint,
+                instance_id,
+                model_suffix,
+                ..
+            } => DiscoveryInstanceId::Model(ModelCardInstanceId {
+                namespace: namespace.clone(),
+                component: component.clone(),
+                endpoint: endpoint.clone(),
+                instance_id: *instance_id,
+                model_suffix: model_suffix.clone(),
+            }),
+        }
+    }
+}
+
+/// Unique identifier for an endpoint instance
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EndpointInstanceId {
+    pub namespace: String,
+    pub component: String,
+    pub endpoint: String,
+    pub instance_id: u64,
+}
+
+impl EndpointInstanceId {
+    /// Converts to a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}`
+    pub fn to_path(&self) -> String {
+        format!(
+            "{}/{}/{}/{:x}",
+            self.namespace, self.component, self.endpoint, self.instance_id
+        )
+    }
+
+    /// Parses from a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}`
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() != 4 {
+            anyhow::bail!(
+                "Invalid EndpointInstanceId path: expected 4 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            namespace: parts[0].to_string(),
+            component: parts[1].to_string(),
+            endpoint: parts[2].to_string(),
+            instance_id: u64::from_str_radix(parts[3], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+        })
+    }
+}
+
+/// Unique identifier for a model card instance
+/// The combination of (namespace, component, endpoint, instance_id, model_suffix) uniquely identifies a model card
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ModelCardInstanceId {
+    pub namespace: String,
+    pub component: String,
+    pub endpoint: String,
+    pub instance_id: u64,
+    /// None for base models, Some(slug) for LoRA adapters
+    pub model_suffix: Option<String>,
+}
+
+impl ModelCardInstanceId {
+    /// Converts to a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]`
+    pub fn to_path(&self) -> String {
+        match &self.model_suffix {
+            Some(suffix) => format!(
+                "{}/{}/{}/{:x}/{}",
+                self.namespace, self.component, self.endpoint, self.instance_id, suffix
+            ),
+            None => format!(
+                "{}/{}/{}/{:x}",
+                self.namespace, self.component, self.endpoint, self.instance_id
+            ),
+        }
+    }
+
+    /// Parses from a path string: `{namespace}/{component}/{endpoint}/{instance_id:x}[/{model_suffix}]`
+    pub fn from_path(path: &str) -> Result<Self> {
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() < 4 || parts.len() > 5 {
+            anyhow::bail!(
+                "Invalid ModelCardInstanceId path: expected 4 or 5 parts, got {}",
+                parts.len()
+            );
+        }
+        Ok(Self {
+            namespace: parts[0].to_string(),
+            component: parts[1].to_string(),
+            endpoint: parts[2].to_string(),
+            instance_id: u64::from_str_radix(parts[3], 16)
+                .map_err(|e| anyhow::anyhow!("Invalid instance_id hex: {}", e))?,
+            model_suffix: parts.get(4).map(|s| s.to_string()),
+        })
+    }
+}
+
+/// Union of instance identifiers for different discovery object types
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DiscoveryInstanceId {
+    Endpoint(EndpointInstanceId),
+    Model(ModelCardInstanceId),
+}
+
+impl DiscoveryInstanceId {
+    /// Returns the raw instance_id regardless of variant type
+    pub fn instance_id(&self) -> u64 {
+        match self {
+            Self::Endpoint(eid) => eid.instance_id,
+            Self::Model(mid) => mid.instance_id,
+        }
+    }
+
+    /// Extracts the EndpointInstanceId, returning an error if this is a Model variant
+    pub fn extract_endpoint_id(&self) -> Result<&EndpointInstanceId> {
+        match self {
+            Self::Endpoint(eid) => Ok(eid),
+            Self::Model(_) => anyhow::bail!("Expected Endpoint variant, got Model"),
+        }
+    }
+
+    /// Extracts the ModelCardInstanceId, returning an error if this is an Endpoint variant
+    pub fn extract_model_id(&self) -> Result<&ModelCardInstanceId> {
+        match self {
+            Self::Model(mid) => Ok(mid),
+            Self::Endpoint(_) => anyhow::bail!("Expected Model variant, got Endpoint"),
+        }
+    }
 }
 
 /// Events emitted by the discovery watch stream
@@ -205,8 +349,8 @@ impl DiscoveryInstance {
 pub enum DiscoveryEvent {
     /// A new instance was added
     Added(DiscoveryInstance),
-    /// An instance was removed (identified by instance_id)
-    Removed(u64),
+    /// An instance was removed (identified by its unique ID)
+    Removed(DiscoveryInstanceId),
 }
 
 /// Stream type for discovery events

@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: my-registry/tensorrtllm-runtime:my-tag
     TRTLLMPrefillWorker:
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -41,7 +39,6 @@ spec:
             - --disaggregation-mode
             - prefill
     TRTLLMDecodeWorker:
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode

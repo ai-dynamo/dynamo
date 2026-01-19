@@ -213,6 +213,7 @@ The router uses KV events from workers by default to maintain an accurate global
   - Router predicts cache state based on routing decisions with TTL-based expiration and pruning
   - Tracks blocks from recent requests with configurable time-to-live
   - Reduces overhead at the cost of routing accuracy
+  - **NATS is not needed** - suitable for simpler deployments without NATS infrastructure
   - Suitable for testing or when event processing becomes a bottleneck
 
 ## Tuning Guidelines

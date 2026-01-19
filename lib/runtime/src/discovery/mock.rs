@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    DiscoverySpec, DiscoveryStream,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -171,7 +172,7 @@ impl Discovery for MockDiscovery {
         let registry = self.registry.clone();
 
         let stream = async_stream::stream! {
-            let mut known_instances = HashSet::new();
+            let mut known_instances: HashSet<DiscoveryInstanceId> = HashSet::new();
 
             loop {
                 let current: Vec<_> = {
@@ -183,19 +184,11 @@ impl Discovery for MockDiscovery {
                         .collect()
                 };
 
-                let current_ids: HashSet<_> = current.iter().map(|i| {
-                    match i {
-                        DiscoveryInstance::Endpoint(inst) => inst.instance_id,
-                        DiscoveryInstance::Model { instance_id, .. } => *instance_id,
-                    }
-                }).collect();
+                let current_ids: HashSet<DiscoveryInstanceId> = current.iter().map(|i| i.id()).collect();
 
                 // Emit Added events for new instances
                 for instance in current {
-                    let id = match &instance {
-                        DiscoveryInstance::Endpoint(inst) => inst.instance_id,
-                        DiscoveryInstance::Model { instance_id, .. } => *instance_id,
-                    };
+                    let id = instance.id();
                     if known_instances.insert(id) {
                         yield Ok(DiscoveryEvent::Added(instance));
                     }
@@ -203,8 +196,8 @@ impl Discovery for MockDiscovery {
 
                 // Emit Removed events for instances that are gone
                 for id in known_instances.difference(&current_ids).cloned().collect::<Vec<_>>() {
-                    yield Ok(DiscoveryEvent::Removed(id));
                     known_instances.remove(&id);
+                    yield Ok(DiscoveryEvent::Removed(id));
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -272,8 +265,9 @@ mod tests {
 
         let event = stream.next().await.unwrap().unwrap();
         match event {
-            DiscoveryEvent::Removed(instance_id) => {
-                assert_eq!(instance_id, 1);
+            DiscoveryEvent::Removed(id) => {
+                let endpoint_id = id.extract_endpoint_id().expect("Expected endpoint removal");
+                assert_eq!(endpoint_id.instance_id, 1);
             }
             _ => panic!("Expected Removed event for instance-1"),
         }

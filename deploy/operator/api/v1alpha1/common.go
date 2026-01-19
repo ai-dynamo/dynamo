@@ -125,13 +125,13 @@ type ExtraPodSpec struct {
 }
 
 // ScalingAdapter configures whether a service uses the DynamoGraphDeploymentScalingAdapter
-// for replica management. When enabled (default), the DGDSA owns the replicas field and
+// for replica management. When enabled, the DGDSA owns the replicas field and
 // external autoscalers (HPA, KEDA, Planner) can control scaling via the Scale subresource.
 type ScalingAdapter struct {
-	// Disable indicates whether the ScalingAdapter should be disabled for this service.
-	// When false (default), a DGDSA is created and owns the replicas field.
-	// When true, no DGDSA is created and replicas can be modified directly in the DGD.
+	// Enabled indicates whether the ScalingAdapter should be enabled for this service.
+	// When true, a DGDSA is created and owns the replicas field.
+	// When false (default), no DGDSA is created and replicas can be modified directly in the DGD.
 	// +optional
 	// +kubebuilder:default=false
-	Disable bool `json:"disable,omitempty"`
+	Enabled bool `json:"enabled,omitempty"`
 }

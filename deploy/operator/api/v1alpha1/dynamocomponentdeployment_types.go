@@ -20,6 +20,8 @@
 package v1alpha1
 
 import (
+	"fmt"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -111,14 +113,14 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// ReadinessProbe to signal when the container is ready to receive traffic.
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	// Replicas is the desired number of Pods for this component.
-	// When scalingAdapter is enabled (default), this field is managed by the
+	// When scalingAdapter is enabled, this field is managed by the
 	// DynamoGraphDeploymentScalingAdapter and should not be modified directly.
 	// +kubebuilder:validation:Minimum=0
 	Replicas *int32 `json:"replicas,omitempty"`
 	// Multinode is the configuration for multinode components.
 	Multinode *MultinodeSpec `json:"multinode,omitempty"`
 	// ScalingAdapter configures whether this service uses the DynamoGraphDeploymentScalingAdapter.
-	// When enabled (default), replicas are managed via DGDSA and external autoscalers can scale
+	// When enabled, replicas are managed via DGDSA and external autoscalers can scale
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
@@ -172,6 +174,11 @@ func (i *IngressSpec) IsVirtualServiceEnabled() bool {
 type DynamoComponentDeploymentStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+
+	// ObservedGeneration is the most recent generation observed by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
 	// Conditions captures the latest observed state of the component (including
 	// availability and readiness) using standard Kubernetes condition types.
 	Conditions []metav1.Condition `json:"conditions"`
@@ -280,6 +287,10 @@ func (s *DynamoComponentDeployment) GetNumberOfNodes() int32 {
 	return s.Spec.GetNumberOfNodes()
 }
 
+func (s *DynamoComponentDeploymentSharedSpec) IsMultinode() bool {
+	return s.GetNumberOfNodes() > 1
+}
+
 func (s *DynamoComponentDeploymentSharedSpec) GetNumberOfNodes() int32 {
 	if s.Multinode != nil {
 		return s.Multinode.NodeCount
@@ -298,6 +309,21 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentName() string {
 
 func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 	return s.GetNamespace()
+}
+
+// GetDynamoNamespace returns the Dynamo namespace for this component.
+func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
+	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
+}
+
+// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
+// If globalDynamoNamespace is true, returns "dynamo" (global constant).
+// Otherwise, returns {k8sNamespace}-{dgdName}.
+func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
+	if globalDynamoNamespace {
+		return commonconsts.GlobalDynamoNamespace
+	}
+	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
 }
 
 // ModelReference identifies a model served by this component
