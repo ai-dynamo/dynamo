@@ -10,7 +10,8 @@ EPP’s default kv-routing approach is not token-aware because the prompt is not
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
-EPP’s default kv-routing approach is not token-aware because the prompt is hashed without tokenization. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving.
+If you want to use LoRA deploy Dynamo without the Inference Gateway or in the BlackBox approach with the Inference Gateway.
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -21,12 +22,16 @@ Currently, these setups are only supported with the kGateway based Inference Gat
   - [1. Install Dynamo Platform](#1-install-dynamo-platform)
   - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
   - [3. Deploy Your Model](#3-deploy-your-model)
-  - [4. Install Dynamo GAIE Helm Chart](#4-install-dynamo-gaie-helm-chart)
-  - [5. Verify Installation](#5-verify-installation)
-  - [6. Usage](#6-usage)
-  - [7. Deleting the Installation](#7-deleting-the-installation)
+  - [4. Build EPP image](#4-build-epp-image)
+  - [5. Install Dynamo GAIE helm chart](#5-install-dynamo-gaie-helm-chart)
+  - [6. Verify Installation](#6-verify-installation)
+  - [7. Usage](#7-usage)
+  - [7. Deleting the installation](#7-deleting-the-installation)
 - [Gateway API Inference Extension v1.2.1 Integration](#gateway-api-inference-extension-v121-integration)
-- [Body Injector](#body-injector)
+  - [v1.2.1 API Changes](#v121-api-changes)
+  - [Building for v1.2.1](#building-for-v121)
+  - [Header-Only Routing for v1.2.1](#header-only-routing-for-v121)
+
 
 ## Prerequisites
 
@@ -352,13 +357,12 @@ helm uninstall dynamo-gaie -n my-model
 
 ---
 
-## Gateway API Inference Extension v1.2.1 Integration
+## Gateway API Inference Extension Integration
 
 This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
 
 ### v1.2.1 API Changes
 
-The v1.2.1 release introduces breaking changes to the plugin interfaces:
 
 ### Building for v1.2.1
 
@@ -376,5 +380,4 @@ The plugins set HTTP headers that are forwarded to the backend workers.
 | Header | Description | Set By |
 |--------|-------------|--------|
 | `x-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
-| `x-prefiller-host-port` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |
-| `x-dynamo-routing-mode` | `aggregated` or `disaggregated` | kv-aware-scorer |
+| `x-prefill-instance-id` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |
