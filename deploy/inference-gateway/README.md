@@ -104,49 +104,9 @@ kubectl get gateway inference-gateway
 # inference-gateway   kgateway             True         1m
 ```
 
-#### g. Deploy the Body-Transformer service
-
-**Why is this needed?**
 
 Dynamo backend workers require routing information in the request body as an `nvext` field (not just headers). The GAIE EPP sets routing headers (`x-worker-instance-id`, etc.), but these headers need to be converted into body fields before reaching the backend.
 
-The Body-Transformer is a lightweight ext_proc service that:
-1. Reads the routing headers set by the GAIE EPP
-2. Injects the `nvext` field into the JSON request body before forwarding to the Dynamo backend
-
-```
-Client: POST /v1/chat/completions {"model": "Qwen/Qwen3-0.6B", ...}
-    ↓
-kGateway
-    ↓
-EPP (Dynamo KV Scorer)
-  → Selects worker: 1732649523291627853
-  → Sets header: x-worker-instance-id=1732649523291627853
-    ↓
-Body Transformer
-  → Reads header
-  → Injects: {"nvext": {"backend_instance_id": 1732649523291627853}}
-  → Body: 106 → 158 bytes
-    ↓
-Dynamo Backend (vllm-agg-frontend)
-  → Receives request with nvext
-  → Routes to correct worker
-  → Returns response
-    ↓
-Client receives response
-```
-
-**Choosing an approach:**
-
-| Approach | Works With | Pros | Cons |
-|----------|------------|------|------|
-| **Body-Transformer (ext_proc)** | All Envoy-based gateways (kGateway, Istio, Envoy Gateway, etc.) | Portable, works everywhere | Requires deploying an extra service |
-| **Lua filters** | Istio, Envoy Gateway (NOT kGateway) | No extra service needed | Gateway-specific configuration |
-
-- **For kGateway**: Use the Body-Transformer (required - kGateway doesn't support Lua filters)
-- **For Istio/Envoy Gateway**: Choose either Body-Transformer OR Lua filters (see examples below)
-
-Follow the [Body-Transformer README](body-transformer/README.md) to build and deploy this service.
 
 ### 3. Deploy Your Model ###
 
@@ -184,7 +144,34 @@ Create a model configuration file similar to the vllm_agg_qwen.yaml for your mod
 This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
-### 4. Install Dynamo GAIE helm chart ###
+### 4. Build EPP image
+
+You need to build your own Dynamo EPP custom image
+
+```bash
+# export env vars
+export IMAGE_REGISTRY=ghcr.io/nvidia/dynamo	# Container registry
+export IMAGE_TAG=YOUR=TAG # Auto from git tag
+make all # Do everything in one command
+# or make all-push to also push
+
+
+# Or step-by-step
+make dynamo-lib # Build Dynamo library and copy to project
+make image-load # Build Docker image and load locally
+make image-push # Build and push to registry
+make info # Check image tag
+```
+
+#### All-in-one Targets
+
+| Target | Description |
+|--------|-------------|
+| `make dynamo-lib` | Build Dynamo static library and copy to project |
+| `make all` | Build Dynamo lib + Docker image + load locally |
+| `make all-push` | Build Dynamo lib + Docker image + push to registry |
+
+### 5. Install Dynamo GAIE helm chart ###
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 
@@ -246,7 +233,7 @@ helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_
 # Optionally overwrite the image --set-string extension.image=$EPP_IMAGE
 ```
 
-### 5. Verify Installation ###
+### 6. Verify Installation ###
 
 Check that all resources are properly deployed:
 
@@ -274,7 +261,7 @@ NAME        HOSTNAMES   AGE
 qwen-route               33m
 ```
 
-### 6. Usage ###
+### 7. Usage ###
 
 The Inference Gateway provides HTTP endpoints for model inference.
 
@@ -413,30 +400,6 @@ The v1.2.1 release introduces breaking changes to the plugin interfaces:
 The plugin code for v1.2.1 is in:
 - `pkg/plugins/dynamo_kv_scorer/plugin.go`
 
-#### Building your own Dynamo EPP custom image
-
-```bash
-# Build Dynamo library and copy to project
-make dynamo-lib
-
-# Build Docker image and load locally
-make image-local-load
-
-# Or do everything in one command
-make all
-
-# Check image tag
-make info
-```
-
-#### All-in-one Targets
-
-| Target | Description |
-|--------|-------------|
-| `make dynamo-lib` | Build Dynamo static library and copy to project |
-| `make all` | Build Dynamo lib + Docker image + load locally |
-| `make all-push` | Build Dynamo lib + Docker image + push to registry |
-| `make all-kind` | Build Dynamo lib + Docker image + load to kind |
 
 ### Header-Only Routing for v1.2.1
 
