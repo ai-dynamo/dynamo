@@ -27,110 +27,116 @@ on:
 #     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  changed-files:
-    runs-on: ubuntu-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
-    outputs:
-      core: ${{ steps.changes.outputs.core }}
-      operator: ${{ steps.changes.outputs.operator }}
-      deploy: ${{ steps.changes.outputs.deploy }}
-      vllm: ${{ steps.changes.outputs.vllm }}
-      sglang: ${{ steps.changes.outputs.sglang }}
-      trtllm: ${{ steps.changes.outputs.trtllm }}
+  test:
+    runs-on: gpu-l40-amd64
     steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-        with:
-          fetch-depth: 0
-      - name: Check for changes
-        id: changes
-        uses: ./.github/actions/changed-files
-        with:
-          gh_token: ${{ github.token }}
-
-  # backend-status-check:
+      - name: sleep
+        run: |
+          sleep 30000
+  # changed-files:
   #   runs-on: ubuntu-latest
-  #   needs: [changed-files, vllm, sglang, trtllm, operator]  # THIS list determines blocking jobs
-  #   if: always()
+  #   environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+  #   outputs:
+  #     core: ${{ steps.changes.outputs.core }}
+  #     operator: ${{ steps.changes.outputs.operator }}
+  #     deploy: ${{ steps.changes.outputs.deploy }}
+  #     vllm: ${{ steps.changes.outputs.vllm }}
+  #     sglang: ${{ steps.changes.outputs.sglang }}
+  #     trtllm: ${{ steps.changes.outputs.trtllm }}
   #   steps:
-  #     - name: "Check all dependent jobs"
-  #       run: |
-  #         echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #       with:
+  #         fetch-depth: 0
+  #     - name: Check for changes
+  #       id: changes
+  #       uses: ./.github/actions/changed-files
+  #       with:
+  #         gh_token: ${{ github.token }}
 
-  operator:
-    needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-          - { arch: arm64, runner: p-builder-arm-v1 }
-    name: operator-build (${{ matrix.platform.arch }})
-    runs-on: ${{ matrix.platform.runner }}
-    steps:
-      - name: Output Node Name
-        shell: bash
-        run: |
-          echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          cd deploy/operator
-          docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Tester
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          cd deploy/operator
-          docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version: '1.25'
-      - name: Check for uncommitted changes
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          sudo apt-get update && sudo apt-get install -y make
-          cd deploy/operator
-          make check
-      - name: Build Container
-        id: build-image
-        shell: bash
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-        run: |
-          cd deploy/operator
-          docker buildx build --load \
-              --platform linux/${{ matrix.platform.arch }} \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              -f Dockerfile \
-              -t dynamo-operator:latest .
-      - name: Docker Tag and Push
-        uses: ./.github/actions/docker-tag-push
-        with:
-          local_image: dynamo-operator:latest
-          push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
-          aws_push: 'false'
-          azure_push: 'true'
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  # # backend-status-check:
+  # #   runs-on: ubuntu-latest
+  # #   needs: [changed-files, vllm, sglang, trtllm, operator]  # THIS list determines blocking jobs
+  # #   if: always()
+  # #   steps:
+  # #     - name: "Check all dependent jobs"
+  # #       run: |
+  # #         echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+
+  # operator:
+  #   needs: changed-files
+  #   if: needs.changed-files.outputs.operator == 'true'
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       platform:
+  #         - { arch: amd64, runner: p-builder-amd-gpu-v1 }
+  #         - { arch: arm64, runner: p-builder-arm-v1 }
+  #   name: operator-build (${{ matrix.platform.arch }})
+  #   runs-on: ${{ matrix.platform.runner }}
+  #   steps:
+  #     - name: Output Node Name
+  #       shell: bash
+  #       run: |
+  #         echo ${K8S_NODE_NAME}
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Linter
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #       run: |
+  #         cd deploy/operator
+  #         docker build --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+  #     - name: Tester
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #       run: |
+  #         cd deploy/operator
+  #         docker build --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+  #     - name: Set up Go
+  #       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+  #       with:
+  #         go-version: '1.25'
+  #     - name: Check for uncommitted changes
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #       run: |
+  #         sudo apt-get update && sudo apt-get install -y make
+  #         cd deploy/operator
+  #         make check
+  #     - name: Build Container
+  #       id: build-image
+  #       shell: bash
+  #       env:
+  #         ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #       run: |
+  #         cd deploy/operator
+  #         docker buildx build --load \
+  #             --platform linux/${{ matrix.platform.arch }} \
+  #             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+  #             -f Dockerfile \
+  #             -t dynamo-operator:latest .
+  #     - name: Docker Tag and Push
+  #       uses: ./.github/actions/docker-tag-push
+  #       with:
+  #         local_image: dynamo-operator:latest
+  #         push_tags: ai-dynamo/dynamo:${{ github.sha }}-operator-${{ matrix.platform.arch }}
+  #         aws_push: 'false'
+  #         azure_push: 'true'
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
   # vllm:
   #   needs: changed-files
