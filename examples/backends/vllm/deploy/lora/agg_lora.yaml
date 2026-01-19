@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -7,7 +7,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-agg-lora
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -15,7 +14,6 @@ spec:
           image: nvcr.io/nvidian/dynamo-dev/biswa:7e499b5c460f1883a9945d221123e0760051210f-39500608-vllm-amd64
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-agg-lora
       componentType: worker
       subComponentType: decode
       replicas: 1

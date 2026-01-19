@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use dashmap::DashMap;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
@@ -20,6 +19,7 @@ use dynamo_runtime::{
     traits::DistributedRuntimeProvider,
 };
 use futures::stream::{self, StreamExt};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -39,6 +39,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
+    discovery::RuntimeConfigsWithNotify,
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent},
@@ -78,7 +79,7 @@ pub const RADIX_STATE_BUCKET: &str = "radix-bucket";
 pub const RADIX_STATE_FILE: &str = "radix-state";
 
 // for worker-local kvindexer query
-pub const WORKER_KV_INDEXER_QUERY_SUBJECT: &str = "worker_kv_indexer_query";
+pub const WORKER_KV_INDEXER_QUERY_ENDPOINT: &str = "worker_kv_indexer_query";
 pub const WORKER_KV_INDEXER_BUFFER_SIZE: usize = 1024; // store 1024 most recent events in worker buffer
 
 // for router discovery registration
@@ -137,6 +138,16 @@ pub struct KvRouterConfig {
     /// Whether to track active blocks in the router (default: true)
     pub router_track_active_blocks: bool,
 
+    /// Whether to track output blocks during generation (default: false)
+    /// When enabled, the router adds placeholder blocks as tokens are generated
+    /// and applies fractional decay based on progress toward expected_output_tokens.
+    pub router_track_output_blocks: bool,
+
+    /// Whether to assume KV cache reuse when tracking active blocks (default: true).
+    /// When true, computes actual block hashes for sequence tracking.
+    /// When false, generates random hashes (assuming no KV cache reuse).
+    pub router_assume_kv_reuse: bool,
+
     /// Threshold for triggering snapshots. If None, no snapshots will be performed.
     pub router_snapshot_threshold: Option<u32>,
 
@@ -161,6 +172,8 @@ impl Default for KvRouterConfig {
             use_kv_events: true,
             router_replica_sync: false,
             router_track_active_blocks: true,
+            router_track_output_blocks: false,
+            router_assume_kv_reuse: true,
             router_snapshot_threshold: Some(1000000),
             router_reset_states: false,
             router_ttl_secs: 120.0,
@@ -180,6 +193,8 @@ impl KvRouterConfig {
         use_kv_events: Option<bool>,
         replica_sync: Option<bool>,
         track_active_blocks: Option<bool>,
+        track_output_blocks: Option<bool>,
+        assume_kv_reuse: Option<bool>,
         router_snapshot_threshold: Option<Option<u32>>,
         router_reset_states: Option<bool>,
         router_ttl_secs: Option<f64>,
@@ -194,6 +209,9 @@ impl KvRouterConfig {
             router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             router_track_active_blocks: track_active_blocks
                 .unwrap_or(default.router_track_active_blocks),
+            router_track_output_blocks: track_output_blocks
+                .unwrap_or(default.router_track_output_blocks),
+            router_assume_kv_reuse: assume_kv_reuse.unwrap_or(default.router_assume_kv_reuse),
             router_snapshot_threshold: router_snapshot_threshold
                 .unwrap_or(default.router_snapshot_threshold),
             router_reset_states: router_reset_states.unwrap_or(default.router_reset_states),
@@ -201,6 +219,37 @@ impl KvRouterConfig {
             router_max_tree_size: router_max_tree_size.unwrap_or(default.router_max_tree_size),
             router_prune_target_ratio: router_prune_target_ratio
                 .unwrap_or(default.router_prune_target_ratio),
+        }
+    }
+
+    /// Compute sequence hashes for active block tracking based on configuration.
+    ///
+    /// Returns:
+    /// - `None` if `router_track_active_blocks` is false
+    /// - Random hashes if `router_track_active_blocks` is true but `router_assume_kv_reuse` is false
+    /// - Actual sequence hashes if both are true
+    pub fn compute_seq_hashes_for_tracking(
+        &self,
+        tokens: &[u32],
+        block_size: u32,
+    ) -> Option<Vec<u64>> {
+        if !self.router_track_active_blocks {
+            return None;
+        }
+
+        let num_blocks = tokens.len() / block_size as usize;
+        if num_blocks == 0 {
+            return Some(Vec::new());
+        }
+
+        if self.router_assume_kv_reuse {
+            // Compute actual block hashes and sequence hashes
+            let block_hashes = compute_block_hash_for_seq(tokens, block_size, None);
+            Some(compute_seq_hash_for_block(&block_hashes))
+        } else {
+            // Generate random hashes (no KV reuse assumed)
+            let mut rng = rand::rng();
+            Some((0..num_blocks).map(|_| rng.random::<u64>()).collect())
         }
     }
 }
@@ -281,17 +330,15 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        workers_with_configs: Arc<DashMap<protocols::WorkerId, Option<ModelRuntimeConfig>>>,
+        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
-        consumer_id: String,
+        router_id: u64,
     ) -> Result<Self> {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-
-        let instance_ids_rx = client.instance_avail_watcher();
 
         // Watch for runtime config updates via discovery interface
         // (still needed for WorkerQueryClient and background tasks)
@@ -339,11 +386,10 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
-            instance_ids_rx,
-            workers_with_configs,
+            workers_with_configs.clone(),
             selector,
             kv_router_config.router_replica_sync,
-            consumer_id.clone(),
+            router_id,
         )
         .await?;
 
@@ -354,90 +400,67 @@ impl KvRouter {
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // This is spawned as a background task to avoid blocking router startup.
-        // The task waits for runtime_configs to determine whether to use NATS Core or JetStream.
+        // model_manager.get_or_create_runtime_config_watcher() guarantees at least one worker exists.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            // Clone everything needed for the background task
-            let component_clone = component.clone();
-            let kv_indexer_clone = kv_indexer.clone();
-            let cancellation_token_clone = cancellation_token.clone();
-            let mut runtime_configs_rx_clone = runtime_configs_rx.clone();
-            let worker_query_client_clone =
-                worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+            // model_manager guarantees workers_with_configs is populated
+            // Wait for at least one worker before starting the subscriber
+            while workers_with_configs.configs.is_empty() {
+                tracing::info!("KV router waiting for at least one worker...");
+                workers_with_configs.notify.notified().await;
+            }
 
-            tokio::spawn(async move {
-                // Wait for runtime_configs to have at least one entry
-                let (all_local_indexer, count) = loop {
-                    {
-                        let configs = runtime_configs_rx_clone.borrow();
-                        if !configs.is_empty() {
-                            let all_local_indexer =
-                                configs.values().all(|c| c.enable_local_indexer);
-                            break (all_local_indexer, configs.len());
-                        }
-                    }
+            let count = workers_with_configs.configs.len();
+            let all_local_indexer = workers_with_configs
+                .configs
+                .iter()
+                .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
+                .all(|b| b);
 
-                    // Wait for changes to runtime_configs
-                    tokio::select! {
-                        _ = cancellation_token_clone.cancelled() => {
-                            tracing::debug!("Subscriber selection task cancelled");
-                            return;
-                        }
-                        result = runtime_configs_rx_clone.changed() => {
-                            if result.is_err() {
-                                tracing::debug!("Runtime configs channel closed");
-                                return;
-                            }
-                        }
-                    }
-                };
+            tracing::info!("Found {count} worker(s), starting KV event subscriber");
 
-                if all_local_indexer {
-                    // All workers have local_indexer enabled - use NATS Core
-                    tracing::info!(
-                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
-                    );
+            // Start subscriber - setup runs synchronously, then spawns background loop internally
+            if all_local_indexer {
+                tracing::info!(
+                    "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                );
 
-                    if let Err(e) = start_kv_router_background_nats_core(
-                        component_clone.clone(),
-                        kv_indexer_clone.event_sender(),
-                        kv_indexer_clone.remove_worker_sender(),
-                        cancellation_token_clone.clone(),
-                        worker_query_client_clone,
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to start NATS Core subscriber: {e}");
-                    }
-                } else {
-                    // Not all workers have local_indexer - use JetStream
-                    tracing::info!(
-                        "Not all workers have local_indexer enabled, using JetStream subscription"
-                    );
+                start_kv_router_background_nats_core(
+                    component.clone(),
+                    kv_indexer.event_sender(),
+                    kv_indexer.remove_worker_sender(),
+                    cancellation_token.clone(),
+                    worker_query::WorkerQueryClient::new(
+                        component.clone(),
+                        runtime_configs_rx.clone(),
+                    ),
+                )
+                .await?;
+            } else {
+                tracing::info!(
+                    "Not all workers have local_indexer enabled, using JetStream subscription"
+                );
 
-                    if let Err(e) = start_kv_router_background(
-                        component_clone.clone(),
-                        consumer_id,
-                        kv_indexer_clone.event_sender(),
-                        kv_indexer_clone.remove_worker_sender(),
-                        kv_router_config
-                            .router_snapshot_threshold
-                            .map(|_| kv_indexer_clone.get_workers_sender()),
-                        kv_router_config
-                            .router_snapshot_threshold
-                            .map(|_| kv_indexer_clone.snapshot_event_sender()),
-                        cancellation_token_clone.clone(),
-                        kv_router_config.router_snapshot_threshold,
-                        kv_router_config.router_reset_states,
-                    )
-                    .await
-                    {
-                        tracing::error!("Failed to start JetStream subscriber: {e}");
-                    }
-                }
-            });
+                // Convert router_id to string for NATS consumer naming
+                let consumer_id = router_id.to_string();
+                start_kv_router_background(
+                    component.clone(),
+                    consumer_id,
+                    kv_indexer.event_sender(),
+                    kv_indexer.remove_worker_sender(),
+                    kv_router_config
+                        .router_snapshot_threshold
+                        .map(|_| kv_indexer.get_workers_sender()),
+                    kv_router_config
+                        .router_snapshot_threshold
+                        .map(|_| kv_indexer.snapshot_event_sender()),
+                    cancellation_token.clone(),
+                    kv_router_config.router_snapshot_threshold,
+                    kv_router_config.router_reset_states,
+                )
+                .await?;
+            }
         }
 
         tracing::info!("KV Routing initialized");
@@ -480,8 +503,7 @@ impl KvRouter {
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = self
             .kv_router_config
-            .router_track_active_blocks
-            .then(|| compute_seq_hash_for_block(&block_hashes));
+            .compute_seq_hashes_for_tracking(tokens, self.block_size);
 
         let best_worker = self
             .scheduler
@@ -511,14 +533,14 @@ impl KvRouter {
         request_id: String,
         tokens: &[u32],
         overlap_blocks: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) {
         let isl_tokens = tokens.len();
 
-        let maybe_seq_hashes = self.kv_router_config.router_track_active_blocks.then(|| {
-            let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-            compute_seq_hash_for_block(&block_hashes)
-        });
+        let maybe_seq_hashes = self
+            .kv_router_config
+            .compute_seq_hashes_for_tracking(tokens, self.block_size);
 
         if let Err(e) = self
             .scheduler
@@ -527,6 +549,7 @@ impl KvRouter {
                 maybe_seq_hashes,
                 isl_tokens,
                 overlap_blocks,
+                expected_output_tokens,
                 worker,
             )
             .await
@@ -541,6 +564,16 @@ impl KvRouter {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.scheduler.free(request_id).await
+    }
+
+    pub async fn add_output_block(
+        &self,
+        request_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        self.scheduler
+            .add_output_block(request_id, decay_fraction)
+            .await
     }
 
     pub fn block_size(&self) -> u32 {
@@ -567,8 +600,7 @@ impl KvRouter {
 
         let maybe_seq_hashes = self
             .kv_router_config
-            .router_track_active_blocks
-            .then(|| compute_seq_hash_for_block(&block_hashes));
+            .compute_seq_hashes_for_tracking(tokens, self.block_size);
 
         Ok(self
             .scheduler
@@ -754,6 +786,12 @@ impl KvPushRouter {
             .get_overlap_blocks(&request.token_ids, worker)
             .await?;
 
+        // Extract expected_output_tokens from routing hints
+        let expected_output_tokens = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.expected_output_tokens);
+
         // Perform add_request if this router handles local updates
         if !is_query_only && handle_local_updates {
             self.chooser
@@ -761,6 +799,7 @@ impl KvPushRouter {
                     context_id.to_string(),
                     &request.token_ids,
                     overlap_blocks,
+                    expected_output_tokens,
                     worker,
                 )
                 .await;
@@ -815,17 +854,12 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let is_query_only = request.get_annotation_value("query_instance_id").is_some();
 
         // Determine if this router should handle local state updates (add_request, free, etc.)
-        // Only skip local updates for GAIE Stage 2: when BOTH prefill and decode worker IDs
-        // are externally specified (indicates external orchestrator handles tracking).
-        // For internal routing (e.g., bootstrap optimization with only prefill_worker_id set),
-        // we still handle updates locally.
-        let routing = request.routing.as_ref();
-        let handle_local_updates = routing
-            .map(|r| {
-                // GAIE Stage 2 sets both worker IDs - external caller handles tracking
-                // All other cases (including backend_instance_id for routing) - we handle locally
-                r.prefill_worker_id.is_none() || r.decode_worker_id.is_none()
-            })
+        // Default is true (router handles bookkeeping). Set to false for GAIE Stage 2 where
+        // an external orchestrator (e.g., EPP sidecar) handles bookkeeping via C FFI.
+        let handle_local_updates = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.enable_local_updates)
             .unwrap_or(true);
 
         // Get phase from tracker (defaults to Aggregated if no tracker or phase not set)
@@ -908,6 +942,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         }
 
         // Route to worker
+        let isl_tokens = request.token_ids.len();
+        let expected_output_tokens = request
+            .routing
+            .as_ref()
+            .and_then(|r| r.expected_output_tokens);
+        let track_output_blocks =
+            self.chooser.kv_router_config.router_track_output_blocks && handle_local_updates;
+
         let (mut backend_input, context) = request.into_parts();
         backend_input.routing_mut().dp_rank = Some(dp_rank);
         let updated_request = context.map(|_| backend_input);
@@ -917,11 +959,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         let stream_context = response_stream.context();
         let context_for_monitoring = stream_context.clone();
 
-        // TODO: When handle_local_updates=false, consider moving mark_prefill_completed
-        // to an external caller (e.g., sidecar) if they support a first-token hook.
-        // Currently mark_prefill_completed is called here for all flows.
+        // Wrap stream with lifecycle management (mark_prefill_completed, free)
+        // Only perform these operations if handle_local_updates is true.
+        // When false, an external caller (e.g., GAIE sidecar) handles bookkeeping via C FFI.
         let wrapped_stream = Box::pin(async_stream::stream! {
             let mut prefill_marked = false;
+
+            // Output block tracking state
+            let mut cumulative_osl: usize = 0;
+            let mut current_total_blocks = isl_tokens.div_ceil(block_size);
 
             loop {
                 tokio::select! {
@@ -937,7 +983,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             break;
                         };
 
-                        if !prefill_marked {
+                        if handle_local_updates && !prefill_marked {
                             // Only mark prefill completed when we receive actual tokens,
                             // not empty bootstrap info (token_ids: []) from disaggregated prefill
                             let has_tokens = item.data.as_ref()
@@ -951,13 +997,39 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                             }
                         }
 
+                        // Track output blocks if enabled
+                        if track_output_blocks {
+                            let new_tokens = item.data.as_ref()
+                                .map(|d| d.token_ids.len())
+                                .unwrap_or(0);
+                            cumulative_osl += new_tokens;
+
+                            let new_total_blocks = (isl_tokens + cumulative_osl).div_ceil(block_size);
+                            if new_total_blocks > current_total_blocks {
+                                // New block boundary crossed - add output block with decay
+                                // Clamp eot to min 1 to avoid division by zero, and result to min 0.0
+                                let decay_fraction = expected_output_tokens.map(|eot| {
+                                    (1.0 - (cumulative_osl as f64 / eot.max(1) as f64)).max(0.0)
+                                });
+                                if let Err(e) = chooser.add_output_block(&context_id, decay_fraction).await {
+                                    tracing::warn!(
+                                        "Failed to add output block for request {context_id}: {e}"
+                                    );
+                                }
+                                current_total_blocks = new_total_blocks;
+                            }
+                        }
+
                         yield item;
                     }
                 }
             }
 
-            // Always call free() - it's idempotent and safe even if already freed or never added
-            if let Err(e) = chooser.free(&context_id).await {
+            // Only call free() if we handle local updates.
+            // When handle_local_updates=false, external caller handles cleanup via C FFI.
+            if handle_local_updates
+                && let Err(e) = chooser.free(&context_id).await
+            {
                 tracing::warn!("Failed to free request {context_id}: {e}");
             }
         });

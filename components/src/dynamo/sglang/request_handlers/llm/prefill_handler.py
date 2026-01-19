@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -102,8 +102,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             "bootstrap_room": bootstrap_room,
         }
 
-        # Yield in LLMEngineOutput format for PrefillRouter compatibility
-        # The disaggregated_params field contains the bootstrap info
+        # Yield bootstrap_info for PrefillRouter - required for async generator contract
+        # and Rust-side expects disaggregated_params in first output
         yield {
             "token_ids": [],
             "text": None,
@@ -113,9 +113,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         input_param = self._get_input_param(inner_request)
 
-        # Propagate trace context to SGLang
-        if self.enable_trace:
-            self._propagate_trace_context_to_sglang(context, bootstrap_room)
+        trace_header = self._get_trace_header(context) if self.enable_trace else None
 
         results = await self.engine.async_generate(
             **input_param,
@@ -124,6 +122,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_host=self.bootstrap_host,
             bootstrap_port=self.bootstrap_port,
             bootstrap_room=bootstrap_room,
+            external_trace_header=trace_header,
             rid=trace_id,
         )
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use async_once_cell::OnceCell as AsyncOnceCell;
@@ -13,6 +13,7 @@ use dynamo_llm::{
     discovery::{KvWorkerMonitor, ModelWatcher},
     kv_router::{protocols::*, publisher::KvEventPublisher},
 };
+use dynamo_runtime::discovery::DiscoveryQuery;
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
@@ -56,6 +57,40 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+/// Wait for the discovery daemon to sync and return at least one instance.
+/// This ensures list() calls will have data available.
+/// Returns the number of instances found, or 0 if timed out.
+async fn wait_for_discovery_sync(drt: &DistributedRuntime, timeout_secs: u64) -> usize {
+    tracing::info!("Waiting for discovery to sync...");
+    let discovery = drt.discovery();
+    let timeout = std::time::Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+
+    loop {
+        match discovery.list(DiscoveryQuery::AllModels).await {
+            Ok(instances) if !instances.is_empty() => {
+                tracing::info!(
+                    "Discovery sync complete: found {} instances",
+                    instances.len()
+                );
+                return instances.len();
+            }
+            Ok(_) => {
+                if start.elapsed() > timeout {
+                    tracing::warn!("Discovery sync timed out waiting for instances");
+                    return 0;
+                }
+                tracing::debug!("No instances yet, waiting...");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                tracing::warn!("Discovery list error: {}, continuing...", e);
+                return 0;
+            }
+        }
+    }
+}
+
 /// # Safety
 /// the namespace_c_str and component_c_str are passed as pointers to C strings
 #[unsafe(no_mangle)]
@@ -80,7 +115,20 @@ pub unsafe extern "C" fn dynamo_llm_init(
             .get_or_try_init(async { DistributedRuntime::from_settings(rt.clone()).await })
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(drt) => {
+                // Wait for discovery to sync before returning
+                // This is needed because dynamo_create_worker_selection_pipeline() is called
+                // immediately after, and it needs discovery.list() to return data
+                // the discovery daemon takes time to query K8s and returns async, so we need to wait.
+                let instance_count = wait_for_discovery_sync(drt, 10).await;
+                if instance_count == 0 {
+                    tracing::error!(
+                        "Discovery sync failed: no worker instances found. Is the backend running?"
+                    );
+                    return Err(DynamoLlmResult::ERR);
+                }
+                Ok(())
+            }
             Err(e) => {
                 tracing::error!(error = ?e, "Failed to initialize distributed runtime");
                 Err(DynamoLlmResult::ERR)
@@ -354,7 +402,7 @@ use std::pin::Pin;
 const GENERATE_ENDPOINT: &str = "generate";
 
 use anyhow::Context;
-use dynamo_runtime::{Runtime, distributed::DistributedConfig, traits::DistributedRuntimeProvider};
+use dynamo_runtime::{Runtime, traits::DistributedRuntimeProvider};
 
 use dynamo_llm::discovery::ModelManager;
 use dynamo_llm::entrypoint::build_routed_pipeline;
@@ -465,6 +513,8 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 Some(use_kv_events),
                 Some(router_replica_sync),
                 None, // track_active_blocks
+                None, // track_output_blocks
+                None, // assume_kv_reuse
                 None, // router_snapshot_threshold
                 None, // router_reset_states
                 None, // router_ttl_secs
@@ -881,7 +931,13 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         };
 
         kv_router
-            .add_request(request_id_clone.clone(), &tokens, overlap_blocks, worker)
+            .add_request(
+                request_id_clone.clone(),
+                &tokens,
+                overlap_blocks,
+                None,
+                worker,
+            )
             .await;
 
         tracing::debug!(
@@ -1080,6 +1136,9 @@ pub fn add_query_instance_id(
 ///
 /// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
 /// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
+///
+/// Also sets `enable_local_updates: false` since the external caller (EPP/GAIE)
+/// will handle bookkeeping via C FFI functions.
 pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
     decode_worker_id: Option<i64>,
@@ -1090,6 +1149,9 @@ pub fn set_worker_ids_for_stage2(
             .build()
             .expect("NvExt builder should not fail")
     });
+
+    // Disable local updates - external caller handles bookkeeping via C FFI
+    nvext.enable_local_updates = Some(false);
 
     // Check if this is aggregated mode (same worker for both)
     let is_aggregated = prefill_worker_id == decode_worker_id;
@@ -1300,12 +1362,12 @@ fn spawn_prefill_watcher(
                         }
                     }
                 }
-                DiscoveryEvent::Removed(instance_id) => {
+                DiscoveryEvent::Removed(id) => {
                     // Log removal for observability
                     // Note: The PrefillRouter remains active - worker availability
                     // is handled dynamically by the underlying Client's instance tracking
                     tracing::debug!(
-                        instance_id = instance_id,
+                        instance_id = id.instance_id(),
                         "Prefill worker instance removed from discovery"
                     );
                 }
@@ -1347,10 +1409,28 @@ pub async fn create_worker_selection_pipeline_chat(
 )> {
     use dynamo_llm::kv_router::PrefillRouter;
 
-    let runtime = Runtime::from_settings()?;
-    let dst_config = DistributedConfig::from_settings();
-    let drt_owned = DistributedRuntime::new(runtime, dst_config).await?;
-    let distributed_runtime: &'static DistributedRuntime = Box::leak(Box::new(drt_owned));
+    // Use the global DRT singleton - initialize if not already done
+    // Check if already initialized (by dynamo_llm_init) to avoid redundant sync wait
+    let needs_sync = DRT.get().is_none();
+
+    let distributed_runtime = DRT
+        .get_or_try_init(async {
+            tracing::debug!("Initializing DistributedRuntime singleton (standalone mode)");
+            DistributedRuntime::from_settings(Runtime::from_settings()?).await
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to initialize DistributedRuntime: {}", e))?;
+
+    // Only wait for discovery sync if we just initialized the DRT
+    // (dynamo_llm_init already does this when it initializes)
+    if needs_sync {
+        let instance_count = wait_for_discovery_sync(distributed_runtime, 10).await;
+        if instance_count == 0 {
+            return Err(anyhow::anyhow!(
+                "Discovery sync failed: no worker instances found. Is the backend running?"
+            ));
+        }
+    }
 
     let component = distributed_runtime
         .namespace(namespace)?

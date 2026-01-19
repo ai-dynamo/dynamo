@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,7 +41,8 @@ func NewDynamoComponentDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoC
 // Returns warnings and error.
 func (v *DynamoComponentDeploymentValidator) Validate() (admission.Warnings, error) {
 	// Validate shared spec fields using SharedSpecValidator
-	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec")
+	calculatedNamespace := v.deployment.GetDynamoNamespace()
+	sharedValidator := NewSharedSpecValidator(&v.deployment.Spec.DynamoComponentDeploymentSharedSpec, "spec", calculatedNamespace)
 
 	// DCD-specific validation would go here (currently none)
 

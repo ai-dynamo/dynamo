@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -851,6 +851,36 @@ var _ = Describe("DGDR Helper Functions", func() {
 						Config: createTestConfig(map[string]interface{}{
 							"sweep": map[string]interface{}{
 								"prefill_interpolation_granularity": 16,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
+		})
+
+		It("Should return false for AI Configurator profiling (useAiConfigurator=true camelCase)", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"useAiConfigurator": true,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeFalse())
+		})
+
+		It("Should return true for online profiling (useAiConfigurator=false camelCase)", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"useAiConfigurator": false,
 							},
 						}),
 					},

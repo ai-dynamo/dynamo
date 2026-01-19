@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -176,6 +176,7 @@ python test_router.py -v
 - `DYNAMO_DEBUG=1`: Enable debug file dumps to `/tmp/debug_*.txt`
 - `LOGLEVEL=DEBUG`: Set logging level (DEBUG, INFO, WARNING, ERROR)
 - `TRANSFORMERS_ATTN_IMPLEMENTATION=eager`: Disable FlashAttention (set automatically)
+- `TRTLLM_MAX_NUM_TOKENS`: Set max token length
 
 ### Port Assignment
 

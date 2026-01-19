@@ -85,7 +85,7 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	for file in config/crd/bases/*.yaml; do \
 		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
 			{ printf '%s\n' \
-				'# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
+				'# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
 				'# SPDX-License-Identifier: Apache-2.0' \
 				'#' \
 				'# Licensed under the Apache License, Version 2.0 (the "License");' \
@@ -119,7 +119,7 @@ manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRol
 	for file in config/rbac/*.yaml; do \
 		if [ -f "$$file" ] && ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
 			{ printf '%s\n' \
-				'# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
+				'# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
 				'# SPDX-License-Identifier: Apache-2.0' \
 				'#' \
 				'# Licensed under the Apache License, Version 2.0 (the "License");' \

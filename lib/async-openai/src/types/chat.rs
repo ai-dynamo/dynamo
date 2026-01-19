@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Based on https://github.com/64bit/async-openai/ by Himanshu Neema
 // Original Copyright (c) 2022 Himanshu Neema
 // Licensed under MIT License (see ATTRIBUTIONS-Rust.md)
 //
-// Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+// Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
 use std::{collections::HashMap, pin::Pin};
@@ -966,6 +966,9 @@ pub struct CreateChatCompletionRequest {
 pub struct ChatCompletionStreamOptions {
     /// If set, an additional chunk will be streamed before the `data: [DONE]` message. The `usage` field on this chunk shows the token usage statistics for the entire request, and the `choices` field will always be an empty array. All other chunks will also include a `usage` field, but with a null value.
     pub include_usage: bool,
+    /// NVIDIA-specific and industrial common extensions for per chunk usage reporting.
+    #[serde(default)]
+    pub continuous_usage_stats: bool,
 }
 
 #[derive(ToSchema, Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
@@ -13,7 +13,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: agg-8xtp2
       envs:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
@@ -36,7 +35,6 @@ spec:
       subComponentType: null
     VllmDecodeWorker:
       componentType: worker
-      dynamoNamespace: agg-8xtp2
       envFromSecret: hf-token-secret
       volumeMounts:
       - name: model-cache

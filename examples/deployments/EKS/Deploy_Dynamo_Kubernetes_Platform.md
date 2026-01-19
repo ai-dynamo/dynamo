@@ -34,8 +34,8 @@ Build and Push Operator Image
 
 ```
 cd deploy/operator
-vim Earthfile # change ARG IMAGE_SUFFIX=<ECR_REPOSITORY>
-earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+docker build -t $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG .
+docker push $DOCKER_SERVER/dynamo-operator:$IMAGE_TAG
 ```
 
 Create secrets

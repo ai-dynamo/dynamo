@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Environment variable name constants for centralized management across the codebase
@@ -36,6 +36,9 @@ pub mod logging {
 
     /// Use local timezone for logging timestamps (default is UTC)
     pub const DYN_LOG_USE_LOCAL_TZ: &str = "DYN_LOG_USE_LOCAL_TZ";
+
+    /// Enable span event logging (create/close events)
+    pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
 
     /// OTLP (OpenTelemetry Protocol) tracing configuration
     pub mod otlp {
@@ -347,6 +350,7 @@ mod tests {
             logging::DYN_LOGGING_JSONL,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
+            logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
