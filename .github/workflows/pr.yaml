@@ -64,7 +64,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-v1 }
+          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
           - { arch: arm64, runner: p-builder-arm-v1 }
     name: operator-build (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
@@ -139,7 +139,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-v1 }
+          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
           - { arch: arm64, runner: p-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
@@ -217,7 +217,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-v1 }
+          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
           - { arch: arm64, runner: p-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
@@ -236,7 +236,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-v1 }
+          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
           - { arch: arm64, runner: p-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
@@ -533,7 +533,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: p-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
