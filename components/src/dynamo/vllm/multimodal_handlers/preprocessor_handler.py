@@ -2,28 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import importlib.metadata
 import json
 import logging
 import uuid
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Union
 
+from packaging.version import Version
 from transformers import AutoTokenizer
 from vllm.engine.arg_utils import AsyncEngineArgs
-
-from dynamo.runtime import Client
-
-try:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import CompletionRequest
-except ImportError:
-    from vllm.entrypoints.openai.protocol import (
-        ChatCompletionRequest,
-        CompletionRequest,
-    )
-
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
+
+from dynamo.runtime import Client
 
 from ..multimodal_utils import (
     ChatProcessor,
@@ -36,6 +28,18 @@ from ..multimodal_utils import (
     extract_user_text,
     vLLMMultimodalRequest,
 )
+
+_vllm_version = Version(importlib.metadata.version("vllm"))
+
+if _vllm_version > Version("0.13.0"):
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+else:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+    )
+
 
 logger = logging.getLogger(__name__)
 

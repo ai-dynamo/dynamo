@@ -13,36 +13,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import importlib.metadata
 import json
 import time
 from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_checkable
 
+from packaging.version import Version
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
+from vllm.inputs.data import TokensPrompt
+from vllm.sampling_params import SamplingParams
+from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
-try:
+_vllm_version = Version(importlib.metadata.version("vllm"))
+
+if _vllm_version > Version("0.13.0"):
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.engine.protocol import (
-        CompletionRequest,
-        RequestResponseMetadata,
-    )
-except ImportError:
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+    from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+else:
     from vllm.entrypoints.openai.protocol import (
         ChatCompletionRequest,
         CompletionRequest,
         RequestResponseMetadata,
     )
-try:
-    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-except ImportError:
     from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.inputs.data import TokensPrompt
-from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import TokenizerLike as AnyTokenizer
+    from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+    from vllm.entrypoints.openai.serving_models import (
+        BaseModelPath,
+        OpenAIServingModels,
+    )
 
 
 class StubEngineClient:
