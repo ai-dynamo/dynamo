@@ -104,7 +104,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Raises:
             RuntimeError: If no bootstrap info received from prefill worker.
         """
-        logging.info(f"New Decode Request ID: {context.id()}")
         # Use context.id() as the rid for SGLang - this must match the ID used by
         # decode_disagger.rs when calling the migrate endpoint
         request_id = context.id()
@@ -126,22 +125,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "bootstrap_info is required for disaggregated decode but was not provided."
                 )
 
-            logging.debug(
-                f"Using bootstrap_info: "
-                f"host={bootstrap_info['bootstrap_host']}, "
-                f"port={bootstrap_info['bootstrap_port']}, "
-                f"room={bootstrap_info['bootstrap_room']}"
-            )
-
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(
                     context, bootstrap_info["bootstrap_room"]
                 )
 
-            logging.info(
-                f"Sending disaggregated decode request {request_id} to engine "
-                f"(room={bootstrap_info['bootstrap_room']})"
-            )
+            _t0 = time.perf_counter()
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -151,13 +140,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 rid=request_id,
             )
-
+            _t1 = time.perf_counter()
             # Wait for first token with timeout
             decode_iter = decode.__aiter__()
             try:
                 first_res = await asyncio.wait_for(
                     decode_iter.__anext__(), timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS
                 )
+                _t2 = time.perf_counter()
             except asyncio.TimeoutError:
                 # Abort the request on SGLang side to prevent resource leak
                 if (
@@ -188,7 +178,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(context)
 
-            logging.info(f"Sending aggregated request {request_id} to engine")
             agg = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -228,7 +217,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will
@@ -291,7 +279,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     sglang_request_id = meta_info.get("id")
                     if sglang_request_id:
                         request_id_future.set_result(sglang_request_id)
-                        logging.debug(f"New SGLang Request ID: {sglang_request_id}")
 
                 # Check cancellation before yielding to allow proper cleanup.
                 # This lets SGLang proceed to the second token generation, which will

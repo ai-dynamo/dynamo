@@ -187,6 +187,10 @@ pub fn monitor_for_disconnects(
                             // Stream ended normally
                             inflight_guard.mark_ok();
                             stream_handle.disarm();
+                            tracing::info!(
+                                request_id = %context.id(),
+                                "Frontend stream completed"
+                            );
 
                             // todo: if we yield a dynamo sentinel event, we need to do it before the done or the
                             // async-openai client will chomp it.

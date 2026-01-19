@@ -345,6 +345,80 @@ impl PrefillRouter {
         ))
     }
 
+    /// Execute prefill but return early after getting bootstrap_info, draining stream in background.
+    /// This optimization allows decode to start immediately while prefill continues in background.
+    async fn execute_prefill_early_return(
+        router: Option<InnerPrefillRouter>,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        let router = router.ok_or(PrefillError::NotActivated)?;
+        let mut prefill_response = router
+            .generate(request)
+            .await
+            .map_err(|e| PrefillError::PrefillError(e.to_string()))?;
+
+        let Some(first_output) = prefill_response.next().await else {
+            return Err(PrefillError::PrefillError(
+                "Prefill router returned no output (stream ended)".to_string(),
+            ));
+        };
+
+        if let Some(err) = first_output.err() {
+            return Err(PrefillError::PrefillError(format!(
+                "Prefill router returned error in output: {err:?}"
+            )));
+        }
+
+        let Some(output) = &first_output.data else {
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output has no data field".to_string(),
+            ));
+        };
+
+        let Some(disaggregated_params) = output.disaggregated_params.clone() else {
+            return Err(PrefillError::NoDisaggregatedParams(
+                "Prefill router output missing disaggregated_params".to_string(),
+            ));
+        };
+
+        // Extract prefill worker ID from disaggregated_params
+        let prefill_worker_id = disaggregated_params
+            .get("worker_id")
+            .and_then(|worker_id_json| {
+                worker_id_json
+                    .get("prefill_worker_id")
+                    .and_then(|v| v.as_u64())
+            });
+
+        // Extract prompt_tokens_details from first output if available
+        let prompt_tokens_details = first_output
+            .data
+            .as_ref()
+            .and_then(|o| o.completion_usage.as_ref())
+            .and_then(|u| u.prompt_tokens_details.clone());
+
+        // Spawn a background task to drain the rest of the stream
+        // This keeps the prefill worker connection alive until KV transfer completes
+        tokio::spawn(async move {
+            while let Some(_next) = prefill_response.next().await {
+                // Consume remaining stream items to keep prefill connection alive
+            }
+            tracing::debug!("Prefill stream drain completed");
+        });
+
+        tracing::info!(
+            "Prefill early return: got bootstrap_info, spawned stream drain in background"
+        );
+
+        Ok((
+            PrefillResult {
+                disaggregated_params,
+                prompt_tokens_details,
+            },
+            prefill_worker_id,
+        ))
+    }
+
     /// Spawn prefill as a background task
     fn spawn_prefill_task(&self, prefill_request: SingleIn<PreprocessedRequest>) {
         let router = self.prefill_router.get().cloned();
@@ -367,6 +441,15 @@ impl PrefillRouter {
         request: SingleIn<PreprocessedRequest>,
     ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
         Self::execute_prefill(self.prefill_router.get().cloned(), request).await
+    }
+
+    /// Call prefill with early return optimization - returns as soon as bootstrap_info is available
+    /// and drains the prefill stream in background. This allows decode to start immediately.
+    async fn call_prefill_early_return(
+        &self,
+        request: SingleIn<PreprocessedRequest>,
+    ) -> Result<(PrefillResult, Option<u64>), PrefillError> {
+        Self::execute_prefill_early_return(self.prefill_router.get().cloned(), request).await
     }
 }
 
@@ -530,10 +613,11 @@ impl
 
                 Ok((None, Some(worker_id), Some(bootstrap_info)))
             } else {
-                // Fallback to original: Wait for prefill to complete
+                // Fallback: use early return optimization to return as soon as we have bootstrap_info
+                // This allows decode to start immediately while prefill stream drains in background
                 tracing::info!(
                     request_id = %request_id,
-                    "PrefillRouter: build_bootstrap_info returned None, using original prefill path"
+                    "PrefillRouter: build_bootstrap_info returned None, using early return prefill path"
                 );
 
                 // Set phase to Prefill and record prefill start time if tracking is enabled
@@ -545,7 +629,7 @@ impl
                 let prefill_context = Context::with_id(prefill_req, request_id.clone());
                 engine_ctx.link_child(prefill_context.context());
 
-                self.call_prefill(prefill_context)
+                self.call_prefill_early_return(prefill_context)
                     .await
                     .map(|(result, worker_id)| (Some(result), worker_id, None))
             }

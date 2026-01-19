@@ -276,6 +276,13 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
+fn get_header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -294,6 +301,14 @@ async fn handler_completions(
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let x_request_id = get_header_value(&headers, "x-request-id");
+    let x_dynamo_request_id = get_header_value(&headers, DYNAMO_REQUEST_ID_HEADER);
+    tracing::info!(
+        request_id = %request_id,
+        x_request_id = x_request_id.as_deref(),
+        x_dynamo_request_id = x_dynamo_request_id.as_deref(),
+        "Frontend request received"
+    );
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
@@ -467,6 +482,7 @@ async fn completions_single(
             })?;
 
         inflight_guard.mark_ok();
+        tracing::info!(request_id, "Frontend request completed (non-streaming)");
         Ok(Json(response).into_response())
     }
 }
@@ -714,6 +730,14 @@ async fn handler_chat_completions(
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let x_request_id = get_header_value(&headers, "x-request-id");
+    let x_dynamo_request_id = get_header_value(&headers, DYNAMO_REQUEST_ID_HEADER);
+    tracing::info!(
+        request_id = %request_id,
+        x_request_id = x_request_id.as_deref(),
+        x_dynamo_request_id = x_dynamo_request_id.as_deref(),
+        "Frontend request received"
+    );
     let request = Context::with_id(request, request_id);
     let context = request.context();
 
@@ -1023,6 +1047,7 @@ async fn chat_completions(
                 })?;
 
         inflight_guard.mark_ok();
+        tracing::info!(request_id, "Frontend request completed (non-streaming)");
         Ok(Json(response).into_response())
     }
 }
