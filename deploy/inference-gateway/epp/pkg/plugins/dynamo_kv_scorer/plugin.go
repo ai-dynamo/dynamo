@@ -119,7 +119,7 @@ const (
 	PluginName            = "dynamo-kv-scorer"
 	KVAwareScorerType     = "kv-aware-scorer"
 	WorkerIDHeader        = "x-worker-instance-id"
-	PrefillWorkerIDHeader = "x-prefiller-host-port"
+	PrefillWorkerIDHeader = "x-prefill-instance-id"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
 
 	// stateKey is the key used to store routing state in PluginState
