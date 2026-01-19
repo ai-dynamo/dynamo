@@ -2,11 +2,11 @@
 # Builds custom EPP image with Dynamo KV-aware routing plugins
 
 # Image configuration
-IMAGE_REGISTRY ?= ghcr.io/nvidia/dynamo
+DOCKER_SERVER ?= ghcr.io/nvidia/dynamo
 IMAGE_NAME := dynamo-epp
 GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_TAG ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo "dev")
-IMAGE_REPO ?= $(IMAGE_REGISTRY)/$(IMAGE_NAME)
+IMAGE_REPO ?= $(DOCKER_SERVER)/$(IMAGE_NAME)
 IMAGE_TAG ?= $(IMAGE_REPO):$(GIT_TAG)
 
 # Build configuration

@@ -124,7 +124,7 @@ You need to build your own Dynamo EPP custom image
 
 ```bash
 # export env vars
-export IMAGE_REGISTRY=ghcr.io/nvidia/dynamo	# Container registry
+export DOCKER_SERVER=ghcr.io/nvidia/dynamo	# Container registry
 export IMAGE_TAG=YOUR=TAG # Auto from git tag
 make all # Do everything in one command
 # or make all-push to also push
