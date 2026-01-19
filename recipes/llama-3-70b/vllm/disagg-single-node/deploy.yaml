@@ -12,7 +12,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: llama3-70b-disagg-sn
       volumeMounts:
         - name: model-cache
           mountPoint: /opt/models
@@ -27,7 +26,6 @@ spec:
     VllmPrefillWorker:
       componentType: worker
       subComponentType: prefill
-      dynamoNamespace: llama3-70b-disagg-sn
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache
@@ -71,7 +69,6 @@ spec:
     VllmDecodeWorker:
       componentType: worker
       subComponentType: decode
-      dynamoNamespace: llama3-70b-disagg-sn
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache

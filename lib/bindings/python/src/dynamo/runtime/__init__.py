@@ -11,7 +11,6 @@ from pydantic import BaseModel, ValidationError
 
 # List all the classes in the _core module for re-export
 # import * causes "unable to detect undefined names"
-from dynamo._core import Backend as Backend
 from dynamo._core import Client as Client
 from dynamo._core import Component as Component
 from dynamo._core import Context as Context
@@ -40,7 +39,6 @@ def _register_shutdown_signals(runtime: DistributedRuntime):
 
 def dynamo_worker(
     register_shutdown: bool = False,
-    kv_store: str = "etcd",
     enable_nats: bool = True
 ) -> Callable:
     """
@@ -56,6 +54,7 @@ def dynamo_worker(
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
+            store_kv = os.environ.get("DYN_STORE_KV", "etcd")
             runtime = DistributedRuntime(loop, kv_store, request_plane, enable_nats)
             if register_shutdown:
                 _register_shutdown_signals(runtime)

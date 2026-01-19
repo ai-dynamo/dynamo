@@ -44,7 +44,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-32b-fp8-agg
       extraPodSpec:
         affinity:
           podAntiAffinity:
@@ -66,7 +65,6 @@ spec:
       replicas: 1
     TrtllmWorker:
       componentType: main
-      dynamoNamespace: qwen3-32b-fp8-agg
       envFromSecret: hf-token-secret
       volumeMounts:
         - name: model-cache

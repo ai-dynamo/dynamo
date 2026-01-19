@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg
       componentType: main
       replicas: 1
       livenessProbe:
@@ -46,7 +45,6 @@ spec:
           args:
             - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128"
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -94,7 +92,6 @@ spec:
           args:
             - "python3 -m dynamo.vllm --model nvidia/Llama-3.1-8B-Instruct-FP8 --no-enable-prefix-caching --block-size 128 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 3

@@ -54,9 +54,22 @@ Below is a summary of the general file structure for the framework Dockerfile st
 |  /opt/dynamo/venv/ | COPY from framework |
 |  /opt/vllm/ | COPY from framework |
 |  /workspace/{tests,examples,deploy}/ |COPY from build context |
-| **STAGE: dev** | **FROM runtime** |
-|  /usr/local/rustup/ | COPY from dynamo_base |
-|  /usr/local/cargo/ | COPY from dynamo_base |
+| **STAGE: dev** | **FROM runtime (via dev/Dockerfile.dev)** |
+|  /usr/bin/, /usr/lib/, etc. | COPY from dynamo_tools (dev utilities, git, sudo, etc.) |
+|  /usr/local/rustup/ | COPY from dynamo_tools |
+|  /usr/local/cargo/ | COPY from dynamo_tools |
+|  /usr/local/bin/maturin | COPY from dynamo_tools |
+|  /opt/dynamo/venv/ | For SGLang: created with --system-site-packages, includes uv and maturin |
+|  /workspace/ | Full source code copied from build context with editable install |
+|  **💡 Recommendation** | **Use --mount-workspace with run.sh** for live editing (bind mount overrides baked-in code) |
+|  PATH | Includes /opt/dynamo/venv/bin:/usr/local/cargo/bin |
+|  umask 002 | Login shell sources /etc/profile.d/00-umask.sh for group-writable files |
+| **STAGE: local-dev** | **FROM dev (via dev/Dockerfile.dev)** |
+|  /home/dynamo/.rustup/ | COPY from /usr/local/rustup (user-writable) |
+|  USER | dynamo (UID/GID remapped to match host user) |
+|  **💡 Recommendation** | **Use --mount-workspace with run.sh** for live editing (bind mount overrides baked-in code) |
+|  RUSTUP_HOME | /home/dynamo/.rustup |
+|  CARGO_HOME | /home/dynamo/.cargo |
 </details>
 
 ### Why Containerization?
@@ -85,12 +98,12 @@ The `build.sh` and `run.sh` scripts are convenience wrappers that simplify commo
 | **Usage** | Benchmarking inference and deployments, non-root | Development, compilation, testing locally | Legacy workflows, root user, use with caution |
 | **User** | dynamo (UID 1000) | dynamo (UID=host user) with sudo | root (UID 0, use with caution) |
 | **Home Directory** | `/home/dynamo` | `/home/dynamo` | `/root` |
-| **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (must be mounted w/ `--mount-workspace`) | `/workspace` (must be mounted w/ `--mount-workspace`) |
+| **Working Directory** | `/workspace` (in-container or mounted) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) | `/workspace` (baked-in, optionally mounted w/ `--mount-workspace`) |
 | **Rust Toolchain** | None (uses pre-built wheels) | System install (`/usr/local/rustup`, `/usr/local/cargo`) | System install (`/usr/local/rustup`, `/usr/local/cargo`) |
 | **Cargo Target** | None | `/workspace/target` | `/workspace/target` |
-| **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang |
+| **Python Env** | venv (`/opt/dynamo/venv`) for vllm/trtllm, system site-packages for sglang | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) | venv (`/opt/dynamo/venv`) for all frameworks (with --system-site-packages for sglang) |
 
-**Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` image creates `/opt/dynamo/venv` (and `local-dev` inherits it from `dev`) for build tooling like `maturin`.
+**Note (SGLang)**: SGLang runtime uses system site-packages, but the `dev` and `local-dev` images create `/opt/dynamo/venv` with `--system-site-packages` for build tooling like `maturin` and `uv`.
 
 ## Usage Guidelines
 
@@ -133,17 +146,31 @@ The `build.sh` script is responsible for building Docker images for different AI
 **Key Features:**
 - **Framework Support**: vLLM (default when --framework not specified), TensorRT-LLM, SGLang, or NONE
 - **Multi-stage Builds**: Build process with base images
-- **Development Targets**: Supports `dev` target and `local-dev` target
+- **Development Targets**: Supports `dev`, `runtime`, and `local-dev` targets via `build.sh`.
 - **Build Caching**: Docker layer caching and sccache support
 - **GPU Optimization**: CUDA, EFA, and NIXL support
+
+**How `dev` / `local-dev` builds work:**
+- `dev` and `local-dev` targets are defined in `container/dev/Dockerfile.dev`.
+- The framework Dockerfiles (`Dockerfile.vllm`, `Dockerfile.trtllm`, `Dockerfile.sglang`, `Dockerfile`) define shared stages used by `Dockerfile.dev` (e.g. `runtime`, `dynamo_base`, `wheel_builder`).
+- To build a single coherent Dockerfile, `build.sh` generates a temporary Dockerfile that is a literal concatenation of:
+  - the selected framework Dockerfile, then
+  - `container/dev/Dockerfile.dev`
+  `build.sh` then continues building normally using the temp Dockerfile path.
+
+**Requirements and debugging:**
+- By default the temp Dockerfile is deleted at the end of `build.sh`. To keep it for inspection, set `KEEP_DEV_DOCKERFILE_TEMP=1`.
+
+> **💡 Tip**: The `dev` and `local-dev` images have source code baked in, but **using `--mount-workspace` with `run.sh` is recommended for development** to bind mount your local workspace for live editing.
 
 **Common Usage Examples:**
 
 ```bash
-# Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is fine to use for inferencing/benchmarking, etc.
+# Build vLLM dev image called dynamo:latest-vllm (default). This runs as root and is for development.
 ./build.sh
 
-# Build both development and local-dev images (integrated into build.sh). While the dev image runs as root, the local-dev image will run as dynamo user with UID/GID matched to your host user, which is useful when mounting partitions. It will also contain development tools.
+# Build a local-dev image. The local-dev image will run as `dynamo` with UID/GID matched to your host user,
+# which is useful when mounting partitions for development.
 ./build.sh --framework vllm --target local-dev
 
 # Build TensorRT-LLM development image called dynamo:latest-trtllm
@@ -328,10 +355,11 @@ See Docker documentation for custom network creation and management.
 
 ### Development Workflow
 ```bash
-# 1. Build local-dev image (creates both dynamo:latest-vllm and dynamo:latest-vllm-local-dev)
+# 1. Build local-dev image (builds runtime, then dev as intermediate, then local-dev as final image)
 ./build.sh --framework vllm --target local-dev
 
 # 2. Run development container using the local-dev image
+# RECOMMENDED: --mount-workspace for live editing in dev and local-dev images
 ./run.sh --image dynamo:latest-vllm-local-dev --mount-workspace -v $HOME/.cache:/home/dynamo/.cache -it
 
 # 3. Inside container, run inference (requires both frontend and backend)

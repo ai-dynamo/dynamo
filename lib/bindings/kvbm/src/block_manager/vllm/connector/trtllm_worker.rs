@@ -3,7 +3,7 @@
 
 use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
-    Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
+    Scheduler, SchedulerMessage, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
 use std::collections::HashSet;
@@ -48,6 +48,11 @@ pub trait Worker: Send + Sync {
         finished_gen_req_ids: Vec<u64>,
         started_loading_req_ids: Vec<u64>,
     ) -> (Vec<u64>, Vec<u64>);
+
+    /// Submit offload operations to execute after the CUDA event completes (non-blocking).
+    /// Does slot bookkeeping synchronously, then spawns an async task to poll the event
+    /// and send operations to the scheduler when complete.
+    fn submit_offload_on_event(&mut self, event: u64) -> anyhow::Result<()>;
 }
 
 pub struct KvConnectorWorker {
@@ -394,6 +399,33 @@ impl Worker for KvConnectorWorker {
 
         (finished_offloading, finished_onboarding)
     }
+
+    fn submit_offload_on_event(&mut self, event: u64) -> anyhow::Result<()> {
+        let operations = std::mem::take(&mut self.offloading_operations);
+
+        // Bookkeeping done synchronously while we have &mut self
+        for op in &operations {
+            self.connector.record_operation(&op.request_id, op.uuid);
+        }
+
+        // Clone channel for async use
+        let tx = self.connector.get_scheduler_tx();
+
+        // Use std::thread since we may be in a subprocess without tokio runtime
+        std::thread::spawn(move || {
+            // Block this thread until event completes (doesn't block main thread)
+            event_sync_blocking(event);
+
+            // Send operations to scheduler
+            for op in operations {
+                if let Err(e) = tx.send(SchedulerMessage::EnqueueRequest(op)) {
+                    tracing::error!("Failed to send offload operation: {}", e);
+                }
+            }
+        });
+
+        Ok(())
+    }
 }
 
 #[pyclass]
@@ -472,5 +504,11 @@ impl PyTrtllmKvConnectorWorker {
     ) -> (Vec<u64>, Vec<u64>) {
         self.connector_worker
             .get_finished(finished_gen_req_ids, started_loading_req_ids)
+    }
+
+    pub fn submit_offload_on_event(&mut self, event: u64) -> PyResult<()> {
+        self.connector_worker
+            .submit_offload_on_event(event)
+            .map_err(to_pyerr)
     }
 }
