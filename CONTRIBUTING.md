@@ -21,6 +21,16 @@ Thank you for your interest in contributing to Dynamo! Whether you're fixing a t
 
 This guide will help you get started. If you have questions, join us on [Discord](https://discord.gg/D92uqZRjCZ) or open a [GitHub Discussion](https://github.com/ai-dynamo/dynamo/discussions).
 
+## New to Dynamo?
+
+If this is your first contribution, here's the recommended path:
+
+1. **Read** the [Code of Conduct](CODE_OF_CONDUCT.md) and this guide
+2. **Set up** your development environment using the [Developing Locally](README.md#developing-locally) guide
+3. **Find an issue** — Browse [open issues](https://github.com/ai-dynamo/dynamo/issues) or propose a fix you've identified
+4. **Start small** — Documentation fixes, bug fixes, and test improvements are great first contributions
+5. **Ask questions** — Join [Discord](https://discord.gg/D92uqZRjCZ) or open a [Discussion](https://github.com/ai-dynamo/dynamo/discussions) if you get stuck
+
 > **Community Impact**
 > - 70+ external contributors have merged PRs
 > - 130+ community contributions merged since launch
