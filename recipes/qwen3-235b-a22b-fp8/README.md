@@ -7,7 +7,7 @@ Production-ready deployments for **Qwen3-235B-A22B** (MoE model with 22B active 
 | Configuration | GPUs | Mode | Description |
 |--------------|------|------|-------------|
 | [**trtllm/agg**](trtllm/agg/) | 16x GPU | Aggregated | TP4, EP4, KV-aware routing |
-| [**trtllm/disagg**](trtllm/disagg/) | 24x GPU | Disaggregated | Prefill/decode separation |
+| [**trtllm/disagg**](trtllm/disagg/) | 16x GPU | Disaggregated | Prefill/decode separation |
 
 ## Prerequisites
 
@@ -67,7 +67,7 @@ This is a large MoE model requiring significant GPU resources:
 | Configuration | GPUs | Min Memory |
 |--------------|------|------------|
 | Aggregated | 16x H100/H200 | ~1.3TB total |
-| Disaggregated | 24x H100/H200 | ~1.9TB total |
+| Disaggregated | 16x H100/H200 | ~1.3TB total |
 
 ## Notes
 

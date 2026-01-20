@@ -6,7 +6,7 @@ Production-ready deployments for **Qwen3-32B** with FP8 quantization using Tenso
 
 | Configuration | GPUs | Mode | Description |
 |--------------|------|------|-------------|
-| [**trtllm/agg**](trtllm/agg/) | 4x GPU | Aggregated | TP2, round-robin routing |
+| [**trtllm/agg**](trtllm/agg/) | 2x GPU | Aggregated | TP2, round-robin routing |
 | [**trtllm/disagg**](trtllm/disagg/) | 8x GPU | Disaggregated | Prefill/decode separation |
 
 ## Prerequisites
