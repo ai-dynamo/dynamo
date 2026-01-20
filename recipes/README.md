@@ -32,10 +32,10 @@ These recipes demonstrate aggregated or disaggregated serving:
 | **[Qwen3-235B-A22B-FP8](qwen3-235b-a22b-fp8/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | 16x GPU | ✅ | ✅ | MoE model, Prefill + Decode | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/agg/)** | TensorRT-LLM | Aggregated | 4x GB200 | ✅ | ✅ | Blackwell only, WideEP | ❌ |
 | **[GPT-OSS-120B](gpt-oss-120b/trtllm/disagg/)** | TensorRT-LLM | Disaggregated | TBD | ❌ | ❌ | Engine configs only, no K8s manifest | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 8x H200 | ✅*1 | ❌ | Benchmark recipe pending | ❌ |
-| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅*1 | ❌ | Benchmark recipe pending | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-8gpu/)** | SGLang | Disagg WideEP | 16x H200 | ✅*1 | ❌ | TP=8 per worker, single-node | ❌ |
+| **[DeepSeek-R1](deepseek-r1/sglang/disagg-16gpu/)** | SGLang | Disagg WideEP | 32x H200 | ✅*1 | ❌ | TP=16 per worker, multi-node | ❌ |
 | **[DeepSeek-R1](deepseek-r1/trtllm/disagg/wide_ep/gb200/)** | TensorRT-LLM | Disagg WideEP (GB200) | 32+4 GB200 | ✅ | ✅ | Multi-node: 8 decode + 1 prefill nodes | ❌ |
-| **[DeepSeek-R1](deepseek-r1/vllm/disagg/)** | vLLM | Disagg DEP16 | 16x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
+| **[DeepSeek-R1](deepseek-r1/vllm/disagg/)** | vLLM | Disagg DEP16 | 32x H200 | ✅ | ❌ | Multi-node, data-expert parallel | ❌ |
 
 *1: Please use `deepseek-r1/model-cache/model-download-sglang.yaml` to download the model into the PVC.
 
@@ -205,7 +205,7 @@ First, deploy the Dynamo Graph per instructions above.
 
 Then follow [Deploy Inference Gateway Section 2](../deploy/inference-gateway/README.md#2-deploy-inference-gateway) to install GAIE.
 
-Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<my-tag>` i.e. `nvcr.io/nvstaging/ai-dynamo/dynamo-frontend:0.7.0rc2-amd64`
+Update the containers.epp.image in the deployment file, i.e. llama-3-70b/vllm/agg/gaie/k8s-manifests/epp/deployment.yaml. It should match the release tag and be in the format `nvcr.io/nvidia/ai-dynamo/frontend:<version>` e.g. `nvcr.io/nvidia/ai-dynamo/frontend:0.8.0`
 The recipe assumes you are using Kubernetes discovery backend and sets the `DYN_DISCOVERY_BACKEND` env variable in the epp deployment. If you want to use etcd enable the lines below and remove the DYN_DISCOVERY_BACKEND env var.
 ```bash
 - name: ETCD_ENDPOINTS
