@@ -17,8 +17,6 @@ from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
-logger = logging.getLogger(__name__)
-
 
 class BaseWorkerHandler(ABC):
     """Abstract base class for SGLang worker handlers."""
@@ -81,8 +79,8 @@ class BaseWorkerHandler(ABC):
             try:
                 await self.generate_endpoint.unregister_endpoint_instance()
             except Exception as unreg_err:
-                logger.warning(
-                    f"[ReleaseMemory] Failed to unregister endpoint from discovery: {unreg_err}"
+                logging.warning(
+                    f"Failed to unregister endpoint from discovery: {unreg_err}"
                 )
 
             # Step 2: Pause generation to drain in-flight requests
@@ -96,7 +94,7 @@ class BaseWorkerHandler(ABC):
                 "message": f"Memory released for tags: {tags}",
             }
         except Exception as e:
-            logger.error(f"Failed to release memory occupation: {e}")
+            logging.error(f"Failed to release memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -126,8 +124,8 @@ class BaseWorkerHandler(ABC):
             try:
                 await self.generate_endpoint.register_endpoint_instance()
             except Exception as reg_err:
-                logger.warning(
-                    f"[ResumeMemory] Failed to re-register endpoint to discovery: {reg_err}"
+                logging.warning(
+                    f"Failed to re-register endpoint to discovery: {reg_err}"
                 )
 
             return {
@@ -135,7 +133,7 @@ class BaseWorkerHandler(ABC):
                 "message": f"Memory resumed for tags: {tags}",
             }
         except Exception as e:
-            logger.error(f"Failed to resume memory occupation: {e}")
+            logging.error(f"Failed to resume memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
     @abstractmethod
