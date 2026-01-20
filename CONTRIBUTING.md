@@ -59,10 +59,6 @@ Documentation improvements are always welcome. This includes:
 
 Small doc fixes can be submitted directly as PRs without an issue.
 
-### First-Time Contributors
-
-New to open source or Dynamo? Look for issues labeled [`good first issue`](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22). These are beginner-friendly tasks with clear scope.
-
 ### Propose a Feature
 
 Have an idea for a new feature? [Open a feature request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml) to discuss it with maintainers before implementation.

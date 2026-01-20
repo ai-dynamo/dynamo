@@ -367,10 +367,9 @@ If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts
 
 We welcome contributions! Whether it's bug reports, documentation improvements, or code contributions—every bit helps.
 
-- 📖 **[Contributing Guide](CONTRIBUTING.md)** – How to get started
-- 🐛 **[Report a Bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)** – Found an issue?
-- 💡 **[Feature Request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)** – Have an idea?
-- 🌱 **[Good First Issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** – New to Dynamo?
+- **[Contributing Guide](CONTRIBUTING.md)** – How to get started
+- **[Report a Bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)** – Found an issue?
+- **[Feature Request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)** – Have an idea?
 
 # Community
 
