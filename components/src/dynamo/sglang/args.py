@@ -491,6 +491,16 @@ async def parse_args(args: list[str]) -> Config:
     # contain code to download a model, it should only parse the args.
     server_args = ServerArgs.from_cli_args(parsed_args)
 
+    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
+    # tokens since last output), not cumulative tokens. When stream_output=True,
+    # SGLang sends disjoint segments which Dynamo passes through directly.
+    # Force stream_output=True for optimal streaming performance.
+    if not server_args.stream_output:
+        logging.info(
+            "Enabling stream_output=True for optimal streaming performance with Dynamo."
+        )
+    server_args.stream_output = True
+
     if parsed_args.use_sglang_tokenizer:
         logging.info(
             "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
