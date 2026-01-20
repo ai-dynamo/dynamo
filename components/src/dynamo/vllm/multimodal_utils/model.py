@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -23,6 +24,10 @@ from vllm import LLM
 from vllm.utils.system_utils import update_environment_variables
 
 logger = logging.getLogger(__name__)
+
+# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
+# should be removed once there is proper way to extract vLLM encoder.
+VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
 class SupportedModels:
@@ -131,7 +136,8 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
-    if is_qwen_vl_model(model_id):
+    if VLLM_ENCODER and is_qwen_vl_model(model_id):
+        # Disable to get ViT from the same process
         update_environment_variables(
             {
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
