@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+{{- if .Values.rbac.create }}
+{{- if .Values.rbac.namespaceRestricted }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dynamo-checkpoint.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dynamo-checkpoint.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- else }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+  labels:
+    {{- include "dynamo-checkpoint.labels" . | nindent 4 }}
+    app.kubernetes.io/component: checkpoint-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dynamo-checkpoint.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}
+

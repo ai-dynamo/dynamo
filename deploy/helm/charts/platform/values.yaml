@@ -210,99 +210,47 @@ dynamo-operator:
           renewBefore: "720h"
 
   # Checkpoint configuration for fast pod restore using CRIU/cuda-checkpoint
+  # NOTE: The checkpoint infrastructure (PVC + DaemonSet) must be installed separately
+  # using the dynamo-checkpoint Helm chart in each namespace where checkpointing is needed.
   checkpoint:
-    # -- Whether to enable checkpoint/restore functionality. When enabled, deploys the checkpoint-agent DaemonSet for creating container checkpoints.
+    # -- Whether to enable checkpoint/restore functionality
     enabled: true
 
-    # Storage configuration for checkpoint tar files
-    # Supports multiple backends: pvc (default), s3, oci
+    # Storage configuration
+    # These settings tell the operator where to find checkpoint storage
+    # Must match the configuration in the dynamo-checkpoint chart
     storage:
-      # -- Storage backend type. Options: "pvc" (PersistentVolumeClaim), "s3" (S3-compatible object storage), "oci" (OCI registry)
+      # -- Storage backend type: pvc, s3, or oci
       type: pvc
 
-      # -- Host path for signal files used for communication between checkpoint job pods and the DaemonSet. Both components mount this path to coordinate checkpoint completion.
+      # -- Host path for signal files (communication between checkpoint pod and DaemonSet)
       signalHostPath: "/var/lib/dynamo-checkpoint/signals"
 
       # PVC storage configuration (used when type=pvc)
       pvc:
-        # -- Name of an existing PVC for storing checkpoint tar files. This PVC must be created separately with RWX (ReadWriteMany) access mode to allow multiple nodes to read checkpoints.
-        pvcName: "checkpoint-storage"
-        # -- Base path within the PVC for storing checkpoint tar files. Each checkpoint is stored as {basePath}/{identityHash}.tar
+        # -- Name of the PVC created by the dynamo-checkpoint chart
+        pvcName: "dynamo-checkpoint-pvc"
+        # -- Base path within the PVC for storing checkpoints
         basePath: "/checkpoints"
 
       # S3 storage configuration (used when type=s3)
       s3:
-        # -- S3 URI in format: s3://[endpoint/]bucket/prefix. Examples: "s3://my-bucket/checkpoints" (AWS S3), "s3://minio.example.com/my-bucket/checkpoints" (MinIO)
+        # -- S3 URI in format: s3://[endpoint/]bucket/prefix
         uri: ""
-        # -- Reference to a secret containing AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION. If not provided, uses IRSA/Workload Identity for authentication.
+        # -- Reference to a secret containing AWS credentials
         credentialsSecretRef: ""
 
       # OCI registry storage configuration (used when type=oci)
       oci:
-        # -- OCI URI in format: oci://registry/repository. Examples: "oci://myregistry.io/checkpoints", "oci://ghcr.io/myorg/checkpoints"
+        # -- OCI URI in format: oci://registry/repository
         uri: ""
         # -- Reference to a docker config secret for registry authentication
         credentialsSecretRef: ""
 
-    # Checkpoint agent DaemonSet configuration
-    agent:
-      # Container image for the checkpoint agent
-      image:
-        # -- Container image repository for the checkpoint agent
-        repository: jmancuso768/cr-daemonset
-        # -- Container image tag for the checkpoint agent
-        tag: 8dfe6b08348207b1c731ebd93a52ec7ca5c2d09c
-        # -- Image pull policy for the checkpoint agent
-        pullPolicy: IfNotPresent
-
-      # -- Resource limits and requests for checkpoint agent containers
-      resources:
-        limits:
-          cpu: "500m"
-          memory: "512Mi"
-        requests:
-          cpu: "100m"
-          memory: "128Mi"
-
-      # -- Node selector for checkpoint agent pods. Use this to restrict checkpoint agents to specific nodes (e.g., GPU nodes).
-      nodeSelector:
-        nvidia.com/gpu.present: "true"
-
-      # -- Node tolerations for checkpoint agent pods. Default: tolerate GPU taints and dedicated compute nodes.
-      tolerations:
-        - key: nvidia.com/gpu
-          operator: Exists
-          effect: NoSchedule
-        - key: dedicated_compute
-          operator: Exists
-          effect: NoSchedule
-
-      # -- Affinity rules for checkpoint agent pods
-      affinity: {}
-
-      # -- Additional labels to add to checkpoint agent pods
-      podLabels: {}
-
-      # -- Additional annotations to add to checkpoint agent pods
-      podAnnotations: {}
-
-      # -- Image pull secrets for the checkpoint agent container image
-      imagePullSecrets: []
-
-      # -- Path to the container runtime socket. The checkpoint agent needs access to the container runtime to perform checkpoint operations. Change to /var/run/docker.sock for Docker runtime.
-      containerRuntimeSocket: /run/containerd/containerd.sock
-
-      # -- Runtime class for the checkpoint agent pods. Set to "nvidia" for GPU access (required for CUDA checkpointing). Leave empty to use the default runtime.
-      runtimeClassName: nvidia
-
-      # -- Path to CUDA plugin directory for GPU checkpoint support. Required for GPU workloads to checkpoint CUDA device memory.
-      cudaPluginDir: /usr/local/lib/criu
-
-      # -- CRIU ghost file size limit in bytes. Ghost files are used for temporary file handling during checkpoint. 512MB is recommended for GPU workloads with large memory allocations.
-      criuGhostLimit: "536870912"
-
-      # -- CRIU operation timeout in seconds. Maximum time to wait for checkpoint/restore to complete. Increase for models with very large memory footprints. Default: 21600 (6 hours)
-      criuTimeout: "21600"
+    # CRIU timeout configuration (shared across checkpoint and restore)
+    criu:
+      # -- CRIU operation timeout in seconds. Default: 21600 (6 hours)
+      timeout: "21600"
 
 
 # Grove component - distributed inference orchestration
