@@ -13,12 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.metadata
 import json
 import time
 from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_checkable
 
-from packaging.version import Version
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
@@ -26,9 +24,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
-_vllm_version = Version(importlib.metadata.version("vllm"))
-
-if _vllm_version > Version("0.13.0"):
+# Try importing from new vLLM structure (>0.13.0), fallback to old structure
+try:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -36,7 +33,7 @@ if _vllm_version > Version("0.13.0"):
     from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
     from vllm.entrypoints.openai.models.protocol import BaseModelPath
     from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-else:
+except ImportError:
     from vllm.entrypoints.openai.protocol import (
         ChatCompletionRequest,
         CompletionRequest,
