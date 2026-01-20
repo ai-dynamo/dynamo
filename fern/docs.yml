@@ -22,36 +22,6 @@ title: NVIDIA Dynamo Documentation
 versions:
   - display-name: Next
     path: ./versions/next.yml
-  - display-name: v0.7.1
-    path: ./versions/v0.7.1.yml
-  - display-name: v0.7.0
-    path: ./versions/v0.7.0.yml
-  - display-name: v0.6.1
-    path: ./versions/v0.6.1.yml
-  - display-name: v0.6.0
-    path: ./versions/v0.6.0.yml
-  - display-name: v0.5.1
-    path: ./versions/v0.5.1.yml
-  - display-name: v0.5.0
-    path: ./versions/v0.5.0.yml
-  - display-name: v0.4.1
-    path: ./versions/v0.4.1.yml
-  - display-name: v0.4.0
-    path: ./versions/v0.4.0.yml
-  - display-name: v0.3.2
-    path: ./versions/v0.3.2.yml
-  - display-name: v0.3.1
-    path: ./versions/v0.3.1.yml
-  - display-name: v0.3.0
-    path: ./versions/v0.3.0.yml
-  - display-name: v0.2.1
-    path: ./versions/v0.2.1.yml
-  - display-name: v0.2.0
-    path: ./versions/v0.2.0.yml
-  - display-name: v0.1.1
-    path: ./versions/v0.1.1.yml
-  - display-name: v0.1.0
-    path: ./versions/v0.1.0.yml
 
 # GitHub repository link in navbar
 navbar-links:
