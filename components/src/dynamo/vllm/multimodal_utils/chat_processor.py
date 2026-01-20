@@ -24,7 +24,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
 
-# Try importing from new vLLM structure (>0.13.0), fallback to old structure
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/32369), fallback to old structure
 try:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
