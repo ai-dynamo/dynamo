@@ -1,12 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
-#[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
 pub struct CommonExt {
     /// If true, the model will ignore the end of string token and generate to max_tokens.
     /// This field can also be specified in nvext, but the root-level value takes precedence.

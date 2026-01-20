@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context as _;
@@ -146,7 +146,10 @@ async fn engine_for(
     match out_opt {
         Output::Auto => {
             // Auto-discover backends
-            Ok(EngineConfig::Dynamic(Box::new(local_model)))
+            Ok(EngineConfig::Dynamic {
+                model: Box::new(local_model),
+                engine_factory: None,
+            })
         }
         Output::Echo => Ok(EngineConfig::InProcessText {
             model: Box::new(local_model),

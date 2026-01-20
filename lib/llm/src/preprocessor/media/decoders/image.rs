@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::io::Cursor;
@@ -7,6 +7,7 @@ use anyhow::Result;
 use image::{ColorType, GenericImageView, ImageFormat, ImageReader};
 use ndarray::Array3;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::super::common::EncodedMediaData;
 use super::super::rdma::DecodedMediaData;
@@ -14,19 +15,20 @@ use super::{DecodedMediaMetadata, Decoder};
 
 const DEFAULT_MAX_ALLOC: u64 = 128 * 1024 * 1024; // 128 MB
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Image decoder limits - can only be set via server config, not runtime kwargs.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ImageDecoder {
+pub struct ImageDecoderLimits {
     #[serde(default)]
-    pub(crate) max_image_width: Option<u32>,
+    pub max_image_width: Option<u32>,
     #[serde(default)]
-    pub(crate) max_image_height: Option<u32>,
-    // maximum allowed total allocation of the decoder in bytes
+    pub max_image_height: Option<u32>,
+    /// Maximum allowed total allocation of the decoder in bytes
     #[serde(default)]
-    pub(crate) max_alloc: Option<u64>,
+    pub max_alloc: Option<u64>,
 }
 
-impl Default for ImageDecoder {
+impl Default for ImageDecoderLimits {
     fn default() -> Self {
         Self {
             max_image_width: None,
@@ -34,6 +36,13 @@ impl Default for ImageDecoder {
             max_alloc: Some(DEFAULT_MAX_ALLOC),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImageDecoder {
+    #[serde(default)]
+    pub(crate) limits: ImageDecoderLimits,
 }
 
 #[allow(clippy::upper_case_acronyms)]
@@ -50,14 +59,25 @@ pub struct ImageMetadata {
 }
 
 impl Decoder for ImageDecoder {
+    fn with_runtime(&self, runtime: Option<&Self>) -> Self {
+        match runtime {
+            Some(r) => {
+                let mut d = r.clone();
+                d.limits.clone_from(&self.limits);
+                d
+            }
+            None => self.clone(),
+        }
+    }
+
     fn decode(&self, data: EncodedMediaData) -> Result<DecodedMediaData> {
         let bytes = data.into_bytes()?;
 
         let mut reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
         let mut limits = image::Limits::no_limits();
-        limits.max_image_width = self.max_image_width;
-        limits.max_image_height = self.max_image_height;
-        limits.max_alloc = self.max_alloc;
+        limits.max_image_width = self.limits.max_image_width;
+        limits.max_image_height = self.limits.max_image_height;
+        limits.max_alloc = self.limits.max_alloc;
         reader.limits(limits);
 
         let format = reader.format();
@@ -177,9 +197,11 @@ mod tests {
         #[case] test_case: &str,
     ) {
         let decoder = ImageDecoder {
-            max_image_width: max_width,
-            max_image_height: max_height,
-            max_alloc: Some(DEFAULT_MAX_ALLOC),
+            limits: ImageDecoderLimits {
+                max_image_width: max_width,
+                max_image_height: max_height,
+                max_alloc: Some(DEFAULT_MAX_ALLOC),
+            },
         };
         let image_bytes = create_test_image(width, height, 3, format); // RGB
         let encoded_data = create_encoded_media_data(image_bytes);
@@ -251,5 +273,34 @@ mod tests {
             input_channels,
             format
         );
+    }
+
+    #[test]
+    fn test_with_runtime_limit_enforcement() {
+        let server_limits = ImageDecoderLimits {
+            max_image_width: Some(100),
+            max_image_height: Some(100),
+            max_alloc: Some(1024),
+        };
+        let server_config = ImageDecoder {
+            limits: server_limits.clone(),
+        };
+
+        // Runtime config tries to override limits (should be ignored)
+        let runtime_limits = ImageDecoderLimits {
+            max_image_width: Some(9999),
+            max_image_height: Some(9999),
+            max_alloc: Some(999999),
+        };
+        let runtime_config = ImageDecoder {
+            limits: runtime_limits,
+        };
+
+        let merged = server_config.with_runtime(Some(&runtime_config));
+
+        // Check that server limits are preserved
+        assert_eq!(merged.limits.max_image_width, Some(100));
+        assert_eq!(merged.limits.max_image_height, Some(100));
+        assert_eq!(merged.limits.max_alloc, Some(1024));
     }
 }

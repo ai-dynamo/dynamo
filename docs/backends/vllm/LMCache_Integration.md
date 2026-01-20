@@ -160,6 +160,45 @@ When LMCache is enabled with `--connector lmcache` and `DYN_SYSTEM_PORT` is set,
 
 For detailed information on LMCache metrics, including the complete list of available metrics and how to access them, see the **[LMCache Metrics section](prometheus.md#lmcache-metrics)** in the vLLM Prometheus Metrics Guide.
 
+### Troubleshooting
+
+#### LMCache log: `PrometheusLogger instance already created with different metadata`
+
+You may see an error like:
+
+```text
+LMCache ERROR: PrometheusLogger instance already created with different metadata. This should not happen except in test
+```
+
+**Version note**: We reproduced this behavior with **vLLM v0.12.0**. We have not reproduced it with **vLLM v0.11.0**, so it may be specific to (or introduced in) v0.12.0.
+
+This is emitted by LMCache when the LMCache connector is initialized more than once in the same process (for example, once for a `WORKER` role and later for a `SCHEDULER` role). LMCache uses a process-global singleton for its Prometheus logger, so the second initialization can log this warning if its metadata differs.
+
+- **Impact**: This is a log-only error; in our testing it does not prevent vLLM/Dynamo from serving requests. If you care about LMCache metric labels, be aware the logger singleton uses the first-seen metadata.
+- **Repro without Dynamo** (vLLM v0.12.0):
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --port 18000 \
+  --gpu-memory-utilization 0.24 \
+  --enforce-eager \
+  --no-enable-prefix-caching \
+  --max-num-seqs 2 \
+  --kv-offloading-backend lmcache \
+  --kv-offloading-size 1 \
+  --disable-hybrid-kv-cache-manager
+```
+
+- **Mitigation (silence)**: set `LMCACHE_LOG_LEVEL=CRITICAL`.
+- **Upstream issue**: [vLLM issue #30996](https://github.com/vllm-project/vllm/issues/30996).
+
+#### vLLM log: `Found PROMETHEUS_MULTIPROC_DIR was set by user`
+
+vLLM v1 uses `prometheus_client.multiprocess` and stores intermediate metric values in `PROMETHEUS_MULTIPROC_DIR`.
+
+- If you **set `PROMETHEUS_MULTIPROC_DIR` yourself**, vLLM warns that the directory must be wiped between runs to avoid stale/incorrect metrics.
+- When running via Dynamo, the vLLM wrapper may set `PROMETHEUS_MULTIPROC_DIR` internally to a temporary directory to avoid vLLM cleanup issues. If you still see the warning, confirm you are not exporting `PROMETHEUS_MULTIPROC_DIR` in your shell or container environment.
+
 ## References and Additional Resources
 
 - [LMCache Documentation](https://docs.lmcache.ai/index.html) - Comprehensive guide and API reference

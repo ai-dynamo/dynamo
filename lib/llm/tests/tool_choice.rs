@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_async_openai::types::{
@@ -30,6 +30,7 @@ fn create_test_request() -> NvCreateChatCompletionRequest {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
         unsupported_fields: Default::default(),
     }
 }
@@ -118,6 +119,7 @@ fn build_backend_output(text: &str) -> BackendOutput {
         log_probs: None,
         top_logprobs: None,
         finish_reason: Some(common::FinishReason::Stop),
+        stop_reason: None,
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,
@@ -285,6 +287,7 @@ async fn test_streaming_named_tool_buffers_until_finish() {
             } else {
                 None
             },
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -351,6 +354,7 @@ async fn test_streaming_required_tool_parallel() {
             } else {
                 None
             },
+            stop_reason: None,
             index: Some(0),
             completion_usage: None,
             disaggregated_params: None,
@@ -419,6 +423,7 @@ fn test_no_tool_choice_outputs_normal_text() {
         log_probs: None,
         top_logprobs: None,
         finish_reason: None,
+        stop_reason: None,
         index: Some(0),
         completion_usage: None,
         disaggregated_params: None,

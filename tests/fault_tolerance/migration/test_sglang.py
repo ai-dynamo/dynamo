@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -27,6 +27,7 @@ from .utils import (
     determine_request_receiving_worker,
     start_completion_request,
     validate_completion_response,
+    verify_migration_metrics,
     verify_migration_occurred,
 )
 
@@ -38,6 +39,7 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
     pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
 ]
 
 
@@ -139,17 +141,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
 
 @pytest.mark.timeout(235)  # 3x average
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_request_migration_sglang_worker_failure(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -213,20 +204,14 @@ def test_request_migration_sglang_worker_failure(
                 # Step 7: Verify migration occurred
                 verify_migration_occurred(frontend)
 
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
+
 
 @pytest.mark.timeout(235)  # 3x average
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_request_migration_sglang_graceful_shutdown(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -294,19 +279,13 @@ def test_request_migration_sglang_graceful_shutdown(
                 # Step 7: Verify migration occurred during graceful shutdown
                 verify_migration_occurred(frontend)
 
+                # Step 8: Verify migration metrics
+                verify_migration_metrics(
+                    frontend.frontend_port, expected_ongoing_request_count=1
+                )
+
 
 @pytest.mark.timeout(135)  # 3x average
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_no_request_migration_sglang_worker_failure(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
@@ -391,17 +370,6 @@ def test_no_request_migration_sglang_worker_failure(
 
 @pytest.mark.timeout(135)  # 3x average
 @pytest.mark.skip(reason="SGLang graceful shutdown not yet implemented")
-@pytest.mark.parametrize(
-    "request_plane",
-    [
-        "nats",
-        pytest.param(
-            "tcp",
-            marks=pytest.mark.xfail(reason="Multi-worker TCP unstable", strict=False),
-        ),
-    ],
-    indirect=True,
-)
 def test_no_request_migration_sglang_graceful_shutdown(
     request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):

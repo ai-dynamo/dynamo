@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Configuration file for the Sphinx documentation builder.
@@ -7,7 +7,7 @@ import sys
 
 # -- Project information -----------------------------------------------------
 project = "NVIDIA Dynamo"
-copyright = "2024-2025, NVIDIA CORPORATION & AFFILIATES"
+copyright = "2024-2026, NVIDIA CORPORATION & AFFILIATES"
 author = "NVIDIA"
 
 # Version is set via DYNAMO_DOCS_VERSION env var during build (e.g., "0.3.0")
@@ -86,6 +86,15 @@ redirects = {
     "dynamo_glossary": "../reference/glossary.html",
     "support_matrix": "../reference/support-matrix.html",
     "components/router/README": "../router/README.html",
+    # Multimodal documentation consolidation
+    "backends/vllm/multimodal": "../../multimodal/vllm.html",
+    "backends/vllm/multimodal_vllm_guide": "../../multimodal/vllm.html",
+    "backends/trtllm/multimodal_support": "../../multimodal/trtllm.html",
+    "backends/trtllm/multimodal_trtllm_guide": "../../multimodal/trtllm.html",
+    "backends/trtllm/multinode/multinode-multimodal-example": "../../../multimodal/trtllm.html",
+    "backends/sglang/multimodal_epd": "../../multimodal/sglang.html",
+    "backends/sglang/multimodal_sglang_guide": "../../multimodal/sglang.html",
+    "multimodal/multimodal_intro": "index.html",
 }
 
 # Custom extensions

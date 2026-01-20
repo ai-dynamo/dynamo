@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{AsyncEngineContextProvider, ResponseStream, STREAM_ERR_MSG};
@@ -196,6 +196,64 @@ where
 
         self.generate_with_fault_detection(instance_id, request)
             .await
+    }
+
+    /// Select the next worker according to the routing mode.
+    /// Increments round-robin counter if applicable.
+    /// Panics if called on Direct or KV mode - those have their own selection mechanisms.
+    pub fn select_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            _ => {
+                panic!(
+                    "select_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
+    }
+
+    /// Peek the next worker according to the routing mode without incrementing the counter.
+    /// Useful for checking if a worker is suitable before committing to it.
+    pub fn peek_next_worker(&self) -> Option<u64> {
+        let instance_ids = self.client.instance_ids_avail();
+        let count = instance_ids.len();
+        if count == 0 {
+            return None;
+        }
+
+        match self.router_mode {
+            RouterMode::RoundRobin => {
+                // Just peek at the current counter value without incrementing
+                let counter = self.round_robin_counter.load(Ordering::Relaxed) as usize;
+                Some(instance_ids[counter % count])
+            }
+            RouterMode::Random => {
+                // For random, peeking implies a fresh random selection since it's stateless.
+                // Note: The caller must realize that select_next_worker() will pick a DIFFERENT random worker.
+                let counter = rand::rng().random::<u64>() as usize;
+                Some(instance_ids[counter % count])
+            }
+            _ => {
+                panic!(
+                    "peek_next_worker should not be called for {:?} routing mode",
+                    self.router_mode
+                )
+            }
+        }
     }
 
     /*

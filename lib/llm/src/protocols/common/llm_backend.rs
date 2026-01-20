@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +7,7 @@ pub use super::FinishReason;
 pub use super::preprocessor::PreprocessedRequest;
 use crate::protocols::TokenIdType;
 use dynamo_async_openai::types::CompletionUsage;
+use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
@@ -44,6 +45,12 @@ pub struct BackendOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
+
     // Model Deployment Card checksum
     //pub mdcsum: String,
 
@@ -67,7 +74,7 @@ pub struct BackendOutput {
 ///
 /// This is the minimal raw output from the LLM engine. The Backend may then apply multiple
 /// levels of post-processing before the BackendOutput is returns
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct LLMEngineOutput {
     // new token_ids
     pub token_ids: Vec<TokenIdType>,
@@ -90,6 +97,11 @@ pub struct LLMEngineOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
+
+    /// The stop string or token that triggered the stop condition.
+    /// This is set when finish_reason is Stop and identifies what triggered it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<StopReason>,
 
     // Index field for batch requests to match OpenAI format
     pub index: Option<u32>,
@@ -117,6 +129,7 @@ impl LLMEngineOutput {
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Cancelled),
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             extra_args: None,
@@ -132,6 +145,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Stop),
+            stop_reason: None,
             top_logprobs: None,
             index: None,
             disaggregated_params: None,
@@ -149,6 +163,7 @@ impl LLMEngineOutput {
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Length),
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             extra_args: None,
@@ -165,6 +180,7 @@ impl LLMEngineOutput {
             log_probs: None,
             top_logprobs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
+            stop_reason: None,
             index: None,
             disaggregated_params: None,
             extra_args: None,

@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -73,7 +73,7 @@ be operating within your distributed runtime.
 
 The current examples use a hard-coded `namespace`. We will address the `namespace` collisions later.
 
-All examples require the `etcd` and `nats.io` pre-requisites to be running and available.
+Most examples require `etcd` for service discovery. `nats.io` is required for KV-aware routing with event tracking; for approximate mode (`--no-kv-events`), NATS is optional.
 
 #### Rust `hello_world`
 

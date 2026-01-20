@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -32,7 +32,7 @@ AIPERF_PREFILL_ATTN_DP_NUM_REQ_RATIO = 4
 
 # Cost calculation defaults
 # TODO: allow user to configure this in GUI
-GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars
+DEFAULT_GPU_COST_PER_HOUR = 3.0  # Cost per GPU per hour in dollars
 
 
 class EngineType(str, Enum):

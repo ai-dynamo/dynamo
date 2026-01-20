@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Integration tests for logprob analysis functionality
@@ -389,6 +389,7 @@ fn create_response_with_linear_probs(
             reasoning_content: None,
         },
         finish_reason: Some(FinishReason::Stop),
+        stop_reason: None,
         logprobs: Some(ChatChoiceLogprobs {
             content: Some(token_logprobs),
             refusal: None,
@@ -468,6 +469,7 @@ fn create_multi_choice_response(
                     reasoning_content: None,
                 },
                 finish_reason: Some(FinishReason::Stop),
+                stop_reason: None,
                 logprobs: Some(ChatChoiceLogprobs {
                     content: Some(token_logprobs),
                     refusal: None,

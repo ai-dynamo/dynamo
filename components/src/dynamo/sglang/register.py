@@ -1,12 +1,14 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
 import logging
+import socket
 from typing import Optional
 
 import sglang as sgl
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.utils import get_local_ip_auto
 
 from dynamo._core import Endpoint
 from dynamo.llm import ModelInput, ModelRuntimeConfig, ModelType, register_llm
@@ -65,6 +67,39 @@ async def _register_llm_with_runtime_config(
         return False
 
 
+def _get_bootstrap_info_for_config(
+    engine: sgl.Engine,
+) -> tuple[Optional[str], Optional[int]]:
+    """Extract bootstrap host and port from SGLang engine for config registration.
+
+    Args:
+        engine: The SGLang engine instance.
+
+    Returns:
+        Tuple of (bootstrap_host, bootstrap_port), or (None, None) if not available.
+    """
+    try:
+        inner_tm = engine.tokenizer_manager
+        bootstrap_port = getattr(
+            inner_tm.server_args, "disaggregation_bootstrap_port", None
+        )
+
+        if bootstrap_port is None:
+            return None, None
+
+        if inner_tm.server_args.dist_init_addr:
+            bootstrap_host = socket.gethostbyname(
+                inner_tm.server_args.dist_init_addr.split(":")[0]
+            )
+        else:
+            bootstrap_host = get_local_ip_auto()
+
+        return bootstrap_host, bootstrap_port
+    except Exception as e:
+        logging.warning(f"Failed to get bootstrap info: {e}")
+        return None, None
+
+
 async def _get_runtime_config(
     engine: sgl.Engine, server_args: ServerArgs, dynamo_args: DynamoArgs
 ) -> Optional[ModelRuntimeConfig]:
@@ -82,7 +117,16 @@ async def _get_runtime_config(
     # set reasoning parser and tool call parser
     runtime_config.reasoning_parser = dynamo_args.reasoning_parser
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
+    runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
 
+    # Set bootstrap endpoint for disaggregated serving (prefill workers)
+    bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
+    if bootstrap_host and bootstrap_port:
+        runtime_config.set_disaggregated_endpoint(bootstrap_host, bootstrap_port)
+        logging.info(
+            f"Publishing disaggregated endpoint to discovery: "
+            f"{bootstrap_host}:{bootstrap_port}"
+        )
     # In SGLang, these are server_args, not scheduler_info (unlike vLLM)
     # Note: If --max-running-requests is not specified, SGLang uses an internal default
     # undocumented value. The value here will be None if not explicitly set by user.
