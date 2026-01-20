@@ -8,6 +8,7 @@ CONCURRENCY=1
 # Create a JSONL file with 12 identical small image URLs
 # NOTE: any kind of caching can signifantly affect the benchmark results,
 # should make sure what you are doing.
+rm data_small.jsonl
 echo '{"images": ["http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg"]}' \
     >> data_small.jsonl
 echo "This benchmark uses duplicate image urls, so any kind of caching can signifantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
