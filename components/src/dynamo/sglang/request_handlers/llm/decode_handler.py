@@ -23,6 +23,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint=None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -31,12 +32,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
             component,
             engine,
             config,
             publisher,
+            generate_endpoint,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
