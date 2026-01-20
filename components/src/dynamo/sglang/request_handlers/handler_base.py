@@ -80,9 +80,6 @@ class BaseWorkerHandler(ABC):
             # Step 1: Unregister endpoint from discovery FIRST
             try:
                 await self.generate_endpoint.unregister_endpoint_instance()
-                logger.info(
-                    "[ReleaseMemory] Unregistered endpoint from discovery - worker removed from routing pool"
-                )
             except Exception as unreg_err:
                 logger.warning(
                     f"[ReleaseMemory] Failed to unregister endpoint from discovery: {unreg_err}"
@@ -90,11 +87,9 @@ class BaseWorkerHandler(ABC):
 
             # Step 2: Pause generation to drain in-flight requests
             await self.engine.async_pause_generation()
-            logger.info("[ReleaseMemory] Generation paused")
 
             # Step 3: Release memory now that it's safe
             await self.engine.async_release_memory_occupation(tags)
-            logger.info(f"[ReleaseMemory] Released memory for tags: {tags}")
 
             return {
                 "status": "ok",
@@ -123,18 +118,13 @@ class BaseWorkerHandler(ABC):
         try:
             # Step 1: Resume memory first - must be ready before accepting requests
             await self.engine.async_resume_memory_occupation(tags)
-            logger.info(f"[ResumeMemory] Resumed memory for tags: {tags}")
 
             # Step 2: Continue generation
             await self.engine.async_continue_generation()
-            logger.info("[ResumeMemory] Generation continued")
 
             # Step 3: Re-register to discovery so frontend can route to us
             try:
                 await self.generate_endpoint.register_endpoint_instance()
-                logger.info(
-                    "[ResumeMemory] Re-registered endpoint to discovery - worker added back to routing pool"
-                )
             except Exception as reg_err:
                 logger.warning(
                     f"[ResumeMemory] Failed to re-register endpoint to discovery: {reg_err}"
