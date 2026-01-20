@@ -26,4 +26,6 @@ kv_cache_config:
     - 32768
 
 cache_transceiver_config:
-  backend: DEFAULT
+  backend: UCX
+  # Must exceed max ISL to avoid transfer failures and perf degradation
+  max_tokens_in_buffer: 16384
