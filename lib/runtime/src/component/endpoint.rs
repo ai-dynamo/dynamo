@@ -86,8 +86,6 @@ impl EndpointConfigBuilder {
 
         let system_health = endpoint.drt().system_health();
 
-        let request_plane_mode = endpoint.drt().request_plane();
-
         // Register with graceful shutdown tracker if needed
         if graceful_shutdown {
             tracing::debug!(
