@@ -129,15 +129,28 @@ Understanding Dynamo's architecture helps you find where to make changes.
 
 | Component | Purpose | Directory |
 |-----------|---------|-----------|
-| **API Server** | OpenAI-compatible HTTP frontend for receiving inference requests | `components/src/dynamo/frontend/` |
-| **Smart Router** | KV cache-aware request routing with load balancing | `components/src/dynamo/router/` |
-| **Planner** | Real-time performance tuning and worker scaling decisions | `components/src/dynamo/planner/` |
-| **Backend Workers** | Engine integrations (vLLM, SGLang, TensorRT-LLM) | `components/src/dynamo/{vllm,sglang,trtllm}/` |
-| **Disaggregated Serving** | Separate Prefill and Decode workers for GPU optimization | `lib/llm/` |
+| **Frontend** | OpenAI-compatible HTTP API server | `components/src/dynamo/frontend/` |
+| **Router** | KV cache-aware request routing with load balancing | `components/src/dynamo/router/` |
+| **Planner** | Real-time performance tuning and worker scaling | `components/src/dynamo/planner/` |
+| **Workers** | Backend engine integrations (vLLM, SGLang, TensorRT-LLM) | `components/src/dynamo/{vllm,sglang,trtllm}/` |
 | **KV Cache Manager** | Multi-tier cache offloading (GPU → CPU → SSD → Object Storage) | `lib/bindings/kvbm/` |
-| **Event Plane** | Metrics transfer across Dynamo components | `lib/runtime/` |
-| **NIXL** | Low-latency, interconnect-agnostic multi-node data transfer | [ai-dynamo/nixl](https://github.com/ai-dynamo/nixl) |
-| **Kubernetes Operator** | CRDs, controllers, and webhooks for K8s deployment | `deploy/operator/` |
+| **SLA Profiler** | Benchmarking and SLA-driven configuration | `benchmarks/profiler/` |
+
+### Communication Planes
+
+| Plane | Purpose | Documentation |
+|-------|---------|---------------|
+| **Discovery Plane** | Service registration and discovery across components | [docs/design_docs/distributed_runtime.md](docs/design_docs/distributed_runtime.md) |
+| **Request Plane** | High-performance request routing between components | [docs/design_docs/request_plane.md](docs/design_docs/request_plane.md) |
+| **KV Event Plane** | KV cache event propagation for cache-aware routing | [docs/design_docs/event_plane.md](docs/design_docs/event_plane.md) |
+
+### Kubernetes Deployment
+
+| Component | Purpose | Directory |
+|-----------|---------|-----------|
+| **Operator** | CRDs, controllers, and webhooks for K8s-native deployment | `deploy/operator/` |
+| **Helm Charts** | Templated deployment configurations | `deploy/helm/` |
+| **Recipes** | Pre-built deployment configurations for common scenarios | `recipes/` |
 
 ### Why These Languages?
 
