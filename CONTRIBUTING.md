@@ -43,14 +43,14 @@ We are committed to providing a welcoming and inclusive environment. Please read
 
 ## Ways to Contribute
 
-### 🐛 Report a Bug
+### Report a Bug
 
 Found something broken? [Open a bug report](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml) with:
 - Steps to reproduce
 - Expected vs. actual behavior
 - Environment details (OS, GPU, Python version, Dynamo version)
 
-### 📚 Improve Documentation
+### Improve Documentation
 
 Documentation improvements are always welcome. This includes:
 - Fixing typos or unclear explanations
@@ -59,15 +59,15 @@ Documentation improvements are always welcome. This includes:
 
 Small doc fixes can be submitted directly as PRs without an issue.
 
-### 🌱 First-Time Contributors
+### First-Time Contributors
 
 New to open source or Dynamo? Look for issues labeled [`good first issue`](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22). These are beginner-friendly tasks with clear scope.
 
-### 💡 Propose a Feature
+### Propose a Feature
 
 Have an idea for a new feature? [Open a feature request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml) to discuss it with maintainers before implementation.
 
-### 🔧 Contribute Code
+### Contribute Code
 
 Ready to write code? See the [Contribution Workflow](#contribution-workflow) section below for the process.
 
@@ -282,8 +282,8 @@ By contributing, you agree that your contributions will be licensed under the [A
 
 ## Getting Help
 
-- 💬 **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
-- 🗣️ **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
-- 📖 **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/latest/index.html)
+- **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
+- **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
+- **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/latest/index.html)
 
-Thank you for contributing to Dynamo! 🚀
+Thank you for contributing to Dynamo!
