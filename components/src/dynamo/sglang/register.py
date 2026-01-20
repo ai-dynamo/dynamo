@@ -124,6 +124,8 @@ def _get_bootstrap_info_for_config(
                     f"Failed to resolve bootstrap host '{host_core}': {e}, using as-is"
                 )
         else:
+            # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
+            # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
             bootstrap_host = get_local_ip_auto()
             is_ipv6 = ":" in bootstrap_host
             logging.info(
