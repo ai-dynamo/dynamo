@@ -75,49 +75,9 @@ Ready to write code? See the [Contribution Workflow](#contribution-workflow) sec
 
 ## Quick Start for Contributors
 
-### Prerequisites
-
-- **Python 3.10+** with development headers (`sudo apt install python3-dev`)
-- **Rust** (install via [rustup](https://rustup.rs/))
-- **Build tools**: `sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler cmake`
-
-### Fork and Clone
-
 1. [Fork the repository](https://github.com/ai-dynamo/dynamo/fork) on GitHub
-2. Clone your fork:
-
-```bash
-git clone https://github.com/YOUR_USERNAME/dynamo.git
-cd dynamo
-
-# Create virtual environment
-uv venv venv
-source venv/bin/activate
-
-# Install dependencies and build
-uv pip install pip maturin
-cd lib/bindings/python && maturin develop --uv && cd ../../..
-uv pip install -e .
-```
-
-### Run Tests
-
-```bash
-# Run unit tests
-pytest -m "unit"
-
-# Run a quick sanity check
-./deploy/sanity_check.py
-```
-
-### Set Up Pre-commit Hooks
-
-```bash
-pip install pre-commit
-pre-commit install
-```
-
-For detailed setup instructions, see the [Developing Locally](README.md#developing-locally) section in the README.
+2. Clone your fork and set up your development environment following the [Developing Locally](README.md#developing-locally) guide
+3. Set up pre-commit hooks: `pip install pre-commit && pre-commit install`
 
 ---
 
