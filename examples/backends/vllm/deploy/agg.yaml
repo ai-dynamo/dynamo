@@ -12,7 +12,12 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:new-build-1
+          args:
+          - "-m"
+          - "dynamo.frontend"
+          - "--store-kv"
+          - "mem"
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -22,7 +27,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:new-build-1
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -31,3 +36,5 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
+            - --store-kv
+            - mem

@@ -10,7 +10,18 @@ IMAGE_REPO ?= $(DOCKER_SERVER)/$(IMAGE_NAME)
 IMAGE_TAG ?= $(IMAGE_REPO):$(GIT_TAG)
 
 # Build configuration
-PLATFORMS ?= linux/amd64
+# Auto-detect host architecture for consistent builds with Dynamo library
+# The Dynamo library is built for the host arch, so Docker must match
+HOST_ARCH := $(shell uname -m)
+ifeq ($(HOST_ARCH),x86_64)
+    PLATFORMS ?= linux/amd64
+else ifeq ($(HOST_ARCH),aarch64)
+    PLATFORMS ?= linux/arm64
+else ifeq ($(HOST_ARCH),arm64)
+    PLATFORMS ?= linux/arm64
+else
+    PLATFORMS ?= linux/amd64
+endif
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
 BUILDER_IMAGE ?= golang:1.24

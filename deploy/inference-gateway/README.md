@@ -49,24 +49,10 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
 
 ```bash
+cd deploy/inference-gateway
 ./scripts/install_gaie_crd_kgateway.sh
 ```
-
-#### d. Deploy the Inference Gateway
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/kgateway/gateway.yaml
-```
-
-#### e. Patch the Gateway to use kgateway GatewayClass
-
-The manifest uses `gatewayClassName: agentgateway` but kGateway creates a GatewayClass named `kgateway`. Patch it:
-
-```bash
-kubectl patch gateway inference-gateway --type='json' \
-  -p='[{"op": "replace", "path": "/spec/gatewayClassName", "value": "kgateway"}]'
-```
-**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command above fixes this mismatch.
+**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
 
 #### f. Verify the Gateway is running
 
@@ -79,9 +65,6 @@ kubectl get gateway inference-gateway
 ```
 
 
-Dynamo backend workers require routing information in the request body as an `nvext` field (not just headers). The GAIE EPP sets routing headers (`x-worker-instance-id`, etc.), but these headers need to be converted into body fields before reaching the backend.
-
-
 ### 3. Deploy Your Model ###
 
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
@@ -89,7 +72,8 @@ Follow the steps in [model deployment](../../examples/backends/vllm/deploy/READM
 Sample commands to deploy model:
 
 ```bash
-cd <dynamo-source-root>/examples/backends/vllm/deploy
+cd <dynamo-source-root>
+cd examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
@@ -153,7 +137,7 @@ The Inference Gateway is configured through the `inference-gateway-resources.yam
 Deploy the Inference Gateway resources to your Kubernetes cluster by running the command below.
 
 ```bash
-cd deploy/
+cd deploy/inference-gateway/
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
@@ -214,7 +198,6 @@ Check that all resources are properly deployed:
 
 ```bash
 kubectl get inferencepool
-kubectl get inferencemodel
 kubectl get httproute
 kubectl get service
 kubectl get gateway
@@ -226,10 +209,6 @@ Sample output:
 # kubectl get inferencepool
 NAME        AGE
 qwen-pool   33m
-
-# kubectl get inferencemodel
-NAME         MODEL NAME        INFERENCE POOL   CRITICALITY   AGE
-qwen-model   Qwen/Qwen3-0.6B   qwen-pool        Critical      33m
 
 # kubectl get httproute
 NAME        HOSTNAMES   AGE
@@ -364,6 +343,7 @@ helm uninstall kgateway -n kgateway-system
 helm uninstall kgateway-crds -n kgateway-system
 
 # 3. Delete the kgateway-system namespace (optional, cleans up everything in it)
+helm uninstall kgateway --namespace kgateway-system
 kubectl delete namespace kgateway-system --ignore-not-found
 
 # 4. Delete the Inference Extension CRDs

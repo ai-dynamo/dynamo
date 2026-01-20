@@ -29,6 +29,10 @@ ARG BASE_IMAGE=ubuntu:24.04
 # =============================================================================
 FROM ${BUILDER_IMAGE} AS builder
 
+# Docker buildx provides these automatically for multi-platform builds
+ARG TARGETOS=linux
+ARG TARGETARCH
+
 ARG COMMIT_SHA
 ARG BUILD_REF
 
@@ -56,7 +60,8 @@ RUN if [ ! -f "pkg/plugins/dynamo_kv_scorer/lib/libdynamo_llm_capi.a" ]; then \
     fi
 
 # Build with CGO enabled for the Dynamo FFI
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build \
+# Use TARGETOS/TARGETARCH from Docker buildx for proper platform support
+RUN CGO_ENABLED=1 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
     -ldflags="-X sigs.k8s.io/gateway-api-inference-extension/version.GitVersion=${BUILD_REF} \
               -X sigs.k8s.io/gateway-api-inference-extension/version.GitCommit=${COMMIT_SHA}" \
     -o epp ./cmd/epp
