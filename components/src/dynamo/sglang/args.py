@@ -495,10 +495,6 @@ async def parse_args(args: list[str]) -> Config:
     # tokens since last output), not cumulative tokens. When stream_output=True,
     # SGLang sends disjoint segments which Dynamo passes through directly.
     # Force stream_output=True for optimal streaming performance.
-    if not server_args.stream_output:
-        logging.info(
-            "Enabling stream_output=True for optimal streaming performance with Dynamo."
-        )
     server_args.stream_output = True
 
     if parsed_args.use_sglang_tokenizer:
