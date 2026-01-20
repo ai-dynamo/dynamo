@@ -7,6 +7,7 @@ import os
 import time
 from typing import Any, AsyncGenerator, Dict
 
+import nvtx
 import sglang as sgl
 
 from dynamo._core import Component, Context
@@ -57,6 +58,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         logging.info("Engine shutdown")
         super().cleanup()
 
+    @nvtx.annotate(domain="py", category="DecodeHandler")
     def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Build sampling params from request format.
 
@@ -68,27 +70,43 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         """
         if self.skip_tokenizer_init:
             # Token-based request format
-            sampling_opts = request.get("sampling_options", {})
-            stop_conditions = request.get("stop_conditions", {})
+            with nvtx.annotate(
+                "extract_token_based_params",
+                domain="py",
+                category="DecodeHandler",
+                color="cyan",
+            ):
+                sampling_opts = request.get("sampling_options", {})
+                stop_conditions = request.get("stop_conditions", {})
 
-            param_mapping = {
-                "temperature": sampling_opts.get("temperature"),
-                "top_p": sampling_opts.get("top_p"),
-                "top_k": sampling_opts.get("top_k"),
-                "max_new_tokens": stop_conditions.get("max_tokens"),
-                "ignore_eos": stop_conditions.get("ignore_eos"),
-            }
+                param_mapping = {
+                    "temperature": sampling_opts.get("temperature"),
+                    "top_p": sampling_opts.get("top_p"),
+                    "top_k": sampling_opts.get("top_k"),
+                    "max_new_tokens": stop_conditions.get("max_tokens"),
+                    "ignore_eos": stop_conditions.get("ignore_eos"),
+                }
         else:
             # OpenAI request format
-            param_mapping = {
-                "temperature": request.get("temperature"),
-                "top_p": request.get("top_p"),
-                "top_k": request.get("top_k"),
-                "max_new_tokens": request.get("max_tokens"),
-            }
+            with nvtx.annotate(
+                "extract_openai_params",
+                domain="py",
+                category="DecodeHandler",
+                color="cyan",
+            ):
+                param_mapping = {
+                    "temperature": request.get("temperature"),
+                    "top_p": request.get("top_p"),
+                    "top_k": request.get("top_k"),
+                    "max_new_tokens": request.get("max_tokens"),
+                }
 
-        return {k: v for k, v in param_mapping.items() if v is not None}
+        with nvtx.annotate(
+            "filter_none_params", domain="py", category="DecodeHandler", color="yellow"
+        ):
+            return {k: v for k, v in param_mapping.items() if v is not None}
 
+    @nvtx.annotate(domain="py", category="DecodeHandler")
     async def generate(
         self, request: Dict[str, Any], context: Context
     ) -> AsyncGenerator[Dict[str, Any], None]:
@@ -107,8 +125,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         # Use context.id() as the rid for SGLang - this must match the ID used by
         # decode_disagger.rs when calling the migrate endpoint
         request_id = context.id()
-        sampling_params = self._build_sampling_params(request)
-        input_param = self._get_input_param(request)
+        with nvtx.annotate(
+            "build_sampling_params", domain="py", category="DecodeHandler", color="blue"
+        ):
+            sampling_params = self._build_sampling_params(request)
+        with nvtx.annotate(
+            "get_input_param", domain="py", category="DecodeHandler", color="cyan"
+        ):
+            input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
             # Check if bootstrap_info is in the request (direct field or via prefill_result)
@@ -131,22 +155,35 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 )
 
             _t0 = time.perf_counter()
-            decode = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                bootstrap_host=bootstrap_info["bootstrap_host"],
-                bootstrap_port=bootstrap_info["bootstrap_port"],
-                bootstrap_room=bootstrap_info["bootstrap_room"],
-                rid=request_id,
-            )
+            with nvtx.annotate(
+                "async_generate_disagg",
+                domain="py",
+                category="DecodeHandler",
+                color="green",
+            ):
+                decode = await self.engine.async_generate(
+                    **input_param,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    bootstrap_host=bootstrap_info["bootstrap_host"],
+                    bootstrap_port=bootstrap_info["bootstrap_port"],
+                    bootstrap_room=bootstrap_info["bootstrap_room"],
+                    rid=request_id,
+                )
             _t1 = time.perf_counter()
             # Wait for first token with timeout
             decode_iter = decode.__aiter__()
             try:
-                first_res = await asyncio.wait_for(
-                    decode_iter.__anext__(), timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS
-                )
+                with nvtx.annotate(
+                    "wait_first_token_disagg",
+                    domain="py",
+                    category="DecodeHandler",
+                    color="orange",
+                ):
+                    first_res = await asyncio.wait_for(
+                        decode_iter.__anext__(),
+                        timeout=DECODE_KV_TRANSFER_TIMEOUT_SECONDS,
+                    )
                 _t2 = time.perf_counter()
             except asyncio.TimeoutError:
                 # Abort the request on SGLang side to prevent resource leak
@@ -178,12 +215,18 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             if self.enable_trace:
                 self._propagate_trace_context_to_sglang(context)
 
-            agg = await self.engine.async_generate(
-                **input_param,
-                sampling_params=sampling_params,
-                stream=True,
-                rid=request_id,
-            )
+            with nvtx.annotate(
+                "async_generate_aggregated",
+                domain="py",
+                category="DecodeHandler",
+                color="green",
+            ):
+                agg = await self.engine.async_generate(
+                    **input_param,
+                    sampling_params=sampling_params,
+                    stream=True,
+                    rid=request_id,
+                )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
                     yield out
@@ -191,6 +234,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(agg, context):
                     yield out
 
+    @nvtx.annotate(domain="py", category="DecodeHandler")
     async def _process_token_stream(
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
@@ -211,48 +255,93 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
+                with nvtx.annotate(
+                    "process_stream_item",
+                    domain="py",
+                    category="DecodeHandler",
+                    color="blue",
+                ):
+                    # Extract SGLang request ID from the first response and set the future
+                    if not request_id_future.done():
+                        with nvtx.annotate(
+                            "extract_request_id",
+                            domain="py",
+                            category="DecodeHandler",
+                            color="cyan",
+                        ):
+                            meta_info = res.get("meta_info", {})
+                            sglang_request_id = meta_info.get("id")
+                            if sglang_request_id:
+                                request_id_future.set_result(sglang_request_id)
 
-                # Check cancellation before yielding to allow proper cleanup.
-                # This lets SGLang proceed to the second token generation, which will
-                # async context switch and allow the abort monitor to signal cancellation.
-                # The loop should exit by itself when context.is_stopped() returns True.
-                out = {}
-                finish_reason = res["meta_info"]["finish_reason"]
-                if finish_reason:
-                    out["finish_reason"] = finish_reason["type"]
+                    # Check cancellation before yielding to allow proper cleanup.
+                    # This lets SGLang proceed to the second token generation, which will
+                    # async context switch and allow the abort monitor to signal cancellation.
+                    # The loop should exit by itself when context.is_stopped() returns True.
+                    out = {}
+                    with nvtx.annotate(
+                        "extract_meta_info",
+                        domain="py",
+                        category="DecodeHandler",
+                        color="yellow",
+                    ):
+                        finish_reason = res["meta_info"]["finish_reason"]
+                        if finish_reason:
+                            out["finish_reason"] = finish_reason["type"]
 
-                output_ids = res.get("output_ids", [])
-                # If request is not finished yet, but there are no outputs, return an error.
-                if not output_ids and not finish_reason:
+                    with nvtx.annotate(
+                        "get_output_ids",
+                        domain="py",
+                        category="DecodeHandler",
+                        color="green",
+                    ):
+                        output_ids = res.get("output_ids", [])
+                    # If request is not finished yet, but there are no outputs, return an error.
+                    if not output_ids and not finish_reason:
+                        if not context.is_stopped():
+                            yield {"finish_reason": "error", "token_ids": []}
+                        break
+
+                    with nvtx.annotate(
+                        "slice_output_ids",
+                        domain="py",
+                        category="DecodeHandler",
+                        color="blue",
+                    ):
+                        next_total_toks = len(output_ids)
+                        out["token_ids"] = output_ids[num_output_tokens_so_far:]
+                        num_output_tokens_so_far = next_total_toks
+                    if finish_reason:
+                        with nvtx.annotate(
+                            "build_completion_usage",
+                            domain="py",
+                            category="DecodeHandler",
+                            color="purple",
+                        ):
+                            input_tokens = res["meta_info"]["prompt_tokens"]
+                            completion_tokens = res["meta_info"]["completion_tokens"]
+                            cached_tokens = res["meta_info"]["cached_tokens"]
+                            prefill_prompt_tokens_details = None
+                            if cached_tokens is not None and cached_tokens > 0:
+                                prefill_prompt_tokens_details = {
+                                    "cached_tokens": cached_tokens
+                                }
+                            out["completion_usage"] = {
+                                "prompt_tokens": input_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": input_tokens + completion_tokens,
+                                "prompt_tokens_details": prefill_prompt_tokens_details,
+                            }
                     if not context.is_stopped():
-                        yield {"finish_reason": "error", "token_ids": []}
-                    break
+                        with nvtx.annotate(
+                            "yield_response",
+                            domain="py",
+                            category="DecodeHandler",
+                            color="green",
+                        ):
+                            yield out
 
-                next_total_toks = len(output_ids)
-                out["token_ids"] = output_ids[num_output_tokens_so_far:]
-                num_output_tokens_so_far = next_total_toks
-                if finish_reason:
-                    input_tokens = res["meta_info"]["prompt_tokens"]
-                    completion_tokens = res["meta_info"]["completion_tokens"]
-                    cached_tokens = res["meta_info"]["cached_tokens"]
-                    prefill_prompt_tokens_details = None
-                    if cached_tokens is not None and cached_tokens > 0:
-                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
-                    out["completion_usage"] = {
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": completion_tokens,
-                        "total_tokens": input_tokens + completion_tokens,
-                        "prompt_tokens_details": prefill_prompt_tokens_details,
-                    }
-                if not context.is_stopped():
-                    yield out
-
+    @nvtx.annotate(domain="py", category="DecodeHandler")
     async def _process_text_stream(
         self,
         stream_source: AsyncGenerator[Dict[str, Any], None],
@@ -273,39 +362,71 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
             async for res in stream_source:
-                # Extract SGLang request ID from the first response and set the future
-                if not request_id_future.done():
-                    meta_info = res.get("meta_info", {})
-                    sglang_request_id = meta_info.get("id")
-                    if sglang_request_id:
-                        request_id_future.set_result(sglang_request_id)
+                with nvtx.annotate(
+                    "process_text_item",
+                    domain="py",
+                    category="DecodeHandler",
+                    color="blue",
+                ):
+                    # Extract SGLang request ID from the first response and set the future
+                    if not request_id_future.done():
+                        with nvtx.annotate(
+                            "extract_request_id",
+                            domain="py",
+                            category="DecodeHandler",
+                            color="cyan",
+                        ):
+                            meta_info = res.get("meta_info", {})
+                            sglang_request_id = meta_info.get("id")
+                            if sglang_request_id:
+                                request_id_future.set_result(sglang_request_id)
 
-                # Check cancellation before yielding to allow proper cleanup.
-                # This lets SGLang proceed to the second token generation, which will
-                # async context switch and allow the abort monitor to signal cancellation.
-                # The loop should exit by itself when context.is_stopped() returns True.
+                    # Check cancellation before yielding to allow proper cleanup.
+                    # This lets SGLang proceed to the second token generation, which will
+                    # async context switch and allow the abort monitor to signal cancellation.
+                    # The loop should exit by itself when context.is_stopped() returns True.
 
-                index = res.get("index", 0)
-                text = res.get("text", "")
+                    with nvtx.annotate(
+                        "extract_text_data",
+                        domain="py",
+                        category="DecodeHandler",
+                        color="yellow",
+                    ):
+                        index = res.get("index", 0)
+                        text = res.get("text", "")
 
-                finish_reason = res["meta_info"]["finish_reason"]
-                finish_reason_type = finish_reason["type"] if finish_reason else None
-                next_count = len(text)
-                delta = text[count:]
+                        finish_reason = res["meta_info"]["finish_reason"]
+                        finish_reason_type = (
+                            finish_reason["type"] if finish_reason else None
+                        )
+                        next_count = len(text)
+                        delta = text[count:]
 
-                choice_data = {
-                    "index": index,
-                    "delta": {"role": "assistant", "content": delta},
-                    "finish_reason": finish_reason_type,
-                }
+                    with nvtx.annotate(
+                        "build_response_dict",
+                        domain="py",
+                        category="DecodeHandler",
+                        color="green",
+                    ):
+                        choice_data = {
+                            "index": index,
+                            "delta": {"role": "assistant", "content": delta},
+                            "finish_reason": finish_reason_type,
+                        }
 
-                response = {
-                    "id": res["meta_info"]["id"],
-                    "created": int(time.time()),
-                    "choices": [choice_data],
-                    "model": self.config.server_args.served_model_name,
-                    "object": "chat.completion.chunk",
-                }
-                if not context.is_stopped():
-                    yield response
-                count = next_count
+                        response = {
+                            "id": res["meta_info"]["id"],
+                            "created": int(time.time()),
+                            "choices": [choice_data],
+                            "model": self.config.server_args.served_model_name,
+                            "object": "chat.completion.chunk",
+                        }
+                    if not context.is_stopped():
+                        with nvtx.annotate(
+                            "yield_text_response",
+                            domain="py",
+                            category="DecodeHandler",
+                            color="green",
+                        ):
+                            yield response
+                    count = next_count

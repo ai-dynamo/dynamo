@@ -8,6 +8,8 @@ ARG BRANCH_TYPE
 # PyPI version to install when BRANCH_TYPE is not set
 ARG DYNAMO_VERSION=""
 ARG CARGO_BUILD_JOBS
+# Base sglang image tag version (e.g., v13)
+ARG BASE_TAG_VERSION="v13"
 
 FROM alpine:latest AS dependency-downloader
 RUN apk add --no-cache wget unzip
@@ -84,6 +86,7 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
     --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     if [ -n "${AWS_ENDPOINT_URL}" ]; then export SCCACHE_ENDPOINT="${AWS_ENDPOINT_URL}"; fi && \
+    if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then unset RUSTC_WRAPPER; fi && \
     cargo chef cook --release --recipe-path recipe.json
 COPY . .
 RUN python3 -m pip install --break-system-packages maturin
@@ -93,12 +96,14 @@ RUN --mount=type=secret,id=AWS_ACCESS_KEY_ID,env=AWS_ACCESS_KEY_ID \
     --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     if [ -n "${AWS_ENDPOINT_URL}" ]; then export SCCACHE_ENDPOINT="${AWS_ENDPOINT_URL}"; fi && \
+    if [ -z "${AWS_ACCESS_KEY_ID}" ] || [ -z "${AWS_SECRET_ACCESS_KEY}" ]; then unset RUSTC_WRAPPER; fi && \
     cd lib/bindings/python && python3 -m maturin build --release
 
 # Use an arch-specific base image tag to avoid cross-arch tag clobbering.
 # BuildKit provides TARGETARCH automatically for buildx builds.
 ARG TARGETARCH
-FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-v12-${TARGETARCH}
+ARG BASE_TAG_VERSION
+FROM nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-${BASE_TAG_VERSION}-${TARGETARCH}
 #FROM sgl-dd-local
 WORKDIR /sgl-workspace
 

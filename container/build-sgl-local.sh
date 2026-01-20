@@ -33,6 +33,7 @@ CUDA_VERSION="${CUDA_VERSION:-13}"
 SCCACHE_BUCKET="${SCCACHE_BUCKET:-sccache}"
 SCCACHE_REGION="${SCCACHE_REGION:-us-east-1}"
 CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-16}"
+TAG_VERSION="${TAG_VERSION:-v13}"
 
 # Parse command line arguments
 TAG=""
@@ -69,6 +70,10 @@ while [[ $# -gt 0 ]]; do
             NO_CACHE="--no-cache"
             shift
             ;;
+        --tag-version)
+            TAG_VERSION="$2"
+            shift 2
+            ;;
         --platform)
             PLATFORM="--platform $2"
             shift 2
@@ -78,6 +83,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --tag TAG              Local Docker image tag (optional; defaults based on arch/push)"
+            echo "  --tag-version VERSION  Version tag for base and output images (default: v13)"
             echo "  --push                 Push to registry and use buildx with cache"
             echo "  --target TARGET         Build target/stage (optional)"
             echo "  --no-cache             Disable build cache"
@@ -94,6 +100,7 @@ while [[ $# -gt 0 ]]; do
             echo "  SCCACHE_REGION          AWS region (default: us-east-1)"
             echo "  SGLANG_IMAGE_TAG        SGLang base image tag"
             echo "  CUDA_VERSION            CUDA version (12 or 13, default: 13)"
+            echo "  TAG_VERSION             Version tag for base/output images (default: v13)"
             echo "  BRANCH_TYPE             Build type: local, remote, or unset for PyPI"
             echo "  DYNAMO_VERSION          PyPI version when BRANCH_TYPE not set"
             echo "  CARGO_BUILD_JOBS        Number of parallel cargo jobs (default: 16)"
@@ -140,8 +147,8 @@ if [[ "$PUSH" == "true" ]]; then
         PUSH_TAG="${TAG}-${arch_suffix}"
         TAG="$PUSH_TAG"
     else
-        # Default push tag
-        PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v1-${arch_suffix}"
+        # Default push tag uses TAG_VERSION
+        PUSH_TAG="nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-${TAG_VERSION}-${arch_suffix}"
         TAG="$PUSH_TAG"
     fi
 elif [[ -z "$TAG" ]]; then
@@ -161,6 +168,7 @@ BUILD_ARGS=(
     --build-arg "SCCACHE_BUCKET=${SCCACHE_BUCKET}"
     --build-arg "SCCACHE_REGION=${SCCACHE_REGION}"
     --build-arg "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}"
+    --build-arg "BASE_TAG_VERSION=${TAG_VERSION}"
 )
 
 # Add optional build args if set
@@ -213,6 +221,8 @@ if [[ "$PUSH" == "true" ]]; then
     echo "  Push tag: ${PUSH_TAG}"
 fi
 echo "  Arch suffix: ${arch_suffix}"
+echo "  Tag version: ${TAG_VERSION}"
+echo "  Base image: nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-base-img-${TAG_VERSION}-${arch_suffix}"
 echo "  SGLang image: ${SGLANG_IMAGE_TAG}"
 echo "  CUDA version: ${CUDA_VERSION}"
 echo "  SCCACHE bucket: ${SCCACHE_BUCKET}"
