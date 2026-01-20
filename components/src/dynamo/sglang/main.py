@@ -139,26 +139,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     handler = DecodeWorkerHandler(
         component, engine, config, publisher, generate_endpoint
     )
-
-    # Register engine routes
-    async def start_profile_handler(body: dict) -> dict:
-        """Handle /engine/start_profile requests"""
-        await engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile_handler(body: dict) -> dict:
-        """Handle /engine/stop_profile requests"""
-        await engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    runtime.register_engine_route("start_profile", start_profile_handler)
-    runtime.register_engine_route("stop_profile", stop_profile_handler)
-    runtime.register_engine_route(
-        "release_memory_occupation", handler.release_memory_occupation
-    )
-    runtime.register_engine_route(
-        "resume_memory_occupation", handler.resume_memory_occupation
-    )
+    handler.register_engine_routes(runtime)
 
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
@@ -246,26 +227,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     handler = PrefillWorkerHandler(
         component, engine, config, publisher, generate_endpoint
     )
-
-    # Register engine routes
-    async def start_profile_handler(body: dict) -> dict:
-        """Handle /engine/start_profile requests"""
-        await engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile_handler(body: dict) -> dict:
-        """Handle /engine/stop_profile requests"""
-        await engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    runtime.register_engine_route("start_profile", start_profile_handler)
-    runtime.register_engine_route("stop_profile", stop_profile_handler)
-    runtime.register_engine_route(
-        "release_memory_occupation", handler.release_memory_occupation
-    )
-    runtime.register_engine_route(
-        "resume_memory_occupation", handler.resume_memory_occupation
-    )
+    handler.register_engine_routes(runtime)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 

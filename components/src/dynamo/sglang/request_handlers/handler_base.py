@@ -136,6 +136,39 @@ class BaseWorkerHandler(ABC):
             logging.error(f"Failed to resume memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters passed to start_profile.
+        """
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    def register_engine_routes(self, runtime) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", self.start_profile)
+        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route(
+            "release_memory_occupation", self.release_memory_occupation
+        )
+        runtime.register_engine_route(
+            "resume_memory_occupation", self.resume_memory_occupation
+        )
+
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):
         """Generate response from request.
