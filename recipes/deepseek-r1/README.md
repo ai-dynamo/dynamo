@@ -8,8 +8,8 @@ Production-ready deployments for **DeepSeek-R1** (671B MoE) across multiple back
 |--------------|------|---------|------|-------------|
 | [**sglang/disagg-8gpu**](sglang/disagg-8gpu/) | 8x H200 | SGLang | Disaggregated WideEP | Single-node, expert parallel |
 | [**sglang/disagg-16gpu**](sglang/disagg-16gpu/) | 16x H200 | SGLang | Disaggregated WideEP | Multi-node, expert parallel |
-| [**vllm/disagg**](vllm/disagg/) | 16x H200 | vLLM | Disaggregated DEP16 | Multi-node, data-expert parallel |
 | [**trtllm/disagg/wide_ep/gb200**](trtllm/disagg/wide_ep/gb200/) | 36x GB200 | TensorRT-LLM | Disaggregated WideEP | 8 decode + 1 prefill nodes |
+| [**vllm/disagg**](vllm/disagg/) | 16x H200 | vLLM | Disaggregated DEP16 | Multi-node, data-expert parallel |
 
 ## Prerequisites
 
@@ -92,10 +92,10 @@ DeepSeek-R1 is a very large model requiring significant GPU memory:
 - Uses WideEP (Wide Expert Parallel) for efficient MoE inference
 - See [sglang/README.md](sglang/README.md) for SGLang-specific configuration
 
-### vLLM
-- Uses DEP (Data-Expert Parallel) with hybrid load balancing
-- See [vllm/disagg/README.md](vllm/disagg/README.md) for detailed setup
-
 ### TensorRT-LLM
 - Requires FP4 quantized checkpoint
 - GB200-specific optimizations
+
+### vLLM
+- Uses DEP (Data-Expert Parallel) with hybrid load balancing
+- See [vllm/disagg/README.md](vllm/disagg/README.md) for detailed setup

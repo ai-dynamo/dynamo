@@ -19,6 +19,8 @@ This recipe combines multiple Dynamo performance features (disaggregated serving
 
 These recipes demonstrate aggregated or disaggregated serving:
 
+**GAIE Column**: Indicates whether the recipe includes integration with the [Gateway API Inference Extension (GAIE)](../deploy/inference-gateway/README.md) — a Kubernetes SIG project that extends the Gateway API for AI inference workloads, providing load balancing, model routing, and request management.
+
 | Model | Framework | Mode | GPUs | Deployment | Benchmark Recipe | Notes | GAIE |
 |-------|-----------|------|------|------------|------------------|-------|------|
 | **[Llama-3-70B](llama-3-70b/vllm/agg/)** | vLLM | Aggregated | 4x H100/H200 | ✅ | ✅ | FP8 dynamic quantization | ✅ |
