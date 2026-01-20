@@ -81,10 +81,12 @@ Ready to write code? See the [Contribution Workflow](#contribution-workflow) sec
 - **Rust** (install via [rustup](https://rustup.rs/))
 - **Build tools**: `sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler cmake`
 
-### Clone and Build
+### Fork and Clone
+
+1. [Fork the repository](https://github.com/ai-dynamo/dynamo/fork) on GitHub
+2. Clone your fork:
 
 ```bash
-# Clone your fork
 git clone https://github.com/YOUR_USERNAME/dynamo.git
 cd dynamo
 
@@ -165,7 +167,7 @@ Understanding Dynamo's architecture helps you find where to make changes.
 
 > **Design Philosophy**: We built performance-sensitive modules in Rust for speed, memory safety, and robust concurrency. We use Python for flexibility, enabling rapid prototyping and effortless customization.
 
-For detailed architecture documentation, see [docs/design_docs/architecture.md](docs/design_docs/architecture.md).
+For detailed architecture documentation, see [docs/design_docs/architecture.md](docs/design_docs/architecture.md). For supported versions of critical dependencies (vLLM, SGLang, TensorRT-LLM, CUDA, etc.), see the [Support Matrix](docs/reference/support-matrix.md).
 
 ---
 
