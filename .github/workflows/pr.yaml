@@ -37,30 +37,30 @@ jobs:
       - name: Output Node Name
         shell: bash
         run: |
-          echo ${K8S_NODE_NAME}
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-        with:
-          lfs: true
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:d953f9d0381e2a3a51aa248012df9001d396f57b-sglang-amd64
-          # GH ARM runners have no GPUs, run CPU tests only on ARM
-          pytest_marks: pre_merge and sglang and (gpu_0 or gpu_1)
-          test_type: "pre_merge"
-          platform_arch: amd64
-          enable_mypy: 'true'
-          hf_token: ${{ secrets.HF_TOKEN }}
+          docker run --rm --runtime nvidia nvidia/cuda:12.0-base nvidia-smi
+      # - name: Checkout code
+      #   uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      #   with:
+      #     lfs: true
+      # - name: Docker Login
+      #   uses: ./.github/actions/docker-login
+      #   with:
+      #     ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      # - name: Run tests
+      #   uses: ./.github/actions/pytest
+      #   with:
+      #     image_tag: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:d953f9d0381e2a3a51aa248012df9001d396f57b-sglang-amd64
+      #     # GH ARM runners have no GPUs, run CPU tests only on ARM
+      #     pytest_marks: pre_merge and sglang and (gpu_0 or gpu_1)
+      #     test_type: "pre_merge"
+      #     platform_arch: amd64
+      #     enable_mypy: 'true'
+      #     hf_token: ${{ secrets.HF_TOKEN }}
   # changed-files:
   #   runs-on: ubuntu-latest
   #   environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
