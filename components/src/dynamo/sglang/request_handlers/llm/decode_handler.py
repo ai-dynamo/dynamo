@@ -249,8 +249,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
-        num_output_tokens_so_far = 0
-
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
@@ -308,9 +306,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         category="DecodeHandler",
                         color="blue",
                     ):
-                        next_total_toks = len(output_ids)
-                        out["token_ids"] = output_ids[num_output_tokens_so_far:]
-                        num_output_tokens_so_far = next_total_toks
+                        out["token_ids"] = output_ids
                     if finish_reason:
                         with nvtx.annotate(
                             "build_completion_usage",

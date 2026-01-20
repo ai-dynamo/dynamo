@@ -68,6 +68,7 @@ async def _handle_non_leader_node(
 
 async def worker():
     config = await parse_args(sys.argv[1:])
+    config.server_args.stream_output = True
     dump_config(config.dynamo_args.dump_config_to, config)
 
     loop = asyncio.get_running_loop()
