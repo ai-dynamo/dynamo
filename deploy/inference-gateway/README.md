@@ -354,6 +354,25 @@ If you need to uninstall run:
 ```bash
 kubectl delete dynamoGraphDeployment vllm-agg
 helm uninstall dynamo-gaie -n my-model
+
+# To uninstall GAIE
+# 1. Delete the inference-gateway
+kubectl delete gateway inference-gateway --ignore-not-found
+
+# 2. Uninstall kgateway helm releases
+helm uninstall kgateway -n kgateway-system
+helm uninstall kgateway-crds -n kgateway-system
+
+# 3. Delete the kgateway-system namespace (optional, cleans up everything in it)
+kubectl delete namespace kgateway-system --ignore-not-found
+
+# 4. Delete the Inference Extension CRDs
+IGW_LATEST_RELEASE=v1.2.1
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
+
+# 5. Delete the Gateway API CRDs
+GATEWAY_API_VERSION=v1.4.1
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml --ignore-not-found
 ```
 
 ## Gateway API Inference Extension Integration
