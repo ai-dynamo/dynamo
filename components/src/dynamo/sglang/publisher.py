@@ -80,7 +80,7 @@ class DynamoSglangPublisher:
         self.generate_endpoint = generate_endpoint
         self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
-        self.metrics_publisher.create_endpoint(component, metrics_labels)
+        self.metrics_publisher.create_endpoint(component)
 
         # Set default values (can be overridden later if needed)
         self.request_total_slots = 1024

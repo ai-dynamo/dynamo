@@ -307,6 +307,16 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 		return ComponentReconcileResult{}, fmt.Errorf("failed to create or update the deployment: %w", err)
 	}
 
+	logger.V(1).Info("Deployment sync completed",
+		"deploymentModified", deploymentModified,
+		"deploymentName", deployment.Name,
+		"deploymentGeneration", deployment.Generation,
+		"deploymentObservedGeneration", deployment.Status.ObservedGeneration,
+		"deploymentReplicas", deployment.Status.Replicas,
+		"deploymentUpdatedReplicas", deployment.Status.UpdatedReplicas,
+		"deploymentAvailableReplicas", deployment.Status.AvailableReplicas,
+		"deploymentReadyReplicas", deployment.Status.ReadyReplicas)
+
 	serviceReplicaStatus := &v1alpha1.ServiceReplicaStatus{
 		ComponentKind:     v1alpha1.ComponentKindDeployment,
 		ComponentName:     deployment.Name,
@@ -317,7 +327,6 @@ func (r *DynamoComponentDeploymentReconciler) reconcileDeploymentResources(ctx c
 	}
 
 	if IsDeploymentReady(deployment) {
-		logger.Info("Deployment is ready. Setting available status condition to true.")
 		return ComponentReconcileResult{
 			modified:             deploymentModified,
 			status:               metav1.ConditionTrue,
@@ -458,6 +467,7 @@ func (r *DynamoComponentDeploymentReconciler) setStatusConditionAndServiceReplic
 
 	meta.SetStatusCondition(&dynamoComponentDeployment.Status.Conditions, condition)
 	dynamoComponentDeployment.Status.Service = componentReconcileResult.serviceReplicaStatus
+	dynamoComponentDeployment.Status.ObservedGeneration = dynamoComponentDeployment.Generation
 
 	err := r.Status().Update(ctx, dynamoComponentDeployment)
 	if err != nil {
@@ -763,9 +773,11 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	// 1. ObservedGeneration: Deployment controller has observed the latest configuration
 	// 2. UpdatedReplicas: All replicas have been updated to the latest version
 	// 3. AvailableReplicas: All desired replicas are available (schedulable and healthy)
+	// 4. Replicas: Total replicas equals desired (no surge pods remaining from rolling update)
 	if status.ObservedGeneration < deployment.Generation ||
 		status.UpdatedReplicas < desiredReplicas ||
-		status.AvailableReplicas < desiredReplicas {
+		status.AvailableReplicas < desiredReplicas ||
+		status.Replicas != desiredReplicas {
 		return false
 	}
 	// Finally, check for the DeploymentAvailable condition
@@ -1232,6 +1244,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if extraPodMetadata != nil {
 		maps.Copy(podAnnotations, extraPodMetadata.Annotations)
 		maps.Copy(podLabels, extraPodMetadata.Labels)
+	}
+
+	// Propagate restart annotation to pod template to trigger rolling restart
+	// This is the same mechanism used by kubectl rollout restart
+	if restartAt, exists := resourceAnnotations[commonconsts.RestartAnnotation]; exists {
+		podAnnotations[commonconsts.RestartAnnotation] = restartAt
 	}
 
 	if podSpec.ServiceAccountName == "" {

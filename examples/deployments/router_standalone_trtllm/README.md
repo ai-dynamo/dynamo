@@ -176,6 +176,7 @@ python test_router.py -v
 - `DYNAMO_DEBUG=1`: Enable debug file dumps to `/tmp/debug_*.txt`
 - `LOGLEVEL=DEBUG`: Set logging level (DEBUG, INFO, WARNING, ERROR)
 - `TRANSFORMERS_ATTN_IMPLEMENTATION=eager`: Disable FlashAttention (set automatically)
+- `TRTLLM_MAX_NUM_TOKENS`: Set max token length
 
 ### Port Assignment
 

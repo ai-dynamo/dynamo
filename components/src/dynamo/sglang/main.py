@@ -70,8 +70,12 @@ async def worker():
     dump_config(config.dynamo_args.dump_config_to, config)
 
     loop = asyncio.get_running_loop()
+    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
     runtime = DistributedRuntime(
-        loop, config.dynamo_args.store_kv, config.dynamo_args.request_plane
+        loop,
+        config.dynamo_args.store_kv,
+        config.dynamo_args.request_plane,
+        config.dynamo_args.use_kv_events,
     )
 
     def signal_handler():

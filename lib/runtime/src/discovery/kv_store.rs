@@ -10,7 +10,8 @@ use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    DiscoverySpec, DiscoveryStream, EndpointInstanceId, ModelCardInstanceId,
 };
 use crate::storage::kv;
 
@@ -394,53 +395,71 @@ impl Discovery for KVStoreDiscovery {
                             continue;
                         }
 
-                        // Extract instance_id from the key path, not the value
-                        // Delete events have empty values in etcd, so we parse the instance_id from the key
+                        // Extract DiscoveryInstanceId from the key path
+                        // Delete events have empty values in etcd, so we reconstruct the ID from the key
                         //
                         // Key format (relative to bucket, after stripping bucket prefix):
-                        // - Instances: "namespace/component/endpoint/{instance_id:x}"
+                        // - Endpoints: "namespace/component/endpoint/{instance_id:x}"
                         // - Models: "namespace/component/endpoint/{instance_id:x}"
                         // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
                         //
-                        // The instance_id is always at index 3 in the RELATIVE key (after bucket prefix).
                         // Use strip_bucket_prefix for consistency with matches_prefix().
                         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
                         let key_parts: Vec<&str> = relative_key.split('/').collect();
 
                         // In relative key: namespace/component/endpoint/{instance_id}[/{lora_slug}]
-                        // instance_id is at index 3
-                        let instance_id_index = 3;
+                        // We need at least 4 parts: namespace, component, endpoint, instance_id
+                        if key_parts.len() < 4 {
+                            tracing::warn!(
+                                key = %key_str,
+                                relative_key = %relative_key,
+                                actual_parts = key_parts.len(),
+                                "Delete event key doesn't have enough parts"
+                            );
+                            continue;
+                        }
 
-                        match key_parts.get(instance_id_index) {
-                            Some(instance_id_hex) => {
-                                match u64::from_str_radix(instance_id_hex, 16) {
-                                    Ok(instance_id) => {
-                                        tracing::debug!(
-                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={:x}, key={}",
-                                            instance_id,
-                                            key_str
-                                        );
-                                        Some(DiscoveryEvent::Removed(instance_id))
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            key = %key_str,
-                                            relative_key = %relative_key,
-                                            error = %e,
-                                            instance_id_hex = %instance_id_hex,
-                                            "Failed to parse instance_id hex from deleted key"
-                                        );
-                                        None
-                                    }
-                                }
+                        let namespace = key_parts[0].to_string();
+                        let component = key_parts[1].to_string();
+                        let endpoint = key_parts[2].to_string();
+                        let instance_id_hex = key_parts[3];
+
+                        match u64::from_str_radix(instance_id_hex, 16) {
+                            Ok(instance_id) => {
+                                // Construct the appropriate DiscoveryInstanceId based on bucket type
+                                let id = if bucket_name == INSTANCES_BUCKET {
+                                    DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+                                        namespace,
+                                        component,
+                                        endpoint,
+                                        instance_id,
+                                    })
+                                } else {
+                                    // Model - check for LoRA suffix (5th part if present)
+                                    let model_suffix = key_parts.get(4).map(|s| s.to_string());
+                                    DiscoveryInstanceId::Model(ModelCardInstanceId {
+                                        namespace,
+                                        component,
+                                        endpoint,
+                                        instance_id,
+                                        model_suffix,
+                                    })
+                                };
+
+                                tracing::debug!(
+                                    "KVStoreDiscovery::list_and_watch: Emitting Removed event for {:?}, key={}",
+                                    id,
+                                    key_str
+                                );
+                                Some(DiscoveryEvent::Removed(id))
                             }
-                            None => {
+                            Err(e) => {
                                 tracing::warn!(
                                     key = %key_str,
                                     relative_key = %relative_key,
-                                    expected_index = instance_id_index,
-                                    actual_parts = key_parts.len(),
-                                    "Delete event key doesn't have instance_id at expected position"
+                                    error = %e,
+                                    instance_id_hex = %instance_id_hex,
+                                    "Failed to parse instance_id hex from deleted key"
                                 );
                                 None
                             }

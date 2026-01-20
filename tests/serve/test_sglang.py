@@ -155,10 +155,11 @@ sglang_configs = {
             )
         ],
     ),
-    "multimodal_agg_qwen": SGLangConfig(
-        name="multimodal_agg_qwen",
+    "multimodal_epd_qwen": SGLangConfig(
+        # E/PD architecture: Encode worker (GPU 0) + Prefill/Decode worker (GPU 1)
+        name="multimodal_epd_qwen",
         directory=sglang_dir,
-        script_name="multimodal_agg.sh",
+        script_name="multimodal_epd.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2.5-VL-7B-Instruct",
         delayed_start=0,
@@ -181,6 +182,46 @@ sglang_configs = {
                 # approach to validation for this test to be stable.
                 expected_response=["image"],
                 temperature=0.0,
+            )
+        ],
+    ),
+    "multimodal_agg_qwen": SGLangConfig(
+        # Tests single-process aggregated multimodal inference using DecodeWorkerHandler
+        # with in-process vision encoding (no separate encode worker)
+        name="multimodal_agg_qwen",
+        directory=sglang_dir,
+        script_name="agg.sh",
+        marks=[
+            pytest.mark.gpu_1,
+            pytest.mark.pre_merge,
+            pytest.mark.nightly,
+            pytest.mark.timeout(300),
+        ],
+        model="Qwen/Qwen2.5-VL-7B-Instruct",
+        script_args=[
+            "--model-path",
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            "--chat-template",
+            "qwen2-vl",
+        ],
+        delayed_start=0,
+        timeout=360,
+        frontend_port=DefaultPort.FRONTEND.value,
+        request_payloads=[
+            chat_payload(
+                [
+                    {"type": "text", "text": "What is in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+                        },
+                    },
+                ],
+                repeat_count=1,
+                expected_response=["image"],
+                temperature=0.0,
+                max_tokens=100,
             )
         ],
     ),

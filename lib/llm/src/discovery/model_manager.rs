@@ -320,14 +320,14 @@ impl ModelManager {
             .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
-    /// Save a ModelDeploymentCard from an instance's ModelDeploymentCard key so we can fetch it later when the key is
+    /// Save a ModelDeploymentCard from an instance's key so we can fetch it later when the key is
     /// deleted.
     pub fn save_model_card(&self, key: &str, card: ModelDeploymentCard) -> anyhow::Result<()> {
         self.cards.lock().insert(key.to_string(), card);
         Ok(())
     }
 
-    /// Remove and return model card for this instance's etcd key. We do this when the instance stops.
+    /// Remove and return model card for this instance's key. We do this when the instance stops.
     pub fn remove_model_card(&self, key: &str) -> Option<ModelDeploymentCard> {
         self.cards.lock().remove(key)
     }
@@ -374,9 +374,6 @@ impl ModelManager {
 
         discovery.register(discovery_spec).await?;
 
-        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
-        let consumer_id = instance_id.to_string();
-
         // Get or create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
@@ -388,7 +385,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            consumer_id,
+            instance_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);

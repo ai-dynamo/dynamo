@@ -224,7 +224,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
         let (_parts, body) = response.into_parts();
-        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();

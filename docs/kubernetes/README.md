@@ -25,7 +25,7 @@ High-level guide to Dynamo Kubernetes deployments. Start here, then dive into sp
 - Used for: Resource isolation, RBAC, organizing deployments
 - Example: `dynamo-system`, `team-a-namespace`
 
-**Dynamo Namespace**: The logical namespace used by Dynamo components for [service discovery](./service_discovery.md).
+**Dynamo Namespace**: The logical namespace used by Dynamo components for [service discovery](/docs/kubernetes/service_discovery.md).
 - Used for: Runtime component communication, service discovery
 - Specified in: `.spec.services.<ServiceName>.dynamoNamespace` field
 - Example: `my-llm`, `production-model`, `dynamo-dev`
@@ -47,7 +47,7 @@ kubectl version --client  # Should show v1.24+
 helm version              # Should show v3.0+
 ```
 
-For detailed installation instructions, see the [Prerequisites section](./installation_guide.md#prerequisites) in the Installation Guide.
+For detailed installation instructions, see the [Prerequisites section](/docs/kubernetes/installation_guide.md#prerequisites) in the Installation Guide.
 
 ## Pre-deployment Checks
 
@@ -57,7 +57,7 @@ Before deploying the platform, run the pre-deployment checks to ensure the clust
 ./deploy/pre-deployment/pre-deployment-check.sh
 ```
 
-This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](../../deploy/pre-deployment/README.md) for more details.
+This validates kubectl connectivity, StorageClass configuration, and GPU availability. See [pre-deployment checks](/deploy/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 
@@ -82,7 +82,7 @@ If your cluster has namespace-restricted Dynamo operators, add this flag to step
 --set dynamo-operator.namespaceRestriction.enabled=true
 ```
 
-For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](./installation_guide.md)**.
+For more details or customization options (including multinode deployments), see **[Installation Guide for Dynamo Kubernetes Platform](/docs/kubernetes/installation_guide.md)**.
 
 ## 2. Choose Your Backend
 
@@ -90,9 +90,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
 |--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](../../examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](../../examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](../../examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[SGLang](/examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](/examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](/examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
@@ -117,7 +117,7 @@ kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
 curl http://localhost:8000/v1/models
 ```
 
-For SLA-based autoscaling, see [SLA Planner Quick Start Guide](../planner/sla_planner_quickstart.md).
+For SLA-based autoscaling, see [SLA Planner Quick Start Guide](/docs/planner/sla_planner_quickstart.md).
 
 ## Understanding Dynamo's Custom Resources
 
@@ -147,15 +147,15 @@ A lower-level interface that defines your complete inference pipeline:
 
 Use this when you need fine-grained control or have already completed profiling.
 
-Refer to the [API Reference and Documentation](./api_reference.md) for more details.
+Refer to the [API Reference and Documentation](/docs/kubernetes/api_reference.md) for more details.
 
 ## 📖 API Reference & Documentation
 
 For detailed technical specifications of Dynamo's Kubernetes resources:
 
-- **[API Reference](./api_reference.md)** - Complete CRD field specifications for all Dynamo resources
-- **[Create Deployment](./deployment/create_deployment.md)** - Step-by-step deployment creation with DynamoGraphDeployment
-- **[Operator Guide](./dynamo_operator.md)** - Dynamo operator configuration and management
+- **[API Reference](/docs/kubernetes/api_reference.md)** - Complete CRD field specifications for all Dynamo resources
+- **[Create Deployment](/docs/kubernetes/deployment/create_deployment.md)** - Step-by-step deployment creation with DynamoGraphDeployment
+- **[Operator Guide](/docs/kubernetes/dynamo_operator.md)** - Dynamo operator configuration and management
 
 ### Choosing Your Architecture Pattern
 
@@ -170,7 +170,7 @@ When creating a deployment, select the architecture pattern that best fits your 
 You can run the Frontend on one machine (e.g., a CPU node) and workers on different machines (GPU nodes). The Frontend serves as a framework-agnostic HTTP entry point that:
 
 - Provides OpenAI-compatible `/v1/chat/completions` endpoint
-- Auto-discovers backend workers via [service discovery](./service_discovery.md) (Kubernetes-native by default)
+- Auto-discovers backend workers via [service discovery](/docs/kubernetes/service_discovery.md) (Kubernetes-native by default)
 - Routes requests and handles load balancing
 - Validates and preprocesses requests
 
@@ -238,15 +238,15 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](../examples/README.md)** - Complete working examples
-- **[Create Custom Deployments](./deployment/create_deployment.md)** - Build your own CRDs
-- **[Managing Models with DynamoModel](./deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
-- **[Operator Documentation](./dynamo_operator.md)** - How the platform works
-- **[Service Discovery](./service_discovery.md)** - Discovery backends and configuration
-- **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
-- **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users
-- **[Logging](./observability/logging.md)** - For logging setup
-- **[Multinode Deployment](./deployment/multinode-deployment.md)** - For multinode deployment
-- **[Grove](./grove.md)** - For grove details and custom installation
-- **[Monitoring](./observability/metrics.md)** - For monitoring setup
-- **[Model Caching with Fluid](./model_caching_with_fluid.md)** - For model caching with Fluid
+- **[Examples](/docs/examples/README.md)** - Complete working examples
+- **[Create Custom Deployments](/docs/kubernetes/deployment/create_deployment.md)** - Build your own CRDs
+- **[Managing Models with DynamoModel](/docs/kubernetes/deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
+- **[Operator Documentation](/docs/kubernetes/dynamo_operator.md)** - How the platform works
+- **[Service Discovery](/docs/kubernetes/service_discovery.md)** - Discovery backends and configuration
+- **[Helm Charts](/deploy/helm/README.md)** - For advanced users
+- **[GitOps Deployment with FluxCD](/docs/kubernetes/fluxcd.md)** - For advanced users
+- **[Logging](/docs/kubernetes/observability/logging.md)** - For logging setup
+- **[Multinode Deployment](/docs/kubernetes/deployment/multinode-deployment.md)** - For multinode deployment
+- **[Grove](/docs/kubernetes/grove.md)** - For grove details and custom installation
+- **[Monitoring](/docs/kubernetes/observability/metrics.md)** - For monitoring setup
+- **[Model Caching with Fluid](/docs/kubernetes/model_caching_with_fluid.md)** - For model caching with Fluid
