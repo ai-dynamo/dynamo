@@ -363,6 +363,24 @@ Set the environment variable `DYN_LOG` to adjust the logging level; for example,
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
 
+# Contributing
+
+We welcome contributions! Whether it's bug reports, documentation improvements, or code contributions—every bit helps.
+
+- 📖 **[Contributing Guide](CONTRIBUTING.md)** – How to get started
+- 🐛 **[Report a Bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)** – Found an issue?
+- 💡 **[Feature Request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)** – Have an idea?
+- 🌱 **[Good First Issues](https://github.com/ai-dynamo/dynamo/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)** – New to Dynamo?
+
+# Community
+
+Dynamo thrives on community contributions.
+
+![External Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
+![Community PRs](https://img.shields.io/badge/PRs_merged-130%2B-blue)
+
+See our [contributor graph](https://github.com/ai-dynamo/dynamo/graphs/contributors) for the full picture.
+
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design_docs/disagg_serving.md
 [kv-routing]: docs/router/kv_cache_routing.md
