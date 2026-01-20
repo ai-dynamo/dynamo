@@ -16,6 +16,86 @@ pub struct DisaggregatedEndpoint {
     pub bootstrap_port: Option<u16>,
 }
 
+/// Configuration for which tokenizer backend to use.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TokenizerBackend {
+    /// Use the default HuggingFace Rust tokenizer
+    #[default]
+    HuggingFace,
+    /// Use a custom Python tokenizer (requires python_module and python_class)
+    Python,
+    /// Shorthand for SGLang's tokenizer (uses dynamo.common.tokenizers.sglang.SGLangTokenizer)
+    SGLang,
+    /// Shorthand for vLLM's tokenizer (uses dynamo.common.tokenizers.vllm.VLLMTokenizer)
+    VLLM,
+}
+
+/// Configuration for the tokenizer used by Dynamo's preprocessor.
+///
+/// This allows switching between different tokenizer implementations:
+/// - HuggingFace: Default Rust-based tokenizer using tokenizers.json
+/// - Python: Custom Python tokenizer with configurable module/class
+/// - SGLang: Shorthand for SGLang's tokenizer
+/// - VLLM: Shorthand for vLLM's tokenizer
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct TokenizerConfig {
+    /// Which tokenizer backend to use
+    #[serde(default)]
+    pub backend: TokenizerBackend,
+
+    /// Python module path for custom tokenizer (only used when backend is Python)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_module: Option<String>,
+
+    /// Python class name for custom tokenizer (only used when backend is Python)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub python_class: Option<String>,
+}
+
+impl TokenizerConfig {
+    /// Create a config for the default HuggingFace tokenizer.
+    pub fn huggingface() -> Self {
+        Self {
+            backend: TokenizerBackend::HuggingFace,
+            python_module: None,
+            python_class: None,
+        }
+    }
+
+    /// Create a config for SGLang's tokenizer.
+    pub fn sglang() -> Self {
+        Self {
+            backend: TokenizerBackend::SGLang,
+            python_module: None,
+            python_class: None,
+        }
+    }
+
+    /// Create a config for vLLM's tokenizer.
+    pub fn vllm() -> Self {
+        Self {
+            backend: TokenizerBackend::VLLM,
+            python_module: None,
+            python_class: None,
+        }
+    }
+
+    /// Create a config for a custom Python tokenizer.
+    pub fn python(module: String, class: String) -> Self {
+        Self {
+            backend: TokenizerBackend::Python,
+            python_module: Some(module),
+            python_class: Some(class),
+        }
+    }
+
+    /// Check if this config uses a Python-based tokenizer.
+    pub fn is_python_based(&self) -> bool {
+        !matches!(self.backend, TokenizerBackend::HuggingFace)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelRuntimeConfig {
     pub total_kv_blocks: Option<u64>,
@@ -53,6 +133,10 @@ pub struct ModelRuntimeConfig {
     /// Bootstrap endpoint for disaggregated serving (prefill workers publish this)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disaggregated_endpoint: Option<DisaggregatedEndpoint>,
+
+    /// Tokenizer configuration for Dynamo's preprocessor
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokenizer_config: Option<TokenizerConfig>,
 }
 
 const fn default_data_parallel_size() -> u32 {
@@ -72,6 +156,7 @@ impl Default for ModelRuntimeConfig {
             runtime_data: HashMap::new(),
             tensor_model_config: None,
             disaggregated_endpoint: None,
+            tokenizer_config: None,
         }
     }
 }

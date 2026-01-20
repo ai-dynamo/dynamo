@@ -503,6 +503,9 @@ class ModelRuntimeConfig:
     enable_local_indexer: bool
     runtime_data: dict[str, Any]
     tensor_model_config: Any | None
+    tokenizer_backend: str | None
+    tokenizer_python_module: str | None
+    tokenizer_python_class: str | None
 
     def __init__(self) -> None: ...
 
@@ -512,6 +515,21 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
+        ...
+
+    def set_tokenizer_config(
+        self,
+        backend: str,
+        python_module: str | None = None,
+        python_class: str | None = None,
+    ) -> None:
+        """Set the tokenizer configuration for Dynamo's preprocessor.
+
+        Args:
+            backend: Tokenizer backend: "huggingface", "python", "sglang", or "vllm"
+            python_module: Python module path (required for "python" backend)
+            python_class: Python class name (required for "python" backend)
+        """
         ...
 
 class OAIChatPreprocessor:

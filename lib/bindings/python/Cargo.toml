@@ -22,11 +22,12 @@ name = "_core"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["python-tokenizer"]
 media-ffmpeg = ["dynamo-llm/media-ffmpeg"]
+python-tokenizer = ["dynamo-llm/python-tokenizer"]
 
 [dependencies]
-dynamo-llm = { path = "../../llm" }
+dynamo-llm = { path = "../../llm", features = ["python-tokenizer"] }
 dynamo-runtime = { path = "../../runtime" }
 dynamo-parsers = { path = "../../parsers" }
 

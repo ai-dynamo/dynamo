@@ -119,6 +119,15 @@ async def _get_runtime_config(
     runtime_config.tool_call_parser = dynamo_args.tool_call_parser
     runtime_config.enable_local_indexer = dynamo_args.enable_local_indexer
 
+    # Set tokenizer config if not using default huggingface
+    if dynamo_args.tokenizer_backend != "huggingface":
+        runtime_config.set_tokenizer_config(
+            backend=dynamo_args.tokenizer_backend,
+            python_module=dynamo_args.tokenizer_module,
+            python_class=dynamo_args.tokenizer_class,
+        )
+        logging.info(f"Configured tokenizer backend: {dynamo_args.tokenizer_backend}")
+
     # Set bootstrap endpoint for disaggregated serving (prefill workers)
     bootstrap_host, bootstrap_port = _get_bootstrap_info_for_config(engine)
     if bootstrap_host and bootstrap_port:

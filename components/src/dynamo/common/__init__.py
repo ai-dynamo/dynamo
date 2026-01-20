@@ -10,6 +10,7 @@ Dynamo backends and components.
 Main submodules:
     - config_dump: Configuration dumping and system diagnostics utilities
     - utils: Common utilities including environment and prometheus helpers
+    - tokenizers: Tokenizer abstractions for Python-based tokenizers
 """
 
 from dynamo.common import config_dump, utils

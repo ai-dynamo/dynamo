@@ -54,7 +54,7 @@ use crate::protocols::{
         nvext::NvExtProvider,
     },
 };
-use crate::tokenizers::{HuggingFaceTokenizer, traits::Tokenizer};
+use crate::tokenizers::{HuggingFaceTokenizer, create_tokenizer_from_config, traits::Tokenizer};
 
 use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
@@ -123,29 +123,89 @@ pub struct OpenAIPreprocessor {
 impl OpenAIPreprocessor {
     pub fn new(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
         let formatter = PromptFormatter::from_mdc(&mdc)?;
-        let tokenizer = mdc.tokenizer_hf()?;
-        match formatter {
-            PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, tokenizer),
+
+        // Check if we should use a Python-based tokenizer
+        let tokenizer_config = mdc.runtime_config.tokenizer_config.clone();
+        let use_python_tokenizer = tokenizer_config
+            .as_ref()
+            .map(|c| c.is_python_based())
+            .unwrap_or(false);
+
+        if use_python_tokenizer {
+            // Use the configured Python tokenizer
+            let config = tokenizer_config.as_ref().unwrap();
+            let model_path = mdc.source_path();
+
+            // Get the tokenizer.json path for fallback (not used for Python tokenizers)
+            let tokenizer_json_path = mdc.tokenizer.as_ref().and_then(|t| match t {
+                crate::model_card::TokenizerKind::HfTokenizerJson(f) => {
+                    f.path().map(|p| p.display().to_string())
+                }
+            });
+
+            let tokenizer = create_tokenizer_from_config(
+                config,
+                model_path,
+                tokenizer_json_path.as_deref(),
+            )?;
+
+            match formatter {
+                PromptFormatter::OAI(formatter) => {
+                    Self::new_with_tokenizer(mdc, formatter, tokenizer)
+                }
+            }
+        } else {
+            // Use the default HuggingFace tokenizer
+            let hf_tokenizer = mdc.tokenizer_hf()?;
+            match formatter {
+                PromptFormatter::OAI(formatter) => Self::new_with_parts(mdc, formatter, hf_tokenizer),
+            }
         }
     }
 
+    /// Create a preprocessor with an existing HuggingFace tokenizer.
     pub fn new_with_parts(
         mdc: ModelDeploymentCard,
         formatter: Arc<dyn OAIPromptFormatter>,
         hf_tokenizer: tokenizers::Tokenizer,
     ) -> Result<Arc<Self>> {
-        let mdcsum = mdc.mdcsum().to_string();
         let tokenizer = Arc::new(HuggingFaceTokenizer::from_tokenizer(hf_tokenizer));
+        Self::new_with_tokenizer(mdc, formatter, tokenizer)
+    }
+
+    /// Create a preprocessor with a pre-configured tokenizer.
+    pub fn new_with_tokenizer(
+        mdc: ModelDeploymentCard,
+        formatter: Arc<dyn OAIPromptFormatter>,
+        tokenizer: Arc<dyn Tokenizer>,
+    ) -> Result<Arc<Self>> {
+        let mdcsum = mdc.mdcsum().to_string();
+        let model_name = mdc.name().to_string();
+        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
+
+        // Initialize runtime config from the ModelDeploymentCard
+        let runtime_config = mdc.runtime_config.clone();
+
+        // Log which tokenizer backend is being used
+        if let Some(ref config) = runtime_config.tokenizer_config {
+            tracing::info!(
+                "Using tokenizer backend: {:?} for model {}",
+                config.backend,
+                model_name
+            );
+        } else {
+            tracing::info!(
+                "Using default HuggingFace tokenizer for model {}",
+                model_name
+            );
+        }
+
         let Some(model_info) = mdc.model_info else {
             anyhow::bail!(
                 "Blank ModelDeploymentCard cannot be used for pre-processing, no model_info"
             );
         };
         let model_info = model_info.get_model_info()?;
-        let tool_call_parser = mdc.runtime_config.tool_call_parser.clone();
-
-        // // Initialize runtime config from the ModelDeploymentCard
-        let runtime_config = mdc.runtime_config.clone();
 
         #[cfg(feature = "media-nixl")]
         let media_loader = match mdc.media_decoder {

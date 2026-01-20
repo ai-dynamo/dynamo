@@ -27,6 +27,7 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
+python-tokenizer = ["dep:pyo3"]
 
 [[bench]]
 name = "tokenizer"
@@ -140,6 +141,9 @@ tokenizers = { version = "0.21.4", default-features = false, features = [
   "esaxx_fast",
   "rustls-tls",
 ] }
+
+# python tokenizer support
+pyo3 = { version = "0.23.4", default-features = false, features = ["macros"], optional = true }
 
 # backend
 galil-seiferas = { version = "0.1" }

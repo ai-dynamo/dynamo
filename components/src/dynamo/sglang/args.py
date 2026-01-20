@@ -124,6 +124,28 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
+    "tokenizer-backend": {
+        "flags": ["--tokenizer-backend"],
+        "type": str,
+        "default": "huggingface",
+        "choices": ["huggingface", "python", "sglang", "vllm"],
+        "help": "Tokenizer backend to use in Dynamo's preprocessor. 'huggingface' uses the Rust tokenizer, "
+        "'sglang' or 'vllm' use the respective framework's tokenizer, 'python' uses a custom tokenizer.",
+    },
+    "tokenizer-module": {
+        "flags": ["--tokenizer-module"],
+        "type": str,
+        "default": None,
+        "help": "Python module path for custom tokenizer (requires --tokenizer-backend python). "
+        "Example: 'my_package.tokenizer'",
+    },
+    "tokenizer-class": {
+        "flags": ["--tokenizer-class"],
+        "type": str,
+        "default": None,
+        "help": "Class name in the tokenizer module (requires --tokenizer-backend python). "
+        "Example: 'MyCustomTokenizer'",
+    },
 }
 
 
@@ -160,6 +182,11 @@ class DynamoArgs:
     enable_local_indexer: bool = False
     # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
+
+    # Tokenizer backend options
+    tokenizer_backend: str = "huggingface"
+    tokenizer_module: Optional[str] = None
+    tokenizer_class: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -517,6 +544,33 @@ async def parse_args(args: list[str]) -> Config:
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
+    # Validate tokenizer backend arguments
+    tokenizer_backend = parsed_args.tokenizer_backend
+    tokenizer_module = parsed_args.tokenizer_module
+    tokenizer_class = parsed_args.tokenizer_class
+
+    if tokenizer_backend == "python":
+        if not tokenizer_module or not tokenizer_class:
+            logging.error(
+                "--tokenizer-backend python requires both --tokenizer-module and --tokenizer-class"
+            )
+            sys.exit(1)
+    elif tokenizer_backend in ("huggingface", "sglang", "vllm"):
+        if tokenizer_module or tokenizer_class:
+            logging.warning(
+                f"--tokenizer-module and --tokenizer-class are ignored when "
+                f"--tokenizer-backend is '{tokenizer_backend}'"
+            )
+
+    # Validate that --tokenizer-backend is not used with --use-sglang-tokenizer
+    if parsed_args.use_sglang_tokenizer and tokenizer_backend != "huggingface":
+        logging.error(
+            "Cannot use --tokenizer-backend with --use-sglang-tokenizer. "
+            "--use-sglang-tokenizer bypasses Dynamo's preprocessor entirely, "
+            "while --tokenizer-backend configures the tokenizer within Dynamo's preprocessor."
+        )
+        sys.exit(1)
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -536,6 +590,9 @@ async def parse_args(args: list[str]) -> Config:
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,
+        tokenizer_backend=tokenizer_backend,
+        tokenizer_module=tokenizer_module,
+        tokenizer_class=tokenizer_class,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
 

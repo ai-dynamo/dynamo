@@ -4,6 +4,8 @@
 use super::*;
 use llm_rs::local_model::runtime_config::DisaggregatedEndpoint as RsDisaggregatedEndpoint;
 use llm_rs::local_model::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
+use llm_rs::local_model::runtime_config::TokenizerBackend as RsTokenizerBackend;
+use llm_rs::local_model::runtime_config::TokenizerConfig as RsTokenizerConfig;
 
 #[pyclass]
 #[derive(Clone, Default)]
@@ -153,5 +155,68 @@ impl ModelRuntimeConfig {
             .disaggregated_endpoint
             .as_ref()
             .and_then(|e| e.bootstrap_port)
+    }
+
+    /// Set the tokenizer configuration for Dynamo's preprocessor.
+    ///
+    /// # Arguments
+    /// * `backend` - Tokenizer backend: "huggingface", "python", "sglang", or "vllm"
+    /// * `python_module` - Python module path (required for "python" backend)
+    /// * `python_class` - Python class name (required for "python" backend)
+    #[pyo3(signature = (backend, python_module=None, python_class=None))]
+    fn set_tokenizer_config(
+        &mut self,
+        backend: &str,
+        python_module: Option<String>,
+        python_class: Option<String>,
+    ) -> PyResult<()> {
+        let backend = match backend.to_lowercase().as_str() {
+            "huggingface" => RsTokenizerBackend::HuggingFace,
+            "python" => RsTokenizerBackend::Python,
+            "sglang" => RsTokenizerBackend::SGLang,
+            "vllm" => RsTokenizerBackend::VLLM,
+            other => {
+                return Err(PyErr::new::<PyException, _>(format!(
+                    "Invalid tokenizer backend '{}'. Valid options: huggingface, python, sglang, vllm",
+                    other
+                )));
+            }
+        };
+
+        self.inner.tokenizer_config = Some(RsTokenizerConfig {
+            backend,
+            python_module,
+            python_class,
+        });
+        Ok(())
+    }
+
+    #[getter]
+    fn tokenizer_backend(&self) -> Option<String> {
+        self.inner.tokenizer_config.as_ref().map(|c| {
+            match c.backend {
+                RsTokenizerBackend::HuggingFace => "huggingface",
+                RsTokenizerBackend::Python => "python",
+                RsTokenizerBackend::SGLang => "sglang",
+                RsTokenizerBackend::VLLM => "vllm",
+            }
+            .to_string()
+        })
+    }
+
+    #[getter]
+    fn tokenizer_python_module(&self) -> Option<String> {
+        self.inner
+            .tokenizer_config
+            .as_ref()
+            .and_then(|c| c.python_module.clone())
+    }
+
+    #[getter]
+    fn tokenizer_python_class(&self) -> Option<String> {
+        self.inner
+            .tokenizer_config
+            .as_ref()
+            .and_then(|c| c.python_class.clone())
     }
 }

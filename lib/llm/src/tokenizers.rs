@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod hf;
+#[cfg(feature = "python-tokenizer")]
+pub mod python;
 
 // TODO: Add tokenizer benchmarks
 // TODO: Enable README.md as a module doc
@@ -15,6 +17,8 @@ use crate::protocols::TokenIdType;
 pub use anyhow::{Error, Result};
 
 pub use hf::HuggingFaceTokenizer;
+#[cfg(feature = "python-tokenizer")]
+pub use python::PythonTokenizer;
 
 /// Represents the type of tokenizer being used
 #[derive(Debug)]
@@ -32,6 +36,8 @@ pub enum Encoding {
     Hf(Box<tokenizers::tokenizer::Encoding>),
     /// Sentence Piece
     Sp(Vec<TokenIdType>),
+    /// Python tokenizer output
+    Py(Vec<TokenIdType>),
 }
 
 impl Encoding {
@@ -39,6 +45,7 @@ impl Encoding {
         match self {
             Encoding::Hf(inner) => inner.get_ids(),
             Encoding::Sp(inner) => inner,
+            Encoding::Py(inner) => inner,
         }
     }
 }
@@ -134,6 +141,86 @@ pub fn create_tokenizer_from_file(file_path: &str) -> Result<Arc<dyn traits::Tok
             Ok(Arc::new(tokenizer))
         }
         _ => Err(Error::msg("Unsupported file type".to_string())),
+    }
+}
+
+use crate::local_model::runtime_config::{TokenizerBackend, TokenizerConfig};
+
+/// Create a tokenizer based on the provided configuration.
+///
+/// This factory function supports multiple tokenizer backends:
+/// - HuggingFace: Uses the Rust tokenizers library with tokenizer.json
+/// - SGLang: Uses SGLang's Python tokenizer (requires "python-tokenizer" feature)
+/// - VLLM: Uses vLLM's Python tokenizer (requires "python-tokenizer" feature)
+/// - Python: Uses a custom Python tokenizer with specified module/class (requires "python-tokenizer" feature)
+///
+/// # Arguments
+/// * `config` - The tokenizer configuration specifying which backend to use
+/// * `model_path` - Model path/name (used for Python tokenizers and as fallback)
+/// * `tokenizer_json_path` - Path to tokenizer.json file (required for HuggingFace backend)
+#[cfg(feature = "python-tokenizer")]
+pub fn create_tokenizer_from_config(
+    config: &TokenizerConfig,
+    model_path: &str,
+    tokenizer_json_path: Option<&str>,
+) -> Result<Arc<dyn traits::Tokenizer>> {
+    match config.backend {
+        TokenizerBackend::HuggingFace => {
+            let path = tokenizer_json_path.ok_or_else(|| {
+                Error::msg(
+                    "HuggingFace tokenizer requires tokenizer.json path, but none was provided",
+                )
+            })?;
+            let tokenizer = HuggingFaceTokenizer::from_file(path)?;
+            Ok(Arc::new(tokenizer))
+        }
+        TokenizerBackend::SGLang => {
+            let tokenizer = PythonTokenizer::sglang(model_path.to_string());
+            Ok(Arc::new(tokenizer))
+        }
+        TokenizerBackend::VLLM => {
+            let tokenizer = PythonTokenizer::vllm(model_path.to_string());
+            Ok(Arc::new(tokenizer))
+        }
+        TokenizerBackend::Python => {
+            let module = config.python_module.as_ref().ok_or_else(|| {
+                Error::msg("Python tokenizer requires python_module to be specified")
+            })?;
+            let class = config.python_class.as_ref().ok_or_else(|| {
+                Error::msg("Python tokenizer requires python_class to be specified")
+            })?;
+            let tokenizer =
+                PythonTokenizer::new(module.clone(), class.clone(), model_path.to_string());
+            Ok(Arc::new(tokenizer))
+        }
+    }
+}
+
+/// Create a tokenizer based on the provided configuration.
+///
+/// Without the "python-tokenizer" feature, only HuggingFace backend is supported.
+#[cfg(not(feature = "python-tokenizer"))]
+pub fn create_tokenizer_from_config(
+    config: &TokenizerConfig,
+    _model_path: &str,
+    tokenizer_json_path: Option<&str>,
+) -> Result<Arc<dyn traits::Tokenizer>> {
+    match config.backend {
+        TokenizerBackend::HuggingFace => {
+            let path = tokenizer_json_path.ok_or_else(|| {
+                Error::msg(
+                    "HuggingFace tokenizer requires tokenizer.json path, but none was provided",
+                )
+            })?;
+            let tokenizer = HuggingFaceTokenizer::from_file(path)?;
+            Ok(Arc::new(tokenizer))
+        }
+        TokenizerBackend::SGLang | TokenizerBackend::VLLM | TokenizerBackend::Python => {
+            Err(Error::msg(
+                "Python-based tokenizers require the 'python-tokenizer' feature to be enabled. \
+                 Please rebuild dynamo-llm with the 'python-tokenizer' feature.",
+            ))
+        }
     }
 }
 
