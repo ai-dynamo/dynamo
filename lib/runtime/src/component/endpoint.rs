@@ -87,7 +87,7 @@ impl EndpointConfigBuilder {
         let system_health = endpoint.drt().system_health();
 
         let request_plane_mode = endpoint.drt().request_plane();
-        tracing::info!("Endpoint starting with request plane mode: {request_plane_mode}",);
+        tracing::debug!("Endpoint starting with request plane mode: {request_plane_mode}",);
 
         // Register with graceful shutdown tracker if needed
         if graceful_shutdown {
@@ -140,7 +140,7 @@ impl EndpointConfigBuilder {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             endpoint = %endpoint_name_for_task,
             transport = server.transport_name(),
             "Registering endpoint with request plane server"
