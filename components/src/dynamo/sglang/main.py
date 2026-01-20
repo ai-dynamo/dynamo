@@ -153,7 +153,21 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(component, engine, config, publisher)
+    handler = DecodeWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+
+    # Register memory management routes using handler methods
+    runtime.register_engine_route(
+        "release_memory_occupation", handler.release_memory_occupation
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", handler.resume_memory_occupation
+    )
+    logging.info(
+        "Registered engine routes: /engine/release_memory_occupation, /engine/resume_memory_occupation"
+    )
+
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -254,7 +268,20 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config, publisher)
+    handler = PrefillWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+
+    # Register memory management routes using handler methods
+    runtime.register_engine_route(
+        "release_memory_occupation", handler.release_memory_occupation
+    )
+    runtime.register_engine_route(
+        "resume_memory_occupation", handler.resume_memory_occupation
+    )
+    logging.info(
+        "Registered engine routes: /engine/release_memory_occupation, /engine/resume_memory_occupation"
+    )
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
