@@ -143,9 +143,11 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
                 "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
             }
         )
+        # [gluo NOTE] this actually loads the full model,
+        # which require more GPU memory than needed.
         vllm_model = LLM(
             model=model_id,
-            enforce_eager=True,
+            enforce_eager=False,
             gpu_memory_utilization=0.4,
             max_model_len=10,
         )
