@@ -136,20 +136,10 @@ class EncodeWorkerHandler:
 
                 image = await self.image_loader.load_image(image_url)
 
-                time_loaded = time.perf_counter()
-                logger.debug(
-                    f"Image loading time: {time_loaded - time_start:.4f} seconds"
-                )
-
                 logger.debug(
                     f"Processing image {image_url} for request: {{ id: {request_id} }}"
                 )
                 image_embeds = self.image_processor(images=image, return_tensors="pt")
-
-                time_processed = time.perf_counter()
-                logger.debug(
-                    f"Image processing time: {time_processed - time_loaded:.4f} seconds"
-                )
 
                 # Encode the image embeddings using model-specific encoder
                 embeddings = encode_image_embeddings(
@@ -157,10 +147,6 @@ class EncodeWorkerHandler:
                     image_embeds=image_embeds,
                     vision_encoder=self.vision_encoder,
                     projector=self.projector,
-                )
-                time_encode = time.perf_counter()
-                logger.debug(
-                    f"Image encoding time: {time_encode - time_processed:.4f} seconds"
                 )
 
                 image_grid_thw = (

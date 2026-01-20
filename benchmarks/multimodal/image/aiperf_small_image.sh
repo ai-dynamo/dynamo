@@ -5,11 +5,12 @@
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CONCURRENCY=1
 
-# Create a small JSONL file with 12 identical image URLs
+# Create a JSONL file with 12 identical small image URLs
 # NOTE: any kind of caching can signifantly affect the benchmark results,
 # should make sure what you are doing.
 echo '{"images": ["http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg","http://images.cocodataset.org/test2017/000000155781.jpg"]}' \
     >> data_small.jsonl
+echo "This benchmark uses duplicate image urls, so any kind of caching can signifantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
