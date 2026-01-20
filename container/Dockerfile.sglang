@@ -442,6 +442,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service
+
 ##################################
 ########## Runtime Image #########
 ##################################
@@ -503,6 +507,7 @@ ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+        /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
         sglang==${SGLANG_VERSION}

@@ -481,6 +481,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service
+
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -605,6 +609,7 @@ COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbin
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
     ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
     ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
@@ -725,6 +730,7 @@ ARG ENABLE_KVBM
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
+      /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
@@ -801,6 +807,7 @@ RUN cd /usr/local/lib && \
     ldconfig
 
 USER dynamo
+
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 

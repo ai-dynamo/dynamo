@@ -348,7 +348,16 @@ cd lib/bindings/python
 maturin develop --uv
 ```
 
-## 6. Install the wheel
+## 6. Install GPU Memory Service
+
+The GPU Memory Service is a Python package with a C++ extension. It requires only Python development headers and a C++ compiler (g++).
+
+```bash
+cd $PROJECT_ROOT
+uv pip install -e lib/gpu_memory_service
+```
+
+## 7. Install the wheel
 
 ```
 cd $PROJECT_ROOT
