@@ -519,6 +519,7 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
+    # Install NVIDIA packages based on CUDA version
     CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
     if [ "$CUDA_MAJOR" = "12" ]; then \
         # Install NVIDIA packages that are needed for DeepEP to work properly
@@ -527,6 +528,13 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
             nvidia-nccl-cu12==2.28.3 \
             nvidia-cudnn-cu12==9.16.0.29 \
             nvidia-cutlass-dsl==4.3.0; \
+    elif [ "$CUDA_MAJOR" = "13" ]; then \
+        # CUDA 13: Install CuDNN for PyTorch 2.9.1 compatibility
+        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+            nvidia-nccl-cu13==2.28.3 \
+            nvidia-cublas==13.1.0.3 \
+            nvidia-cutlass-dsl==4.3.1 \
+            nvidia-cudnn-cu13==9.16.0.29; \
     fi
 
 # Switch back to dynamo user after package installations

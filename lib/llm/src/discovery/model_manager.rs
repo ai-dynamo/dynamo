@@ -374,9 +374,6 @@ impl ModelManager {
 
         discovery.register(discovery_spec).await?;
 
-        // Use instance_id (hex) as the consumer ID for NATS consumer coordination
-        let consumer_id = instance_id.to_string();
-
         // Get or create runtime config watcher for this endpoint
         let workers_with_configs = self.get_or_create_runtime_config_watcher(endpoint).await?;
 
@@ -388,7 +385,7 @@ impl ModelManager {
             kv_cache_block_size,
             Some(selector),
             kv_router_config,
-            consumer_id,
+            instance_id,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
