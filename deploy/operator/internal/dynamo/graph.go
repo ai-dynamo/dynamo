@@ -337,10 +337,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 }
 
 func getDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
-	if service.GlobalDynamoNamespace {
-		return commonconsts.GlobalDynamoNamespace
-	}
-	return fmt.Sprintf("%s-%s", object.GetNamespace(), object.GetName())
+	return v1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
@@ -570,10 +567,24 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			Protocol:   corev1.ProtocolTCP,
 		}
 	}
+
+	// Start with user-defined labels from component.Labels
+	labels := make(map[string]string)
+	for k, v := range component.Labels {
+		labels[k] = v
+	}
+
+	// Add k8s discovery labels (these take precedence over user labels)
+	if isK8sDiscoveryEnabled {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
 			Namespace: dynamoDeployment.Namespace,
+			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
@@ -582,12 +593,6 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
-	}
-	if isK8sDiscoveryEnabled {
-		service.Labels = map[string]string{
-			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
-			commonconsts.KubeLabelDynamoDiscoveryEnabled: commonconsts.KubeLabelValueTrue,
-		}
 	}
 	return service, nil
 }
@@ -1071,15 +1076,15 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 }
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
+	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
+
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
 		ComponentType:                  component.ComponentType,
 		ParentGraphDeploymentName:      parentGraphDeploymentName,
 		ParentGraphDeploymentNamespace: namespace,
 		DiscoveryBackend:               discoveryBackend,
-	}
-	if component.DynamoNamespace != nil {
-		componentContext.DynamoNamespace = *component.DynamoNamespace
+		DynamoNamespace:                dynamoNamespace,
 	}
 	return componentContext
 }

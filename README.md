@@ -30,20 +30,26 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## Framework Support Matrix
 
-| Feature                                                                                           | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
-| ------------------------------------------------------------------------------------------------- | ---- | ------ | ------------ |
-| [**Disaggregated Serving**](/docs/design_docs/disagg_serving.md)                                 | ✅   | ✅     | ✅           |
-| [**KV-Aware Routing**](/docs/router/kv_cache_routing.md)                                    | ✅   | ✅     | ✅           |
-| [**SLA-Based Planner**](docs/planner/sla_planner.md)                                        | ✅   | ✅     | ✅           |
-| [**KVBM**](docs/kvbm/kvbm_architecture.md)                                               | ✅   | 🚧     | ✅           |
+| Feature                                                              | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
+| -------------------------------------------------------------------- | :--: | :----: | :----------: |
+| [**Disaggregated Serving**](docs/design_docs/disagg_serving.md)      | ✅   | ✅     | ✅           |
+| [**KV-Aware Routing**](docs/router/kv_cache_routing.md)              | ✅   | ✅     | ✅           |
+| [**SLA-Based Planner**](docs/planner/sla_planner.md)                 | ✅   | ✅     | ✅           |
+| [**KVBM**](docs/kvbm/kvbm_architecture.md)                           | ✅   | 🚧     | ✅           |
+| [**Multimodal**](docs/multimodal/index.md)                           | ✅   | ✅     | ✅           |
+| [**Tool Calling**](docs/agents/tool-calling.md)                      | ✅   | ✅     | ✅           |
+
+> **[Full Feature Matrix →](feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
 
 ## Latest News
 
+- [12/05] [Moonshot AI's Kimi K2 achieves 10x inference speedup with Dynamo on GB200](https://quantumzeitgeist.com/kimi-k2-nvidia-ai-ai-breakthrough/)
+- [12/02] [Mistral AI runs Mistral Large 3 with 10x faster inference using Dynamo](https://www.marktechpost.com/2025/12/02/nvidia-and-mistral-ai-bring-10x-faster-inference-for-the-mistral-3-family-on-gb200-nvl72-gpu-systems/)
+- [12/01] [InfoQ: NVIDIA Dynamo simplifies Kubernetes deployment for LLM inference](https://www.infoq.com/news/2025/12/nvidia-dynamo-kubernetes/)
+- [11/20] [Dell integrates PowerScale with Dynamo's NIXL for 19x faster TTFT](https://www.dell.com/en-us/dt/corporate/newsroom/announcements/detailpage.press-releases~usa~2025~11~dell-technologies-and-nvidia-advance-enterprise-ai-innovation.htm)
+- [11/20] [WEKA partners with NVIDIA on KV cache storage for Dynamo](https://siliconangle.com/2025/11/20/nvidia-weka-kv-cache-solution-ai-inferencing-sc25/)
 - [11/13] [Dynamo Office Hours Playlist](https://www.youtube.com/playlist?list=PL5B692fm6--tgryKu94h2Zb7jTFM3Go4X)
-- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/#qwen3-coder-benchmarks-with-kv-routing)
-- [10/13] [NVIDIA Blackwell Leads on New SemiAnalysis InferenceMax Benchmarks](https://developer.nvidia.com/blog/nvidia-blackwell-leads-on-new-semianalysis-inferencemax-benchmarks/)
-- [09/09] [Dynamo + NVIDIA Blackwell Ultra Sets New MLPerf Inference Benchmark Record](https://blogs.nvidia.com/blog/mlperf-inference-blackwell-ultra/)
-- [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./docs/backends/trtllm/gpt-oss.md)
+- [10/16] [How Baseten achieved 2x faster inference with NVIDIA Dynamo](https://www.baseten.co/blog/how-baseten-achieved-2x-faster-inference-with-nvidia-dynamo/)
 
 ## The Era of Multi-GPU, Multi-Node
 
@@ -88,23 +94,6 @@ Backend engines require Python development headers for JIT compilation. Install 
 sudo apt install python3-dev
 ```
 
-### Install etcd (optional) and NATS (required)
-
-To coordinate across a data center, Dynamo relies on etcd and NATS. These will be used in production. To run Dynamo locally etcd is optional.
-
-- [etcd](https://etcd.io/) can be run directly as `./etcd`.
-- [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
-
-To quickly setup etcd & NATS, you can also run:
-
-```bash
-# At the root of the repository:
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-To run locally without etcd, pass `--store-kv file` to both the frontend and workers. The directory used for key-value data can be configured via the `DYN_FILE_KV` environment variable (example: `export DYN_FILE_KV=/data/kv/dynamo`). Defaults to `$TMPDIR/dynamo_store_kv`.
-
-
 ## 2. Select an engine
 
 We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
@@ -139,7 +128,7 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 - **Workers** – Set of pre-configured LLM serving engines.
 
 ```
-# Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router.
+# Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
 # Pass the TLS certificate and key paths to use HTTPS instead of HTTP.
 # Pass --store-kv to use the filesystem instead of etcd. The workers and frontend must share a disk.
 python -m dynamo.frontend --http-port 8000 [--tls-cert-path cert.pem] [--tls-key-path key.pem] [--store-kv file]
@@ -174,6 +163,23 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 - Check out [Backends](examples/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
 - Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
+### Service Discovery and Messaging
+
+Dynamo uses TCP for inter-component communication. External services are optional for most deployments:
+
+| Deployment | etcd | NATS | Notes |
+|------------|------|------|-------|
+| **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
+| **Local development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; TCP request plane |
+| **KV-aware routing** | — | ✅ Required | Add NATS for KV event messaging |
+
+For local development, pass `--store-kv file` to both the frontend and workers. For distributed non-Kubernetes deployments or KV-aware routing:
+
+- [etcd](https://etcd.io/) can be run directly as `./etcd`.
+- [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
+
+To quickly setup both: `docker compose -f deploy/docker-compose.yml up -d`
+
 ### Benchmarking Dynamo
 
 Dynamo provides comprehensive benchmarking tools to evaluate and optimize your deployments:
@@ -194,7 +200,7 @@ This writes the current frontend spec to `docs/frontends/openapi.json` at the re
 
 # Engines
 
-Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, NATS and etcd need to be installed, along with a Dynamo frontend (`python -m dynamo.frontend [--interactive]`).
+Dynamo is designed to be inference engine agnostic. To use any engine with Dynamo, start a Dynamo frontend (`python -m dynamo.frontend`). For local development, pass `--store-kv file` to avoid etcd dependency. NATS is optional and only required for KV-aware routing.
 
 ## vLLM
 
@@ -259,8 +265,11 @@ sudo apt-get -y install libzmq3-dev
 ### After installing the pre-requisites above, install Dynamo
 
 ```
-uv pip install ai-dynamo[trtllm]
+pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo[trtllm]
 ```
+
+> [!Note]
+> We use `pip` instead of `uv` here because `tensorrt-llm` has a URL-based git dependency (`etcd3`) that `uv` does not currently support.
 
 Run the backend/worker like this:
 
@@ -348,8 +357,18 @@ uv pip install -e .
 
 You should now be able to run `python -m dynamo.frontend`.
 
-Remember that nats and etcd must typically be running (see earlier).
+For local development, pass `--store-kv file` to avoid external dependencies (see Service Discovery and Messaging section).
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+
+<!-- Reference links for Feature Compatibility Matrix -->
+[disagg]: docs/design_docs/disagg_serving.md
+[kv-routing]: docs/router/kv_cache_routing.md
+[planner]: docs/planner/sla_planner.md
+[kvbm]: docs/kvbm/kvbm_architecture.md
+[mm]: examples/multimodal/
+[migration]: docs/fault_tolerance/request_migration.md
+[lora]: examples/backends/vllm/deploy/lora/README.md
+[tools]: docs/agents/tool-calling.md

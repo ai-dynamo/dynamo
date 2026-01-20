@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -23,7 +22,6 @@ spec:
             - --http-port
             - "8000"
     decode:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -46,7 +44,6 @@ spec:
             - --tensor-parallel-size
             - "2"
     prefill:
-      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

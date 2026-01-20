@@ -162,7 +162,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
-    m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
     m.add_class::<llm::kv::ApproxKvIndexer>()?;
@@ -360,7 +359,12 @@ fn register_llm<'p>(
 
         let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
         builder
+            // model path is the physical path on disk of the downloaded model
             .model_path(model_path)
+            // source path is what the user gave as `--model-path`, either a real path (in which
+            // case it matches model_path above), or an HF repo.
+            .source_path(source_path.clone().into())
+            // --served_model_name
             .model_name(model_name.clone())
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
@@ -386,7 +390,10 @@ fn register_llm<'p>(
         if let Some(lora_name) = lora_identifier {
             tracing::info!("Registered LoRA '{}' MDC", lora_name);
         } else {
-            tracing::info!("Registered base model '{:?}' MDC", model_name);
+            tracing::info!(
+                "Registered base model '{}' MDC",
+                model_name.unwrap_or(source_path)
+            );
         }
 
         Ok(())

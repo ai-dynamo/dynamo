@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: mocker-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -16,7 +15,6 @@ spec:
           image: my-registry/mocker-runtime:my-tag
     prefill:
       envFromSecret: hf-token-secret
-      dynamoNamespace: mocker-disagg
       componentType: worker
       subComponentType: prefill
       replicas: 1
@@ -40,7 +38,6 @@ spec:
             - --is-prefill-worker
     decode:
       envFromSecret: hf-token-secret
-      dynamoNamespace: mocker-disagg
       componentType: worker
       subComponentType: decode
       replicas: 1

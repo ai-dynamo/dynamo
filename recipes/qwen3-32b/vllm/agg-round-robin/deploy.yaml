@@ -13,7 +13,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: agg-8xtp2
       envs:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
@@ -36,7 +35,6 @@ spec:
       subComponentType: null
     VllmDecodeWorker:
       componentType: worker
-      dynamoNamespace: agg-8xtp2
       envFromSecret: hf-token-secret
       volumeMounts:
       - name: model-cache
