@@ -4,13 +4,13 @@
 # flake8: noqa
 import logging
 
-import nixl
+# import nixl
 from kvbm._core import __version__ as __version__
 from kvbm._feature_stubs import _make_feature_stub, _make_module_stub
 
 # nixl needs to be loaded before any other imports to ensure that the nixl shared object is available for the KVBM core.
 logger = logging.getLogger(__name__)
-logger.info(f"Loaded nixl API module: {nixl._api}")
+# logger.info(f"Loaded nixl API module: {nixl._api}")
 
 # v1 feature: BlockManager, KvbmLeader, KvbmWorker
 try:

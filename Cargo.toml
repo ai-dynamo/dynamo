@@ -18,6 +18,7 @@ members = [
     "lib/nova",
     "lib/nova-backend",
     "lib/nova-discovery",
+    "lib/nova-streaming",
     "lib/identity",
     "lib/kvbm",
     "lib/kvbm-config",
@@ -38,6 +39,7 @@ default-members = [
     "lib/nova",
     "lib/nova-backend",
     "lib/nova-discovery",
+    "lib/nova-streaming",
     "lib/identity",
     "lib/kvbm",
     "lib/kvbm-config",
@@ -77,6 +79,7 @@ dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.7.0" }
 dynamo-nova = { path = "lib/nova", version = "0.7.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
 dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.7.0" }
+dynamo-nova-streaming = { path = "lib/nova-streaming", version = "0.7.0" }
 dynamo-identity = { path = "lib/identity", version = "0.7.0" }
 
 # nixl

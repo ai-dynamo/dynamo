@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 
 import kvbm
 import torch
+from kvbm.v2.common import NovaPeerMetadata as _NovaPeerMetadataBase
 from kvbm.v2.vllm import KvbmVllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -40,17 +41,15 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class NovaPeerMetadata(KVConnectorHandshakeMetadata):
+class NovaPeerMetadata(_NovaPeerMetadataBase, KVConnectorHandshakeMetadata):
     """
-    Nova peer info for handshake between worker and leader.
+    vLLM-compatible NovaPeerMetadata with handshake interface.
 
-    This metadata is returned by get_handshake_metadata() and contains
-    the serialized Nova PeerInfo needed for the leader to register this
-    worker as a peer.
+    Extends the common NovaPeerMetadata to also inherit from vLLM's
+    KVConnectorHandshakeMetadata for compatibility with vLLM's connector API.
     """
 
-    instance_id: bytes  # 16-byte UUID
-    worker_address: bytes  # JSON-serialized WorkerAddress
+    pass
 
 
 class SchedulerConnectorWorker:

@@ -325,11 +325,10 @@ impl ConnectorWorker {
         cuda_event: Arc<cudarc::driver::CudaEvent>,
     ) -> Result<()> {
         // Take the Nova event handle
-        let nova_event = self.state.take_forward_pass_nova_event().ok_or_else(|| {
-            anyhow::anyhow!(
-                "No Nova event handle - forward_pass_completion_active was true but no event set"
-            )
-        })?;
+        let Some(nova_event) = self.state.take_forward_pass_nova_event() else {
+            tracing::warn!("No Nova event handle - forward_pass_completion_active was true but no event set");
+            return Ok(());
+        };
 
         let nova = self.runtime.nova().clone();
         let cuda_event_handle = cuda_event.cu_event() as u64;

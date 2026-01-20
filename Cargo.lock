@@ -3427,7 +3427,7 @@ dependencies = [
  "dynamo-nova-backend",
  "dynamo-nova-discovery",
  "either",
- "flume",
+ "flume 0.11.1",
  "futures",
  "lru 0.16.2",
  "parking_lot",
@@ -3456,7 +3456,7 @@ dependencies = [
  "dashmap 6.1.0",
  "derive_builder",
  "dynamo-identity",
- "flume",
+ "flume 0.11.1",
  "futures",
  "hashbrown 0.16.1",
  "http 1.4.0",
@@ -3531,6 +3531,30 @@ dependencies = [
  "uuid 1.18.1",
  "validator",
  "xxhash-rust",
+]
+
+[[package]]
+name = "dynamo-nova-streaming"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dashmap 6.1.0",
+ "dynamo-identity",
+ "dynamo-nova",
+ "dynamo-nova-backend",
+ "flume 0.12.0",
+ "futures",
+ "parking_lot",
+ "pin-project-lite",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tracing",
+ "uuid 1.18.1",
 ]
 
 [[package]]
@@ -4014,6 +4038,9 @@ name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
+dependencies = [
+ "getrandom 0.2.16",
+]
 
 [[package]]
 name = "fax"
@@ -4133,6 +4160,18 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "nanorand",
+ "spin",
+]
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "fastrand 2.3.0",
+ "futures-core",
+ "futures-sink",
  "spin",
 ]
 

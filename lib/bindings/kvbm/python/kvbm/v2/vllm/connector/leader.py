@@ -19,10 +19,10 @@ import os
 from typing import TYPE_CHECKING, Any, Optional
 
 import kvbm
+from kvbm.v2.common import register_workers_from_handshake
 from kvbm.v2.vllm import KvbmVllmConfig
 
 from ..sched_output import process_scheduler_output
-from .worker import NovaPeerMetadata
 
 # Import v2 bindings (requires v2 feature)
 if kvbm.v2.is_available():
@@ -195,32 +195,7 @@ class SchedulerConnectorLeader:
         Args:
             metadata: Dictionary mapping tp_rank (int) to NovaPeerMetadata
         """
-        # Create sorted list of (tp_rank, worker_meta) tuples sorted by tp_rank
-        sorted_workers = sorted(metadata.items(), key=lambda x: x[0])
-
-        # Validate that we have consecutive tp_ranks from 0 to N-1
-        num_workers = len(sorted_workers)
-        expected_ranks = list(range(num_workers))
-        actual_ranks = [tp_rank for tp_rank, _ in sorted_workers]
-
-        if actual_ranks != expected_ranks:
-            raise ValueError(
-                f"Expected consecutive tp_ranks from 0 to {num_workers - 1}, "
-                f"got {actual_ranks}"
-            )
-
-        # Validate all metadata types and register workers in sorted order
-        for tp_rank, worker_meta in sorted_workers:
-            if not isinstance(worker_meta, NovaPeerMetadata):
-                raise ValueError(
-                    f"Expected NovaPeerMetadata, got {type(worker_meta).__name__}"
-                )
-            self.leader.register_worker(
-                tp_rank, worker_meta.instance_id, worker_meta.worker_address
-            )
-
-        # Single call to initialize all workers
-        self.leader.initialize_workers()
+        register_workers_from_handshake(self.leader, metadata)
 
     # Utility functions
 
