@@ -77,8 +77,8 @@ WORKDIR /
 # Copy the binary from builder
 COPY --from=builder /workspace/epp .
 
-# Copy the config file
-COPY --from=builder /workspace/config/epp-config-dynamo.yaml /config/epp-config.yaml
+# Note: EPP config is mounted via Kubernetes ConfigMap at runtime
+# See helm/dynamo-gaie/templates/epp-configmap.yaml
 
 # Create non-root user
 RUN useradd -r -u 65532 -g nogroup nonroot

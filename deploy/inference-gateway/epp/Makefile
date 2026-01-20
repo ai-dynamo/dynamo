@@ -26,8 +26,8 @@ KIND_CLUSTER ?= kind
 PROJECT_DIR := $(shell pwd)
 
 # Dynamo directories
-# Default: assume we're in dynamo/deploy/inference-gateway
-DYNAMO_DIR ?= $(shell cd $(PROJECT_DIR)/../.. && pwd)
+# Default: assume we're in dynamo/deploy/inference-gateway/epp
+DYNAMO_DIR ?= $(shell cd $(PROJECT_DIR)/../../.. && pwd)
 DYNAMO_LIB_DIR := $(PROJECT_DIR)/pkg/plugins/dynamo_kv_scorer/lib
 DYNAMO_INCLUDE_DIR := $(PROJECT_DIR)/pkg/plugins/dynamo_kv_scorer/include
 
