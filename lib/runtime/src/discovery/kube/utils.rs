@@ -9,7 +9,7 @@ use std::hash::{Hash, Hasher};
 /// Hash a pod name to get a consistent instance ID
 pub fn hash_pod_name(pod_name: &str) -> u64 {
     // Clear top 11 bits to ensure it can be safely rounded to IEEE-754 f64
-    const INSTANCE_ID_MASK: u64 = 0x0x001F_FFFF_FFFF_FFFFu64;
+    const INSTANCE_ID_MASK: u64 = 0x001F_FFFF_FFFF_FFFFu64;
     let mut hasher = DefaultHasher::new();
     pod_name.hash(&mut hasher);
     hasher.finish() & INSTANCE_ID_MASK
