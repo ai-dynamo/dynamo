@@ -6,12 +6,11 @@ MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CONCURRENCY=1
 
 # Create a JSONL file with 11 identical large image URLs
-# NOTE: any kind of caching can signifantly affect the benchmark results,
+# NOTE: any kind of caching can significantly affect the benchmark results,
 # should make sure what you are doing.
-rm data_large.jsonl
 echo '{"images": ["https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"]}' \
-    >> data_large.jsonl
-echo "This benchmark uses duplicate image urls, so any kind of caching can signifantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
+    > data_large.jsonl
+echo "This benchmark uses duplicate image urls, so any kind of caching can significantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do

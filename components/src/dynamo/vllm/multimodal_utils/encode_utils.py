@@ -62,7 +62,10 @@ def get_qwen_image_features(
     logger.debug(f"Encoding image of shape: {image_embeds['pixel_values'].shape}")
     if VLLM_ENCODER:
         pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
-        grid_thw = image_embeds.get("image_grid_thw").tolist()
+        grid_thw = image_embeds.get("image_grid_thw")
+        if grid_thw is None:
+            raise ValueError("grid_thw is not provided")
+        grid_thw = grid_thw.tolist()
         image_embeds = vision_encoder(pixel_values, grid_thw=grid_thw)
         return image_embeds
 
