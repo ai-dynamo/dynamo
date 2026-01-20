@@ -258,7 +258,7 @@ Dynamo requires all contributions to be signed off with the [Developer Certifica
 
 Each commit must include a sign-off line:
 
-```
+```text
 Signed-off-by: Jane Smith <jane.smith@email.com>
 ```
 
