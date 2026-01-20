@@ -123,44 +123,21 @@ For detailed setup instructions, see the [Developing Locally](README.md#developi
 
 Understanding Dynamo's architecture helps you find where to make changes.
 
-```mermaid
-flowchart LR
-    subgraph request_path [Request Path]
-        direction TB
-        Client[Client] --> Frontend
-        Frontend --> Router
-        Router --> Workers
-    end
+![Dynamo Architecture](docs/images/architecture.png)
 
-    subgraph control_plane [Control Plane]
-        direction TB
-        Planner[Planner] -.->|scaling decisions| Router
-        EventPlane[Event Plane] -.->|metrics| Planner
-    end
+### Core Components
 
-    subgraph workers [Worker Pool]
-        direction TB
-        Workers[Backend Workers]
-        Workers --> PrefillW[Prefill]
-        Workers --> DecodeW[Decode]
-    end
-
-    subgraph engine [Inference Engine]
-        direction TB
-        LLMEngine[LLM Engine]
-        KVBM[KV Block Manager]
-        LLMEngine <--> KVBM
-    end
-
-    subgraph data_plane [Data Plane]
-        NIXL[NIXL Transfer]
-    end
-
-    PrefillW --> LLMEngine
-    DecodeW --> LLMEngine
-    KVBM --> NIXL
-    PrefillW <-.->|KV transfer| DecodeW
-```
+| Component | Purpose | Directory |
+|-----------|---------|-----------|
+| **API Server** | OpenAI-compatible HTTP frontend for receiving inference requests | `components/src/dynamo/frontend/` |
+| **Smart Router** | KV cache-aware request routing with load balancing | `components/src/dynamo/router/` |
+| **Planner** | Real-time performance tuning and worker scaling decisions | `components/src/dynamo/planner/` |
+| **Backend Workers** | Engine integrations (vLLM, SGLang, TensorRT-LLM) | `components/src/dynamo/{vllm,sglang,trtllm}/` |
+| **Disaggregated Serving** | Separate Prefill and Decode workers for GPU optimization | `lib/llm/` |
+| **KV Cache Manager** | Multi-tier cache offloading (GPU → CPU → SSD → Object Storage) | `lib/bindings/kvbm/` |
+| **Event Plane** | Metrics transfer across Dynamo components | `lib/runtime/` |
+| **NIXL** | Low-latency, interconnect-agnostic multi-node data transfer | [ai-dynamo/nixl](https://github.com/ai-dynamo/nixl) |
+| **Kubernetes Operator** | CRDs, controllers, and webhooks for K8s deployment | `deploy/operator/` |
 
 ### Why These Languages?
 
