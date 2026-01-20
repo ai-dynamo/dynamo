@@ -373,8 +373,11 @@ async def parse_args(args: list[str]) -> Config:
             args = args[:key_index] + args[key_index + 2 :]
 
         # Merge config file arguments with CLI arguments.
-        # SGLang >= 0.5.8 accepts parser= parameter for proper store_true detection.
-        # SGLang < 0.5.8 only accepts boolean_actions= parameter.
+        # ConfigArgumentMerger API changed after SGLang v0.5.7:
+        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
+        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
+        # We use inspect.signature to detect the API rather than version checking
+        # since unreleased builds may have the new API while still reporting v0.5.7.
         # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
         # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
         import inspect
