@@ -971,9 +971,18 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     # EPP directory with the new self-contained build
     EPP_DIR="${BUILD_CONTEXT}/deploy/inference-gateway/epp"
 
+    # Set DOCKER_PROXY from ECR_HOSTNAME if available (for pulling base images through proxy)
+    # This prevents rate-limiting when building in CI across multiple PRs
+    DOCKER_PROXY_ARG=""
+    if [[ -n "${ECR_HOSTNAME}" ]]; then
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        DOCKER_PROXY_ARG="DOCKER_PROXY=${DOCKER_PROXY}"
+        echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
+    fi
+
     # Build EPP image using the Makefile
     # The Makefile handles: building Dynamo library, building Docker image, loading it locally
-    $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}"
+    $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}" ${DOCKER_PROXY_ARG}
 
     # Compute EPP image tag (must match Makefile's IMAGE_TAG)
     # IMAGE_TAG = $(IMAGE_REPO):$(GIT_TAG)

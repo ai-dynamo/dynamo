@@ -22,10 +22,14 @@ else ifeq ($(HOST_ARCH),arm64)
 else
     PLATFORMS ?= linux/amd64
 endif
+# Docker proxy for avoiding rate limits (e.g., ECR mirror)
+# Set DOCKER_PROXY to prefix base images, e.g., DOCKER_PROXY=my-registry.com/dockerhub/
+DOCKER_PROXY ?=
+
 DOCKER_BUILDX_CMD ?= docker buildx
 IMAGE_BUILD_CMD ?= $(DOCKER_BUILDX_CMD) build
-BUILDER_IMAGE ?= golang:1.24
-BASE_IMAGE ?= ubuntu:24.04
+BUILDER_IMAGE ?= $(DOCKER_PROXY)golang:1.24
+BASE_IMAGE ?= $(DOCKER_PROXY)ubuntu:24.04
 
 # Container tool
 CONTAINER_TOOL ?= docker
@@ -170,6 +174,9 @@ info: ## Show build info
 	@echo "Git Commit: $(GIT_COMMIT_SHA)"
 	@echo "Git Tag: $(GIT_TAG)"
 	@echo "Platforms: $(PLATFORMS)"
+	@echo "Docker Proxy: $(DOCKER_PROXY)"
+	@echo "Builder Image: $(BUILDER_IMAGE)"
+	@echo "Base Image: $(BASE_IMAGE)"
 	@echo "Dynamo Dir: $(DYNAMO_DIR)"
 	@echo "Dynamo Lib Dir: $(DYNAMO_LIB_DIR)"
 	@echo "Dynamo Include Dir: $(DYNAMO_INCLUDE_DIR)"
