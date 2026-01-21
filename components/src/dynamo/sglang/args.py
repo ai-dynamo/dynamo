@@ -154,6 +154,10 @@ class DynamoArgs:
 
     # embedding options
     embedding_worker: bool = False
+
+    # diffusion language model options (derived from server_args.dllm_algorithm)
+    diffusion_worker: bool = False
+
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
@@ -535,6 +539,9 @@ async def parse_args(args: list[str]) -> Config:
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
+    # Auto-detect diffusion worker mode if dllm_algorithm
+    diffusion_worker = server_args.dllm_algorithm is not None
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -551,6 +558,7 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
+        diffusion_worker=diffusion_worker,
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,
