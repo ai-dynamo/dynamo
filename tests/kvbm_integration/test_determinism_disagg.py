@@ -509,7 +509,7 @@ def llm_server(request, runtime_services):
 
     if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif importlib.util.find_spec("tensorrt_llm") is not None:
+    elif check_module_available("tensorrt_llm"):
         server_type = ServerType.trtllm
     else:
         pytest.skip("vllm module is not available in the current environment.")
