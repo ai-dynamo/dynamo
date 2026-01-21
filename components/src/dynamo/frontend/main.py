@@ -23,6 +23,9 @@ import pathlib
 import signal
 
 import uvloop
+from vllm.engine.arg_utils import EngineArgs
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.config_dump.config_dumper import add_config_dump_args
@@ -34,6 +37,7 @@ from dynamo.llm import (
     PythonAsyncEngine,
     RouterConfig,
     RouterMode,
+    fetch_llm,
     make_engine,
     run_input,
 )
@@ -48,19 +52,54 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def _dummy_generator(request):
-    """Minimal generator that yields nothing. Work in progress."""
-    return
-    yield  # Makes this an async generator
+class VllmEngine:
+    def __init__(self, vllm_engine):
+        self.vllm_engine = vllm_engine
+
+    async def generator(self, request):
+        """Minimal generator that yields nothing. Work in progress."""
+        print("** VllmEngine.generator called")
+        return
+        yield  # Makes this an async generator
 
 
-async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
-    """
-    Called by Rust when a model is discovered.
-    """
-    loop = asyncio.get_running_loop()
-    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
-    return PythonAsyncEngine(_dummy_generator, loop)
+class EngineFactory:
+    def __init__(self):
+        pass
+
+    async def engine_factory(self, mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+        """
+        Called by Rust when a model is discovered.
+        """
+        logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()}")
+        loop = asyncio.get_running_loop()
+
+        source_path = mdc.source_path()
+        if not os.path.exists(source_path):
+            print("** Fetching model '{source_path}'")
+            await fetch_llm(source_path)
+
+        # Create the vllm engine
+        # TODO: Maybe re-used setup_vllm_engine from vllm/main.py ?
+        # TODO: Tell vllm to not build a CUDA graph and all that, it's just for pre/post
+        os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        engine_args = EngineArgs(model=source_path)
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.OPENAI_API_SERVER
+        )
+        engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=UsageContext.OPENAI_API_SERVER,
+        )
+
+        gen = VllmEngine(engine_client)
+        return PythonAsyncEngine(gen.generator, loop)
+
+
+def setup_engine_factory() -> EngineFactory:
+    """Create the EngineFactory that creates the engines that run requests."""
+    return EngineFactory().engine_factory
 
 
 def validate_model_name(value):
@@ -437,7 +476,9 @@ async def async_main():
         kwargs["http_metrics_port"] = flags.grpc_metrics_port
 
     if flags.exp_python_factory:
-        kwargs["engine_factory"] = engine_factory
+        # TODO: I think we also need to tell the engine factory when the model is removed,
+        # so it can stop vllm
+        kwargs["engine_factory"] = setup_engine_factory()
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
