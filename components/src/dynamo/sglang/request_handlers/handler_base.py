@@ -184,59 +184,9 @@ class BaseWorkerHandler(ABC):
         pass
 
     def cleanup(self) -> None:
-        """Cleanup resources. Override in subclasses as needed.
-
-        Subclasses should call super().cleanup() FIRST, then engine.shutdown().
-        This ensures graceful child termination before SIGKILL.
-        """
-        self._graceful_shutdown_children()
+        """Cleanup resources. Override in subclasses as needed."""
         if self.publisher is not None:
             self.publisher.cleanup()
-
-    def _graceful_shutdown_children(self, timeout: float = 5.0) -> None:
-        """Gracefully terminate child processes before engine.shutdown() kills them.
-
-        SGLang's engine.shutdown() uses SIGKILL which doesn't allow cleanup.
-        We send SIGTERM first to allow ZMQ sockets and other resources to close properly.
-        """
-        import os
-
-        try:
-            import psutil
-        except ImportError:
-            logging.warning("psutil not available, skipping graceful child shutdown")
-            return
-
-        try:
-            parent = psutil.Process(os.getpid())
-            children = parent.children(recursive=True)
-
-            if not children:
-                return
-
-            logging.debug(
-                f"Sending SIGTERM to {len(children)} child processes for graceful shutdown"
-            )
-
-            # Send SIGTERM to allow atexit handlers to run
-            for child in children:
-                try:
-                    child.terminate()  # SIGTERM
-                except psutil.NoSuchProcess:
-                    pass
-
-            # Wait for graceful termination
-            gone, alive = psutil.wait_procs(children, timeout=timeout)
-
-            if alive:
-                logging.warning(
-                    f"{len(alive)} child processes didn't terminate gracefully, will be killed by engine.shutdown()"
-                )
-            else:
-                logging.info("All child processes terminated gracefully")
-
-        except Exception as e:
-            logging.warning(f"Error during graceful child shutdown: {e}")
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
