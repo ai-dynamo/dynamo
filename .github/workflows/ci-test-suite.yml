@@ -994,14 +994,14 @@ jobs:
 
           # Find all .coverage files and copy them with unique names
           mkdir -p coverage-combined
-          find coverage-artifacts/ -name ".coverage" 2>/dev/null | while read -r file; do
+          find coverage-artifacts/ -name ".coverage*" 2>/dev/null | while read -r file; do
             unique_name=$(echo "$file" | tr '/' '_' | sed 's/coverage-artifacts_//')
             cp "$file" "coverage-combined/.coverage.${unique_name}"
             echo "Copied: $file -> coverage-combined/.coverage.${unique_name}"
           done
 
           # Check if we have any coverage files
-          if ls coverage-combined/.coverage.* 1> /dev/null 2>&1; then
+          if ls coverage-combined/.coverage* 1> /dev/null 2>&1; then
             echo "✅ Found coverage files to merge"
             echo "Files to merge:"
             ls -lh coverage-combined/
@@ -1011,7 +1011,7 @@ jobs:
             # Combine all coverage data (ignore path errors)
             echo "Running coverage combine with path remapping..."
             set +e  # Don't exit on error
-            COVERAGE_RCFILE=../.coveragerc coverage combine --keep  .coverage.* 2>&1 | tee ../combine.log
+            COVERAGE_RCFILE=../.coveragerc coverage combine --keep .coverage* 2>&1 | tee ../combine.log
             set -e
 
 
@@ -1024,6 +1024,8 @@ jobs:
               echo "📊 Generating coverage reports..."
               set +e
               COVERAGE_RCFILE=.coveragerc coverage report --show-missing --data-file=.coverage 2>&1 | tee coverage-report.txt
+              TOTAL_COVERAGE=$(awk '/^TOTAL/ {print $NF}' coverage-report.txt | tail -1)
+              echo "TOTAL_COVERAGE=${TOTAL_COVERAGE:-0%}" >> $GITHUB_ENV
               COVERAGE_RCFILE=.coveragerc coverage html --data-file=.coverage -d coverage-html/ 2>&1 || echo "HTML generation failed"
               COVERAGE_RCFILE=.coveragerc coverage xml --data-file=.coverage -o coverage-merged.xml 2>&1 || echo "XML generation failed"
               set -e
