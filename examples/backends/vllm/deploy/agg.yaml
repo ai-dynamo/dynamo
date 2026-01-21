@@ -13,11 +13,6 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
-          args:
-          - "-m"
-          - "dynamo.frontend"
-          - "--store-kv"
-          - "mem"
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -36,5 +31,4 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-            - --store-kv
-            - mem
+

@@ -15,7 +15,7 @@
 
 {{- if .Values.httpRoute.enabled }}
 {{- /* Default gatewayNamespace to the release namespace if not specified */ -}}
-{{- $gatewayNs := default .Release.Namespace .Values.httpRoute.gatewayNamespace -}}
+{{- $gatewayNs := default .Release.Namespace .Values.httpRoute.gatewayNamespace }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:

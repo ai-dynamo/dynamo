@@ -104,7 +104,7 @@ Take a note of the model's block size provided in the model card.
 
 ### 4. Build EPP image
 
-You need to build your own Dynamo EPP custom image
+You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
 
 ```bash
 # export env vars

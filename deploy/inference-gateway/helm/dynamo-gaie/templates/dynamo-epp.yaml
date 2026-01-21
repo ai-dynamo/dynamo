@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 {{- /* ------------ file-scope vars (no output) ------------ */ -}}
 {{- $platformNs   := default .Release.Namespace .Values.platformNamespace -}}
 {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
@@ -23,10 +24,10 @@
 {{- $std          := .Values.extension.standardImage -}}
 {{- $dyn          := .Values.extension.dynamoImage -}}
 {{- $fallback     := ternary $dyn $std .Values.epp.useDynamo -}}
-{{- $eppImage     := default $fallback .Values.extension.image -}}
+{{- $eppImage     := default $fallback .Values.extension.image }}
 
-
----  # <-- start of actual YAML document
+---
+# Deployment for the EPP (Endpoint Picker Plugin)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
