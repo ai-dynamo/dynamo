@@ -36,7 +36,7 @@ pub use config::*;
 
 pub use layout::{LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType, nixl::NixlLayout};
 pub use offload::{
-    filter::{FrequencyFilter, OffloadFilter, PriorityFilter},
+    filter::{FrequencyFilter, OffloadFilter},
     request::BlockResult,
 };
 pub use pool::{BlockPool, ManagedBlockPool};

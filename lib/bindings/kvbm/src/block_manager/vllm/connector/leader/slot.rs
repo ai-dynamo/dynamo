@@ -383,6 +383,13 @@ pub struct VllmConnectorSlot {
     /// Minimum priority threshold for offload filtering.
     /// Blocks with priority < threshold are not offloaded.
     offload_min_priority: u32,
+
+    /// Flag indicating offload has been permanently terminated for this slot.
+    /// Once true, no further blocks will be offloaded to ensure global contiguity.
+    offload_terminated: bool,
+
+    /// For debugging: block index where offload was terminated.
+    offload_terminated_at_block: Option<usize>,
 }
 
 impl VllmConnectorSlot {
@@ -424,6 +431,8 @@ impl VllmConnectorSlot {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
+            offload_terminated: false,
+            offload_terminated_at_block: None,
         }
     }
 
@@ -501,6 +510,8 @@ impl Slot for VllmConnectorSlot {
         self.tokens_cached_from_disk = 0;
         self.performed_cache_lookup = false;
         self.total_blocks_queried = 0;
+        self.offload_terminated = false;
+        self.offload_terminated_at_block = None;
     }
 
     fn reset(&mut self) {
@@ -561,6 +572,18 @@ impl Slot for VllmConnectorSlot {
         if !block_ids.is_empty() {
             tracing::debug!("assigning {} new device blocks slot", block_ids.len());
             self.device_blocks.extend(block_ids);
+        }
+
+        // Early exit if offload has been permanently terminated.
+        // This ensures global contiguity: once a gap is created by priority filtering,
+        // no subsequent blocks will be offloaded for this request.
+        if self.offload_terminated {
+            tracing::debug!(
+                "offload terminated at block {}; skipping offload evaluation",
+                self.offload_terminated_at_block.unwrap_or(0)
+            );
+            self.current_position += num_scheduled_tokens;
+            return Ok(());
         }
 
         // we should have enough device blocks to cover the newly scheduled tokens
@@ -700,6 +723,22 @@ impl Slot for VllmConnectorSlot {
             self.device_blocks.extend(block_ids);
         }
 
+        // Early exit if offload has been permanently terminated.
+        // This ensures global contiguity: once a gap is created by priority filtering,
+        // no subsequent blocks will be offloaded for this request.
+        if self.offload_terminated {
+            tracing::debug!(
+                "offload terminated at block {}; skipping offload evaluation",
+                self.offload_terminated_at_block.unwrap_or(0)
+            );
+            // Still need to update evaluated_blocks for tracking
+            let num_candidate_blocks =
+                ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
+            self.evaluated_blocks += num_candidate_blocks;
+            self.current_position = computed_position;
+            return Ok(());
+        }
+
         // This approach is fragile, but it's the only way currently to skip evaluating
         // the device matched blocks and to avoid offloading them again.
         // TODO: Consider adding an indicator in the scheduler output to distinguish between
@@ -797,8 +836,9 @@ impl Slot for VllmConnectorSlot {
 
                 // Pass priorities to offload_blocks so they can be stored in BasicMetadata
                 let offload_priorities: Vec<u32> = candidate_priorities
-                    .into_iter()
+                    .iter()
                     .take(num_blocks_to_offload)
+                    .copied()
                     .collect();
 
                 self.offload_blocks(&offload_block_ids, &offload_token_blocks, &offload_priorities)
@@ -807,6 +847,23 @@ impl Slot for VllmConnectorSlot {
                 tracing::debug!(
                     "priority filtering: skipping all {} candidate blocks (threshold={})",
                     num_candidate_blocks,
+                    self.offload_min_priority
+                );
+            }
+
+            // Check if we skipped any blocks due to priority filtering.
+            // If so, terminate offloading for this request to ensure global contiguity.
+            if num_blocks_to_offload < num_candidate_blocks {
+                let termination_index = self.evaluated_blocks + num_blocks_to_offload;
+                self.offload_terminated = true;
+                self.offload_terminated_at_block = Some(termination_index);
+
+                tracing::info!(
+                    request_id = %self.request_id,
+                    "offload terminated at block {}: priority {} < threshold {}; \
+                     no further blocks will be offloaded",
+                    termination_index,
+                    candidate_priorities.get(num_blocks_to_offload).copied().unwrap_or(0),
                     self.offload_min_priority
                 );
             }
