@@ -124,6 +124,18 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
+    "diffusion-worker": {
+        "flags": ["--diffusion-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as diffusion worker for image generation",
+    },
+    "diffusion-s3-bucket": {
+        "flags": ["--diffusion-s3-bucket"],
+        "type": str,
+        "default": os.environ.get("DIFFUSION_S3_BUCKET"),
+        "help": "S3 bucket for storing generated images (required for URL response format)",
+    }
 }
 
 
@@ -427,6 +439,8 @@ async def parse_args(args: list[str]) -> Config:
     if endpoint is None:
         if parsed_args.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
+        elif getattr(parsed_args, "diffusion_worker", False):
+            endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
             and parsed_args.disaggregation_mode == "prefill"
@@ -505,7 +519,29 @@ async def parse_args(args: list[str]) -> Config:
     # TODO: sglang downloads the model in `from_cli_args`, which means we had to
     # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
     # contain code to download a model, it should only parse the args.
-    server_args = ServerArgs.from_cli_args(parsed_args)
+
+    # For diffusion workers, create a minimal dummy ServerArgs since diffusion
+    # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
+    diffusion_worker = getattr(parsed_args, "diffusion_worker", False)
+
+    if diffusion_worker:
+        logging.info(f"Diffusion worker detected with model: {model_path}, creating minimal ServerArgs stub")
+        # Create a minimal ServerArgs-like object that bypasses model config loading
+        # Diffusion workers don't actually use ServerArgs - they use DiffGenerator
+        import types
+        server_args = types.SimpleNamespace()
+        # Copy over any attrs that might be needed, but avoid triggering __post_init__
+        server_args.model_path = model_path
+        server_args.served_model_name = parsed_args.served_model_name
+        server_args.enable_metrics = getattr(parsed_args, "enable_metrics", False)
+        server_args.log_level = getattr(parsed_args, "log_level", "info")
+        server_args.skip_tokenizer_init = True
+        server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
+        server_args.speculative_algorithm = None
+        server_args.disaggregation_mode = None
+        logging.info(f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}")
+    else:
+        server_args = ServerArgs.from_cli_args(parsed_args)
 
     # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
     # tokens since last output), not cumulative tokens. When stream_output=True,

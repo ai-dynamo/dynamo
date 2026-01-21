@@ -21,7 +21,10 @@ from dynamo.sglang.health_check import (
     SglangPrefillHealthCheckPayload,
 )
 from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
-from dynamo.sglang.register import register_llm_with_readiness_gate
+from dynamo.sglang.register import (
+    register_diffusion_model,
+    register_llm_with_readiness_gate,
+)
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
     DiffusionWorkerHandler,
@@ -89,6 +92,8 @@ async def worker():
 
     if config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
+    elif config.dynamo_args.diffusion_worker:
+        await init_diffusion(runtime, config)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
     elif config.dynamo_args.multimodal_encode_worker:
@@ -414,6 +419,76 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
         except asyncio.CancelledError:
             logging.info("Metrics task successfully cancelled")
             pass
+        handler.cleanup()
+
+
+async def init_diffusion(runtime: DistributedRuntime, config: Config):
+    """Initialize diffusion worker component"""
+    dynamo_args = config.dynamo_args
+
+    # Initialize DiffGenerator (not sgl.Engine)
+    from sglang.multimodal_gen import DiffGenerator
+    import torch
+
+    if not dynamo_args.model_path:
+        raise ValueError("--model is required for diffusion workers")
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=dynamo_args.model_path
+    )
+
+
+    # S3 client for image storage
+    s3_client = None
+    if dynamo_args.diffusion_s3_bucket:
+        try:
+            import boto3
+
+            s3_client = boto3.client("s3")
+            logging.info(f"S3 client initialized for bucket: {dynamo_args.diffusion_s3_bucket}")
+        except ImportError:
+            logging.warning(
+                "boto3 not available. S3 uploads will fail. "
+                "Install with: pip install boto3"
+            )
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # Diffusion doesn't have metrics publisher like LLM
+    # Could add custom metrics for images/sec, steps/sec later
+
+    handler = DiffusionWorkerHandler(
+        component, generator, config, publisher=None, s3_client=s3_client
+    )
+
+    # Simplified health check for diffusion
+    health_check_payload = {"status": "ready", "model": dynamo_args.model_path}
+
+    ready_event = asyncio.Event()
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[],  # No LLM metrics labels
+                health_check_payload=health_check_payload,
+            ),
+            register_diffusion_model(
+                generator,
+                generate_endpoint,
+                dynamo_args,
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve diffusion endpoints: {e}")
+        raise
+    finally:
         handler.cleanup()
 
 
