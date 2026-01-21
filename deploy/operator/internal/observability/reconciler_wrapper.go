@@ -47,6 +47,7 @@ func (m *ObservedReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	duration := time.Since(startTime)
 
 	// Determine if a requeue is happening
+	//nolint:staticcheck // SA1019: result.Requeue is deprecated but still supported by controller-runtime
 	requeue := result.Requeue || result.RequeueAfter > 0
 
 	// Record reconciliation metrics

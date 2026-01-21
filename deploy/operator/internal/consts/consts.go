@@ -100,10 +100,10 @@ const (
 
 	// Resource type constants - match Kubernetes Kind names
 	// Used consistently across controllers, webhooks, and metrics
-	ResourceTypeDynamoGraphDeployment              = "DynamoGraphDeployment"
-	ResourceTypeDynamoComponentDeployment          = "DynamoComponentDeployment"
-	ResourceTypeDynamoModel                        = "DynamoModel"
-	ResourceTypeDynamoGraphDeploymentRequest       = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
+	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
+	ResourceTypeDynamoModel                         = "DynamoModel"
+	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
 )
 

@@ -82,7 +82,10 @@ All metrics use the `dynamo_operator` namespace prefix.
 **Labels:**
 - `resource_type`: Currently only `DynamoGraphDeployment` (simplified inventory tracking)
 - `namespace`: Resource namespace
-- `status`: Resource state from `.status.state` field (e.g., `pending`, `running`, `ready`, `failed`)
+- `status`: Resource state from `.status.state` field. Possible values for DynamoGraphDeployment:
+  - `"pending"` - Deployment is being created/configured
+  - `"successful"` - Deployment is healthy and ready
+  - `"failed"` - Deployment has encountered an error
 
 ## Example Queries
 

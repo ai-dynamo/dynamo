@@ -347,10 +347,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start resource counter background goroutine
-	setupLog.Info("Starting resource counter")
-	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), ctrlConfig.ExcludedNamespaces)
-
 	// Initialize namespace scope mechanism
 	var leaseManager *namespace_scope.LeaseManager
 	var leaseWatcher *namespace_scope.LeaseWatcher
@@ -424,6 +420,10 @@ func main() {
 
 	// Pass leaseWatcher to controller config for namespace exclusion filtering
 	ctrlConfig.ExcludedNamespaces = leaseWatcher
+
+	// Start resource counter background goroutine (after ExcludedNamespaces is set)
+	setupLog.Info("Starting resource counter")
+	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), ctrlConfig.ExcludedNamespaces)
 
 	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")

@@ -141,7 +141,7 @@ func (h *DynamoGraphDeploymentHandler) ValidateDelete(ctx context.Context, obj r
 func (h *DynamoGraphDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
 	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
-	
+
 	// Wrap with metrics collection
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoGraphDeployment)
 

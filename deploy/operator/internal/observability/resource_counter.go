@@ -84,12 +84,12 @@ func updateDynamoGraphDeploymentCounts(ctx context.Context, c client.Client, exc
 	for i := range dgdList.Items {
 		dgd := &dgdList.Items[i]
 		namespace := dgd.Namespace
-		
+
 		// Skip if namespace is managed by a namespace-restricted operator
 		if excludedNamespaces != nil && excludedNamespaces.Contains(namespace) {
 			continue
 		}
-		
+
 		state := dgd.Status.State
 		if state == "" {
 			state = "unknown"

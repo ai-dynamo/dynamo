@@ -125,7 +125,7 @@ func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, o
 func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
 	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
-	
+
 	// Wrap with metrics collection
 	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoComponentDeployment)
 

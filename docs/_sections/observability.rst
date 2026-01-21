@@ -11,4 +11,3 @@ Observability
    Health Checks <../observability/health-checks>
    Tracing <../observability/tracing>
    Logging <../observability/logging>
-   Operator Metrics <../observability/operator-metrics>
