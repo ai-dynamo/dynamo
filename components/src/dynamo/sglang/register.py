@@ -88,11 +88,55 @@ def _get_bootstrap_info_for_config(
             return None, None
 
         if inner_tm.server_args.dist_init_addr:
-            bootstrap_host = socket.gethostbyname(
-                inner_tm.server_args.dist_init_addr.split(":")[0]
-            )
+            # IPv6-ready host extraction and resolution:
+            # 1) Extract raw host from "host:port" or "[IPv6]:port"/"[IPv6]".
+            # 2) Resolve via AF_UNSPEC to accept A/AAAA and literals.
+            # 3) Bracket-wrap IPv6 for safe "{host}:{port}" URL formatting.
+            addr = inner_tm.server_args.dist_init_addr.strip()
+            if addr.startswith("["):
+                end = addr.find("]")
+                host_core = addr[1:end] if end != -1 else addr.strip("[]")
+            else:
+                # Only treat single ':' with numeric suffix as host:port; otherwise it's an IPv6/FQDN host.
+                if addr.count(":") == 1:
+                    host_candidate, maybe_port = addr.rsplit(":", 1)
+                    host_core = host_candidate if maybe_port.isdigit() else addr
+                else:
+                    host_core = addr
+            try:
+                infos = socket.getaddrinfo(
+                    host_core,
+                    None,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                )
+                resolved = infos[0][4][0]  # let OS policy pick v4/v6
+                bootstrap_host = resolved
+                addr_family = infos[0][0]
+                logging.info(
+                    f"Resolved bootstrap host '{host_core}' -> '{resolved}' "
+                    f"({'IPv6' if addr_family == socket.AF_INET6 else 'IPv4'})"
+                )
+            except socket.gaierror as e:
+                # Fallback: keep literal/FQDN as-is (still wrap IPv6 below)
+                bootstrap_host = host_core
+                logging.warning(
+                    f"Failed to resolve bootstrap host '{host_core}': {e}, using as-is"
+                )
         else:
+            # get_local_ip_auto() tries IPv4 first, then IPv6. For explicit control,
+            # set SGLANG_HOST_IP env var (use bracketed format for IPv6: [addr])
             bootstrap_host = get_local_ip_auto()
+            is_ipv6 = ":" in bootstrap_host
+            logging.info(
+                f"Using auto-detected local IP: {bootstrap_host} "
+                f"({'IPv6' if is_ipv6 else 'IPv4'})"
+            )
+
+        # Wrap IPv6 literal with brackets so f"{host}:{port}" stays valid.
+        if ":" in bootstrap_host and not bootstrap_host.startswith("["):
+            bootstrap_host = f"[{bootstrap_host}]"
+            logging.info(f"Wrapped IPv6 address with brackets: {bootstrap_host}")
 
         return bootstrap_host, bootstrap_port
     except Exception as e:

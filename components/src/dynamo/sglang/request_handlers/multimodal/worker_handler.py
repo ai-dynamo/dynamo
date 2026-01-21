@@ -133,30 +133,26 @@ class StreamProcessor:
 
     @staticmethod
     async def process_sglang_stream(stream_source) -> AsyncIterator[str]:
-        """Process SGLang stream output following backend pattern"""
-        num_output_tokens_so_far = 0
+        """Process SGLang stream output.
 
+        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
+        containing only new tokens since the last output. We pass these through directly.
+        """
         try:
             async for res in stream_source:
                 try:
-                    next_total_toks = len(res["output_ids"])
-
-                    # Return incremental tokens
+                    # With stream_output=True, output_ids contains only new tokens (disjoint)
                     output = {
-                        "token_ids": res["output_ids"][num_output_tokens_so_far:],
+                        "token_ids": res["output_ids"],
                         "text": res.get("text", ""),
                         "finished": False,
                     }
-                    num_output_tokens_so_far = next_total_toks
 
                     # Check for finish reason
                     finish_reason = res.get("meta_info", {}).get("finish_reason")
                     if finish_reason:
                         output.update(
                             {
-                                "token_ids": res["output_ids"][
-                                    num_output_tokens_so_far:
-                                ],
                                 "finish_reason": finish_reason.get("type", "stop"),
                                 "finished": True,
                             }
