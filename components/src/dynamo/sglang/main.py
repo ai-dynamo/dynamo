@@ -124,23 +124,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         await _handle_non_leader_node(engine, generate_endpoint)
         return
 
-    # Register engine routes for profiling
-    async def start_profile_handler(body: dict) -> dict:
-        """Handle /engine/start_profile requests"""
-        await engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile_handler(body: dict) -> dict:
-        """Handle /engine/stop_profile requests"""
-        await engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    runtime.register_engine_route("start_profile", start_profile_handler)
-    runtime.register_engine_route("stop_profile", stop_profile_handler)
-    logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
-    )
-
     # publisher instantiates the metrics and kv event publishers
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
@@ -153,7 +136,11 @@ async def init(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    handler = DecodeWorkerHandler(component, engine, config, publisher)
+    handler = DecodeWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+    handler.register_engine_routes(runtime)
+
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -224,23 +211,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         await _handle_non_leader_node(engine, generate_endpoint)
         return
 
-    # Register engine routes for profiling
-    async def start_profile_handler(body: dict) -> dict:
-        """Handle /engine/start_profile requests"""
-        await engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile_handler(body: dict) -> dict:
-        """Handle /engine/stop_profile requests"""
-        await engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    runtime.register_engine_route("start_profile", start_profile_handler)
-    runtime.register_engine_route("stop_profile", stop_profile_handler)
-    logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
-    )
-
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit
     # Only needed on leader node that handles requests
     await _warmup_prefill_engine(engine, server_args)
@@ -254,7 +224,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config, publisher)
+    handler = PrefillWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+    handler.register_engine_routes(runtime)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
