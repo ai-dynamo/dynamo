@@ -59,7 +59,7 @@ runs:
           if [ -z "$TAG" ]; then
             continue
           fi
-          echo "Tagging and pushing to ECR: ${TAG}"
+          echo "Tagging and pushing: ${ECR_HOSTNAME}/${TAG}"
           docker tag "${LOCAL_IMAGE}" "${ECR_HOSTNAME}/${TAG}"
           docker push "${ECR_HOSTNAME}/${TAG}"
         done <<< "$PUSH_TAGS"
