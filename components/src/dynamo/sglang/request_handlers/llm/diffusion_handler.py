@@ -41,10 +41,12 @@ class DiffusionWorkerHandler(BaseWorkerHandler):
             generate_endpoint: The endpoint handle for discovery.
         """
         super().__init__(component, engine, config, publisher, generate_endpoint)
-        
+
         # Validate that diffusion algorithm is configured
-        if not hasattr(engine.tokenizer_manager.server_args, 'dllm_algorithm') or \
-           engine.tokenizer_manager.server_args.dllm_algorithm is None:
+        if (
+            not hasattr(engine.tokenizer_manager.server_args, "dllm_algorithm")
+            or engine.tokenizer_manager.server_args.dllm_algorithm is None
+        ):
             logger.warning(
                 "SGLang engine does not have dllm_algorithm configured. "
                 "Diffusion LM behavior may not be active."
@@ -60,21 +62,19 @@ class DiffusionWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         # Get input parameters (tokens or text)
         input_param = self._get_input_param(request)
-        
+
         # Build sampling parameters
         sampling_params = self._build_sampling_params(request)
-        
+
         # Generate trace info if tracing is enabled
         trace_header = self._get_trace_header(context) if self.enable_trace else None
         trace_id = context.id() if trace_header else None
-        
+
         logger.debug(
             f"Starting diffusion generation for request {context.id()}, "
             f"input_tokens={len(request.get('token_ids', []))}"
         )
-        
-        # Call SGLang engine - it handles diffusion internally!
-        # From our perspective, this looks identical to autoregressive generation
+
         async_gen = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
@@ -82,18 +82,16 @@ class DiffusionWorkerHandler(BaseWorkerHandler):
             external_trace_header=trace_header,
             rid=trace_id,
         )
-        
-        # Process token stream - reuses existing BaseWorkerHandler method
-        # This works for both autoregressive and diffusion models!
+
         async for out in self._process_token_stream(async_gen, context):
             yield out
 
     def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Build SGLang sampling parameters from request.
-        
+
         Args:
             request: Request dict with sampling_options and stop_conditions.
-            
+
         Returns:
             Dict of sampling parameters for SGLang engine.
         """
@@ -101,23 +99,29 @@ class DiffusionWorkerHandler(BaseWorkerHandler):
             # Token-based request format
             sampling_opts = request.get("sampling_options", {})
             stop_conditions = request.get("stop_conditions", {})
-            
+
             sampling_params = {}
-            
+
             # Only add params if they have valid values (not None)
-            if "temperature" in sampling_opts and sampling_opts["temperature"] is not None:
+            if (
+                "temperature" in sampling_opts
+                and sampling_opts["temperature"] is not None
+            ):
                 sampling_params["temperature"] = sampling_opts["temperature"]
             if "top_p" in sampling_opts and sampling_opts["top_p"] is not None:
                 sampling_params["top_p"] = sampling_opts["top_p"]
             if "top_k" in sampling_opts and sampling_opts["top_k"] is not None:
                 sampling_params["top_k"] = sampling_opts["top_k"]
-            if "max_tokens" in stop_conditions and stop_conditions["max_tokens"] is not None:
+            if (
+                "max_tokens" in stop_conditions
+                and stop_conditions["max_tokens"] is not None
+            ):
                 sampling_params["max_new_tokens"] = stop_conditions["max_tokens"]
-            
+
             # Add stop strings if present
             if "stop_strings" in stop_conditions:
                 sampling_params["stop"] = stop_conditions["stop_strings"]
-                
+
             return sampling_params
         else:
             # Text-based request format (SGLang handles tokenization)
@@ -129,14 +133,14 @@ class DiffusionWorkerHandler(BaseWorkerHandler):
         context: Context,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
-        
+
         With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
         containing only new tokens since the last output. We pass these through directly.
-        
+
         Args:
             stream_source: Async generator from engine.async_generate.
             context: Context object for cancellation handling.
-            
+
         Yields:
             Dict with token_ids and optional finish_reason.
         """
