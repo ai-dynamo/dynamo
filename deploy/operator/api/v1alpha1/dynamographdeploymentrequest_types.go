@@ -254,6 +254,7 @@ type DynamoGraphDeploymentRequestStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:shortName=dgdr
+// +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="DeploymentReady")].status`,description="Ready status of the deployment"
 // +kubebuilder:printcolumn:name="Model",type=string,JSONPath=`.spec.model`
 // +kubebuilder:printcolumn:name="Backend",type=string,JSONPath=`.status.backend`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
