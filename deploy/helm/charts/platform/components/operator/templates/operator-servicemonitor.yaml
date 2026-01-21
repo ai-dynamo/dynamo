@@ -19,6 +19,7 @@ metadata:
   name: {{ include "dynamo-operator.fullname" . }}-operator
   namespace: {{ .Release.Namespace }}
   labels:
+    release: prometheus
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
   selector:
