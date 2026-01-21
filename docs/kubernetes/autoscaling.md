@@ -115,9 +115,9 @@ kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"re
 #        use 'kubectl scale dgdsa/sglang-agg-decode --replicas=3' or update the DynamoGraphDeploymentScalingAdapter instead
 ```
 
-## Disabling DGDSA for a Service
+## Enabling DGDSA for a Service
 
-If you want to manage replicas directly in the DGD (without autoscaling), you can disable the scaling adapter per service:
+By default, no DGDSA is created for services, allowing direct replica management via the DGD. To enable autoscaling via HPA, KEDA, or Planner, explicitly enable the scaling adapter:
 
 ```yaml
 apiVersion: nvidia.com/v1alpha1
@@ -127,23 +127,23 @@ metadata:
 spec:
   services:
     Frontend:
-      replicas: 2
-      scalingAdapter:
-        disable: true    # ← No DGDSA created, direct edits allowed
+      replicas: 2        # ← No DGDSA by default, direct edits allowed
 
     decode:
-      replicas: 1        # ← DGDSA created by default, managed via adapter
+      replicas: 1
+      scalingAdapter:
+        enabled: true    # ← DGDSA created, managed via adapter
 ```
 
-**When to disable DGDSA:**
-- You want simple, manual replica management
-- You don't need autoscaling for that service
-- You prefer direct DGD edits over adapter-based scaling
-
-**When to keep DGDSA enabled (default):**
+**When to enable DGDSA:**
 - You want to use HPA, KEDA, or Planner for autoscaling
 - You want a clear separation between "desired scale" (adapter) and "deployment config" (DGD)
 - You want protection against accidental direct replica edits
+
+**When to keep DGDSA disabled (default):**
+- You want simple, manual replica management
+- You don't need autoscaling for that service
+- You prefer direct DGD edits over adapter-based scaling
 
 ## Autoscaling with Dynamo Planner
 
@@ -612,15 +612,14 @@ If you've disabled the scaling adapter for a service, edit the DGD directly:
 kubectl patch dgd sglang-agg --type=merge -p '{"spec":{"services":{"decode":{"replicas":3}}}}'
 ```
 
-Or edit the YAML:
+Or edit the YAML (no `scalingAdapter.enabled: true` means direct edits are allowed):
 
 ```yaml
 spec:
   services:
     decode:
       replicas: 3
-      scalingAdapter:
-        disable: true
+      # No scalingAdapter.enabled means replicas can be edited directly
 ```
 
 ## Best Practices

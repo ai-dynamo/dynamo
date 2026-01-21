@@ -8,7 +8,7 @@ When integrating Dynamo with the Inference Gateway you could either use the defa
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
-EPP’s default kv-routing approach is token-aware only `by approximation` because the prompt is tokenized with a generic tokenizer unaware of the model deployed. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+EPP’s default kv-routing approach is not token-aware because the prompt is hashed without tokenization. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -27,34 +27,17 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 ### 1. Install Dynamo Platform ###
 
-[See Quickstart Guide](../../docs/kubernetes/README.md) to install Dynamo Cloud.
+[See Quickstart Guide](../../docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
 
 ### 2. Deploy Inference Gateway ###
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
-You can use the script below or follow the steps manually.
-
-Script:
 
 ```bash
 ./install_gaie_crd_kgateway.sh
 ```
 
-Manual steps:
-
-a. Deploy the Gateway API CRDs:
-
-```bash
-GATEWAY_API_VERSION=v1.3.0
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
-```
-
-b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs)
-
-```bash
-INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
-```
+Verify installation:
 
 ```bash
 kubectl get gateway inference-gateway -n my-model
@@ -119,6 +102,12 @@ export EPP_IMAGE=<the-epp-image-you-built>
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
 ```
 
+By default, the Kubernetes discovery mechanism is used. If you prefer etcd, please use the `--set epp.dynamo.useEtcd=true` flag below.
+
+```bash
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE --set epp.dynamo.useEtcd=true
+```
+
 Key configurations include:
 
 - An InferenceModel resource for the Qwen model
@@ -150,50 +139,26 @@ You can either use the special FrontEnd image for the EPP_IMAGE in the Helm depl
 
 ##### 1. Build the custom EPP image #####
 
-If you choose to build your own image use the steps below.
-
-##### 1.1 Clone the official GAIE repo in a separate folder #####
+If you choose to build your own image, use the `container/build.sh` script with the `--target frontend` option:
 
 ```bash
-git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git
-cd gateway-api-inference-extension
-git checkout v0.5.1
+./container/build.sh --framework none --target frontend
 ```
 
-##### 1.2 Build the Dynamo Custom EPP #####
+This command automatically:
+- Clones the Gateway API Inference Extension (GAIE) repository at the correct version
+- Builds the Dynamo Router static library
+- Applies the necessary patches to the EPP codebase
+- Builds the custom EPP image with Dynamo KV routing support
+- Builds the frontend image with the EPP binary and Dynamo runtime components
 
-###### 1.2.1 Clone the official EPP repo ######
-
-```bash
-# Clone the official GAIE repo in a separate folder
-cd path/to/gateway-api-inference-extension
-git clone git@github.com:kubernetes-sigs/gateway-api-inference-extension.git
-git checkout v0.5.1
-```
-
-###### 1.2.2 Run the script to build the EPP image ######
-
-The script will apply a custom patch to the code with your GAIE repo and build the image for you to use.
-
-```bash
-# Use your custom paths
-export DYNAMO_DIR=/path/to/dynamo
-export GAIE_DIR=/path/to/gateway-api-inference-extension
-
-# Run the script
-cd deploy/inference-gateway
-./build-epp-dynamo.sh
-```
-
-Under the hood the script applies the Dynamo Patch to the EPP code base; creates a Dynamo Router static library and builds a custom EPP image with it.
-Re-tag the freshly built image and push it to your registry.
+Re-tag the freshly built image and push it to your registry:
 
 ```bash
 docker images
 docker tag <your-new-id> <your-image-tag>
-docker push  <your-image-tag>
+docker push <your-image-tag>
 ```
-
 
 **Note**
 You can also use the standard EPP image`us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0`. For the basic black box integration run:
@@ -240,10 +205,6 @@ The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
 
-```bash
-export GATEWAY_URL=<Gateway-URL>
-```
-
 To test the gateway in minikube, use the following command:
 a. User minikube tunnel to expose the gateway to the host
    This requires `sudo` access to the host machine. alternatively, you can use port-forward to expose the gateway to the host as shown in alternative (b).
@@ -254,7 +215,7 @@ ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is no
 minikube tunnel & # start the tunnel
 
 # in second terminal where you want to send inference requests
-GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o yaml -o jsonpath='{.spec.clusterIP}')
+GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}')
 echo $GATEWAY_URL
 ```
 

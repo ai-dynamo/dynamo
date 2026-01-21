@@ -4,9 +4,9 @@ This directory contains utilities and manifests for Dynamo benchmarking and prof
 
 ## Prerequisites
 
-**Before using these utilities, you must first set up Dynamo Cloud following the main installation guide:**
+**Before using these utilities, you must first set up Dynamo Kubernetes Platform following the main installation guide:**
 
-👉 **[Follow the Dynamo Cloud installation guide](/docs/kubernetes/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
+👉 **[Follow the Dynamo Kubernetes Platform installation guide](/docs/kubernetes/installation_guide.md) to install the Dynamo Kubernetes Platform first.**
 
 This includes:
 1. Installing the Dynamo CRDs
@@ -27,7 +27,7 @@ This includes:
 
 ### Benchmarking Resource Setup
 
-After setting up Dynamo Cloud, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
+After setting up Dynamo Kubernetes Platform, use this script to prepare your namespace with the additional resources needed for benchmarking and profiling workflows:
 
 The setup script creates a `dynamo-pvc` with `ReadWriteOnce` (RWO) access mode using your cluster's default storage class. This is sufficient for profiling workflows where only one job writes at a time.
 

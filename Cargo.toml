@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [workspace]
@@ -46,7 +46,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -57,30 +57,29 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.7.0" }
-dynamo-llm = { path = "lib/llm", version = "0.7.0" }
-dynamo-config = { path = "lib/config", version = "0.7.0" }
-dynamo-tokens = { path = "lib/tokens", version = "0.7.0" }
-dynamo-async-openai = { path = "lib/async-openai", version = "0.7.0", features = [
+dynamo-runtime = { path = "lib/runtime", version = "0.8.0" }
+dynamo-llm = { path = "lib/llm", version = "0.8.0" }
+dynamo-config = { path = "lib/config", version = "0.8.0" }
+dynamo-tokens = { path = "lib/tokens", version = "0.8.0" }
+dynamo-async-openai = { path = "lib/async-openai", version = "0.8.0", features = [
     "byot",
     "rustls",
 ] }
-dynamo-parsers = { path = "lib/parsers", version = "0.7.0" }
-dynamo-memory = { path = "lib/memory", version = "0.7.0" }
+dynamo-parsers = { path = "lib/parsers", version = "0.8.0" }
+dynamo-memory = { path = "lib/memory", version = "0.8.0" }
 
 # kvbm
-dynamo-kvbm = { path = "lib/kvbm", version = "0.7.0" }
-dynamo-kvbm-config = { path = "lib/kvbm-config", version = "0.7.0" }
-dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.7.0" }
+dynamo-kvbm = { path = "lib/kvbm", version = "0.8.0" }
+dynamo-kvbm-config = { path = "lib/kvbm-config", version = "0.8.0" }
+dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.8.0" }
 
 # nova
-dynamo-nova = { path = "lib/nova", version = "0.7.0" }
-dynamo-nova-backend = { path = "lib/nova-backend", version = "0.7.0" }
-dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.7.0" }
-dynamo-identity = { path = "lib/identity", version = "0.7.0" }
+dynamo-nova = { path = "lib/nova", version = "0.8.0" }
+dynamo-nova-backend = { path = "lib/nova-backend", version = "0.8.0" }
+dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.8.0" }
+dynamo-identity = { path = "lib/identity", version = "0.8.0" }
 
 # nixl
-# nixl-sys = { version = "0.7.1" }
 nixl-sys = { git = "https://github.com/ai-dynamo/nixl.git", branch = "ryan/fix-stub-build" }
 
 # External dependencies

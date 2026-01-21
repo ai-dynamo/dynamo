@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -70,8 +70,12 @@ async def worker():
     dump_config(config.dynamo_args.dump_config_to, config)
 
     loop = asyncio.get_running_loop()
+    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
     runtime = DistributedRuntime(
-        loop, config.dynamo_args.store_kv, config.dynamo_args.request_plane
+        loop,
+        config.dynamo_args.store_kv,
+        config.dynamo_args.request_plane,
+        config.dynamo_args.use_kv_events,
     )
 
     def signal_handler():
@@ -120,39 +124,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         await _handle_non_leader_node(engine, generate_endpoint)
         return
 
-    # Register engine routes for profiling
-    async def start_profile_handler(body: dict) -> dict:
-        """Handle /engine/start_profile requests"""
-        await engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile_handler(body: dict) -> dict:
-        """Handle /engine/stop_profile requests"""
-        await engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    runtime.register_engine_route("start_profile", start_profile_handler)
-    runtime.register_engine_route("stop_profile", stop_profile_handler)
-    logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
-    )
-
-    prefill_client = None
-    prefill_router_client = None
-    if config.serving_mode == DisaggregationMode.DECODE:
-        prefill_router_client = (
-            await runtime.namespace(dynamo_args.namespace)
-            .component("router")
-            .endpoint("best_worker_id")
-            .client()
-        )
-        prefill_client = (
-            await runtime.namespace(dynamo_args.namespace)
-            .component("prefill")
-            .endpoint("generate")
-            .client()
-        )
-
     # publisher instantiates the metrics and kv event publishers
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
@@ -166,8 +137,10 @@ async def init(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     handler = DecodeWorkerHandler(
-        component, engine, config, publisher, prefill_client, prefill_router_client
+        component, engine, config, publisher, generate_endpoint
     )
+    handler.register_engine_routes(runtime)
+
     print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
@@ -238,23 +211,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         await _handle_non_leader_node(engine, generate_endpoint)
         return
 
-    # Register engine routes for profiling
-    async def start_profile_handler(body: dict) -> dict:
-        """Handle /engine/start_profile requests"""
-        await engine.tokenizer_manager.start_profile(**body)
-        return {"status": "ok", "message": "Profiling started"}
-
-    async def stop_profile_handler(body: dict) -> dict:
-        """Handle /engine/stop_profile requests"""
-        await engine.tokenizer_manager.stop_profile()
-        return {"status": "ok", "message": "Profiling stopped"}
-
-    runtime.register_engine_route("start_profile", start_profile_handler)
-    runtime.register_engine_route("stop_profile", stop_profile_handler)
-    logging.info(
-        "Registered engine routes: /engine/start_profile, /engine/stop_profile"
-    )
-
     # Perform dummy warmup for prefill worker to avoid initial TTFT hit
     # Only needed on leader node that handles requests
     await _warmup_prefill_engine(engine, server_args)
@@ -268,21 +224,36 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
 
-    handler = PrefillWorkerHandler(component, engine, config, publisher)
+    handler = PrefillWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+    handler.register_engine_routes(runtime)
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
 
-    tasks = [
-        generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=metrics_labels,
-            health_check_payload=health_check_payload,
-        )
-    ]
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(*tasks)
+        # Start endpoint immediately and register model concurrently
+        # Registration publishes runtime_config with bootstrap endpoint for optimization
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Tokens,
+                output_type=ModelType.Prefill,
+                readiness_gate=ready_event,
+            ),
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise

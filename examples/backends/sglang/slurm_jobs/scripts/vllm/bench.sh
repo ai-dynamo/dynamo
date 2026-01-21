@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # Example script adapted from https://github.com/kedarpotdar-nv/bench_serving/tree/dynamo-fix.
@@ -40,7 +40,7 @@ set -e
 warmup_isl=$chosen_isl
 warmup_osl=$chosen_osl
 warmup_req_rate=250
-warmup_concurrency_list=(1 4 8 32 64 128 256 512)
+warmup_concurrency_list=(1 4 32 128 256)
 
 # Ensure all chosen concurrencies are in warmup list
 for c in "${chosen_concurrencies[@]}"; do

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Optional
@@ -26,8 +26,9 @@ class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
 
         def callback():
             self.event.record()
-            self.event.synchronize()
-            self._connector.execute_offload_operations()
+            # Non-blocking: passes event to Rust for async polling
+            self._connector.submit_offload_on_event(self.event.cuda_event)
+            # Returns immediately - no CPU blocking
 
         return callback
 

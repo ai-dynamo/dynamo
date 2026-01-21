@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
@@ -471,6 +471,11 @@ pub fn disable_ansi_logging() -> bool {
 /// Set the `DYN_LOG_USE_LOCAL_TZ` environment variable to a [`is_truthy`] value
 pub fn use_local_timezone() -> bool {
     env_is_truthy(environment_names::logging::DYN_LOG_USE_LOCAL_TZ)
+}
+
+/// Returns true if `DYN_LOGGING_SPAN_EVENTS` is set to a truthy value.
+pub fn span_events_enabled() -> bool {
+    env_is_truthy(environment_names::logging::DYN_LOGGING_SPAN_EVENTS)
 }
 
 #[cfg(test)]

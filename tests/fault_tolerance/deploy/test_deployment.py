@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -435,6 +435,7 @@ def results_summary():
 
 @pytest.mark.k8s
 @pytest.mark.fault_tolerance
+@pytest.mark.post_merge
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")

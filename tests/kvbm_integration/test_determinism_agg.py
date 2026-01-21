@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -183,20 +183,6 @@ class LLMServerManager:
             )
             self.server_stdout_file.flush()
 
-        # Try to download the model.
-        model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
-        print("Attempting model download...")
-        try:
-            subprocess.run(
-                f"pip install hf_transfer && HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model}",
-                check=True,
-                shell=True,
-            )
-        except subprocess.CalledProcessError:
-            print("Model download failed. Is this a locally stored model?")
-
         # Launch
         self.process = subprocess.Popen(
             self.server_cmd,
@@ -349,7 +335,7 @@ def llm_server(request, runtime_services):
         server_type=server_type,
     )
 
-    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "600"))
+    start_timeout = int(os.environ.get("KVBM_SERVER_START_TIMEOUT", "300"))
     if not server_manager.start_server(timeout=start_timeout):
         pytest.fail(
             f"Failed to start {server_type} server (cpu_blocks={cpu_blocks}, gpu_blocks={gpu_blocks}, port={server_manager.port})"
@@ -364,7 +350,8 @@ def llm_server(request, runtime_services):
 def tester(llm_server):
     """Create determinism tester bound to the running server's base URL."""
     t = AggDeterminismTester(
-        base_url=llm_server.base_url, server_type=llm_server.server_type
+        base_url=llm_server.base_url,
+        server_type=llm_server.server_type,
     )
     t.download_shakespeare_text()
     return t
@@ -392,24 +379,6 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.parametrize(
         "llm_server",
         [
-            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
-        ],
-        indirect=True,
-    )
-    @pytest.mark.kvbm_v2
-    def test_determinism_agg_with_cache_reset_v2(
-        self, tester, llm_server, runtime_services, monkeypatch
-    ):
-        """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
-        monkeypatch.setenv("DYN_KVBM_USE_V2_TRANSFER_EXPERIMENTAL", "1")
-        # Call the base class implementation
-        super().base_test_determinism_with_cache_reset(
-            tester, llm_server, runtime_services
-        )
-
-    @pytest.mark.parametrize(
-        "llm_server",
-        [
             {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "20000"))},
         ],
         indirect=True,
@@ -420,7 +389,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
     )
     @pytest.mark.parametrize(
         "max_tokens",
-        [int(x) for x in os.environ.get("KVBM_MAX_TOKENS", "10").split(",")],
+        [int(os.environ.get("KVBM_MAX_TOKENS", "48"))],
     )
     @pytest.mark.parametrize(
         "num_prompts",
@@ -441,12 +410,7 @@ class TestDeterminismAgg(BaseTestDeterminism):
         print("CONCURRENT DETERMINISM TEST WITH IFEVAL")
         print("=" * 70)
 
-        # Override max_tokens for this test iteration
-        original_max_tokens = os.environ.get("KVBM_MAX_TOKENS")
-        os.environ["KVBM_MAX_TOKENS"] = str(max_tokens)
-        print(
-            f"Using KVBM_MAX_TOKENS={max_tokens} (parametrized, original: {original_max_tokens or '48'})"
-        )
+        print(f"Using max_tokens={max_tokens} (from KVBM_MAX_TOKENS)")
 
         # Configuration comes from parametrize
         print(
@@ -601,12 +565,6 @@ class TestDeterminismAgg(BaseTestDeterminism):
         print(f"Deterministic: {deterministic_count}")
         print(f"Success rate: {success_rate:.1%}")
         print(f"Concurrent requests: {num_concurrent}")
-
-        # Restore original max_tokens setting
-        if original_max_tokens is not None:
-            os.environ["KVBM_MAX_TOKENS"] = original_max_tokens
-        else:
-            os.environ.pop("KVBM_MAX_TOKENS", None)
 
         assert (
             success_rate == 1.0

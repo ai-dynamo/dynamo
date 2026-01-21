@@ -39,8 +39,8 @@ Run the setup script to start MinIO and download/upload a LoRA adapter from Hugg
 
 This script will:
 - Start MinIO in a Docker container
-- Download a LoRA adapter from Hugging Face Hub (default: `Neural-Hacker/Qwen3-Math-Reasoning-LoRA`)
-- Upload the LoRA to MinIO at `s3://my-loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA`
+- Download a LoRA adapter from Hugging Face Hub (default: `codelion/Qwen3-0.6B-accuracy-recovery-lora`)
+- Upload the LoRA to MinIO at `s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora`
 
 #### Script Options
 
@@ -75,7 +75,7 @@ LORA_NAME="my-lora" \
 Start the Dynamo frontend and worker with LoRA support enabled:
 
 ```bash
-./agg_lora_s3.sh
+./agg_lora.sh
 ```
 
 This will:
@@ -103,9 +103,9 @@ Load a LoRA from S3-compatible storage backend (e.g. MinIO):
 curl -X POST http://localhost:8081/v1/loras \
   -H "Content-Type: application/json" \
   -d '{
-    "lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
+    "lora_name": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
     "source": {
-      "uri": "s3://my-loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA"
+      "uri": "s3://my-loras/codelion/Qwen3-0.6B-accuracy-recovery-lora"
     }
   }' | jq .
 ```
@@ -114,8 +114,8 @@ Expected response:
 ```json
 {
   "status": "success",
-  "message": "LoRA adapter 'Neural-Hacker/Qwen3-Math-Reasoning-LoRA' loaded successfully",
-  "lora_name": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
+  "message": "LoRA adapter 'codelion/Qwen3-0.6B-accuracy-recovery-lora' loaded successfully",
+  "lora_name": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
   "lora_id": 1207343256
 }
 ```
@@ -146,7 +146,7 @@ You should see both the base model and the LoRA adapter listed.
 curl -X POST http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Neural-Hacker/Qwen3-Math-Reasoning-LoRA",
+    "model": "codelion/Qwen3-0.6B-accuracy-recovery-lora",
     "messages": [{
       "role": "user",
       "content": "What is good low risk investment strategy?"
@@ -176,7 +176,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 When you no longer need a LoRA, unload it to free up resources:
 
 ```bash
-curl -X DELETE http://localhost:8081/v1/loras/Neural-Hacker/Qwen3-Math-Reasoning-LoRA | jq .
+curl -X DELETE http://localhost:8081/v1/loras/codelion/Qwen3-0.6B-accuracy-recovery-lora | jq .
 ```
 
 Expected response:
@@ -259,7 +259,7 @@ curl -X POST http://localhost:8081/v1/loras \
 
 ### Using Different Base Models
 
-To use a different base model, modify the `--model` parameter in `agg_lora_s3.sh`:
+To use a different base model, modify the `--model` parameter in `agg_lora.sh`:
 
 ```bash
 python -m dynamo.vllm --model meta-llama/Llama-2-7b-hf --enable-lora --max-lora-rank 64
@@ -271,7 +271,7 @@ Ensure your LoRAs are compatible with the chosen base model.
 
 ### Stop Services
 
-Press `Ctrl+C` in the terminal running `agg_lora_s3.sh` to stop Dynamo services.
+Press `Ctrl+C` in the terminal running `agg_lora.sh` to stop Dynamo services.
 
 ### Stop MinIO
 

@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
@@ -128,6 +128,12 @@ python -m dynamo.vllm --model Qwen/Qwen3-0.6B --connector lmcache
 # View all LMCache metrics
 curl -s localhost:8081/metrics | grep "^lmcache:"
 ```
+
+### Troubleshooting
+
+Troubleshooting LMCache-related metrics and logs (including `PrometheusLogger instance already created with different metadata` and `PROMETHEUS_MULTIPROC_DIR` warnings) is documented in:
+
+- [LMCache Integration Guide](LMCache_Integration.md#troubleshooting)
 
 **For complete LMCache configuration and metric details**, see:
 - [LMCache Integration Guide](LMCache_Integration.md) - Setup and configuration

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
@@ -9,6 +9,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::Response;
+
 use super::Metrics;
 use super::RouteDoc;
 use super::metrics;
@@ -18,6 +21,7 @@ use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use axum_server::tls_rustls::RustlsConfig;
 use derive_builder::Builder;
+use dynamo_runtime::config::environment_names::llm as env_llm;
 use dynamo_runtime::discovery::{Discovery, KVStoreDiscovery};
 use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::metrics::prometheus_names::name_prefix;
@@ -34,6 +38,7 @@ pub struct State {
     store: kv::Manager,
     discovery_client: Arc<dyn Discovery>,
     flags: StateFlags,
+    cancel_token: CancellationToken,
 }
 
 #[derive(Default, Debug)]
@@ -73,12 +78,17 @@ impl StateFlags {
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>, store: kv::Manager) -> Self {
+    pub fn new(
+        manager: Arc<ModelManager>,
+        store: kv::Manager,
+        cancel_token: CancellationToken,
+    ) -> Self {
         // Initialize discovery backed by KV store
         // Create a cancellation token for the discovery's watch streams
         let discovery_client = {
-            let cancel_token = CancellationToken::new();
-            Arc::new(KVStoreDiscovery::new(store.clone(), cancel_token)) as Arc<dyn Discovery>
+            let discovery_cancel_token = cancel_token.child_token();
+            Arc::new(KVStoreDiscovery::new(store.clone(), discovery_cancel_token))
+                as Arc<dyn Discovery>
         };
 
         Self {
@@ -92,6 +102,7 @@ impl State {
                 embeddings_endpoints_enabled: AtomicBool::new(false),
                 responses_endpoints_enabled: AtomicBool::new(false),
             },
+            cancel_token,
         }
     }
 
@@ -114,6 +125,16 @@ impl State {
 
     pub fn discovery(&self) -> Arc<dyn Discovery> {
         self.discovery_client.clone()
+    }
+
+    /// Check if the service is shutting down
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token.is_cancelled()
+    }
+
+    /// Get the cancellation token
+    pub fn cancel_token(&self) -> &CancellationToken {
+        &self.cancel_token
     }
 
     // TODO
@@ -218,6 +239,8 @@ impl HttpService {
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
+        let state_cancel = self.state.cancel_token().clone();
+
         let addr: SocketAddr = address
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid address '{}': {}", address, e))?;
@@ -252,9 +275,11 @@ impl HttpService {
                     result.map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
                 }
                 _ = observer.cancelled() => {
+                    state_cancel.cancel();
                     tracing::info!("HTTPS server shutdown requested");
-                    handle.graceful_shutdown(Some(Duration::from_secs(5)));
-                    // TODO: Do we need to wait?
+                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
+                    handle.graceful_shutdown(Some(Duration::from_secs(get_graceful_shutdown_timeout() as u64)));
+                    // no longer accepting requests, draining all existing connections
                 }
             }
         } else {
@@ -281,7 +306,15 @@ impl HttpService {
             })?;
 
             axum::serve(listener, router)
-                .with_graceful_shutdown(observer.cancelled_owned())
+                .with_graceful_shutdown(async move {
+                    observer.cancelled_owned().await;
+                    state_cancel.cancel();
+                    tracing::info!("HTTP server shutdown requested");
+                    // accepting requests for 5 more seconds, to allow incorrectly routed requests to arrive
+                    tokio::time::sleep(Duration::from_secs(get_graceful_shutdown_timeout() as u64))
+                        .await;
+                    // no longer accepting requests, draining all existing connections
+                })
                 .await
                 .inspect_err(|_| cancel_token.cancel())?;
         }
@@ -302,6 +335,13 @@ impl HttpService {
             if enable { "enabled" } else { "disabled" }
         );
     }
+}
+
+fn get_graceful_shutdown_timeout() -> usize {
+    std::env::var(env_llm::DYN_HTTP_GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(5)
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -326,7 +366,9 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager, config.store));
+        // Create a temporary cancel token for building - will be replaced in spawn/run
+        let temp_cancel_token = CancellationToken::new();
+        let state = Arc::new(State::new(model_manager, config.store, temp_cancel_token));
         state
             .flags
             .set(&EndpointType::Chat, config.enable_chat_endpoints);
@@ -388,7 +430,37 @@ impl HttpServiceConfigBuilder {
         all_docs.extend(openapi_docs);
 
         // Add span for tracing
-        router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
+        // Add on_response callback for logging response status code
+        router = router.layer(
+            TraceLayer::new_for_http()
+                .make_span_with(make_request_span)
+                .on_response(
+                    |response: &Response<Body>, latency: Duration, _span: &tracing::Span| {
+                        let status = response.status();
+                        let latency_ms = latency.as_millis();
+
+                        if status.is_server_error() {
+                            tracing::error!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with server error"
+                            );
+                        } else if status.is_client_error() {
+                            tracing::warn!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed with client request error"
+                            );
+                        } else {
+                            tracing::debug!(
+                                status = %status.as_u16(),
+                                latency_ms = %latency_ms,
+                                "request completed"
+                            );
+                        }
+                    },
+                ),
+        );
 
         Ok(HttpService {
             state,
@@ -466,7 +538,7 @@ impl HttpServiceConfigBuilder {
                             Ok(next.run(req).await)
                         } else {
                             tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
-                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                            Err(axum::http::StatusCode::NOT_FOUND)
                         }
                     }
                 },
@@ -474,5 +546,50 @@ impl HttpServiceConfigBuilder {
             routes.push((docs, route));
         }
         routes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    #[serial]
+    async fn test_liveness_endpoint_reflects_cancellation() {
+        // 1. Setup service & token
+        let cancel_token = Arc::new(CancellationToken::new());
+        let service = HttpService::builder().build().unwrap();
+        let port = service.port;
+
+        // 2. Spawn service with shared token
+        let service_token = cancel_token.clone();
+        let handle = tokio::spawn(async move {
+            service.run((*service_token).clone()).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+        // 3. Cancel the token
+        cancel_token.cancel();
+
+        // 4. Wait a tiny bit for propagation
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // 5. Hit the endpoint
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://localhost:{}/live", port))
+            .send()
+            .await
+            .expect("Request failed");
+
+        // 6. ASSERTION: Should be 503 Service Unavailable
+        assert_eq!(resp.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        // Clean up
+        handle.abort();
     }
 }

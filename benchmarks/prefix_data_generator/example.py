@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -41,9 +41,9 @@ synthesizer = Synthesizer(
 # generate requests
 requests_synth = synthesizer.synthesize_requests(
     num_requests=100,
-    input_len_filter=(
+    max_isl=(
         16384 - 1000
-    ),  # this is what most model defaults to, leaving some room for outpputs
+    ),  # this is what most model defaults to, leaving some room for outputs
 )
 
 # convert the hashes into random texts (lorem ipsum), respecting the prefix structure

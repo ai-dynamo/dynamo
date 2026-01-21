@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,9 +26,9 @@ This directory contains practical examples demonstrating how to deploy and use D
 
 Learn fundamental Dynamo concepts through these introductory examples:
 
-- **[Quickstart](basics/quickstart/README.md)** - Simple aggregated serving example with vLLM backend
-- **[Disaggregated Serving](basics/disaggregated_serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
-- **[Multi-node](basics/multinode/README.md)** - Distributed inference across multiple nodes and GPUs
+- **[Quickstart](/examples/basics/quickstart/README.md)** - Simple aggregated serving example with vLLM backend
+- **[Disaggregated Serving](/examples/basics/disaggregated_serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
+- **[Multi-node](/examples/basics/multinode/README.md)** - Distributed inference across multiple nodes and GPUs
 
 ## Framework Support
 
@@ -53,11 +53,11 @@ Platform-specific deployment guides for production environments:
 
 Low-level runtime examples for developers using Python<>Rust bindings:
 
-- **[Hello World](custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
+- **[Hello World](/examples/custom_backend/hello_world/README.md)** - Minimal Dynamo runtime service demonstrating basic concepts
 
 ## Getting Started
 
-1. **Choose your deployment pattern**: Start with the [Quickstart](basics/quickstart/README.md) for a simple local deployment, or explore [Disaggregated Serving](basics/disaggregated_serving/README.md) for advanced architectures.
+1. **Choose your deployment pattern**: Start with the [Quickstart](/examples/basics/quickstart/README.md) for a simple local deployment, or explore [Disaggregated Serving](/examples/basics/disaggregated_serving/README.md) for advanced architectures.
 
 2. **Set up prerequisites**: Most examples require etcd and NATS services. You can start them using:
    ```bash
@@ -72,7 +72,15 @@ Before running any examples, ensure you have:
 
 - **Docker & Docker Compose** - For containerized services
 - **CUDA-compatible GPU** - For LLM inference (except hello_world, which is non-GPU aware)
-- **Python 3.9++** - For client scripts and utilities
-- **Kubernetes cluster** - For any cloud deployment/K8s examples
+- **Python 3.9+** - For client scripts and utilities
 
+### For Kubernetes Deployments
 
+If you're running Kubernetes/cloud deployment examples (EKS, AKS, GKE), you'll also need:
+
+| Tool | Minimum Version | Installation |
+|------|-----------------|--------------|
+| **kubectl** | v1.24+ | [Install kubectl](https://kubernetes.io/docs/tasks/tools/#kubectl) |
+| **Helm** | v3.0+ | [Install Helm](https://helm.sh/docs/intro/install/) |
+
+See the [Kubernetes Installation Guide](/docs/kubernetes/installation_guide.md#prerequisites) for detailed setup instructions and pre-deployment checks.

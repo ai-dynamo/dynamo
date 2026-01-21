@@ -1,5 +1,5 @@
 #  SPDX-FileCopyrightText:  Copyright The Kubernetes Authors.
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 #  Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,17 +13,18 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-#  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
+#  Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES
 
 # Dockerfile.epp - Custom Dockerfile for GAIE EPP. This is to be used with the deploy/inference-gateway/build-epp-dynamo.sh
 
-ARG BUILDER_IMAGE=golang:1.24
-ARG BASE_IMAGE=ubuntu:22.04
+ARG DOCKER_PROXY
+ARG BUILDER_IMAGE="golang:1.24"
+ARG BASE_IMAGE="ubuntu:22.04"
 
 ############################
 # Builder
 ############################
-FROM ${BUILDER_IMAGE} AS builder
+FROM ${DOCKER_PROXY}${BUILDER_IMAGE} AS builder
 
 ENV CGO_ENABLED=1
 # be explicit; helps cgo when linking libstdc++
@@ -66,7 +67,7 @@ RUN go build \
 ############################
 # Runtime
 ############################
-FROM ${BASE_IMAGE} AS runtime
+FROM ${DOCKER_PROXY}${BASE_IMAGE} AS runtime
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA

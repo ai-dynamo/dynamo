@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -40,6 +40,8 @@ from dynamo.planner.utils.planner_core import Metrics, Planner  # noqa: E402
 
 
 @pytest.fixture
+@pytest.mark.pre_merge
+@pytest.mark.gpu_0
 def planner():
     """Set up test environment with mocked dependencies."""
     # Create mock arguments
@@ -54,7 +56,8 @@ def planner():
     args.backend = "vllm"
     args.no_operation = True  # Don't actually scale
     args.no_correction = False  # Allow correction factors
-    args.prometheus_port = 0  # 0 means disabled
+    args.metric_pulling_prometheus_endpoint = "http://localhost:9090"  # dummy endpoint
+    args.metric_reporting_prometheus_port = 0  # 0 means disabled
     args.load_predictor = "constant"
     args.load_prediction_window_size = 10
     args.profile_results_dir = os.path.join(

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: trtllm-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: my-registry/tensorrtllm-runtime:my-tag
     TRTLLMPrefillWorker:
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -41,7 +39,6 @@ spec:
             - --disaggregation-mode
             - prefill
     TRTLLMDecodeWorker:
-      dynamoNamespace: trtllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
