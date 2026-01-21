@@ -176,6 +176,7 @@ type ServiceReplicaStatus struct {
 // +kubebuilder:resource:shortName=dgd
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=`.status.conditions[?(@.type=="Ready")].status`,description="Ready status of the graph deployment"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // DynamoGraphDeployment is the Schema for the dynamographdeployments API.
 type DynamoGraphDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
