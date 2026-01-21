@@ -864,7 +864,7 @@ jobs:
           export IMAGE="${ECR_HOSTNAME}/${{ env.REGISTRY_IMAGE }}:${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
           echo "Running fault tolerance test: ${{ matrix.framework.test_scenario }}"
           echo "Using namespace: $NAMESPACE"
-          echo "Using image: $IMAGE"
+          echo "Using image tag: ${{ env.NIGHTLY_IMAGE_PREFIX }}-${FRAMEWORK}-amd64"
           # Install python3-venv package if not already installed
           sudo apt-get update && sudo apt-get install -y python3-venv
           # Set up Python virtual environment and install test dependencies
