@@ -3,7 +3,7 @@
 
 //! CUDA device memory storage.
 
-use super::{MemoryDescription, Result, StorageError, StorageKind, nixl::NixlDescriptor};
+use super::{MemoryDescriptor, Result, StorageError, StorageKind, nixl::NixlDescriptor};
 use cudarc::driver::CudaContext;
 use std::any::Any;
 use std::collections::HashMap;
@@ -26,9 +26,13 @@ fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
 /// CUDA device memory allocated via cudaMalloc.
 #[derive(Debug)]
 pub struct DeviceStorage {
+    /// CUDA context used for allocation and deallocation.
     ctx: Arc<CudaContext>,
+    /// Device pointer to the allocated memory.
     ptr: u64,
+    /// CUDA device ID where memory is allocated.
     device_id: u32,
+    /// Size of the allocation in bytes.
     len: usize,
 }
 
@@ -84,7 +88,7 @@ impl Drop for DeviceStorage {
     }
 }
 
-impl MemoryDescription for DeviceStorage {
+impl MemoryDescriptor for DeviceStorage {
     fn addr(&self) -> usize {
         self.device_ptr() as usize
     }
