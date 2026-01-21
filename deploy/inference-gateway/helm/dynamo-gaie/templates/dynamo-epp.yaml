@@ -121,11 +121,21 @@ spec:
             value: "true"
           - name: USE_STREAMING
             value: "true"
+          # HuggingFace token for downloading model config files
+          # Without this, HuggingFace rate-limits requests (429 Too Many Requests)
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: HF_TOKEN
+                optional: true
         {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
             value: {{ .value | quote }}
         {{- end }}
+          - name: RUST_LOG
+            value: "debug,dynamo_llm::kv_router=trace"
 
         ports:
           - containerPort: 9002
