@@ -300,7 +300,12 @@ impl Runtime {
 
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
-        tracing::info!("Runtime shutdown initiated");
+        // Capture backtrace to identify who called shutdown
+        let backtrace = std::backtrace::Backtrace::capture();
+        tracing::info!(
+            backtrace = %backtrace,
+            "Runtime shutdown initiated - call stack captured"
+        );
 
         // Spawn the shutdown coordination task BEFORE cancelling tokens
         let tracker = self.graceful_shutdown_tracker.clone();

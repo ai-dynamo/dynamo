@@ -176,17 +176,36 @@ pub async fn run(
             None
         };
 
-    http_service
+    tracing::info!("HTTP service starting main loop");
+    let run_result = http_service
         .run(distributed_runtime.primary_token())
-        .await?;
+        .await;
+
+    // Log why the HTTP service exited
+    match &run_result {
+        Ok(()) => {
+            tracing::warn!(
+                "HTTP service run() returned Ok - this means the service loop ended normally. \
+                 This could be due to the cancellation token being triggered or the HTTP server stopping."
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "HTTP service run() returned an error - service loop terminated abnormally"
+            );
+        }
+    }
 
     // Abort the polling task if it was started
     if let Some(task) = polling_task {
         task.abort();
     }
 
+    tracing::info!("HTTP entrypoint calling distributed_runtime.shutdown()");
     distributed_runtime.shutdown(); // Cancel primary token
-    Ok(())
+
+    run_result
 }
 
 /// Spawns a task that watches for new models in store,

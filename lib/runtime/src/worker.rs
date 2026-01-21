@@ -219,17 +219,22 @@ async fn signal_handler(cancel_token: CancellationToken) -> anyhow::Result<()> {
         anyhow::Ok(())
     };
 
-    tokio::select! {
+    let shutdown_reason = tokio::select! {
         _ = ctrl_c => {
-            tracing::info!("Ctrl+C received, starting graceful shutdown");
+            "SIGINT/Ctrl+C received from OS"
         },
         _ = sigterm => {
-            tracing::info!("SIGTERM received, starting graceful shutdown");
+            "SIGTERM received from OS (likely Kubernetes pod termination)"
         },
         _ = cancel_token.cancelled() => {
-            tracing::debug!("CancellationToken triggered; shutting down");
+            "CancellationToken was triggered programmatically (not by OS signal)"
         },
-    }
+    };
+
+    tracing::warn!(
+        reason = shutdown_reason,
+        "Signal handler initiating graceful shutdown"
+    );
 
     // trigger a shutdown
     cancel_token.cancel();
