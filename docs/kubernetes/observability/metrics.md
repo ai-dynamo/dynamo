@@ -20,8 +20,8 @@ helm repo update
 # Values allow PodMonitors to be picked up that are outside of the kube-prometheus-stack helm release
 helm install prometheus -n monitoring --create-namespace prometheus-community/kube-prometheus-stack \
   --set prometheus.prometheusSpec.podMonitorSelectorNilUsesHelmValues=false \
-  --set prometheus.prometheusSpec.podMonitorNamespaceSelector="{}" \
-  --set prometheus.prometheusSpec.probeNamespaceSelector="{}"
+  --set prometheus.prometheusSpec.podMonitorNamespaceSelector.matchLabels=null \
+  --set prometheus.prometheusSpec.probeNamespaceSelector.matchLabels=null
 ```
 
 > [!Note]
