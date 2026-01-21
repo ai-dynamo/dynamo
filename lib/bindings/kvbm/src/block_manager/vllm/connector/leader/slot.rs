@@ -381,7 +381,7 @@ pub struct VllmConnectorSlot {
     cache_stats: Arc<CacheStatsTracker>,
 
     /// Minimum priority threshold for offload filtering.
-    /// Blocks with priority < threshold are not offloaded.
+    /// All blocks after the first occurance of block priority < threshold are not offloaded.
     offload_min_priority: u32,
 
     /// Flag indicating offload has been permanently terminated for this slot.
