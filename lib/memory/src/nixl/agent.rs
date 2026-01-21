@@ -77,7 +77,7 @@ impl NixlAgent {
             return Ok(());
         }
 
-        // Custom params require nixl_sys 0.9+ which adds nixl_capi_params_add
+        // TODO(DIS-1310): Custom params require nixl_sys 0.9+ which adds nixl_capi_params_add
         if !custom_params.is_empty() {
             anyhow::bail!(
                 "Custom NIXL backend parameters for {} are not yet supported. \
