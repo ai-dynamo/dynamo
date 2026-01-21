@@ -67,7 +67,9 @@ async def worker():
     overwrite_args(config)
 
     # Enable NATS based on use_kv_events flag (derived from kv_events_config)
-    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
+    runtime = DistributedRuntime(
+        loop, config.store_kv, config.request_plane, config.use_kv_events
+    )
 
     # Set up signal handler for graceful shutdown
     def signal_handler():
