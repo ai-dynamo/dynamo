@@ -12,92 +12,38 @@ pub use crate::protocols::common::timing::TimingInfo;
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
 
-/// Resolved routing hints from headers and nvext.
-/// Values are read from the header first, falling back to nvext.
-#[derive(Debug, Clone, Default)]
-pub struct ResolvedRoutingHints {
-    pub backend_instance_id: Option<u64>,
-    pub prefill_worker_id: Option<u64>,
-    pub decode_worker_id: Option<u64>,
-}
-
-impl ResolvedRoutingHints {
-    /// Resolve routing hints from HTTP headers and nvext.
-    ///
-    /// Resolution order for each field:
-    /// 1. Check the corresponding HTTP header
-    /// 2. Fall back to the nvext field
-    ///
-    /// Header mappings:
-    /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
-    /// - `x-prefill-instance-id` -> `prefill_worker_id`
-    pub fn resolve(headers: &HeaderMap, nvext: Option<&NvExt>) -> Self {
-        let backend_instance_id =
-            resolve_worker_id(headers, nvext, HEADER_WORKER_INSTANCE_ID, |ext| {
-                ext.backend_instance_id
-            });
-
-        let decode_worker_id =
-            resolve_worker_id(headers, nvext, HEADER_WORKER_INSTANCE_ID, |ext| {
-                ext.decode_worker_id
-            });
-
-        let prefill_worker_id =
-            resolve_worker_id(headers, nvext, HEADER_PREFILL_INSTANCE_ID, |ext| {
-                ext.prefill_worker_id
-            });
-
-        Self {
-            backend_instance_id,
-            prefill_worker_id,
-            decode_worker_id,
-        }
-    }
-}
-
-/// Resolve a single worker ID value from header first, then nvext.
-fn resolve_worker_id<F>(
-    headers: &HeaderMap,
-    nvext: Option<&NvExt>,
-    header_name: &str,
-    nvext_getter: F,
-) -> Option<u64>
-where
-    F: FnOnce(&NvExt) -> Option<u64>,
-{
-    // Try header first
-    if let Some(value) = headers
-        .get(header_name)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return Some(value);
-    }
-
-    // Fall back to nvext
-    nvext.and_then(nvext_getter)
-}
-
-/// Resolve routing hints from headers and nvext, then apply to a mutable nvext.
+/// Apply routing overrides from HTTP headers to nvext.
 ///
-/// This is a convenience function that:
-/// 1. Resolves routing values (header priority, nvext fallback)
-/// 2. Applies the resolved values to the nvext
-/// 3. Returns the nvext (creating one if it was None and hints were found)
-pub fn resolve_and_apply_routing_hints(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
-    let hints = ResolvedRoutingHints::resolve(headers, nvext.as_ref());
+/// Header mappings:
+/// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
+/// - `x-prefill-instance-id` -> `prefill_worker_id`
+///
+/// Headers take priority over existing nvext values when present.
+/// If no headers are present, returns the original nvext unchanged.
+pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
+    let worker_id = headers
+        .get(HEADER_WORKER_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
 
-    // Only create/modify nvext if we have any resolved hints
-    if hints.backend_instance_id.is_some()
-        || hints.decode_worker_id.is_some()
-        || hints.prefill_worker_id.is_some()
-    {
-        let mut ext = nvext.unwrap_or_default();
-        ext.apply_resolved_hints(&hints);
-        Some(ext)
-    } else {
-        nvext
+    let prefill_id = headers
+        .get(HEADER_PREFILL_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    if worker_id.is_none() && prefill_id.is_none() {
+        return nvext;
     }
+
+    let mut ext = nvext.unwrap_or_default();
+    if let Some(id) = worker_id {
+        ext.backend_instance_id = Some(id);
+        ext.decode_worker_id = Some(id);
+    }
+    if let Some(id) = prefill_id {
+        ext.prefill_worker_id = Some(id);
+    }
+    Some(ext)
 }
 
 pub trait NvExtProvider {
@@ -226,21 +172,6 @@ impl NvExt {
     pub fn builder() -> NvExtBuilder {
         NvExtBuilder::default()
     }
-
-    /// Apply resolved routing hints to this NvExt.
-    /// This updates the routing fields with the resolved values.
-    /// Doing it here because the PreProcessor and the pipeline do not have access to the headers.
-    pub fn apply_resolved_hints(&mut self, hints: &ResolvedRoutingHints) {
-        if let Some(id) = hints.backend_instance_id {
-            self.backend_instance_id = Some(id);
-        }
-        if let Some(id) = hints.decode_worker_id {
-            self.decode_worker_id = Some(id);
-        }
-        if let Some(id) = hints.prefill_worker_id {
-            self.prefill_worker_id = Some(id);
-        }
-    }
 }
 
 fn validate_nv_ext(_nv_ext: &NvExt) -> Result<(), ValidationError> {
@@ -318,9 +249,9 @@ mod tests {
         assert!(nv_ext.validate().is_ok());
     }
 
-    // Test ResolvedRoutingHints - header takes priority, nvext used as fallback
+    // Test apply_header_routing_overrides - header takes priority
     #[test]
-    fn test_resolved_routing_hints_header_priority() {
+    fn test_apply_header_routing_overrides_header_priority() {
         use axum::http::HeaderMap;
 
         // Only HEADER_WORKER_INSTANCE_ID is in the header
@@ -335,12 +266,57 @@ mod tests {
             .build()
             .unwrap();
 
-        let resolved = ResolvedRoutingHints::resolve(&headers, Some(&nvext));
+        let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
 
         // Header should override backend_instance_id and decode_worker_id
-        assert_eq!(resolved.backend_instance_id, Some(123));
-        assert_eq!(resolved.decode_worker_id, Some(123));
-        // prefill_worker_id should fall back to nvext since header is absent
-        assert_eq!(resolved.prefill_worker_id, Some(777));
+        assert_eq!(result.backend_instance_id, Some(123));
+        assert_eq!(result.decode_worker_id, Some(123));
+        // prefill_worker_id should remain from original nvext (not overwritten by header)
+        assert_eq!(result.prefill_worker_id, Some(777));
+    }
+
+    // Test apply_header_routing_overrides - no headers returns original nvext
+    #[test]
+    fn test_apply_header_routing_overrides_no_headers() {
+        use axum::http::HeaderMap;
+
+        let headers = HeaderMap::new();
+
+        let nvext = NvExt::builder()
+            .backend_instance_id(999)
+            .prefill_worker_id(777)
+            .build()
+            .unwrap();
+
+        let result = apply_header_routing_overrides(Some(nvext.clone()), &headers).unwrap();
+
+        // Should return original values unchanged
+        assert_eq!(result.backend_instance_id, Some(999));
+        assert_eq!(result.prefill_worker_id, Some(777));
+    }
+
+    // Test apply_header_routing_overrides - creates nvext if None and headers present
+    #[test]
+    fn test_apply_header_routing_overrides_creates_nvext() {
+        use axum::http::HeaderMap;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
+
+        let result = apply_header_routing_overrides(None, &headers).unwrap();
+
+        assert_eq!(result.backend_instance_id, Some(42));
+        assert_eq!(result.decode_worker_id, Some(42));
+    }
+
+    // Test apply_header_routing_overrides - returns None if no nvext and no headers
+    #[test]
+    fn test_apply_header_routing_overrides_none_passthrough() {
+        use axum::http::HeaderMap;
+
+        let headers = HeaderMap::new();
+        let result = apply_header_routing_overrides(None, &headers);
+
+        assert!(result.is_none());
     }
 }
