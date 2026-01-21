@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${VERSION}
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -23,7 +23,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${VERSION}
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3
@@ -43,7 +43,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:${VERSION}
           workingDir: /workspace/examples/backends/vllm
           command:
           - python3

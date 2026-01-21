@@ -40,7 +40,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: my-registry/dynamo:my-tag
+          image: my-registry/dynamo:${VERSION}
           workingDir: /workspace/examples/custom_backend/hello_world/
           command:
             - /bin/sh
@@ -78,7 +78,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: my-registry/dynamo:my-tag
+          image: my-registry/dynamo:${VERSION}
           workingDir: /workspace/examples/custom_backend/hello_world/
           command:
             - /bin/sh
