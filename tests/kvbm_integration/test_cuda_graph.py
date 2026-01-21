@@ -15,7 +15,6 @@ impact determinism measurements.
 This is a TensorRTLLM only test.
 """
 
-import importlib.util
 import logging
 import os
 import shutil
@@ -27,21 +26,12 @@ from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 
+from .common import check_module_available
+
 logger = logging.getLogger(__name__)
 
 
-def _check_engine_available(module_name: str) -> bool:
-    """Check if an engine module is available and importable."""
-    if importlib.util.find_spec(module_name) is None:
-        return False
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ImportError:
-        return False
-
-
-HAS_TRTLLM = _check_engine_available("tensorrt_llm")
+HAS_TRTLLM = check_module_available("tensorrt_llm")
 
 # Just need a model to show the config works rather than any stress of the system.
 MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"

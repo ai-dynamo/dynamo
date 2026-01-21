@@ -9,16 +9,124 @@ This module contains shared classes and functions used by both
 aggregated and disaggregated determinism tests.
 """
 
+import importlib.util
 import os
 import re
 import time
 from collections import defaultdict
+from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pytest
 import requests
+
+# ============================================================================
+# Module Availability Checks
+# ============================================================================
+
+
+def check_module_available(module_name: str) -> bool:
+    """Check if a Python module is available and importable.
+
+    This function first checks if the module spec can be found, then attempts
+    to actually import it to ensure it's functional.
+
+    Args:
+        module_name: Name of the module to check (e.g., "vllm", "tensorrt_llm")
+
+    Returns:
+        True if the module is available and importable, False otherwise
+
+    Example:
+        >>> has_vllm = check_module_available("vllm")
+        >>> has_trtllm = check_module_available("tensorrt_llm")
+    """
+    if importlib.util.find_spec(module_name) is None:
+        return False
+    try:
+        importlib.import_module(module_name)
+        return True
+    except ImportError:
+        return False
+
+
+def calculate_semantic_similarity(text1: str, text2: str) -> float:
+    """
+    Calculate semantic similarity between two texts using character-level matching.
+
+    Returns a similarity ratio between 0 and 1:
+    - 1.0 = exact match
+    - 0.8+ = semantically equivalent (minor word changes)
+    - <0.7 = significantly different
+    """
+    matcher = SequenceMatcher(None, text1, text2)
+    return matcher.ratio()
+
+
+def are_semantically_equivalent(
+    text1: str,
+    text2: str,
+    min_similarity: float = 0.75,
+    prefix_exact_match_ratio: float = 0.5,
+) -> tuple:
+    """
+    Check if two texts are semantically equivalent.
+
+    Checks both overall similarity and prefix matching to ensure early tokens
+    are deterministic (where FP errors haven't accumulated).
+
+    Args:
+        text1: First text (baseline)
+        text2: Second text (response to compare)
+        min_similarity: Minimum similarity ratio (0-1) to consider equivalent
+        prefix_exact_match_ratio: Ratio of text that must exactly match from start
+
+    Returns:
+        (is_equivalent, similarity_score, reason)
+    """
+    # Calculate overall similarity
+    similarity = calculate_semantic_similarity(text1, text2)
+
+    # Check prefix match (first X% must be exact to avoid early divergence)
+    prefix_len = int(min(len(text1), len(text2)) * prefix_exact_match_ratio)
+    prefix_match = text1[:prefix_len] == text2[:prefix_len]
+
+    if similarity >= min_similarity:
+        if prefix_match:
+            return (
+                True,
+                similarity,
+                f"Semantically equivalent ({similarity:.1%} similar, prefix matches)",
+            )
+        else:
+            return (
+                False,
+                similarity,
+                f"High similarity but early divergence (prefix mismatch at {prefix_len} chars)",
+            )
+    else:
+        return (False, similarity, f"Low similarity ({similarity:.1%})")
+
+
+def load_prompt_from_file(prompt_path: Path) -> Optional[str]:
+    """Load and preprocess prompt from file.
+
+    Args:
+        prompt_path: Path to the prompt file
+
+    Returns:
+        Cleaned prompt content, or None if file doesn't exist
+    """
+    if not prompt_path.exists():
+        return None
+
+    with open(prompt_path, "r", encoding="utf-8") as f:
+        # Strip SPDX license header lines (start with #)
+        lines = f.readlines()
+        content_lines = [line for line in lines if not line.startswith("#")]
+        return "".join(content_lines).strip()
 
 
 def check_logs_for_patterns(
@@ -393,7 +501,6 @@ def llm_server_kvbm(request, runtime_services):
         def test_example(llm_server_kvbm):
             ...
     """
-    import importlib.util
     import os
     import time
 
@@ -409,9 +516,9 @@ def llm_server_kvbm(request, runtime_services):
     )
 
     # Detect available server type
-    if importlib.util.find_spec("vllm") is not None:
+    if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif importlib.util.find_spec("tensorrt_llm") is not None:
+    elif check_module_available("tensorrt_llm"):
         server_type = ServerType.trtllm
         pytest.skip("TensorRT-LLM tests are disabled for this test")
     else:
@@ -494,6 +601,446 @@ def llm_server_kvbm(request, runtime_services):
 
 class TestDeterminism:
     """Test class for determinism validation."""
+
+    def _establish_baseline(self, tester, prompt: str, max_tokens: int) -> str:
+        """Establish baseline response: warmup -> clear cache -> baseline."""
+        print("\n" + "=" * 70)
+        print("ESTABLISHING BASELINE (warmup -> clear cache -> baseline)")
+        print("=" * 70)
+
+        # Step 1: Warmup
+        print("\nStep 1: Warmup request...")
+        try:
+            warmup_response = tester.make_request(
+                prompt, max_tokens=max_tokens, temperature=0, seed=42
+            )
+            print(f"Warmup response: {warmup_response}")
+        except Exception as e:
+            pytest.fail(f"Warmup request failed: {e}")
+
+        # Step 2: Clear cache
+        print("\nStep 2: Clearing cache...")
+        try:
+            tester.reset_prefix_cache()
+            print("Cache cleared successfully")
+        except Exception as e:
+            print(f"Warning: Cache reset failed: {e}")
+
+        # Step 3: Baseline request
+        print("\nStep 3: Baseline request (after cache clear)...")
+        try:
+            baseline_response = tester.make_request(
+                prompt, max_tokens=max_tokens, temperature=0, seed=42
+            )
+            print(f"Baseline response: {baseline_response}")
+            print("\n✓ Baseline established")
+            print("=" * 70)
+            return baseline_response
+        except Exception as e:
+            pytest.fail(f"Baseline request failed: {e}")
+
+    def _start_benchmark(self, llm_server) -> tuple:
+        """Start vllm bench in background.
+
+        Returns:
+            tuple: (process, file_handle, log_path)
+        """
+        import subprocess
+
+        model = os.environ.get(
+            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
+        bench_cmd = [
+            "vllm",
+            "bench",
+            "serve",
+            "--backend",
+            "vllm",
+            "--model",
+            model,
+            "--base-url",
+            llm_server.base_url,
+            "--dataset-name",
+            "random",
+            "--random-input-len",
+            "4000",
+            "--random-output-len",
+            "180",
+            "--max-concurrency",
+            "7",
+            "--num-prompts",
+            "2000",
+        ]
+
+        print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
+        bench_log = os.path.join(str(Path(".")), "vllm_bench_semantic.log")
+        bench_file = open(bench_log, "w")
+        bench_process = subprocess.Popen(
+            bench_cmd,
+            stdout=bench_file,
+            stderr=subprocess.STDOUT,
+            env=os.environ.copy(),
+        )
+        return bench_process, bench_file, bench_log
+
+    def _wait_for_benchmark_activity(self, initial_offload: int) -> bool:
+        """Wait for benchmark to start creating offload activity.
+
+        Args:
+            initial_offload: Initial offload block count to compare against
+
+        Returns:
+            bool: True if benchmark activity detected, False otherwise
+        """
+        print("\nWaiting for benchmark to start and create memory pressure...")
+        max_wait = int(os.environ.get("KVBM_BENCH_STARTUP_WAIT", "120"))
+
+        for wait_iteration in range(max_wait // 5):
+            time.sleep(5)
+            elapsed = (wait_iteration + 1) * 5
+
+            try:
+                current_metrics = fetch_kvbm_metrics()
+                current_offload = current_metrics.get("kvbm_offload_blocks_d2h", 0)
+
+                if current_offload > initial_offload:
+                    offload_delta = current_offload - initial_offload
+                    print(
+                        f" Benchmark activity detected after {elapsed}s ({offload_delta} blocks offloaded)"
+                    )
+                    print("Waiting additional 10s for benchmark to fully ramp up...")
+                    time.sleep(10)
+                    return True
+                else:
+                    print(f" Waiting... ({elapsed}s elapsed, no offload activity yet)")
+            except Exception as e:
+                print(f"  Waiting... ({elapsed}s elapsed, metrics check failed: {e})")
+
+        print(f" Warning: No benchmark activity detected after {max_wait}s")
+        return False
+
+    def _compare_with_baseline(
+        self, response: str, baseline: str, min_similarity: float, request_num: int
+    ) -> dict:
+        """Compare response with baseline. Returns comparison result dict.
+
+        Returns a dict with keys:
+        - exact_match: bool - True if response exactly matches baseline
+        - semantic_match: bool - True if semantically equivalent (includes exact matches)
+        - similarity: float - Similarity score 0.0-1.0
+        - reason: str - Explanation of the result
+        - diverge_pos: int - Character position where divergence starts (if not matching)
+        - approx_token: int - Approximate token position of divergence
+        - context_before: str - Text context before divergence point
+        - baseline_continues: str - How baseline continues after divergence
+        - response_continues: str - How response continues after divergence
+        - request_num: int - Request number
+        - response: str - Full response text
+        - baseline: str - Full baseline text
+        """
+        result = {
+            "request_num": request_num,
+            "exact_match": False,
+            "semantic_match": False,
+            "similarity": 0.0,
+            "reason": "",
+            "response": response,
+            "baseline": baseline,
+        }
+
+        # Check for exact match
+        if response == baseline:
+            result["exact_match"] = True
+            result["semantic_match"] = True
+            result["similarity"] = 1.0
+            result["reason"] = "Exact match"
+            return result
+
+        # Check semantic equivalence
+        is_equivalent, similarity, reason = are_semantically_equivalent(
+            baseline, response, min_similarity=min_similarity
+        )
+        result["similarity"] = similarity
+        result["reason"] = reason
+
+        if is_equivalent:
+            result["semantic_match"] = True
+        else:
+            # Find divergence point for reporting
+            diverge_pos = 0
+            for j, (c1, c2) in enumerate(zip(baseline, response)):
+                if c1 != c2:
+                    diverge_pos = j
+                    break
+            else:
+                diverge_pos = min(len(baseline), len(response))
+
+            approx_token = diverge_pos // 4
+
+            result["diverge_pos"] = diverge_pos
+            result["approx_token"] = approx_token
+            result["context_before"] = baseline[max(0, diverge_pos - 30) : diverge_pos]
+            result["baseline_continues"] = baseline[diverge_pos : diverge_pos + 50]
+            result["response_continues"] = response[diverge_pos : diverge_pos + 50]
+
+        return result
+
+    def _report_results(
+        self,
+        num_requests: int,
+        exact_matches: int,
+        semantic_matches: int,
+        mismatches: list,
+    ):
+        """Print final test results."""
+        print("\n" + "=" * 70)
+        print("SEMANTIC DETERMINISM RESULTS")
+        print("=" * 70)
+        print(f"Total requests: {num_requests}")
+        print(
+            f"Exact matches: {exact_matches}/{num_requests} ({exact_matches/num_requests:.1%})"
+        )
+        print(
+            f"Semantic matches: {semantic_matches}/{num_requests} ({semantic_matches/num_requests:.1%})"
+        )
+        print(
+            f"Semantic divergence: {len(mismatches)}/{num_requests} ({len(mismatches)/num_requests:.1%})"
+        )
+
+        if mismatches:
+            print(f"\n{'='*70}")
+            print(f"NON-DETERMINISTIC RESPONSES ({len(mismatches)} total):")
+            print(f"{'='*70}")
+            for mismatch in mismatches:
+                req_num = mismatch["request_num"]
+                if "error" in mismatch:
+                    print(f"\nRequest {req_num}: FAILED - {mismatch['error']}")
+                else:
+                    print(
+                        f"\nRequest {req_num}: MISMATCH (similarity: {mismatch.get('similarity', 0):.1%})"
+                    )
+                    print(f"  Baseline: {mismatch.get('baseline', '')[:150]}...")
+                    print(f"  Got:      {mismatch.get('response', '')[:150]}...")
+
+            semantic_success_rate = (semantic_matches / num_requests) * 100
+            min_success_rate = 80.0
+
+            print(f"\n{'='*70}")
+            print(f"SEMANTIC SUCCESS RATE: {semantic_success_rate:.1f}%")
+            print(f"{'='*70}")
+            print(f"Failed requests: {[m['request_num'] for m in mismatches]}")
+
+            if semantic_success_rate < min_success_rate:
+                pytest.fail(
+                    f"Semantic determinism test failed!\n"
+                    f"Semantic match rate: {semantic_success_rate:.1f}% (< {min_success_rate:.0f}%)\n"
+                    f"This indicates significant non-determinism beyond FP precision effects"
+                )
+            else:
+                print(
+                    f"TEST PASSED - SEMANTICALLY DETERMINISTIC (>= {min_success_rate:.0f}%)"
+                )
+        else:
+            print(f"\n{'='*70}")
+            print("TEST PASSED - ALL RESPONSES SEMANTICALLY EQUIVALENT")
+            print(f"{'='*70}")
+            print(
+                f"Exact matches: {exact_matches}/{num_requests} ({exact_matches/num_requests:.1%})"
+            )
+
+    def _show_final_kvbm_stats(self, initial_offload: int):
+        """Display final KVBM metrics and compare with initial state.
+
+        Args:
+            initial_offload: Initial offload block count to compare against
+
+        Raises:
+            pytest.fail: If no offload activity was detected during the test
+        """
+        print(f"\n{'='*70}")
+        print("FINAL KVBM STATS")
+        print(f"{'='*70}")
+        try:
+            final_metrics = fetch_kvbm_metrics()
+            final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
+            final_onboard = final_metrics.get("kvbm_onboard_blocks_h2d", 0)
+
+            offload_delta = final_offload - initial_offload
+            print(f"Initial offload: {initial_offload} blocks")
+            print(f"Final offload:   {final_offload} blocks")
+            print(f"Total offloaded: {offload_delta} blocks")
+            print(f"Total onboarded: {final_onboard} blocks")
+
+            if offload_delta > 0:
+                print(
+                    f"\n KVBM offload activity detected: {offload_delta} blocks offloaded"
+                )
+            else:
+                pytest.fail(
+                    f"No offload activity detected during test.\n"
+                    f"Initial offload: {initial_offload} blocks, Final offload: {final_offload} blocks.\n"
+                    f"Test requires memory pressure to properly validate determinism under load."
+                )
+
+            if final_onboard > 0:
+                print(
+                    f" KVBM onboard activity detected: {final_onboard} blocks onboarded"
+                )
+            else:
+                pytest.fail(
+                    f"No onboard activity detected during test.\n"
+                    f"Final onboard: {final_onboard} blocks.\n"
+                    f"Test requires KV cache onboarding to properly validate determinism under load."
+                )
+
+        except Exception as e:
+            print(f"Could not fetch final metrics: {e}")
+
+    def base_test_spanish_prompt_determinism_under_load(
+        self, tester, llm_server, runtime_services, spanish_prompt_path: Path
+    ):
+        """Base implementation: send Spanish prompt repeatedly while vllm bench runs.
+
+        Tests determinism under high concurrency load. Reproduces bugs where responses
+        can become corrupted or non-deterministic under memory pressure.
+
+        Args:
+            tester: DeterminismTester instance
+            llm_server: LLM server manager
+            runtime_services: Runtime services fixture
+            spanish_prompt_path: Path to the Spanish prompt file
+        """
+        import subprocess
+
+        print("\n" + "=" * 70)
+        print("DETERMINISM TEST UNDER HIGH CONCURRENCY LOAD")
+        print("=" * 70)
+
+        # Load prompt
+        prompt = load_prompt_from_file(spanish_prompt_path)
+        if prompt is None:
+            pytest.fail(f"Prompt not found at {spanish_prompt_path}")
+
+        # Test parameters
+        num_requests = int(os.environ.get("KVBM_NUM_ITERATIONS", "15"))
+        delay_seconds = int(os.environ.get("KVBM_REQUEST_DELAY", "30"))
+        max_tokens = int(os.environ.get("KVBM_MAX_TOKENS", "80"))
+        min_similarity = float(os.environ.get("KVBM_MIN_SIMILARITY", "0.75"))
+
+        print("\nTest configuration:")
+        print(f"  Requests: {num_requests}")
+        print(f"  Delay: {delay_seconds}s")
+        print(f"  Max tokens: {max_tokens}")
+        print(f"  Min semantic similarity: {min_similarity:.0%}")
+
+        # Establish baseline
+        baseline_response = self._establish_baseline(tester, prompt, max_tokens)
+
+        # Start benchmark
+        bench_process, bench_file, bench_log = self._start_benchmark(llm_server)
+
+        try:
+            # Check initial metrics
+            print("\nChecking initial KVBM metrics...")
+            try:
+                initial_metrics = fetch_kvbm_metrics()
+                initial_offload = initial_metrics.get("kvbm_offload_blocks_d2h", 0)
+                print(f"Initial offload: {initial_offload} blocks")
+            except Exception as e:
+                print(f"Could not fetch initial metrics: {e}")
+                initial_offload = 0
+
+            # Wait for benchmark activity
+            benchmark_started = self._wait_for_benchmark_activity(initial_offload)
+            if not benchmark_started:
+                pytest.fail(
+                    "Benchmark failed to start or create offload activity. "
+                    "Test cannot proceed without memory pressure to properly test determinism under load."
+                )
+
+            print("Waiting additional 10s for benchmark to fully ramp up...")
+            time.sleep(10)
+
+            # Send requests and track results
+            print(f"\n{'='*70}")
+            print(f"SENDING {num_requests} REQUESTS (comparing against baseline)")
+            print(f"{'='*70}")
+
+            responses = []
+            mismatches = []
+            exact_matches = 0
+            semantic_matches = 0
+
+            for i in range(num_requests):
+                print(f"\n--- Request {i+1}/{num_requests} ---")
+
+                try:
+                    response = tester.make_request(
+                        prompt, max_tokens=max_tokens, temperature=0, seed=42
+                    )
+                    responses.append(response)
+                    print(f"Response: {response}")
+
+                    # Compare with baseline
+                    comparison = self._compare_with_baseline(
+                        response, baseline_response, min_similarity, i + 1
+                    )
+
+                    if comparison["exact_match"]:
+                        print("✓ EXACT MATCH (100% deterministic)")
+                        exact_matches += 1
+                        semantic_matches += 1
+                    elif comparison["semantic_match"]:
+                        print(
+                            f"✓ SEMANTICALLY EQUIVALENT ({comparison['similarity']:.1%} similar)"
+                        )
+                        print(f"  {comparison['reason']}")
+                        semantic_matches += 1
+                    else:
+                        print(
+                            f"✗ SEMANTIC DIVERGENCE ({comparison['similarity']:.1%} similar)"
+                        )
+                        print(f"  {comparison['reason']}")
+                        print(
+                            f"  Divergence at char {comparison['diverge_pos']} (~token {comparison['approx_token']})"
+                        )
+                        print(f"  Context before: ...{comparison['context_before']}")
+                        print(
+                            f"  Baseline continues: {comparison['baseline_continues']}..."
+                        )
+                        print(
+                            f"  Response continues: {comparison['response_continues']}..."
+                        )
+                        mismatches.append(comparison)
+
+                except Exception as e:
+                    print(f"Request failed: {e}")
+                    responses.append(None)
+                    mismatches.append({"request_num": i + 1, "error": str(e)})
+
+                # Wait before next request
+                if i < num_requests - 1:
+                    print(f"Waiting {delay_seconds}s...")
+                    time.sleep(delay_seconds)
+
+            # Report results
+            self._report_results(
+                num_requests, exact_matches, semantic_matches, mismatches
+            )
+
+            # Show final KVBM stats
+            self._show_final_kvbm_stats(initial_offload)
+
+        finally:
+            print("\nStopping benchmark...")
+            try:
+                bench_process.terminate()
+                bench_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                bench_process.kill()
+                bench_process.wait()
+            bench_file.close()
+            print(f"Benchmark log: {bench_log}")
 
     def base_test_determinism_with_cache_reset(
         self, tester, llm_server, runtime_services, success_rate_threshold=1.0
@@ -623,325 +1170,6 @@ class TestDeterminism:
         assert (
             success_rate >= success_rate_threshold
         ), f"Model is not deterministic across cache reset: {total_failed} comparisons failed, success rate {success_rate:.1%} lower than expected {success_rate_threshold*100}%"
-
-    def base_test_spanish_prompt_determinism_under_load(
-        self, tester, llm_server, runtime_services, spanish_prompt_path: Path
-    ):
-        """Base implementation: send Spanish prompt repeatedly while vllm bench runs.
-
-        Tests determinism under high concurrency load. Reproduces bugs where responses
-        can become corrupted or non-deterministic under memory pressure.
-
-        Args:
-            tester: DeterminismTester instance
-            llm_server: LLM server manager
-            runtime_services: Runtime services fixture
-            spanish_prompt_path: Path to the Spanish prompt file
-        """
-        import subprocess
-
-        print("\n" + "=" * 70)
-        print("DETERMINISM TEST UNDER HIGH CONCURRENCY LOAD")
-        print("=" * 70)
-
-        # Load Spanish prompt
-        if not spanish_prompt_path.exists():
-            pytest.skip(f"Spanish prompt not found at {spanish_prompt_path}")
-
-        with open(spanish_prompt_path, "r", encoding="utf-8") as f:
-            # Strip SPDX license header lines (start with #) from prompt files
-            lines = f.readlines()
-            content_lines = [line for line in lines if not line.startswith("#")]
-            prompt = "".join(content_lines).strip()
-
-        print(f"Loaded Spanish prompt: {len(prompt)} chars")
-        print(f"Preview: {prompt[:100]}...")
-
-        # Test parameters
-        num_requests = int(os.environ.get("KVBM_NUM_ITERATIONS", "15"))
-        delay_seconds = int(os.environ.get("KVBM_REQUEST_DELAY", "30"))
-        max_tokens = int(os.environ.get("KVBM_MAX_TOKENS", "100"))
-
-        print("\nTest configuration:")
-        print(f"  Requests: {num_requests}")
-        print(f"  Delay: {delay_seconds}s")
-        print(f"  Max tokens: {max_tokens}")
-
-        # Start vllm bench in background
-        model = os.environ.get(
-            "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-        )
-        bench_cmd = [
-            "vllm",
-            "bench",
-            "serve",
-            "--backend",
-            "vllm",
-            "--model",
-            model,
-            "--base-url",
-            llm_server.base_url,
-            "--dataset-name",
-            "random",
-            "--random-input-len",
-            "4000",
-            "--random-output-len",
-            "180",
-            "--max-concurrency",
-            "7",
-            "--num-prompts",
-            "2000",
-        ]
-
-        print(f"\nStarting vllm bench: {' '.join(bench_cmd)}")
-        bench_log = os.path.join(str(Path(".")), "vllm_bench_spanish.log")
-        bench_file = open(bench_log, "w")
-        bench_process = subprocess.Popen(
-            bench_cmd,
-            stdout=bench_file,
-            stderr=subprocess.STDOUT,
-            env=os.environ.copy(),
-        )
-
-        try:
-            # Check initial metrics
-            print("\nChecking initial KVBM metrics...")
-            try:
-                initial_metrics = fetch_kvbm_metrics()
-                initial_offload = initial_metrics.get("kvbm_offload_blocks_d2h", 0)
-                print(f"Initial offload: {initial_offload} blocks")
-            except Exception as e:
-                print(f"Could not fetch initial metrics: {e}")
-                initial_offload = 0
-
-            # Wait for benchmark to start and create offload activity
-            print("\nWaiting for benchmark to start and create memory pressure...")
-            max_wait = int(os.environ.get("KVBM_BENCH_STARTUP_WAIT", "120"))
-            benchmark_started = False
-
-            for wait_iteration in range(max_wait // 5):
-                time.sleep(5)
-                elapsed = (wait_iteration + 1) * 5
-
-                try:
-                    current_metrics = fetch_kvbm_metrics()
-                    current_offload = current_metrics.get("kvbm_offload_blocks_d2h", 0)
-
-                    if current_offload > initial_offload:
-                        offload_delta = current_offload - initial_offload
-                        print(
-                            f" Benchmark activity detected after {elapsed}s ({offload_delta} blocks offloaded)"
-                        )
-                        benchmark_started = True
-                        break
-                    else:
-                        print(
-                            f" Waiting... ({elapsed}s elapsed, no offload activity yet)"
-                        )
-                except Exception as e:
-                    print(
-                        f"  Waiting... ({elapsed}s elapsed, metrics check failed: {e})"
-                    )
-
-            if not benchmark_started:
-                print(f" Warning: No benchmark activity detected after {max_wait}s")
-                print(" Test will continue anyway, but may not reproduce the bug")
-            else:
-                # Give a bit more time for benchmark to ramp up
-                print("Waiting additional 10s for benchmark to fully ramp up...")
-                time.sleep(10)
-
-            # Send same request repeatedly
-            print(f"\n{'='*70}")
-            print(f"SENDING {num_requests} REQUESTS")
-            print(f"{'='*70}")
-
-            responses = []
-            baseline_response = None  # Will be set from first response
-            mismatches = []  # Track which requests had non-deterministic responses
-
-            for i in range(num_requests):
-                print(f"\n--- Request {i+1}/{num_requests} ---")
-
-                try:
-                    response = tester.make_request(
-                        prompt, max_tokens=max_tokens, temperature=0.7, seed=42
-                    )
-                    responses.append(response)
-                    print(f"Response: {response}")
-
-                    # Check for obvious corruption patterns (fail immediately)
-                    corruption_detected = False
-                    corruption_reason = []
-
-                    # Check for excessive repetition of short patterns (like {{char}}{{char}})
-                    if response.count("{{") > 20 or response.count("}}") > 20:
-                        open_count = response.count("{{")
-                        close_count = response.count("}}")
-                        corruption_reason.append(
-                            f"Excessive template markers (open: {open_count}, close: {close_count})"
-                        )
-                        corruption_detected = True
-
-                    # Check for excessive dots/newlines
-                    if (
-                        response.count("\n") > 50
-                        or response.count(".") > len(response) * 0.3
-                    ):
-                        corruption_reason.append("Excessive dots/newlines")
-                        corruption_detected = True
-
-                    # Check for null bytes or replacement characters
-                    if "\x00" in response or "�" in response:
-                        corruption_reason.append("Null bytes or replacement characters")
-                        corruption_detected = True
-
-                    # Check for control characters
-                    control_chars = sum(
-                        1 for c in response if ord(c) < 32 and c not in "\n\t\r"
-                    )
-                    if control_chars > 10:
-                        corruption_reason.append(
-                            f"Excessive control characters: {control_chars}"
-                        )
-                        corruption_detected = True
-
-                    # Check for strange ASCII patterns (non-printable, high ratio of special chars)
-                    non_printable = sum(
-                        1
-                        for c in response
-                        if ord(c) > 127 or (ord(c) < 32 and c not in "\n\t\r")
-                    )
-                    if len(response) > 0 and non_printable / len(response) > 0.3:
-                        corruption_reason.append(
-                            f"Strange ASCII: {non_printable}/{len(response)} chars are non-printable"
-                        )
-                        corruption_detected = True
-
-                    if corruption_detected:
-                        print(f"\n{'='*70}")
-                        print("SEVERE CORRUPTION DETECTED - FAILING IMMEDIATELY!")
-                        print(f"{'='*70}")
-                        print(f"Request: {i+1}/{num_requests}")
-                        print(f"Reason: {', '.join(corruption_reason)}")
-                        print(f"Response: {response[:500]}")
-                        pytest.fail(
-                            f"Severe corruption at request {i+1}!\n"
-                            f"Reason: {corruption_reason}\n"
-                            f"Response: {response[:300]}"
-                        )
-
-                    # Set first response as baseline
-                    if i == 0:
-                        baseline_response = response
-                        print("✓ Baseline set (request 1)")
-                    else:
-                        # From request 2 onwards, check determinism against baseline
-                        if response != baseline_response:
-                            print("NON-DETERMINISTIC (differs from baseline)")
-                            mismatches.append(
-                                {
-                                    "request_num": i + 1,
-                                    "response": response,
-                                    "baseline": baseline_response,
-                                }
-                            )
-                        else:
-                            print("Match with baseline")
-
-                except Exception as e:
-                    print(f"Request failed: {e}")
-                    responses.append(None)
-                    mismatches.append({"request_num": i + 1, "error": str(e)})
-
-                # Wait before next request
-                if i < num_requests - 1:
-                    print(f"Waiting {delay_seconds}s...")
-                    time.sleep(delay_seconds)
-
-            # Report results
-            print("\n" + "=" * 70)
-            print("TEST RESULTS")
-            print("=" * 70)
-            print(f"Total requests: {num_requests}")
-            print(f"Deterministic: {num_requests - len(mismatches)}/{num_requests}")
-            print(f"Non-deterministic: {len(mismatches)}/{num_requests}")
-
-            if mismatches:
-                print(f"\n{'='*70}")
-                print(f"NON-DETERMINISTIC RESPONSES ({len(mismatches)} total):")
-                print(f"{'='*70}")
-                for mismatch in mismatches:
-                    req_num = mismatch["request_num"]
-                    if "error" in mismatch:
-                        print(f"\nRequest {req_num}: FAILED")
-                        print(f"  Error: {mismatch['error']}")
-                    else:
-                        print(f"\nRequest {req_num}: MISMATCH")
-                        print(f"  Baseline: {mismatch['baseline'][:150]}...")
-                        print(f"  Got:      {mismatch['response'][:150]}...")
-
-                # Calculate percentage
-                success_rate = ((num_requests - len(mismatches)) / num_requests) * 100
-                print(f"\n{'='*70}")
-                print("TEST FAILED")
-                print(f"{'='*70}")
-                print(f"Success rate: {success_rate:.1f}%")
-                print(f"Failed requests: {[m['request_num'] for m in mismatches]}")
-
-                pytest.fail(
-                    f"Determinism test failed!\n"
-                    f"{len(mismatches)}/{num_requests} responses were non-deterministic\n"
-                    f"Success rate: {success_rate:.1f}%"
-                )
-            else:
-                print(f"\n{'='*70}")
-                print("TEST PASSED - ALL RESPONSES DETERMINISTIC")
-                print(f"{'='*70}")
-                print(f"All {num_requests} responses matched the baseline!")
-
-            # Check final onboard stats
-            print(f"\n{'='*70}")
-            print("FINAL KVBM STATS")
-            print(f"{'='*70}")
-            try:
-                final_metrics = fetch_kvbm_metrics()
-                final_offload = final_metrics.get("kvbm_offload_blocks_d2h", 0)
-                final_onboard = final_metrics.get("kvbm_onboard_blocks_h2d", 0)
-
-                offload_delta = final_offload - initial_offload
-                print(f"Initial offload: {initial_offload} blocks")
-                print(f"Final offload:   {final_offload} blocks")
-                print(f"Total offloaded: {offload_delta} blocks")
-                print(f"Total onboarded: {final_onboard} blocks")
-
-                if offload_delta > 0:
-                    print(
-                        f"\n KVBM offload activity detected: {offload_delta} blocks offloaded"
-                    )
-                else:
-                    print("\n WARNING: No offload activity detected during test")
-
-                if final_onboard > 0:
-                    print(
-                        f" KVBM onboard activity detected: {final_onboard} blocks onboarded"
-                    )
-                else:
-                    print(" WARNING: No onboard activity detected during test")
-
-            except Exception as e:
-                print(f"Could not fetch final metrics: {e}")
-
-        finally:
-            print("\nStopping benchmark...")
-            try:
-                bench_process.terminate()
-                bench_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                bench_process.kill()
-                bench_process.wait()
-            bench_file.close()
-            print(f"Benchmark log: {bench_log}")
 
 
 # ============================================================================

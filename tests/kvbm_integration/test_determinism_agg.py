@@ -14,10 +14,8 @@ The expected results should be 100% match between the two cases. Compared to
 disaggregated mode, aggregated mode has less randomness chances.
 """
 
-import importlib.util
 import logging
 import os
-import shutil
 import signal
 import socket
 import subprocess
@@ -33,24 +31,9 @@ import requests
 
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
+from .common import check_module_available
 
-
-def _check_command_available(command: str) -> bool:
-    """Check if a command is available in PATH."""
-    return shutil.which(command) is not None
-
-
-def _find_free_port() -> int:
-    """Find a free port by binding to port 0 and letting the OS assign one."""
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        s.listen(1)
-        port = s.getsockname()[1]
-    return port
-
-
-HAS_VLLM_BENCH = _check_command_available("vllm")
+HAS_VLLM_BENCH = check_module_available("vllm")
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
@@ -380,9 +363,9 @@ def llm_server(request, runtime_services):
     # Put logs in the per-test directory set up by tests/conftest.py
     log_dir = Path(request.node.name)
 
-    if importlib.util.find_spec("vllm") is not None:
+    if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif importlib.util.find_spec("tensorrt_llm") is not None:
+    elif check_module_available("tensorrt_llm"):
         server_type = ServerType.trtllm
     else:
         raise Exception(
