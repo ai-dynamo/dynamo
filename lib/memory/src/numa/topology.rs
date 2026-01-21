@@ -79,22 +79,26 @@ impl NumaTopology {
         })
     }
 
-    /// Get all CPUs for a NUMA node.
+    /// Returns all CPU IDs belonging to the given NUMA node.
+    ///
+    /// Returns `None` if the node ID is not in the topology.
     pub fn cpus_for_node(&self, node_id: u32) -> Option<&[usize]> {
         self.node_to_cpus.get(&node_id).map(|v| v.as_slice())
     }
 
-    /// Get NUMA node for a CPU.
+    /// Returns the NUMA node ID that contains the given CPU.
+    ///
+    /// Returns `None` if the CPU ID is not in the topology.
     pub fn node_for_cpu(&self, cpu_id: usize) -> Option<u32> {
         self.cpu_to_node.get(&cpu_id).copied()
     }
 
-    /// Get number of NUMA nodes.
+    /// Returns the number of NUMA nodes in the system.
     pub fn num_nodes(&self) -> usize {
         self.node_to_cpus.len()
     }
 
-    /// Check if single-node system.
+    /// Returns `true` if this is a single-node (non-NUMA) system.
     pub fn is_single_node(&self) -> bool {
         self.num_nodes() == 1
     }

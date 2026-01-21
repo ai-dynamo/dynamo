@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! CUDA memory pool for efficient device memory allocation in hot paths.
@@ -25,8 +25,11 @@ use std::sync::Arc;
 ///     .build()?;
 /// ```
 pub struct CudaMemPoolBuilder {
+    /// CUDA context for the target device.
     context: Arc<CudaContext>,
+    /// Bytes to pre-allocate to warm the pool.
     reserve_size: usize,
+    /// Optional threshold above which memory is returned to the system on free.
     release_threshold: Option<u64>,
 }
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! External memory wrapper for memory allocated by external frameworks.
@@ -46,8 +46,11 @@ use std::fmt;
 /// let registered = register_with_nixl(external, &agent, None)?;
 /// ```
 pub struct ExternalDeviceMemory {
+    /// Raw pointer to externally-allocated GPU memory.
     ptr: *const u8,
+    /// Size of the memory region in bytes.
     size: usize,
+    /// CUDA device ID where this memory resides.
     device_id: u64,
 }
 

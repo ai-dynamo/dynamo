@@ -20,6 +20,7 @@ use std::{
 
 /// Errors specific to arena allocation.
 #[derive(Debug, thiserror::Error)]
+#[allow(missing_docs)]
 pub enum ArenaError {
     #[error("Page size must be a power of 2")]
     PageSizeNotAligned,
@@ -64,11 +65,17 @@ impl<S: MemoryDescriptor> std::fmt::Debug for ArenaAllocator<S> {
 ///
 /// The buffer is backed by a [`MemoryDescriptor`] object, and the allocation is freed when the buffer is dropped.
 pub struct ArenaBuffer<S: MemoryDescriptor> {
+    /// Byte offset from the start of the backing storage.
     offset: usize,
+    /// Absolute memory address of this buffer.
     address: usize,
+    /// User-requested allocation size in bytes.
     requested_size: usize,
+    /// Shared reference to the backing storage.
     storage: Arc<S>,
+    /// Internal allocation handle from the offset allocator.
     allocation: Allocation,
+    /// Shared reference to the allocator for freeing on drop.
     allocator: Arc<Mutex<Allocator>>,
 }
 
@@ -107,7 +114,11 @@ impl<S: MemoryDescriptor> ArenaAllocator<S> {
         })
     }
 
-    /// Allocate a new [`ArenaBuffer`] from the allocator.
+    /// Allocates a new [`ArenaBuffer`] of the given size from this allocator.
+    ///
+    /// The actual allocation may consume more pages than strictly needed due to
+    /// page-size rounding. Returns [`ArenaError::AllocationFailed`] if there are
+    /// not enough contiguous pages available.
     pub fn allocate(&self, size: usize) -> std::result::Result<ArenaBuffer<S>, ArenaError> {
         let size = size as u64;
         let pages = size.div_ceil(self.page_size);

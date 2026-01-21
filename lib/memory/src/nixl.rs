@@ -38,11 +38,18 @@ pub trait NixlMemory: MemoryDescriptor + NixlCompatible {}
 impl<T: MemoryDescriptor + NixlCompatible + ?Sized> NixlMemory for T {}
 
 /// NIXL descriptor containing registration information.
+///
+/// This struct holds the information needed to describe a memory region
+/// to NIXL for transfer operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NixlDescriptor {
+    /// Base address of the memory region.
     pub addr: u64,
+    /// Size of the memory region in bytes.
     pub size: usize,
+    /// Type of memory (host, device, etc.).
     pub mem_type: MemType,
+    /// Device identifier (GPU index for device memory, 0 for host memory).
     pub device_id: u64,
 }
 

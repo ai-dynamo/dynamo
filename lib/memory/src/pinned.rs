@@ -27,8 +27,11 @@ fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
 /// CUDA pinned host memory allocated via cudaHostAlloc.
 #[derive(Debug)]
 pub struct PinnedStorage {
+    /// Host pointer to the pinned memory.
     ptr: usize,
+    /// Size of the allocation in bytes.
     len: usize,
+    /// CUDA context used for allocation and deallocation.
     ctx: Arc<CudaContext>,
 }
 

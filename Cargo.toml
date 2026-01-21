@@ -80,7 +80,7 @@ dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.8.0" }
 dynamo-identity = { path = "lib/identity", version = "0.8.0" }
 
 # nixl
-nixl-sys = { git = "https://github.com/ai-dynamo/nixl.git", branch = "ryan/fix-stub-build" }
+nixl-sys = { version = "0.8.0" }
 
 # External dependencies
 anyhow = { version = "1" }

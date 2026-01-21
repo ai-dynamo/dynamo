@@ -49,7 +49,9 @@ pub struct NixlBackendConfig {
 }
 
 impl NixlBackendConfig {
-    /// Create a new empty configuration (no backends enabled).
+    /// Creates a new configuration with the given backends.
+    ///
+    /// For an empty configuration with no backends, use [`Default::default()`].
     pub fn new(backends: HashMap<String, HashMap<String, String>>) -> Self {
         Self { backends }
     }

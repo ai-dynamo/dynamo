@@ -9,6 +9,8 @@
 //! - Composition-based NIXL registration via `NixlRegistered<T>` wrapper
 //! - RAII with proper drop ordering (registration handle drops before memory)
 
+#![deny(missing_docs)]
+
 pub mod actions;
 pub mod arena;
 pub mod nixl;
@@ -70,6 +72,7 @@ pub trait MemoryDescriptor: Send + Sync + fmt::Debug {
 
 /// Errors that can occur during storage operations.
 #[derive(Debug, Error)]
+#[allow(missing_docs)]
 pub enum StorageError {
     #[error("allocation failed: {0}")]
     AllocationFailed(String),
@@ -147,6 +150,10 @@ impl StorageKind {
 pub struct Buffer(Arc<dyn MemoryDescriptor>);
 
 impl Buffer {
+    /// Wraps a concrete storage type into a type-erased [`Buffer`].
+    ///
+    /// This is the primary way to create a `Buffer` from any type that
+    /// implements [`MemoryDescriptor`].
     pub fn new<S: MemoryDescriptor + 'static>(memory: S) -> Self {
         Buffer(Arc::new(memory))
     }
@@ -225,15 +232,18 @@ pub struct MemoryRegion {
 }
 
 impl MemoryRegion {
+    /// Creates a new memory region with the given base address and size.
     pub fn new(addr: usize, size: usize) -> Self {
         Self { addr, size }
     }
 
+    /// Returns the base address of this memory region.
     #[inline]
     pub fn addr(&self) -> usize {
         self.addr
     }
 
+    /// Returns the size of this memory region in bytes.
     #[inline]
     pub fn size(&self) -> usize {
         self.size

@@ -26,9 +26,13 @@ fn cuda_context(device_id: u32) -> Result<Arc<CudaContext>> {
 /// CUDA device memory allocated via cudaMalloc.
 #[derive(Debug)]
 pub struct DeviceStorage {
+    /// CUDA context used for allocation and deallocation.
     ctx: Arc<CudaContext>,
+    /// Device pointer to the allocated memory.
     ptr: u64,
+    /// CUDA device ID where memory is allocated.
     device_id: u32,
+    /// Size of the allocation in bytes.
     len: usize,
 }
 

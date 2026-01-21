@@ -59,11 +59,15 @@ struct SendPtr(*mut u8);
 // The worker never accesses the pointer after sending it.
 unsafe impl Send for SendPtr {}
 
-/// Request to allocate CUDA pinned memory.
+/// Request to allocate CUDA pinned memory on a specific NUMA node.
 struct AllocRequest {
+    /// Number of bytes to allocate.
     size: usize,
+    /// Target NUMA node for allocation.
     node: NumaNode,
+    /// CUDA device ID (for context binding).
     gpu_id: u32,
+    /// Channel for sending back the allocation result.
     response: Sender<AllocResult>,
 }
 
@@ -96,7 +100,11 @@ impl NumaWorker {
         })
     }
 
-    /// Worker thread main loop.
+    /// Worker thread main loop that processes allocation requests.
+    ///
+    /// On startup, the worker pins itself to the target NUMA node using
+    /// `sched_setaffinity`. It then processes allocation requests in a loop
+    /// until the channel is closed.
     fn worker_loop(node: NumaNode, requests: Receiver<AllocRequest>) {
         // First thing: pin this thread to the target NUMA node
         tracing::trace!("Pinning worker thread to node {}", node.0);
