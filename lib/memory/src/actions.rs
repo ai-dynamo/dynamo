@@ -256,7 +256,9 @@ mod tests {
     #[test]
     fn test_memset_full_region() {
         let mut storage = create_storage(1024);
-        storage.memset(0xAB, 0, 1024).expect("memset should succeed");
+        storage
+            .memset(0xAB, 0, 1024)
+            .expect("memset should succeed");
 
         let slice = unsafe { storage.as_slice().expect("as_slice should succeed") };
         assert!(slice.iter().all(|&b| b == 0xAB));
@@ -266,9 +268,13 @@ mod tests {
     fn test_memset_partial_region() {
         let mut storage = create_storage(1024);
         // First fill with 0x00
-        storage.memset(0x00, 0, 1024).expect("memset should succeed");
+        storage
+            .memset(0x00, 0, 1024)
+            .expect("memset should succeed");
         // Then fill middle region with 0xFF
-        storage.memset(0xFF, 100, 200).expect("memset should succeed");
+        storage
+            .memset(0xFF, 100, 200)
+            .expect("memset should succeed");
 
         let slice = unsafe { storage.as_slice().expect("as_slice should succeed") };
         // Check before region
@@ -283,7 +289,9 @@ mod tests {
     fn test_memset_at_end() {
         let mut storage = create_storage(1024);
         // Fill the last 100 bytes
-        storage.memset(0x42, 924, 100).expect("memset should succeed");
+        storage
+            .memset(0x42, 924, 100)
+            .expect("memset should succeed");
 
         let slice = unsafe { storage.as_slice().expect("as_slice should succeed") };
         assert!(slice[924..].iter().all(|&b| b == 0x42));
@@ -293,7 +301,9 @@ mod tests {
     fn test_memset_zero_size() {
         let mut storage = create_storage(1024);
         // Zero-size memset should succeed (no-op)
-        storage.memset(0xFF, 500, 0).expect("zero-size memset should succeed");
+        storage
+            .memset(0xFF, 500, 0)
+            .expect("zero-size memset should succeed");
     }
 
     #[test]
@@ -317,7 +327,9 @@ mod tests {
     #[test]
     fn test_as_slice_full() {
         let mut storage = create_storage(1024);
-        storage.memset(0xCD, 0, 1024).expect("memset should succeed");
+        storage
+            .memset(0xCD, 0, 1024)
+            .expect("memset should succeed");
 
         let slice = unsafe { storage.as_slice().expect("as_slice should succeed") };
         assert_eq!(slice.len(), 1024);
@@ -327,8 +339,12 @@ mod tests {
     #[test]
     fn test_slice_partial() {
         let mut storage = create_storage(1024);
-        storage.memset(0x00, 0, 1024).expect("memset should succeed");
-        storage.memset(0xAA, 100, 50).expect("memset should succeed");
+        storage
+            .memset(0x00, 0, 1024)
+            .expect("memset should succeed");
+        storage
+            .memset(0xAA, 100, 50)
+            .expect("memset should succeed");
 
         let partial = storage.slice(100, 50).expect("slice should succeed");
         assert_eq!(partial.len(), 50);
@@ -352,7 +368,9 @@ mod tests {
     #[test]
     fn test_slice_zero_length() {
         let storage = create_storage(1024);
-        let slice = storage.slice(500, 0).expect("zero-length slice should succeed");
+        let slice = storage
+            .slice(500, 0)
+            .expect("zero-length slice should succeed");
         assert!(slice.is_empty());
     }
 
@@ -377,9 +395,13 @@ mod tests {
     fn test_as_slice_typed_u32() {
         let mut storage = create_storage(1024);
         // Fill with known pattern
-        storage.memset(0x00, 0, 1024).expect("memset should succeed");
+        storage
+            .memset(0x00, 0, 1024)
+            .expect("memset should succeed");
 
-        let typed: &[u32] = storage.as_slice_typed().expect("typed slice should succeed");
+        let typed: &[u32] = storage
+            .as_slice_typed()
+            .expect("typed slice should succeed");
         assert_eq!(typed.len(), 256); // 1024 / 4
         assert!(typed.iter().all(|&v| v == 0));
     }
@@ -387,17 +409,23 @@ mod tests {
     #[test]
     fn test_as_slice_typed_u64() {
         let storage = create_storage(1024);
-        let typed: &[u64] = storage.as_slice_typed().expect("typed slice should succeed");
+        let typed: &[u64] = storage
+            .as_slice_typed()
+            .expect("typed slice should succeed");
         assert_eq!(typed.len(), 128); // 1024 / 8
     }
 
     #[test]
     fn test_slice_typed_partial() {
         let mut storage = create_storage(1024);
-        storage.memset(0x00, 0, 1024).expect("memset should succeed");
+        storage
+            .memset(0x00, 0, 1024)
+            .expect("memset should succeed");
 
         // Slice 10 u32 elements starting at offset 0
-        let typed: &[u32] = storage.slice_typed(0, 10).expect("typed slice should succeed");
+        let typed: &[u32] = storage
+            .slice_typed(0, 10)
+            .expect("typed slice should succeed");
         assert_eq!(typed.len(), 10);
     }
 
@@ -405,7 +433,9 @@ mod tests {
     fn test_slice_typed_with_offset() {
         let storage = create_storage(1024);
         // Slice starting at offset 64 (aligned for u64)
-        let typed: &[u64] = storage.slice_typed(64, 5).expect("typed slice should succeed");
+        let typed: &[u64] = storage
+            .slice_typed(64, 5)
+            .expect("typed slice should succeed");
         assert_eq!(typed.len(), 5);
     }
 

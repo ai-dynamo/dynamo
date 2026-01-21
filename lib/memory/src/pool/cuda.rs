@@ -14,11 +14,11 @@
 //! reentrant. The GPU-side operations remain stream-ordered and asynchronous.
 
 use anyhow::{Result, anyhow};
-use cudarc::driver::CudaContext;
 use cudarc::driver::sys::{
     self, CUmemAllocationType, CUmemLocationType, CUmemPool_attribute, CUmemPoolProps,
     CUmemoryPool, CUresult, CUstream,
 };
+use cudarc::driver::{CudaContext, CudaStream};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
@@ -73,7 +73,7 @@ impl CudaMemPoolBuilder {
         let mut props: CUmemPoolProps = unsafe { std::mem::zeroed() };
         props.allocType = CUmemAllocationType::CU_MEM_ALLOCATION_TYPE_PINNED;
         props.location.type_ = CUmemLocationType::CU_MEM_LOCATION_TYPE_DEVICE;
-        props.location.id = self.context.cu_device() as i32;
+        props.location.id = self.context.cu_device();
 
         let mut pool: CUmemoryPool = ptr::null_mut();
 
@@ -110,16 +110,16 @@ impl CudaMemPoolBuilder {
         if self.reserve_size > 0 {
             // Create a temporary stream for warming
             let stream = self.context.new_stream()?;
-            let cu_stream = stream.cu_stream();
 
-            // Allocate to warm the pool
-            let ptr = cuda_pool.alloc_async(self.reserve_size, cu_stream)?;
+            // Allocate to warm the pool (using safe variant)
+            let ptr = cuda_pool.alloc_async(self.reserve_size, &stream)?;
 
             // Free back to pool (memory stays reserved)
-            cuda_pool.free_async(ptr, cu_stream)?;
+            cuda_pool.free_async(ptr, &stream)?;
 
             // Synchronize to ensure operations complete
-            let result = unsafe { sys::cuStreamSynchronize(cu_stream) };
+            // SAFETY: stream.cu_stream() is valid for the lifetime of `stream`
+            let result = unsafe { sys::cuStreamSynchronize(stream.cu_stream()) };
             if result != CUresult::CUDA_SUCCESS {
                 return Err(anyhow!(
                     "cuStreamSynchronize failed with error: {:?}",
@@ -175,6 +175,9 @@ impl CudaMemPool {
 
     /// Allocate memory from the pool asynchronously.
     ///
+    /// This is the safe variant that takes a `&CudaStream` reference, ensuring
+    /// the stream is valid for the duration of the call.
+    ///
     /// The allocation is stream-ordered; the memory is available for use
     /// after all preceding operations on the stream complete.
     ///
@@ -190,7 +193,34 @@ impl CudaMemPool {
     ///
     /// # Returns
     /// Device pointer to the allocated memory
-    pub fn alloc_async(&self, size: usize, stream: CUstream) -> Result<u64> {
+    pub fn alloc_async(&self, size: usize, stream: &CudaStream) -> Result<u64> {
+        // SAFETY: stream.cu_stream() returns a valid handle owned by the CudaStream,
+        // and the borrow ensures the stream lives for the duration of this call.
+        unsafe { self.alloc_async_raw(size, stream.cu_stream()) }
+    }
+
+    /// Allocate memory from the pool asynchronously (raw stream handle variant).
+    ///
+    /// This is the unsafe variant for use when you have a raw `CUstream` handle
+    /// from sources other than cudarc's `CudaStream`.
+    ///
+    /// # Host Serialization
+    ///
+    /// This method acquires an internal mutex because `cuMemAllocFromPoolAsync`
+    /// is not host-thread reentrant.
+    ///
+    /// # Arguments
+    /// * `size` - Size in bytes to allocate
+    /// * `stream` - Raw CUDA stream handle for async ordering
+    ///
+    /// # Returns
+    /// Device pointer to the allocated memory
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `stream` is a valid CUDA stream handle that
+    /// will remain valid for the duration of this call.
+    pub unsafe fn alloc_async_raw(&self, size: usize, stream: CUstream) -> Result<u64> {
         let pool = self
             .inner
             .lock()
@@ -212,19 +242,37 @@ impl CudaMemPool {
 
     /// Free memory back to the pool asynchronously.
     ///
+    /// This is the safe variant that takes a `&CudaStream` reference.
+    ///
     /// The memory is returned to the pool's reservoir (not the OS) and can be
     /// reused by subsequent allocations. The free is stream-ordered.
-    ///
-    /// # Note
-    ///
-    /// Unlike [`alloc_async`](Self::alloc_async), this method does not require
-    /// host-side serialization because `cuMemFreeAsync` does not access the pool
-    /// handle directly.
     ///
     /// # Arguments
     /// * `ptr` - Device pointer previously allocated from this pool
     /// * `stream` - CUDA stream for async ordering
-    pub fn free_async(&self, ptr: u64, stream: CUstream) -> Result<()> {
+    pub fn free_async(&self, ptr: u64, stream: &CudaStream) -> Result<()> {
+        // SAFETY: stream.cu_stream() returns a valid handle owned by the CudaStream,
+        // and the borrow ensures the stream lives for the duration of this call.
+        unsafe { self.free_async_raw(ptr, stream.cu_stream()) }
+    }
+
+    /// Free memory back to the pool asynchronously (raw stream handle variant).
+    ///
+    /// This is the unsafe variant for use when you have a raw `CUstream` handle.
+    ///
+    /// The memory is returned to the pool's reservoir (not the OS) and can be
+    /// reused by subsequent allocations. The free is stream-ordered.
+    ///
+    /// # Arguments
+    /// * `ptr` - Device pointer previously allocated from this pool
+    /// * `stream` - Raw CUDA stream handle for async ordering
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `ptr` is a valid device pointer previously allocated from this pool
+    /// - `stream` is a valid CUDA stream handle
+    pub unsafe fn free_async_raw(&self, ptr: u64, stream: CUstream) -> Result<()> {
         let result = unsafe { sys::cuMemFreeAsync(ptr, stream) };
 
         if result != CUresult::CUDA_SUCCESS {

@@ -169,8 +169,8 @@ mod tests {
     fn test_offset_buffer_from_inner_address_at_start() {
         let base = create_test_buffer(1024);
         let base_addr = base.addr();
-        let offset_buf =
-            OffsetBuffer::from_inner_address(base.clone(), base_addr, 1024).expect("should succeed");
+        let offset_buf = OffsetBuffer::from_inner_address(base.clone(), base_addr, 1024)
+            .expect("should succeed");
         assert_eq!(offset_buf.offset(), 0);
         assert_eq!(offset_buf.addr(), base.addr());
     }
