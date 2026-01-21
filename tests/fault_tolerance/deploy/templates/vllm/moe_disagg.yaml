@@ -8,7 +8,6 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-moe-disagg
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -17,7 +16,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-moe-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -83,7 +81,6 @@ spec:
             - --no-enable-prefix-caching
             - --enforce-eager
     VllmPrefillWorker:
-      dynamoNamespace: vllm-moe-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill

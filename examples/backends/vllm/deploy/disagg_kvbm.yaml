@@ -8,14 +8,12 @@ metadata:
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-kvbm
       componentType: frontend
       replicas: 1
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-kvbm
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -37,7 +35,6 @@ spec:
             - "32000"
             - --enforce-eager
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-kvbm
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
