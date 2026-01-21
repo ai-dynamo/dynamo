@@ -13,6 +13,7 @@ pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
@@ -66,7 +67,7 @@ pub struct PythonAsyncEngine(PythonServerStreamingEngine);
 
 #[pymethods]
 impl PythonAsyncEngine {
-    /// Create a new instance of the PythonAsyncEngine
+    /// Create a new instance of the PythonAsyncEngine for standalone Python use
     ///
     /// # Arguments
     /// - `generator`: a Python async generator that will be used to generate responses
@@ -78,11 +79,33 @@ impl PythonAsyncEngine {
     /// and we would not know until runtime.
     #[new]
     pub fn new(generator: PyObject, event_loop: PyObject) -> PyResult<Self> {
+        // For standalone use, create default token and disable migration
         let cancel_token = CancellationToken::new();
+        let migrate_flag = Arc::new(AtomicBool::new(false));
+        Self::new_internal(generator, event_loop, cancel_token, migrate_flag)
+    }
+}
+
+
+impl PythonAsyncEngine {
+    /// Internal constructor for use from Rust code (e.g., serve_endpoint)
+    ///
+    /// # Arguments
+    /// - `generator`: a Python async generator that will be used to generate responses
+    /// - `event_loop`: the Python event loop that will be used to run the generator
+    /// - `cancel_token`: the cancellation token from the runtime for shutdown detection
+    /// - `migrate_flag`: atomic flag indicating if migration is enabled
+    pub(crate) fn new_internal(
+        generator: PyObject,
+        event_loop: PyObject,
+        cancel_token: CancellationToken,
+        migrate_flag: Arc<AtomicBool>,
+    ) -> PyResult<Self> {
         Ok(PythonAsyncEngine(PythonServerStreamingEngine::new(
             cancel_token,
             Arc::new(generator),
             Arc::new(event_loop),
+            migrate_flag,
         )))
     }
 }
@@ -100,10 +123,11 @@ where
 
 #[derive(Clone)]
 pub struct PythonServerStreamingEngine {
-    _cancel_token: CancellationToken,
+    cancel_token: CancellationToken,
     generator: Arc<PyObject>,
     event_loop: Arc<PyObject>,
     has_context: bool,
+    migrate_flag: Arc<AtomicBool>,
 }
 
 impl PythonServerStreamingEngine {
@@ -111,6 +135,7 @@ impl PythonServerStreamingEngine {
         cancel_token: CancellationToken,
         generator: Arc<PyObject>,
         event_loop: Arc<PyObject>,
+        migrate_flag: Arc<AtomicBool>,
     ) -> Self {
         let has_context = Python::with_gil(|py| {
             let callable = generator.bind(py);
@@ -118,10 +143,11 @@ impl PythonServerStreamingEngine {
         });
 
         PythonServerStreamingEngine {
-            _cancel_token: cancel_token,
+            cancel_token,
             generator,
             event_loop,
             has_context,
+            migrate_flag,
         }
     }
 }
@@ -168,6 +194,8 @@ where
         let event_loop = self.event_loop.clone();
         let ctx_python = ctx.clone();
         let has_context = self.has_context;
+        let cancel_token = self.cancel_token.clone();
+        let migrate_flag = self.migrate_flag.clone();
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -222,7 +250,26 @@ where
             let mut stream = stream;
             let mut count = 0;
 
-            while let Some(item) = stream.next().await {
+            loop {
+                let item = tokio::select! {
+                    item = stream.next() => {
+                        match item {
+                            Some(item) => item,
+                            None => {
+                                tracing::debug!(request_id, "Stream completed normally");
+                                break;
+                            }
+                        }
+                    }
+                    _ = cancel_token.cancelled(), if migrate_flag.load(Ordering::Acquire) => {
+                        // Runtime shutdown detected - trigger migration by returning same error as PyGeneratorExit
+                        tracing::info!(request_id, "Runtime shutdown detected with migration enabled, triggering migration");
+                        let response = Annotated::from_error("Stream ended before generation completed".to_string());
+                        let _ = tx.send(response).await;
+                        break;
+                    }
+                };
+
                 count += 1;
                 tracing::trace!(
                     request_id,

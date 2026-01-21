@@ -73,7 +73,7 @@ configure_dynamo_logging()
 
 async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
+    runtime.shutdown(True)
     logging.info("DistributedRuntime shutdown complete")
 
 

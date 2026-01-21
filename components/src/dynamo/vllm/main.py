@@ -56,7 +56,7 @@ async def graceful_shutdown(runtime):
     For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
+    runtime.shutdown(True)
     logging.info("DistributedRuntime shutdown complete")
 
 
@@ -67,9 +67,7 @@ async def worker():
     overwrite_args(config)
 
     # Enable NATS based on use_kv_events flag (derived from kv_events_config)
-    runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, config.use_kv_events
-    )
+    runtime = DistributedRuntime(loop, config.store_kv, config.request_plane)
 
     # Set up signal handler for graceful shutdown
     def signal_handler():

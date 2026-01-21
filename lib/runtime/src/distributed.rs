@@ -321,7 +321,11 @@ impl DistributedRuntime {
     }
 
     pub fn shutdown(&self) {
-        self.runtime.shutdown();
+        self.shutdown_with_migrate(false);
+    }
+
+    pub fn shutdown_with_migrate(&self, migrate: bool) {
+        self.runtime.shutdown_with_migrate(migrate);
         self.store.shutdown();
     }
 

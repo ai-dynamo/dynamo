@@ -628,8 +628,9 @@ impl DistributedRuntime {
         })
     }
 
-    fn shutdown(&self) {
-        self.inner.shutdown();
+    #[pyo3(signature = (migrate=None))]
+    fn shutdown(&self, migrate: Option<bool>) {
+        self.inner.shutdown_with_migrate(migrate.unwrap_or(false));
     }
 
     fn event_loop(&self) -> PyObject {
@@ -778,9 +779,15 @@ impl Endpoint {
         metrics_labels: Option<Vec<(String, String)>>,
         health_check_payload: Option<&Bound<'p, PyDict>>,
     ) -> PyResult<Bound<'p, PyAny>> {
-        let engine = Arc::new(engine::PythonAsyncEngine::new(
+        // Get cancellation token and migrate flag from runtime for shutdown detection
+        let cancel_token = self.inner.drt().runtime().child_token();
+        let migrate_flag = self.inner.drt().runtime().migrate_flag();
+
+        let engine = Arc::new(engine::PythonAsyncEngine::new_internal(
             generator,
             self.event_loop.clone(),
+            cancel_token,
+            migrate_flag,
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine.clone()).map_err(to_pyerr)?;
 

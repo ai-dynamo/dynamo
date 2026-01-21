@@ -64,9 +64,13 @@ class DistributedRuntime:
         """
         ...
 
-    def shutdown(self) -> None:
+    def shutdown(self, migrate: bool = False) -> None:
         """
         Shutdown the runtime by triggering the cancellation token
+
+        Args:
+            migrate: If True, indicates this is a migration-aware shutdown
+                    where active requests will be interrupted and migrated
         """
         ...
 

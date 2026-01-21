@@ -23,7 +23,10 @@ use futures::Future;
 use once_cell::sync::OnceCell;
 use std::{
     mem::ManuallyDrop,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{signal, sync::Mutex, task::JoinHandle};
 
@@ -47,6 +50,7 @@ pub struct Runtime {
     graceful_shutdown_tracker: Arc<GracefulShutdownTracker>,
     compute_pool: Option<Arc<compute::ComputePool>>,
     block_in_place_permits: Option<Arc<tokio::sync::Semaphore>>,
+    migrate_flag: Arc<AtomicBool>,
 }
 
 impl Runtime {
@@ -85,6 +89,7 @@ impl Runtime {
             graceful_shutdown_tracker: Arc::new(GracefulShutdownTracker::new()),
             compute_pool,
             block_in_place_permits,
+            migrate_flag: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -300,7 +305,15 @@ impl Runtime {
 
     /// Shuts down the [`Runtime`] instance
     pub fn shutdown(&self) {
-        tracing::info!("Runtime shutdown initiated");
+        self.shutdown_with_migrate(false);
+    }
+
+    /// Shuts down the [`Runtime`] instance with optional migration flag
+    pub fn shutdown_with_migrate(&self, migrate: bool) {
+        tracing::info!("Runtime shutdown initiated (migrate: {})", migrate);
+
+        // Set migration state flag.
+        self.migrate_flag.store(migrate, Ordering::Release);
 
         // Spawn the shutdown coordination task BEFORE cancelling tokens
         let tracker = self.graceful_shutdown_tracker.clone();
@@ -330,6 +343,11 @@ impl Runtime {
             );
             main_token.cancel();
         });
+    }
+
+    /// Get a clone of the migrate flag for checking in other contexts
+    pub fn migrate_flag(&self) -> Arc<AtomicBool> {
+        self.migrate_flag.clone()
     }
 }
 
