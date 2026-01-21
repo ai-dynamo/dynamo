@@ -97,6 +97,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Run as embedding worker component (Dynamo flag, also sets SGLang's --is-embedding)",
     },
+    "diffusion-worker": {
+        "flags": ["--diffusion-worker"],
+        "action": "store_true",
+        "default": False,
+        "help": "Run as diffusion language model worker (e.g., LLaDA2.0). Requires --dllm-algorithm to be set in SGLang args.",
+    },
     "dump-config-to": {
         "flags": ["--dump-config-to"],
         "type": str,
@@ -154,6 +160,10 @@ class DynamoArgs:
 
     # embedding options
     embedding_worker: bool = False
+
+    # diffusion language model options
+    diffusion_worker: bool = False
+
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
@@ -551,6 +561,7 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
+        diffusion_worker=parsed_args.diffusion_worker,
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,
