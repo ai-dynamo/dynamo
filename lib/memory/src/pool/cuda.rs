@@ -6,6 +6,12 @@
 //! This module provides a safe wrapper around CUDA's memory pool APIs, enabling
 //! fast async allocations that avoid the overhead of cudaMalloc/cudaFree per call.
 //! Memory is returned to the pool on free and reused for subsequent allocations.
+//!
+//! # Thread Safety
+//!
+//! [`CudaMemPool`] uses internal locking to serialize host-side calls to the CUDA
+//! driver. This is required because `cuMemAllocFromPoolAsync` is not host-thread
+//! reentrant. The GPU-side operations remain stream-ordered and asynchronous.
 
 use anyhow::{Result, anyhow};
 use cudarc::driver::CudaContext;
@@ -14,7 +20,7 @@ use cudarc::driver::sys::{
     CUmemoryPool, CUresult, CUstream,
 };
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Builder for creating a CUDA memory pool with configurable parameters.
 ///
@@ -96,7 +102,9 @@ impl CudaMemPoolBuilder {
             }
         }
 
-        let cuda_pool = CudaMemPool { pool };
+        let cuda_pool = CudaMemPool {
+            inner: Mutex::new(pool),
+        };
 
         // Warm the pool by pre-allocating and freeing memory
         if self.reserve_size > 0 {
@@ -130,14 +138,29 @@ impl CudaMemPoolBuilder {
 /// Allocations are fast sub-allocations from this reservoir, and frees return memory
 /// to the pool rather than the OS (until the release threshold is exceeded).
 ///
+/// # Thread Safety
+///
+/// This type uses internal locking to serialize host-side calls to CUDA driver APIs.
+/// `cuMemAllocFromPoolAsync` is not host-thread reentrant, so concurrent calls from
+/// multiple threads must be serialized. The GPU-side operations remain asynchronous
+/// and stream-ordered.
+///
 /// Use [`CudaMemPoolBuilder`] for configurable pool creation with pre-allocation.
 pub struct CudaMemPool {
-    pool: CUmemoryPool,
+    /// Mutex protecting the pool handle for host-thread serialization.
+    ///
+    /// CUDA's `cuMemAllocFromPoolAsync` does not guarantee host-thread reentrancy,
+    /// so all calls to the pool must be serialized on the host side.
+    inner: Mutex<CUmemoryPool>,
 }
 
-// SAFETY: CUmemoryPool is a pointer to driver-managed state that is thread-safe
-// when used with proper stream synchronization (which we ensure via stream parameters).
+// SAFETY: CudaMemPool is Send because the Mutex serializes all host-side access
+// to the pool handle, and CUDA driver state is thread-safe when properly serialized.
 unsafe impl Send for CudaMemPool {}
+
+// SAFETY: CudaMemPool is Sync because all access to the pool handle goes through
+// the Mutex, which serializes host-thread access. The CUDA driver requires this
+// serialization because cuMemAllocFromPoolAsync is not host-thread reentrant.
 unsafe impl Sync for CudaMemPool {}
 
 impl CudaMemPool {
@@ -155,6 +178,12 @@ impl CudaMemPool {
     /// The allocation is stream-ordered; the memory is available for use
     /// after all preceding operations on the stream complete.
     ///
+    /// # Host Serialization
+    ///
+    /// This method acquires an internal mutex because `cuMemAllocFromPoolAsync`
+    /// is not host-thread reentrant. The allocation itself is stream-ordered on
+    /// the GPU side.
+    ///
     /// # Arguments
     /// * `size` - Size in bytes to allocate
     /// * `stream` - CUDA stream for async ordering
@@ -162,9 +191,14 @@ impl CudaMemPool {
     /// # Returns
     /// Device pointer to the allocated memory
     pub fn alloc_async(&self, size: usize, stream: CUstream) -> Result<u64> {
+        let pool = self
+            .inner
+            .lock()
+            .map_err(|e| anyhow!("mutex poisoned: {}", e))?;
+
         let mut ptr: u64 = 0;
 
-        let result = unsafe { sys::cuMemAllocFromPoolAsync(&mut ptr, size, self.pool, stream) };
+        let result = unsafe { sys::cuMemAllocFromPoolAsync(&mut ptr, size, *pool, stream) };
 
         if result != CUresult::CUDA_SUCCESS {
             return Err(anyhow!(
@@ -180,6 +214,12 @@ impl CudaMemPool {
     ///
     /// The memory is returned to the pool's reservoir (not the OS) and can be
     /// reused by subsequent allocations. The free is stream-ordered.
+    ///
+    /// # Note
+    ///
+    /// Unlike [`alloc_async`](Self::alloc_async), this method does not require
+    /// host-side serialization because `cuMemFreeAsync` does not access the pool
+    /// handle directly.
     ///
     /// # Arguments
     /// * `ptr` - Device pointer previously allocated from this pool
@@ -197,8 +237,14 @@ impl CudaMemPool {
 
 impl Drop for CudaMemPool {
     fn drop(&mut self) {
+        // No need to lock - we have &mut self so exclusive access is guaranteed
+        let pool = self
+            .inner
+            .get_mut()
+            .expect("mutex should not be poisoned during drop");
+
         // Destroy the pool, releasing all memory back to the system
-        let result = unsafe { sys::cuMemPoolDestroy(self.pool) };
+        let result = unsafe { sys::cuMemPoolDestroy(*pool) };
         if result != CUresult::CUDA_SUCCESS {
             tracing::warn!("cuMemPoolDestroy failed with error: {:?}", result);
         }
