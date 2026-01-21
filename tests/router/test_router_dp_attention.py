@@ -198,7 +198,7 @@ class SGLangDPAttentionProcess:
         )
 
     def __enter__(self):
-        logger.info(f"Starting SGLang DP attention process...")
+        logger.info("Starting SGLang DP attention process...")
         self._process.__enter__()
 
         # Wait additional time for all schedulers to initialize ZMQ publishers
@@ -304,7 +304,7 @@ def test_dp_attention_zmq_ports_bound(
         for i in range(4):
             port = 5557 + i
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            result = sock.connect_ex(('127.0.0.1', port))
+            result = sock.connect_ex(("127.0.0.1", port))
             sock.close()
 
             if result == 0:

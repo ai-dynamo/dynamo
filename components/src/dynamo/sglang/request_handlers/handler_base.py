@@ -214,7 +214,9 @@ class BaseWorkerHandler(ABC):
             if not children:
                 return
 
-            logging.info(f"Sending SIGTERM to {len(children)} child processes for graceful shutdown")
+            logging.debug(
+                f"Sending SIGTERM to {len(children)} child processes for graceful shutdown"
+            )
 
             # Send SIGTERM to allow atexit handlers to run
             for child in children:
@@ -227,7 +229,9 @@ class BaseWorkerHandler(ABC):
             gone, alive = psutil.wait_procs(children, timeout=timeout)
 
             if alive:
-                logging.warning(f"{len(alive)} child processes didn't terminate gracefully, will be killed by engine.shutdown()")
+                logging.warning(
+                    f"{len(alive)} child processes didn't terminate gracefully, will be killed by engine.shutdown()"
+                )
             else:
                 logging.info("All child processes terminated gracefully")
 

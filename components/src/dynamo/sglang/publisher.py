@@ -193,7 +193,9 @@ class DynamoSglangPublisher:
             # Determine number of DP ranks to subscribe to
             # With DP attention enabled, each attn_dp_rank publishes to its own port
             dp_size = getattr(self.server_args, "dp_size", 1) or 1
-            enable_dp_attention = getattr(self.server_args, "enable_dp_attention", False)
+            enable_dp_attention = getattr(
+                self.server_args, "enable_dp_attention", False
+            )
 
             if enable_dp_attention and dp_size > 1:
                 # Subscribe to all DP rank ports
@@ -220,7 +222,9 @@ class DynamoSglangPublisher:
                     zmq_endpoint=zmq_ep,
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
                 )
-                logging.info(f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} at {zmq_ep}")
+                logging.info(
+                    f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} at {zmq_ep}"
+                )
                 publisher = ZmqKvEventPublisher(
                     component=self.component, config=zmq_config
                 )
