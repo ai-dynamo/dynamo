@@ -40,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     # Skip the first run after repo creation
     if: ${{ github.event_name == 'workflow_dispatch' || github.run_number > 1 }}
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
