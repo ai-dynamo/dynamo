@@ -161,9 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_has_ucx() {
+    fn test_default_is_empty() {
         let config = NixlBackendConfig::default();
-        assert!(config.backends().len() == 0); // default() is empty, from_env() has UCX default
+        assert!(config.backends().is_empty()); // default() has no backends
     }
 
     #[test]
