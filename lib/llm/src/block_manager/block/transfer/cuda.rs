@@ -243,7 +243,7 @@ pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
     destinations: &'a mut [Destination],
     stream: &CudaStream,
     ctx: &crate::block_manager::block::transfer::TransferContext,
-) -> Result<Option<crate::block_manager::block::transfer::context::CudaPoolBufferGuard>, TransferError>
+) -> Result<(), TransferError>
 where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
@@ -318,9 +318,17 @@ where
             )));
         }
 
-        tracing::debug!("H2D memcpy completed (stream-ordered)");
+        // Record event and synchronize to ensure H2D completes before host vectors drop
+        // This is critical: the async H2D memcpy is still reading from src_addresses/dst_addresses
+        // host memory when it returns. We must wait for completion before those vectors are dropped.
+        let h2d_event = stream.record_event()
+            .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
+        h2d_event.synchronize()
+            .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
 
-        // Launch kernel
+        tracing::debug!("H2D memcpy completed - host memory no longer needed");
+
+        // Launch kernel (reads from device buffers)
         unsafe {
             launch_copy_kernel_direct(
                 src_buffer,
@@ -340,7 +348,7 @@ where
             .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
 
         tracing::trace!("CUDA pool path complete: DEVICE buffers freed (stream-ordered)");
-        Ok(None)  // No guard needed - stream ordering handles cleanup
+        Ok(())  // No guard needed - stream ordering handles cleanup
     } else {
         // LEGACY PATH: Use TransferResources pool (fallback when CUDA pool not available)
         tracing::warn!("LEGACY PATH: CUDA pool not available, using TransferResources fallback ({} addresses)", src_addresses.len());
@@ -374,7 +382,7 @@ where
         }
 
         tracing::debug!("Legacy path: Kernel launched, waiting for completion in event worker");
-        Ok(None)
+        Ok(())
     }
 }
 
