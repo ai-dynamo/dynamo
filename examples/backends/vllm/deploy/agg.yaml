@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:new-build-1
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           args:
           - "-m"
           - "dynamo.frontend"
@@ -27,7 +27,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:new-build-1
+          image: gnvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
