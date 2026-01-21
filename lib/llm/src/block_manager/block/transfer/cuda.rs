@@ -13,7 +13,7 @@ use dynamo_runtime::config::environment_names::cuda as env_cuda;
 use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use cudarc::driver::sys::{cuMemcpyHtoDAsync_v2, CUresult};
+use cudarc::driver::sys::{cuMemcpyHtoDAsync_v2, CUevent_flags, CUresult};
 
 /// Simple pinned memory allocation
 pub fn allocate_pinned_memory(size: usize) -> Result<u64, TransferError> {
@@ -321,7 +321,7 @@ where
         // Record event and synchronize to ensure H2D completes before host vectors drop
         // This is critical: the async H2D memcpy is still reading from src_addresses/dst_addresses
         // host memory when it returns. We must wait for completion before those vectors are dropped.
-        let h2d_event = stream.record_event()
+        let h2d_event = stream.record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
             .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
         h2d_event.synchronize()
             .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
