@@ -274,16 +274,6 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    # Validate that diffusion algorithm is configured
-    if server_args.dllm_algorithm is None:
-        logging.error(
-            "Diffusion worker requires --dllm-algorithm to be specified. "
-            "Example: --dllm-algorithm LowConfidence"
-        )
-        raise ValueError(
-            "Missing required argument: --dllm-algorithm must be set when using --diffusion-worker"
-        )
-
     logging.info(
         f"Initializing diffusion worker with algorithm: {server_args.dllm_algorithm}"
     )

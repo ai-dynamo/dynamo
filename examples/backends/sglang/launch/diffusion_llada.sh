@@ -64,7 +64,6 @@ CMD="python -m dynamo.sglang \
     --disable-cuda-graph \
     --disable-overlap-schedule \
     --attention-backend triton \
-    --diffusion-worker \
     --dllm-algorithm $DLLM_ALGORITHM"
 
 # Add optional algorithm config if provided
