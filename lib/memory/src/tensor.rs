@@ -336,4 +336,288 @@ mod tests {
         assert_eq!(tensor.ndim(), 0);
         assert!(tensor.is_contiguous());
     }
+
+    #[test]
+    fn test_1d_tensor_contiguous() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 10 * 4,
+            shape: vec![10],
+            stride: vec![1],
+            element_size: 4,
+        };
+        assert_eq!(tensor.numel(), 10);
+        assert_eq!(tensor.ndim(), 1);
+        assert!(tensor.is_contiguous());
+        assert_eq!(tensor.contiguous_stride(), vec![1]);
+    }
+
+    #[test]
+    fn test_1d_tensor_non_contiguous() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 10 * 4,
+            shape: vec![10],
+            stride: vec![2], // Strided access (every other element)
+            element_size: 4,
+        };
+        assert!(!tensor.is_contiguous());
+    }
+
+    #[test]
+    fn test_2d_tensor() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 6 * 4,
+            shape: vec![2, 3],
+            stride: vec![3, 1],
+            element_size: 4,
+        };
+        assert_eq!(tensor.numel(), 6);
+        assert_eq!(tensor.ndim(), 2);
+        assert!(tensor.is_contiguous());
+    }
+
+    #[test]
+    fn test_high_dimensional_tensor() {
+        // 5D tensor: [2, 3, 4, 5, 6]
+        let shape = vec![2, 3, 4, 5, 6];
+        // Contiguous stride: [360, 120, 30, 6, 1]
+        let stride = vec![360, 120, 30, 6, 1];
+        let numel: usize = shape.iter().product();
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: numel * 4,
+            shape,
+            stride,
+            element_size: 4,
+        };
+        assert_eq!(tensor.numel(), 720);
+        assert_eq!(tensor.ndim(), 5);
+        assert!(tensor.is_contiguous());
+        assert_eq!(tensor.contiguous_stride(), vec![360, 120, 30, 6, 1]);
+    }
+
+    #[test]
+    fn test_tensor_with_size_1_dimensions() {
+        // Shape with singleton dimensions: [1, 3, 1, 4]
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 12 * 4,
+            shape: vec![1, 3, 1, 4],
+            stride: vec![12, 4, 4, 1], // Contiguous for this shape
+            element_size: 4,
+        };
+        assert_eq!(tensor.numel(), 12);
+        assert_eq!(tensor.ndim(), 4);
+        assert!(tensor.is_contiguous());
+    }
+
+    #[test]
+    fn test_contiguous_stride_empty() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 0,
+            shape: vec![],
+            stride: vec![],
+            element_size: 4,
+        };
+        assert!(tensor.contiguous_stride().is_empty());
+    }
+
+    #[test]
+    fn test_contiguous_stride_1d() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 5 * 4,
+            shape: vec![5],
+            stride: vec![1],
+            element_size: 4,
+        };
+        assert_eq!(tensor.contiguous_stride(), vec![1]);
+    }
+
+    #[test]
+    fn test_cuda_device_id_system() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 100,
+            shape: vec![10],
+            stride: vec![1],
+            element_size: 4,
+        };
+        assert_eq!(tensor.cuda_device_id(), None);
+    }
+
+    /// Test tensor that reports Device storage kind
+    #[derive(Debug)]
+    struct DeviceTensor {
+        addr: usize,
+        size: usize,
+        shape: Vec<usize>,
+        stride: Vec<usize>,
+        element_size: usize,
+        device_id: u32,
+    }
+
+    impl MemoryDescriptor for DeviceTensor {
+        fn addr(&self) -> usize {
+            self.addr
+        }
+
+        fn size(&self) -> usize {
+            self.size
+        }
+
+        fn storage_kind(&self) -> StorageKind {
+            StorageKind::Device(self.device_id)
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn nixl_descriptor(&self) -> Option<NixlDescriptor> {
+            None
+        }
+    }
+
+    impl TensorDescriptor for DeviceTensor {
+        fn shape(&self) -> &[usize] {
+            &self.shape
+        }
+
+        fn stride(&self) -> &[usize] {
+            &self.stride
+        }
+
+        fn element_size(&self) -> usize {
+            self.element_size
+        }
+    }
+
+    #[test]
+    fn test_cuda_device_id_device() {
+        let tensor = DeviceTensor {
+            addr: 0x1000,
+            size: 100,
+            shape: vec![10],
+            stride: vec![1],
+            element_size: 4,
+            device_id: 2,
+        };
+        assert_eq!(tensor.cuda_device_id(), Some(2));
+    }
+
+    #[test]
+    fn test_arc_tensor_descriptor() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 24 * 4,
+            shape: vec![2, 3, 4],
+            stride: vec![12, 4, 1],
+            element_size: 4,
+        };
+        let arc: Arc<dyn TensorDescriptor> = Arc::new(tensor);
+
+        assert_eq!(arc.addr(), 0x1000);
+        assert_eq!(arc.size(), 24 * 4);
+        assert_eq!(arc.shape(), &[2, 3, 4]);
+        assert_eq!(arc.stride(), &[12, 4, 1]);
+        assert_eq!(arc.element_size(), 4);
+        assert_eq!(arc.storage_kind(), StorageKind::System);
+        assert!(arc.nixl_descriptor().is_none());
+    }
+
+    #[test]
+    fn test_arc_tensor_send_sync() {
+        // TestTensor doesn't impl Send+Sync, so we need a type that does
+        struct SendSyncTensor {
+            addr: usize,
+            size: usize,
+            shape: Vec<usize>,
+            stride: Vec<usize>,
+            element_size: usize,
+        }
+
+        unsafe impl Send for SendSyncTensor {}
+        unsafe impl Sync for SendSyncTensor {}
+
+        impl std::fmt::Debug for SendSyncTensor {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("SendSyncTensor").finish()
+            }
+        }
+
+        impl MemoryDescriptor for SendSyncTensor {
+            fn addr(&self) -> usize {
+                self.addr
+            }
+            fn size(&self) -> usize {
+                self.size
+            }
+            fn storage_kind(&self) -> StorageKind {
+                StorageKind::System
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn nixl_descriptor(&self) -> Option<NixlDescriptor> {
+                None
+            }
+        }
+
+        impl TensorDescriptor for SendSyncTensor {
+            fn shape(&self) -> &[usize] {
+                &self.shape
+            }
+            fn stride(&self) -> &[usize] {
+                &self.stride
+            }
+            fn element_size(&self) -> usize {
+                self.element_size
+            }
+        }
+
+        let tensor = SendSyncTensor {
+            addr: 0x2000,
+            size: 100,
+            shape: vec![10],
+            stride: vec![1],
+            element_size: 4,
+        };
+        let arc: Arc<dyn TensorDescriptor + Send + Sync> = Arc::new(tensor);
+
+        assert_eq!(arc.addr(), 0x2000);
+        assert_eq!(arc.size(), 100);
+        assert_eq!(arc.shape(), &[10]);
+        assert_eq!(arc.stride(), &[1]);
+        assert_eq!(arc.element_size(), 4);
+    }
+
+    #[test]
+    fn test_tensor_shape_stride_element_size() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 48,
+            shape: vec![3, 4],
+            stride: vec![4, 1],
+            element_size: 4,
+        };
+        assert_eq!(tensor.shape(), &[3, 4]);
+        assert_eq!(tensor.stride(), &[4, 1]);
+        assert_eq!(tensor.element_size(), 4);
+    }
+
+    #[test]
+    fn test_tensor_numel_single_element() {
+        let tensor = TestTensor {
+            addr: 0x1000,
+            size: 4,
+            shape: vec![1, 1, 1],
+            stride: vec![1, 1, 1],
+            element_size: 4,
+        };
+        assert_eq!(tensor.numel(), 1);
+    }
 }
