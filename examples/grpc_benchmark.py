@@ -99,12 +99,16 @@ def run_streaming_request(
                     raise RuntimeError(data)
                 elif msg_type == "token":
                     num_tokens += 1
-                    # Check if this is the final response
+                    # Check if this is the final response by looking at finish_reason
                     try:
-                        output = data.as_numpy("text_output")
-                        if output is not None:
-                            # Got final output, stream is done
-                            break
+                        finish_reason = data.as_numpy("finish_reason")
+                        if finish_reason is not None:
+                            reason = finish_reason[0]
+                            if isinstance(reason, bytes):
+                                reason = reason.decode()
+                            # Stream is done when we get a non-empty finish_reason
+                            if reason and reason.strip():
+                                break
                     except Exception:
                         pass
 
@@ -270,10 +274,14 @@ def run_benchmark(
                 executor.submit(request_func, url, model, prompt, timeout)
                 for prompt in prompts
             ]
-            for future in futures:
+            for i, future in enumerate(futures, 1):
                 try:
                     result = future.result(timeout=timeout + 60)
                     results.append(result)
+                    status = "✓" if result.success else "✗"
+                    print(
+                        f"  Got Response {i}/{num_requests} {status} (E2E: {result.end_to_end_latency_s:.2f}s, tokens: {result.num_output_tokens})"
+                    )
                 except Exception as e:
                     results.append(
                         RequestMetrics(
@@ -285,6 +293,7 @@ def run_benchmark(
                             error=str(e),
                         )
                     )
+                    print(f"  Got Response {i}/{num_requests} ✗ (Error: {str(e)[:50]})")
 
         elapsed = time.perf_counter() - start_time
 
