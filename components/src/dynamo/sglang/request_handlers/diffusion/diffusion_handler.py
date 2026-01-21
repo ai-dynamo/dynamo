@@ -10,20 +10,24 @@ import uuid
 from typing import Any, AsyncGenerator, Optional
 
 import torch
+from PIL import Image
+from sglang.multimodal_gen import DiffGenerator
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
 from dynamo.sglang.protocol import CreateImageRequest, ImageData, ImagesResponse
 from dynamo.sglang.publisher import DynamoSglangPublisher
+from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 
 logger = logging.getLogger(__name__)
 
-from sglang.multimodal_gen import DiffGenerator
-from PIL import Image
 
+class DiffusionWorkerHandler(BaseGenerativeHandler):
+    """Handler for diffusion image generation.
 
-class DiffusionWorkerHandler:
-    """Handler for diffusion image generation"""
+    Inherits from BaseGenerativeHandler for common infrastructure like
+    tracing, metrics publishing, and cancellation support.
+    """
 
     def __init__(
         self,
@@ -42,9 +46,11 @@ class DiffusionWorkerHandler:
             publisher: Optional metrics publisher (not used for diffusion currently).
             s3_client: Optional S3 client for image storage.
         """
-        self.component = component
+        # Call parent constructor for common setup
+        super().__init__(component, config, publisher)
+
+        # Diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
-        self.config = config
         self.s3_client = s3_client
         self.s3_bucket = config.dynamo_args.diffusion_s3_bucket
         logger.info("Diffusion worker handler initialized")
@@ -55,6 +61,8 @@ class DiffusionWorkerHandler:
             del self.generator
         torch.cuda.empty_cache()
         logger.info("Diffusion generator cleanup complete")
+        # Call parent cleanup for any base class cleanup
+        super().cleanup()
 
     async def generate(
         self, request: dict[str, Any], context: Context
@@ -73,11 +81,26 @@ class DiffusionWorkerHandler:
         """
         logger.debug(f"Diffusion request: {request}")
 
+        # Get trace header for distributed tracing (for logging/observability)
+        trace_header = self._get_trace_header(context)
+        if trace_header:
+            logger.debug(f"Diffusion request with trace: {trace_header}")
+
         try:
+            # Check for cancellation before starting generation
+            if await self._check_cancellation(context):
+                logger.info(f"Request cancelled before generation: {context.id()}")
+                return
+
             req = CreateImageRequest(**request)
 
             # Parse size
             width, height = self._parse_size(req.size)
+
+            # Check for cancellation after parsing
+            if await self._check_cancellation(context):
+                logger.info(f"Request cancelled during setup: {context.id()}")
+                return
 
             # Generate images (may batch multiple requests at same step)
             images = await self._generate_images(
@@ -89,6 +112,11 @@ class DiffusionWorkerHandler:
                 guidance_scale=req.guidance_scale,
                 seed=req.seed,
             )
+
+            # Check for cancellation after generation
+            if await self._check_cancellation(context):
+                logger.info(f"Request cancelled after generation: {context.id()}")
+                return
 
             # Upload to S3 and get URLs
             image_data = []
