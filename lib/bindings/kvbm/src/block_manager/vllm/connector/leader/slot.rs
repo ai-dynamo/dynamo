@@ -380,10 +380,6 @@ pub struct VllmConnectorSlot {
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
 
-    /// Retention priorities for each block (same length as device_blocks).
-    /// Used for priority-based offload filtering.
-    priorities: Vec<u32>,
-
     /// Minimum priority threshold for offload filtering.
     /// Blocks with priority < threshold are not offloaded.
     offload_min_priority: u32,
@@ -424,7 +420,6 @@ impl VllmConnectorSlot {
             performed_cache_lookup: false,
             total_blocks_queried: 0,
             cache_stats,
-            priorities: Vec::new(),
             offload_min_priority: std::env::var("DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -637,7 +632,10 @@ impl Slot for VllmConnectorSlot {
                 .cloned()
                 .collect::<Vec<_>>();
 
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks)
+            // Default priorities (0) when no priorities are provided
+            let offload_priorities: Vec<u32> = vec![0; num_candidate_blocks];
+
+            self.offload_blocks(&offload_block_ids, &offload_token_blocks, &offload_priorities)
                 .expect("failed to offload blocks");
 
             self.evaluated_blocks += num_candidate_blocks;
@@ -700,16 +698,9 @@ impl Slot for VllmConnectorSlot {
         if !block_ids.is_empty() {
             tracing::debug!("assigning {} new device blocks slot", block_ids.len());
             self.device_blocks.extend(block_ids);
-            // Store priorities for the new blocks (use 0 as default if not provided)
-            if let Some(prios) = priorities {
-                self.priorities.extend(prios.iter().copied());
-            } else {
-                // Fill with default priority (0) if not provided
-                self.priorities.extend(std::iter::repeat(0).take(block_ids.len()));
-            }
         }
 
-        // This approach is fragile, but it’s the only way currently to skip evaluating
+        // This approach is fragile, but it's the only way currently to skip evaluating
         // the device matched blocks and to avoid offloading them again.
         // TODO: Consider adding an indicator in the scheduler output to distinguish between
         // matched and unmatched device blocks/tokens from the scheduler.
@@ -724,7 +715,7 @@ impl Slot for VllmConnectorSlot {
             ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
 
         if num_candidate_blocks > 0 {
-            // Get candidate block IDs and their priorities
+            // Get candidate block IDs
             let candidate_block_ids: Vec<usize> = self
                 .device_blocks
                 .iter()
@@ -733,13 +724,35 @@ impl Slot for VllmConnectorSlot {
                 .copied()
                 .collect();
 
-            let candidate_priorities: Vec<u32> = self
-                .priorities
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .copied()
-                .collect();
+            // Get candidate priorities from the priorities parameter directly.
+            // The priorities parameter maps to the block_ids parameter, which are the new blocks.
+            // After extending device_blocks, candidate blocks come from the end, so we take
+            // priorities from the corresponding positions.
+            let candidate_priorities: Vec<u32> = if let Some(prios) = priorities {
+                // Calculate offset into the priorities array
+                // candidate_block_ids come from device_blocks[evaluated_blocks..evaluated_blocks+num_candidate_blocks]
+                // block_ids were appended to device_blocks, so new blocks start at device_blocks.len() - block_ids.len()
+                let new_blocks_start = self.device_blocks.len() - block_ids.len();
+                let candidate_start = self.evaluated_blocks;
+
+                // If candidate_start >= new_blocks_start, we're within the new blocks range
+                if candidate_start >= new_blocks_start {
+                    let prio_offset = candidate_start - new_blocks_start;
+                    prios
+                        .iter()
+                        .skip(prio_offset)
+                        .take(num_candidate_blocks)
+                        .copied()
+                        .collect()
+                } else {
+                    // Some candidate blocks are from before this call (shouldn't happen in normal flow)
+                    // Fall back to default priority
+                    vec![0; num_candidate_blocks]
+                }
+            } else {
+                // No priorities provided, use default (0)
+                vec![0; num_candidate_blocks]
+            };
 
             assert_eq!(
                 candidate_block_ids.len(),
@@ -782,7 +795,13 @@ impl Slot for VllmConnectorSlot {
                     .cloned()
                     .collect();
 
-                self.offload_blocks(&offload_block_ids, &offload_token_blocks)
+                // Pass priorities to offload_blocks so they can be stored in BasicMetadata
+                let offload_priorities: Vec<u32> = candidate_priorities
+                    .into_iter()
+                    .take(num_blocks_to_offload)
+                    .collect();
+
+                self.offload_blocks(&offload_block_ids, &offload_token_blocks, &offload_priorities)
                     .expect("failed to offload blocks");
             } else if self.offload_min_priority > 0 {
                 tracing::debug!(
@@ -1159,6 +1178,7 @@ impl VllmConnectorSlot {
         &mut self,
         block_ids: &[BlockId],
         token_blocks: &[TokenBlock],
+        priorities: &[u32],
     ) -> Result<(), SlotError> {
         // Check if slot is in Finishing state before creating operations
         // If we're finishing, don't create new operations
@@ -1167,12 +1187,14 @@ impl VllmConnectorSlot {
         }
 
         assert!(block_ids.len() == token_blocks.len());
+        assert!(block_ids.len() == priorities.len());
         let operation_id = uuid::Uuid::new_v4();
 
         let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
             self.request_id.clone(),
             block_ids.to_vec(),
             token_blocks.to_vec(),
+            priorities.to_vec(),
             operation_id,
         ));
 
@@ -1267,6 +1289,8 @@ struct LocalOffloadRequest {
     request_id: String,
     block_ids: Vec<BlockId>,
     token_blocks: Vec<TokenBlock>,
+    /// Priorities for each block, used to set BasicMetadata.priority during offload.
+    priorities: Vec<u32>,
     operation_id: uuid::Uuid,
 }
 
@@ -1275,13 +1299,16 @@ impl LocalOffloadRequest {
         request_id: String,
         block_ids: Vec<BlockId>,
         token_blocks: Vec<TokenBlock>,
+        priorities: Vec<u32>,
         operation_id: uuid::Uuid,
     ) -> Self {
         debug_assert!(block_ids.len() == token_blocks.len());
+        debug_assert!(block_ids.len() == priorities.len());
         Self {
             request_id,
             block_ids,
             token_blocks,
+            priorities,
             operation_id,
         }
     }
@@ -1582,14 +1609,22 @@ where
         storage_name
     );
 
-    // 2. Apply token blocks
+    // 2. Apply token blocks and set priorities
     let mut blocks_to_register = Vec::new();
-    let zipped_blocks = blocks.into_iter().zip(token_blocks.into_iter());
+    let priorities = offload_req.priorities;
 
-    for (mut mutable_block, token_block) in zipped_blocks {
+    for ((mut mutable_block, token_block), priority) in blocks
+        .into_iter()
+        .zip(token_blocks.into_iter())
+        .zip(priorities.into_iter())
+    {
         mutable_block
             .apply_token_block(token_block.clone())
             .map_err(|e| anyhow::anyhow!("failed to apply token block: {:?}", e))?;
+
+        // Set the priority on the block's metadata so it flows through to downstream processing
+        let updated_metadata = mutable_block.metadata().with_priority(priority);
+        mutable_block.update_metadata(updated_metadata);
 
         blocks_to_register.push(mutable_block);
     }

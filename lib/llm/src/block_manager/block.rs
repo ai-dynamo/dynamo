@@ -95,6 +95,10 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// The offload priority of the block. Higher priority blocks are offloaded first.
     /// If the block should not be offloaded, return None.
     fn offload_priority(&self) -> Option<u64>;
+
+    /// Returns a new metadata instance with the specified priority.
+    /// Used to carry priority through the block lifecycle for offload filtering.
+    fn with_priority(&self, priority: u32) -> Self;
 }
 
 /// A trait for blocks that can be returned to the pool.
@@ -524,6 +528,10 @@ impl BlockMetadata for BasicMetadata {
     fn offload_priority(&self) -> Option<u64> {
         Some(self.priority as u64)
     }
+
+    fn with_priority(&self, priority: u32) -> Self {
+        self.update_priority(priority)
+    }
 }
 /// Collection that holds shared storage and layout
 #[derive(Debug)]
@@ -622,6 +630,18 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MutableBlock<S, L, M> {
 
     pub fn set_parent(&mut self, parent: Arc<MutableBlock<S, L, M>>) {
         self.parent = Some(parent);
+    }
+}
+
+/// Implementation for MutableBlock with BasicMetadata to support priority-based offload filtering.
+impl<S: Storage, L: LocalityProvider> MutableBlock<S, L, BasicMetadata> {
+    /// Set the priority on the block's metadata.
+    /// This is used to carry priority through the block lifecycle for offload filtering.
+    pub fn set_priority(&mut self, priority: u32) {
+        if let Some(block) = self.block.as_mut() {
+            let updated = block.metadata().update_priority(priority);
+            block.update_metadata(updated);
+        }
     }
 }
 
