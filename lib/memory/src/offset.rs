@@ -42,10 +42,20 @@ impl OffsetBuffer {
 
     /// Creates an offset buffer from an absolute address within the base region.
     pub fn from_inner_address(base: Buffer, address: usize, size: usize) -> Result<Self> {
-        // address must be within the base region
-        if address < base.addr() || address + size > base.addr() + base.size() {
+        // Use checked arithmetic to prevent overflow
+        let end = address
+            .checked_add(size)
+            .ok_or_else(|| StorageError::Unsupported("address + size overflow".into()))?;
+        let base_end = base
+            .addr()
+            .checked_add(base.size())
+            .ok_or_else(|| StorageError::Unsupported("base address + size overflow".into()))?;
+
+        // Verify address is within the base region
+        if address < base.addr() || end > base_end {
             return Err(StorageError::Unsupported("address out of bounds".into()));
         }
+
         let offset = address - base.addr();
         Self::new(base, offset, size)
     }
