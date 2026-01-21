@@ -5,7 +5,7 @@
 from .embedding import EmbeddingWorkerHandler
 
 # Base handlers
-from .handler_base import BaseWorkerHandler
+from .handler_base import BaseGenerativeHandler, BaseWorkerHandler
 
 # Diffusion handlers
 from .diffusion import DiffusionWorkerHandler
@@ -22,6 +22,8 @@ from .multimodal import (
 )
 
 __all__ = [
+    # Base handlers
+    "BaseGenerativeHandler",
     "BaseWorkerHandler",
     # LLM handlers
     "DecodeWorkerHandler",
