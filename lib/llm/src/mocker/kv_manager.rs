@@ -162,8 +162,20 @@ impl KvManager {
             dp_rank: self.dp_rank,
         };
 
+        let is_store = matches!(event.data, KvCacheEventData::Stored(_));
+        let event_id = event.event_id;
+
         if let Err(e) = publisher.publish(event) {
             tracing::warn!("Failed to publish KV event: {e}");
+        } else {
+            let tree_size = self.tree_size();
+            tracing::info!(
+                "Published KV event: event_id={}, dp_rank={}, type={}, tree_size={}",
+                event_id,
+                self.dp_rank,
+                if is_store { "store" } else { "remove" },
+                tree_size
+            );
         }
     }
 
@@ -344,6 +356,15 @@ impl KvManager {
     /// Get the keys of active blocks
     pub fn get_active_blocks(&self) -> Vec<&UniqueBlock> {
         self.active_blocks.keys().collect()
+    }
+
+    /// Get the tree size (count of full blocks in all_blocks).
+    /// This corresponds to what the router's indexer tracks in its radix tree for this worker.
+    pub fn tree_size(&self) -> usize {
+        self.all_blocks
+            .iter()
+            .filter(|block| matches!(block, UniqueBlock::FullBlock(_)))
+            .count()
     }
 
     /// Check if a sequence can be scheduled and calculate cost if possible
