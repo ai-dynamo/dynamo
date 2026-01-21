@@ -1,6 +1,10 @@
 # Quickstart
 
-This is a simple example showing how you can quickly get started deploying Large Language Models with Dynamo.
+This guide is for running Dynamo **using the CLI on your local machine or VM**. It's a simple example showing how you can quickly get started deploying Large Language Models with Dynamo.
+
+> [!IMPORTANT]
+> **Looking to deploy on Kubernetes instead?**
+> Skip these steps and see the [Kubernetes Installation Guide](/docs/kubernetes/installation_guide.md) and [Kubernetes Quickstart](/docs/kubernetes/README.md) for instructions on deploying Dynamo in a Kubernetes cluster.
 
 ## Prerequisites
 
