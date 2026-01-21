@@ -186,6 +186,7 @@ impl Flags {
                 self.use_kv_events,
                 self.router_replica_sync,
                 self.router_track_active_blocks,
+                None, // track_output_blocks
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
                 None, // assume_kv_reuse
                 None,
