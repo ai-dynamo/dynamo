@@ -321,7 +321,6 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
 
-    # Use DiffusionWorkerHandler instead of DecodeWorkerHandler
     handler = DiffusionWorkerHandler(
         component, engine, config, publisher, generate_endpoint
     )

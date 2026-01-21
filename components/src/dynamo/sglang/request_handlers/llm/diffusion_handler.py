@@ -10,8 +10,6 @@ from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.llm.decode_handler import DecodeWorkerHandler
 
-logger = logging.getLogger(__name__)
-
 
 class DiffusionWorkerHandler(DecodeWorkerHandler):
     """
@@ -42,13 +40,13 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
             not hasattr(engine.tokenizer_manager.server_args, "dllm_algorithm")
             or engine.tokenizer_manager.server_args.dllm_algorithm is None
         ):
-            logger.error(
+            logging.error(
                 "SGLang engine does not have dllm_algorithm configured. "
                 "Diffusion LM behavior may not be active."
                 "Please check the SGLang engine configuration."
             )
         else:
-            logger.info(
+            logging.info(
                 f"Diffusion worker initialized with algorithm: "
                 f"{engine.tokenizer_manager.server_args.dllm_algorithm}"
             )
@@ -65,7 +63,7 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         Yields:
             Response dicts with token_ids or OpenAI-formatted chunks.
         """
-        logger.debug(
+        logging.debug(
             f"Starting diffusion generation for request {context.id()}, "
             f"input_tokens={len(request.get('token_ids', []))}"
         )
@@ -80,7 +78,6 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
         trace_header = self._get_trace_header(context) if self.enable_trace else None
         trace_id = context.id() if trace_header else None
 
-        # Generate using SGLang (diffusion algorithm runs internally)
         async_gen = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
@@ -98,5 +95,4 @@ class DiffusionWorkerHandler(DecodeWorkerHandler):
                 yield out
 
     def cleanup(self) -> None:
-        """Cleanup resources. Same as decode worker."""
         super().cleanup()
