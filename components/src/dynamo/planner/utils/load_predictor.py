@@ -39,17 +39,29 @@ class BasePredictor(ABC):
     def __init__(self, minimum_data_points=5):
         self.minimum_data_points = minimum_data_points
         self.data_buffer = []
+        # Even if we preload historical data, we still want to ignore the initial
+        # post-deployment idle period (a run of zeros) until we see the first
+        # non-zero datapoint from live traffic.
+        self._seen_nonzero_since_idle_reset = False
+
+    def reset_idle_skip(self):
+        """Reset idle-period skipping state (e.g., after warmup, before live)."""
+        self._seen_nonzero_since_idle_reset = False
 
     def add_data_point(self, value):
         """Add new data point to the buffer"""
         if math.isnan(value):
             value = 0
 
-        if len(self.data_buffer) == 0 and value == 0:
-            # skip the beginning idle period
+        if value == 0 and not self._seen_nonzero_since_idle_reset:
+            # Skip the beginning idle period (leading zeros) even if data_buffer
+            # is pre-warmed with historical data.
             return
-        else:
-            self.data_buffer.append(value)
+
+        if value != 0:
+            self._seen_nonzero_since_idle_reset = True
+
+        self.data_buffer.append(value)
 
     def get_last_value(self):
         """Get the last value from the buffer"""
@@ -81,9 +93,16 @@ class ARIMAPredictor(BasePredictor):
         super().__init__(minimum_data_points=minimum_data_points)
         self.window_size = window_size  # How many past points to use
         self.model = None
+        # Pending points to incrementally update the fitted model with.
+        # This avoids re-running auto_arima() on every step.
+        self._pending_updates: list[float] = []
 
     def add_data_point(self, value):
+        prev_len = len(self.data_buffer)
         super().add_data_point(value)
+        if len(self.data_buffer) > prev_len:
+            # Only queue updates if the value wasn't skipped by BasePredictor.
+            self._pending_updates.append(float(self.data_buffer[-1]))
         # Keep only the last window_size points
         if len(self.data_buffer) > self.window_size:
             self.data_buffer = self.data_buffer[-self.window_size :]
@@ -99,12 +118,20 @@ class ARIMAPredictor(BasePredictor):
             return self.data_buffer[0]  # Return the constant value
 
         try:
-            # Fit auto ARIMA model
-            self.model = pmdarima.auto_arima(
-                self.data_buffer,
-                suppress_warnings=True,
-                error_action="ignore",
-            )
+            # Fit auto ARIMA model once, then only do incremental updates.
+            if self.model is None:
+                self.model = pmdarima.auto_arima(
+                    self.data_buffer,
+                    suppress_warnings=True,
+                    error_action="ignore",
+                )
+            else:
+                # Incrementally update model with any new observations since last predict.
+                if self._pending_updates:
+                    self.model.update(self._pending_updates)
+
+            # Clear pending updates: model is now up-to-date through the latest observed point.
+            self._pending_updates = []
 
             # Make prediction
             forecast = self.model.predict(n_periods=1)
@@ -112,6 +139,7 @@ class ARIMAPredictor(BasePredictor):
         except Exception as e:
             # Log the specific error for debugging
             logger.warning(f"ARIMA prediction failed: {e}, using last value")
+            self._pending_updates = []
             return self.get_last_value()
 
 
@@ -124,6 +152,7 @@ class ProphetPredictor(BasePredictor):
         self.step_size = step_size
         self.start_date = datetime(2024, 1, 1)  # Base date for generating timestamps
         self.data_buffer = []  # Override to store dicts instead of values
+        self._seen_nonzero_since_idle_reset = False
 
     def add_data_point(self, value):
         """Add new data point to the buffer"""
@@ -131,9 +160,13 @@ class ProphetPredictor(BasePredictor):
         timestamp = self.start_date + timedelta(seconds=self.curr_step)
         value = 0 if math.isnan(value) else value
 
-        if len(self.data_buffer) == 0 and value == 0:
-            # skip the beginning idle period
+        if value == 0 and not self._seen_nonzero_since_idle_reset:
+            # skip the beginning idle period (leading zeros), even if pre-warmed
             return
+
+        if value != 0:
+            self._seen_nonzero_since_idle_reset = True
+
         self.data_buffer.append({"ds": timestamp, "y": value})
         self.curr_step += 1
 

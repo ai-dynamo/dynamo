@@ -8,6 +8,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Memory management library for Dynamo"
 
 [features]
 default = ["testing-all"]
