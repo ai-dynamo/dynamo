@@ -28,6 +28,13 @@ If this is your first contribution, here's the recommended path:
 1. **Read** the [Code of Conduct](CODE_OF_CONDUCT.md) and this guide
 2. **Set up** your development environment using the [Developing Locally](README.md#developing-locally) guide
 3. **Find an issue** — Browse [open issues](https://github.com/ai-dynamo/dynamo/issues) or propose a fix you've identified
+
+   | Issue Type | Description |
+   |------------|-------------|
+   | [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) | Beginner-friendly |
+   | [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted) | Community contributions welcome |
+   | [Needs info](https://github.com/ai-dynamo/dynamo/labels/needs-info) | Issues needing clarification |
+
 4. **Start small** — Documentation fixes, bug fixes, and test improvements are great first contributions
 5. **Ask questions** — Join [Discord](https://discord.gg/D92uqZRjCZ) or open a [Discussion](https://github.com/ai-dynamo/dynamo/discussions) if you get stuck
 
@@ -76,6 +83,42 @@ Have an idea for a new feature? [Open a feature request](https://github.com/ai-d
 ### Contribute Code
 
 Ready to write code? See the [Contribution Workflow](#contribution-workflow) section below for the process.
+
+---
+
+## What Happens to Your Issue
+
+### Priority Levels
+
+When triaged, issues are assigned a priority based on impact:
+
+| Priority | Meaning |
+|----------|---------|
+| **Urgent** | Critical blocker—system failure, security vulnerability, data loss |
+| **P0** | High impact—major functionality broken, blocking multiple users |
+| **P1** | Medium impact—workarounds exist, or popular feature request |
+| **P2** | Low impact—minor bugs, nice-to-have features, cosmetic issues |
+
+### Status Labels
+
+| Status | What It Means |
+|--------|---------------|
+| `needs-triage` | We're reviewing your issue |
+| `needs-info` | We need more details from you |
+| `approved-for-pr` | Ready for implementation—submit a PR |
+| `in-progress` | Someone is working on this |
+| `blocked` | Waiting on external dependency |
+
+### Response Expectations
+
+- **Initial response:** Within 2 business days for most issues
+- **Triage complete:** Within 1 week for P0/P1, longer for lower priority
+- **No activity for 60 days:** We'll check if the issue is still relevant
+- **No activity for 90 days:** Issue may be auto-closed (can be reopened)
+
+### Good First Issues
+
+Issues labeled `good-first-issue` are sized for new contributors. We provide extra guidance on these—look for clear acceptance criteria and a suggested approach in the issue description.
 
 ---
 
