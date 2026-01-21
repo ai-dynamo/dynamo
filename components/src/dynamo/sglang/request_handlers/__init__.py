@@ -7,6 +7,9 @@ from .embedding import EmbeddingWorkerHandler
 # Base handlers
 from .handler_base import BaseWorkerHandler
 
+# Diffusion handlers
+from .diffusion import DiffusionWorkerHandler
+
 # LLM handlers
 from .llm import DecodeWorkerHandler, DiffusionWorkerHandler, PrefillWorkerHandler
 
@@ -26,6 +29,8 @@ __all__ = [
     "PrefillWorkerHandler",
     # Embedding handlers
     "EmbeddingWorkerHandler",
+    # Diffusion handlers
+    "DiffusionWorkerHandler",
     # Multimodal handlers
     "MultimodalEncodeWorkerHandler",
     "MultimodalPrefillWorkerHandler",
