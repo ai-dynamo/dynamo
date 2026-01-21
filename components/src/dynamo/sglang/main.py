@@ -17,6 +17,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
+    DiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -465,8 +466,10 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
         component, generator, config, publisher=None, s3_client=s3_client
     )
 
-    # Simplified health check for diffusion
-    health_check_payload = {"status": "ready", "model": dynamo_args.model_path}
+    # Create proper health check payload that sends a minimal diffusion request
+    health_check_payload = DiffusionHealthCheckPayload(
+        model_path=dynamo_args.model_path
+    ).to_dict()
 
     ready_event = asyncio.Event()
 
