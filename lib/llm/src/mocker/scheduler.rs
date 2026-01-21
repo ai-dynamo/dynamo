@@ -320,7 +320,10 @@ impl Scheduler {
                 let total_time = prefill_time + decode_time;
 
                 // 4. Send metrics once per forward pass (after all prefill and decode processing)
-                let _ = metrics_tx.send(get_load_metrics(&kv_manager, dp_rank));
+                let _ = metrics_tx.send(MockerMetrics {
+                    dp_rank,
+                    active_decode_blocks: kv_manager.num_active_blocks() as u64,
+                });
 
                 // 5. Sleep to maintain target iteration timing
                 let target_duration =
@@ -494,14 +497,6 @@ fn simulate_decode(
     }
 
     total_time
-}
-
-/// Get current load metrics for worker monitoring
-fn get_load_metrics(kv_manager: &KvManager, dp_rank: u32) -> MockerMetrics {
-    MockerMetrics {
-        dp_rank,
-        active_decode_blocks: kv_manager.num_active_blocks() as u64,
-    }
 }
 
 /// Attempts to schedule waiting requests from the state queue.
