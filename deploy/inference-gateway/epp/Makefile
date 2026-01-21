@@ -2,7 +2,8 @@
 # Builds custom EPP image with Dynamo KV-aware routing plugins
 
 # Image configuration
-DOCKER_SERVER ?= ghcr.io/nvidia/dynamo
+# Image lives in local cache only, not pushed to any registry
+DOCKER_SERVER ?= dynamo
 IMAGE_NAME := dynamo-epp
 GIT_COMMIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 GIT_TAG ?= $(shell git describe --tags --dirty --always 2>/dev/null || echo "dev")

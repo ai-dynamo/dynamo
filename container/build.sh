@@ -987,9 +987,8 @@ if [[ ${TARGET^^} == "FRONTEND" ]]; then
     # Compute EPP image tag (must match Makefile's IMAGE_TAG)
     # IMAGE_TAG = $(IMAGE_REPO):$(GIT_TAG)
     # IMAGE_REPO = $(DOCKER_SERVER)/$(IMAGE_NAME)
-    # DOCKER_SERVER = ghcr.io/nvidia/dynamo
-    # IMAGE_NAME = dynamo-epp
-    EPP_DOCKER_SERVER="ghcr.io/nvidia/dynamo"
+    # Image lives in local cache only, not pushed to any registry
+    EPP_DOCKER_SERVER="dynamo"
     EPP_IMAGE_NAME="dynamo-epp"
     EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
     EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
