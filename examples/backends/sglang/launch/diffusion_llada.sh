@@ -25,6 +25,7 @@ NAMESPACE="${NAMESPACE:-dynamo}"
 COMPONENT="${COMPONENT:-backend}"
 ENDPOINT="${ENDPOINT:-generate}"
 HTTP_PORT="${HTTP_PORT:-8001}"
+TP_SIZE="${TP_SIZE:-1}"
 
 echo "=========================================="
 echo "Launching Diffusion LM Worker (LLaDA2.0)"
@@ -33,6 +34,7 @@ echo "Model: $MODEL_PATH"
 echo "Namespace: $NAMESPACE"
 echo "Component: $COMPONENT"
 echo "Frontend Port: $HTTP_PORT"
+echo "TP Size: $TP_SIZE"
 echo "Diffusion Algorithm: ${DLLM_ALGORITHM:-LowConfidence}"
 echo "Algorithm Config: ${DLLM_ALGORITHM_CONFIG:-default}"
 echo "=========================================="
@@ -54,6 +56,7 @@ echo "Starting Diffusion LM Worker..."
 export CUDA_VISIBLE_DEVICES=0
 CMD="python -m dynamo.sglang \
     --model-path $MODEL_PATH \
+    --tp-size $TP_SIZE \
     --skip-tokenizer-init \
     --trust-remote-code \
     --endpoint dyn://${NAMESPACE}.${COMPONENT}.${ENDPOINT} \

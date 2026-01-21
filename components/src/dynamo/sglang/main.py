@@ -337,8 +337,6 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     try:
         # Start endpoint and register model
-        # TODO(rust-integration): Diffusion models use same ModelType as autoregressive
-        # (Chat | Completions), no new bitflags needed
         await asyncio.gather(
             generate_endpoint.serve_endpoint(
                 handler.generate,
