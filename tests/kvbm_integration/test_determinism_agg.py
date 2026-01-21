@@ -45,6 +45,16 @@ pytestmark = [
 ]
 
 
+def _find_free_port() -> int:
+    """Find a free port by binding to port 0 and letting the OS assign one."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
+
+
 class LLMServerManager:
     """Manages LLM server lifecycle for determinism testing."""
 
@@ -428,16 +438,20 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.parametrize(
         "llm_server",
         [
-            {"cpu_blocks": 20000, "gpu_blocks": 5000},
+            {
+                "cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "30000")),
+                "gpu_blocks": int(os.environ.get("KVBM_GPU_BLOCKS", "2048")),
+            },
         ],
         indirect=True,
     )
     @pytest.mark.kvbm_concurrency
     @pytest.mark.skipif(
-        not HAS_VLLM_BENCH, reason="requires vllm bench (vllm command not found)"
+        not HAS_VLLM_BENCH, reason="requires vllm bench (vllm module not found)"
     )
     @pytest.mark.xfail(
-        reason="Known issue, fixed in PR: https://github.com/ai-dynamo/dynamo/pull/5475"
+        reason="Known issue, fixed in PR: https://github.com/ai-dynamo/dynamo/pull/5475",
+        run=True,
     )
     def test_concurrent_determinism_under_load(
         self, tester, llm_server, runtime_services
