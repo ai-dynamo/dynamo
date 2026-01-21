@@ -7,6 +7,9 @@ metadata:
   name: vllm-dsr1
 spec:
   backendFramework: vllm
+  envs:
+    - name: HF_HOME
+      value: /model-cache
   pvcs:
     - name: model-cache
       create: false

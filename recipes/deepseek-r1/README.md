@@ -40,7 +40,9 @@ kubectl apply -f model-cache/model-cache.yaml -n ${NAMESPACE}
 kubectl apply -f model-cache/model-download.yaml -n ${NAMESPACE}
 
 # Wait for download (this is a large model - may take 1+ hours)
-kubectl wait --for=condition=Complete job/model-download -n ${NAMESPACE} --timeout=7200s
+# For SGLang: kubectl wait --for=condition=Complete job/model-download-sglang ...
+# For vLLM/TRT-LLM: kubectl wait --for=condition=Complete job/model-download ...
+kubectl wait --for=condition=Complete job/model-download-sglang -n ${NAMESPACE} --timeout=7200s
 
 # Deploy (choose one configuration)
 kubectl apply -f sglang/disagg-8gpu/deploy.yaml -n ${NAMESPACE}

@@ -113,6 +113,8 @@ spec:
           env:
             - name: MODEL_PATH
               value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/prefill.yaml
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
@@ -164,6 +166,8 @@ spec:
           env:
             - name: MODEL_PATH
               value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/decode.yaml
           image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0

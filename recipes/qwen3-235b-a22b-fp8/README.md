@@ -74,4 +74,4 @@ This is a large MoE model requiring significant GPU resources:
 - Update `storageClassName` in `model-cache/model-cache.yaml` before deploying
 - Model download may take 30-60 minutes
 - Uses KV-aware routing for efficient cache utilization
-- Chunked prefill enabled for better memory management
+- Chunked prefill enabled for aggregated mode (disabled for disaggregated)
