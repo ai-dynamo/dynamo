@@ -21,10 +21,13 @@ import logging
 import os
 import pathlib
 import signal
+import uuid
 
 import uvloop
 from vllm.engine.arg_utils import EngineArgs
+from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.common.config_dump import dump_config
@@ -52,15 +55,70 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+MASK_64_BITS = (1 << 64) - 1
+
+
+def random_uuid() -> str:
+    return f"{uuid.uuid4().int & MASK_64_BITS:016x}"  # 16 hex chars
+
+
 class VllmEngine:
     def __init__(self, vllm_engine):
-        self.vllm_engine = vllm_engine
+        self.engine = vllm_engine
 
+    # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
+    # it has a lot of fields.
+    # request: dynamo.NVCreateChatCompletionRequest
     async def generator(self, request):
         """Minimal generator that yields nothing. Work in progress."""
-        print("** VllmEngine.generator called")
+
+        # ** VllmEngine.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
+        print(f"** VllmEngine.generator called: {request}")
+
+        # Let vllm handle all pre-processing
+        request_id = random_uuid()
+        vllm_preproc: EngineCoreRequest = self.engine.input_processor.process_inputs(
+            request_id,
+            request["messages"][0]["content"],  # prompt
+            SamplingParams(),
+            # arrival_time: float | None = None,
+            # lora_request: LoRARequest | None = None,
+            # tokenization_kwargs: dict[str, Any] | None = None,
+            # trace_headers: Mapping[str, str] | None = None,
+            # priority: int = 0,
+            # data_parallel_rank: int | None = None,
+        )
+
+        # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
+        print(f"Processed: {vllm_preproc}")
+
+        self.engine.output_processor.add_request(
+            vllm_preproc,
+            request["messages"][0]["content"],  # prompt
+            # parent_req: ParentRequest | None = None,
+            # request_index: int = 0,
+            # queue: RequestOutputCollector | None = None,
+        )
+
+        # Convert to our type
+        # our_preproc: dynamo.PreprocessedRequest = convert(vllm_preproc)
+
+        # Dynamo Router. This goes to the backend, waits, gets the streaming response, returns it
+        # stream is AsyncResponseStream
+        # dynamo_stream: dynamo.AsyncResponseStream = await self.endpoint_client.round_robin(our_preproc)
+
+        # async for dynamo_response in dynamo_stream:
+        #    vllm_response: [EngineCoreOutput] = convert(dynamo_response)
+
+        # Let vllm handle all post-processing
+        #    vlm_out: vllm.RequestOutput = self.engine.output_processor.process_output(vllm_response)
+
+        #    dynamo_out: dynamo.NvCreateChatCompletionResponse = convert(vllm_out)
+
+        # Rust now handles Server Sent Events back to user
+        #    yield dynamo_out
         return
-        yield  # Makes this an async generator
+        yield
 
 
 class EngineFactory:
