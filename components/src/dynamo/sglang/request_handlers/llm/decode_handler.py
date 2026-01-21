@@ -50,9 +50,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
+        super().cleanup()
         self.engine.shutdown()
         logging.info("Engine shutdown")
-        super().cleanup()
 
     def _build_sampling_params(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Build sampling params from request format.

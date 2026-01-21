@@ -141,7 +141,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
     handler.register_engine_routes(runtime)
 
-    print(f"Config: {config}")
     health_check_payload = SglangHealthCheckPayload(
         engine, use_text_input=dynamo_args.use_sglang_tokenizer
     ).to_dict()

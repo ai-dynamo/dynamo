@@ -101,9 +101,12 @@ class DynamoSglangPublisher:
             self._ctx, zmq.PULL, self.engine.port_args.metrics_ipc_name, True  # type: ignore
         )
 
+        self._running = True
+        self.kv_publishers: List[ZmqKvEventPublisher] = []
+
     async def run(self) -> None:
         """Continuously receive scheduler metrics from ZMQ socket and publish them."""
-        while True:
+        while self._running:
             try:
                 kv_metrics = await self._sock.recv_pyobj()  # type: ignore
                 self._record_values(
@@ -117,9 +120,36 @@ class DynamoSglangPublisher:
                     data_parallel_rank=kv_metrics.data_parallel_rank,
                 )
             except Exception:
-                logging.exception(
-                    "Failed to receive or publish SGLang scheduler metrics"
-                )
+                if self._running:
+                    logging.exception(
+                        "Failed to receive or publish SGLang scheduler metrics"
+                    )
+
+    def cleanup(self) -> None:
+        """Clean up ZMQ resources."""
+        self._running = False
+
+        # Close ZMQ socket and context
+        if self._sock is not None:
+            try:
+                self._sock.close(linger=0)
+            except Exception as e:
+                logging.warning(f"Failed to close ZMQ socket: {e}")
+
+        if self._ctx is not None:
+            try:
+                self._ctx.term()
+            except Exception as e:
+                logging.warning(f"Failed to terminate ZMQ context: {e}")
+
+        # Shutdown kv publishers
+        for publisher in self.kv_publishers:
+            try:
+                publisher.shutdown()
+            except Exception as e:
+                logging.warning(f"Failed to shutdown kv publisher: {e}")
+
+        logging.info("DynamoSglangPublisher cleanup complete")
 
     def init_engine_metrics_publish(self) -> None:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
@@ -155,8 +185,6 @@ class DynamoSglangPublisher:
             List of ZmqKvEventPublisher instances if kv_events_config is set,
             empty list otherwise.
         """
-        self.kv_publishers: List[ZmqKvEventPublisher] = []
-
         if self.server_args.kv_events_config:
             kv_events = json.loads(self.server_args.kv_events_config)
             base_ep = kv_events.get("endpoint")
