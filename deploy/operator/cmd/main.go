@@ -62,6 +62,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/etcd"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
@@ -338,6 +339,17 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	// Initialize observability metrics
+	setupLog.Info("Initializing observability metrics")
+	if err := observability.InitMetrics(); err != nil {
+		setupLog.Error(err, "unable to initialize observability metrics")
+		os.Exit(1)
+	}
+
+	// Start resource counter background goroutine
+	setupLog.Info("Starting resource counter")
+	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), ctrlConfig.ExcludedNamespaces)
 
 	// Initialize namespace scope mechanism
 	var leaseManager *namespace_scope.LeaseManager

@@ -97,6 +97,14 @@ const (
 	MainContainerName = "main"
 
 	RestartAnnotation = "nvidia.com/restartAt"
+
+	// Resource type constants - match Kubernetes Kind names
+	// Used consistently across controllers, webhooks, and metrics
+	ResourceTypeDynamoGraphDeployment              = "DynamoGraphDeployment"
+	ResourceTypeDynamoComponentDeployment          = "DynamoComponentDeployment"
+	ResourceTypeDynamoModel                        = "DynamoModel"
+	ResourceTypeDynamoGraphDeploymentRequest       = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
 )
 
 type MultinodeDeploymentType string
