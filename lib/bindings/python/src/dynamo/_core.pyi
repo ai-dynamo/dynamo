@@ -205,6 +205,26 @@ class Endpoint:
         """
         ...
 
+    async def unregister_endpoint_instance(self) -> None:
+        """
+        Unregister this endpoint instance from discovery.
+
+        This removes the endpoint from the instances bucket, preventing the router
+        from sending requests to this worker. Use this when a worker is sleeping
+        and should not receive any requests.
+        """
+        ...
+
+    async def register_endpoint_instance(self) -> None:
+        """
+        Re-register this endpoint instance to discovery.
+
+        This adds the endpoint back to the instances bucket, allowing the router
+        to send requests to this worker again. Use this when a worker wakes up
+        and should start receiving requests.
+        """
+        ...
+
 
 class Client:
     """
@@ -524,20 +544,6 @@ class OAIChatPreprocessor:
     async def start(self) -> None:
         """
         Start the preprocessor
-        """
-        ...
-
-class Backend:
-    """
-    LLM Backend engine manages resources and concurrency for executing inference
-    requests in LLM engines (trtllm, vllm, sglang etc)
-    """
-
-    ...
-
-    async def start(self, handler: RequestHandler) -> None:
-        """
-        Start the backend engine and requests to the downstream LLM engine
         """
         ...
 
@@ -1102,6 +1108,7 @@ class KvRouterConfig:
         use_kv_events: bool = True,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
+        router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
@@ -1118,6 +1125,9 @@ class KvRouterConfig:
             use_kv_events: Whether to use KV events from workers (default: True)
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_track_output_blocks: Track output blocks during generation (default: False).
+                When enabled, the router adds placeholder blocks as tokens are generated
+                and applies fractional decay based on progress toward expected_output_tokens.
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
@@ -1655,7 +1665,6 @@ class VirtualConnectorClient:
         ...
 
 __all__ = [
-    "Backend",
     "Client",
     "Component",
     "Context",
