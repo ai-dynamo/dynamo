@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -15,7 +15,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_runtime::metrics::{MetricsHierarchy, prometheus_names::kvstats};
 use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
 use dynamo_runtime::{
     component::{Component, Namespace},
@@ -824,106 +823,42 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 // Metrics Publishers ------------------------------------------------------
 // -------------------------------------------------------------------------
 
+/// Metrics data passed through the channel for NATS publishing
+#[derive(Debug, Clone, Default)]
+struct WorkerMetrics {
+    dp_rank: DpRank,
+    active_decode_blocks: u64,
+}
+
 pub struct WorkerMetricsPublisher {
-    tx: tokio::sync::watch::Sender<Arc<ForwardPassMetrics>>,
-    rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
-    /// Prometheus gauges for KvStats metrics
-    /// We use OnceLock for efficient one-time initialization and lock-free reads
-    /// The gauges are set once during register_prometheus_metrics and then only read
-    prometheus_gauges: OnceLock<KvStatsPrometheusGauges>,
-}
-
-struct KvStatsPrometheusGauges {
-    kv_active_blocks_gauge: prometheus::Gauge,
-    kv_total_blocks_gauge: prometheus::Gauge,
-    gpu_cache_usage_gauge: prometheus::Gauge,
-    gpu_prefix_cache_hit_rate_gauge: prometheus::Gauge,
-}
-
-impl KvStatsPrometheusGauges {
-    /// Create a new KvStatsPrometheusGauges instance with all metrics registered
-    fn new(component: &Component) -> Result<Self> {
-        let kv_active_blocks_gauge = component.metrics().create_gauge(
-            kvstats::ACTIVE_BLOCKS,
-            "Number of active KV cache blocks currently in use",
-            &[],
-        )?;
-
-        let kv_total_blocks_gauge = component.metrics().create_gauge(
-            kvstats::TOTAL_BLOCKS,
-            "Total number of KV cache blocks available",
-            &[],
-        )?;
-
-        let gpu_cache_usage_gauge = component.metrics().create_gauge(
-            kvstats::GPU_CACHE_USAGE_PERCENT,
-            "GPU cache usage as a percentage (0.0-1.0)",
-            &[],
-        )?;
-
-        let gpu_prefix_cache_hit_rate_gauge = component.metrics().create_gauge(
-            kvstats::GPU_PREFIX_CACHE_HIT_RATE,
-            "GPU prefix cache hit rate as a percentage (0.0-1.0)",
-            &[],
-        )?;
-
-        tracing::info!("Registered KvStats Prometheus metrics");
-
-        Ok(KvStatsPrometheusGauges {
-            kv_active_blocks_gauge,
-            kv_total_blocks_gauge,
-            gpu_cache_usage_gauge,
-            gpu_prefix_cache_hit_rate_gauge,
-        })
-    }
-
-    /// Update all gauges with values from KvStats
-    fn update_from_kvstats(&self, kv_stats: &KvStats) {
-        self.kv_active_blocks_gauge
-            .set(kv_stats.kv_active_blocks as f64);
-        self.kv_total_blocks_gauge
-            .set(kv_stats.kv_total_blocks as f64);
-        self.gpu_cache_usage_gauge
-            .set(kv_stats.gpu_cache_usage_perc as f64);
-        self.gpu_prefix_cache_hit_rate_gauge
-            .set(kv_stats.gpu_prefix_cache_hit_rate as f64);
-    }
+    tx: tokio::sync::watch::Sender<WorkerMetrics>,
+    rx: tokio::sync::watch::Receiver<WorkerMetrics>,
 }
 
 impl WorkerMetricsPublisher {
     pub fn new() -> Result<Self> {
-        let (tx, rx) = tokio::sync::watch::channel(Arc::new(ForwardPassMetrics::default()));
-        Ok(WorkerMetricsPublisher {
-            tx,
-            rx,
-            prometheus_gauges: OnceLock::new(),
-        })
+        let (tx, rx) = tokio::sync::watch::channel(WorkerMetrics::default());
+        Ok(WorkerMetricsPublisher { tx, rx })
     }
 
-    pub fn publish(
-        &self,
-        metrics: Arc<ForwardPassMetrics>,
-    ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
-        tracing::trace!("Publish metrics: {metrics:?}");
-
-        // Update Prometheus gauges - OnceLock provides lock-free reads after initialization
-        // This is the hot path - we only read the Arc, no locking overhead
-        if let Some(gauges) = self.prometheus_gauges.get() {
-            gauges.update_from_kvstats(&metrics.kv_stats);
-        }
-
-        self.tx.send(metrics)
-    }
-
-    /// Register KvStats Prometheus metrics with the component's registry
-    pub fn register_prometheus_metrics(&self, component: &Component) -> Result<()> {
-        // Use get_or_init for thread-safe one-time initialization
-        // This will only initialize once, subsequent calls will return immediately
-        self.prometheus_gauges.get_or_init(|| {
-            KvStatsPrometheusGauges::new(component).expect("Failed to create Prometheus gauges")
-        });
-
-        Ok(())
+    /// Publish worker metrics for load monitoring.
+    ///
+    /// # Arguments
+    /// * `dp_rank` - Data parallel rank of the worker (None defaults to 0)
+    /// * `active_decode_blocks` - Number of active KV cache blocks
+    pub fn publish(&self, dp_rank: Option<DpRank>, active_decode_blocks: u64) -> Result<()> {
+        let metrics = WorkerMetrics {
+            dp_rank: dp_rank.unwrap_or(0),
+            active_decode_blocks,
+        };
+        tracing::trace!(
+            "Publish metrics: dp_rank={}, active_decode_blocks={}",
+            metrics.dp_rank,
+            metrics.active_decode_blocks
+        );
+        self.tx
+            .send(metrics)
+            .map_err(|_| anyhow::anyhow!("metrics channel closed"))
     }
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
@@ -934,16 +869,15 @@ impl WorkerMetricsPublisher {
 
     /// Starts a background task to publish metrics over NATS
     ///
-    /// This task monitors metric changes (specifically kv_active_blocks and num_requests_waiting)
+    /// This task monitors metric changes (specifically active_decode_blocks)
     /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
     fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: u64) {
         let nats_rx = self.rx.clone();
 
         tokio::spawn(async move {
             let mut rx = nats_rx;
-            let mut last_kv_active_blocks: Option<u64> = Some(0);
-            let mut last_num_requests_waiting: Option<u64> = Some(0);
-            let mut pending_publish: Option<Arc<ForwardPassMetrics>> = None;
+            let mut last_active_decode_blocks: Option<u64> = Some(0);
+            let mut pending_publish: Option<WorkerMetrics> = None;
             let mut publish_timer =
                 Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
             publish_timer.as_mut().reset(tokio::time::Instant::now()); // Complete immediately
@@ -961,25 +895,16 @@ impl WorkerMetricsPublisher {
 
                         let metrics = rx.borrow_and_update().clone();
 
-                        // Extract the values we care about
-                        let current_kv_active_blocks = metrics.kv_stats.kv_active_blocks;
-                        let current_num_requests_waiting =
-                            metrics.worker_stats.num_requests_waiting;
-
-                        // Check if these specific metrics have changed
-                        let has_changed = match (last_kv_active_blocks, last_num_requests_waiting) {
-                            (Some(last_kv), Some(last_requests)) => {
-                                last_kv != current_kv_active_blocks
-                                    || last_requests != current_num_requests_waiting
-                            }
-                            _ => true, // First time, consider it changed
+                        // Check if active_decode_blocks has changed
+                        let has_changed = match last_active_decode_blocks {
+                            Some(last) => last != metrics.active_decode_blocks,
+                            None => true, // First time, consider it changed
                         };
 
                         // If load metrics changed, schedule a publish
                         if has_changed {
                             pending_publish = Some(metrics.clone());
-                            last_kv_active_blocks = Some(current_kv_active_blocks);
-                            last_num_requests_waiting = Some(current_num_requests_waiting);
+                            last_active_decode_blocks = Some(metrics.active_decode_blocks);
 
                             // Start the 1ms timer
                             publish_timer.as_mut().reset(
@@ -990,11 +915,10 @@ impl WorkerMetricsPublisher {
                     // Timer expired - publish if we have pending metrics
                     _ = &mut publish_timer => {
                         if let Some(metrics) = pending_publish.take() {
-                            // Create ActiveLoad with only active_decode_blocks (worker doesn't know prefill tokens)
                             let active_load = ActiveLoad {
                                 worker_id,
-                                dp_rank: metrics.worker_stats.data_parallel_rank.unwrap_or(0),
-                                active_decode_blocks: Some(metrics.kv_stats.kv_active_blocks),
+                                dp_rank: metrics.dp_rank,
+                                active_decode_blocks: Some(metrics.active_decode_blocks),
                                 active_prefill_tokens: None,
                             };
 
@@ -1876,7 +1800,7 @@ mod test_exponential_backoff {
 #[cfg(all(test, feature = "integration"))]
 mod test_integration_publisher {
     use super::*;
-    use crate::kv_router::protocols::{ActiveLoad, ForwardPassMetrics, KvStats, WorkerStats};
+    use crate::kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::traits::events::EventSubscriber;
     use futures::StreamExt;
@@ -1907,23 +1831,7 @@ mod test_integration_publisher {
         // Test 1: Publish 10 different metrics with 0.5ms intervals
         // Only the last one should be published after 1ms of stability
         for i in 0..10 {
-            let metrics = Arc::new(ForwardPassMetrics {
-                kv_stats: KvStats {
-                    kv_active_blocks: (i * 100) as u64, // Changing load metric
-                    kv_total_blocks: 1000,
-                    gpu_cache_usage_perc: 0.5,
-                    gpu_prefix_cache_hit_rate: 0.8,
-                },
-                worker_stats: WorkerStats {
-                    num_requests_waiting: (i * 10) as u64, // Changing load metric
-                    data_parallel_rank: None,
-                    request_active_slots: 50,
-                    request_total_slots: 100,
-                },
-                spec_decode_stats: None,
-            });
-
-            publisher.publish(metrics).unwrap();
+            publisher.publish(None, (i * 100) as u64).unwrap();
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
@@ -1946,25 +1854,9 @@ mod test_integration_publisher {
             tokio::time::timeout(tokio::time::Duration::from_millis(50), subscriber.next()).await;
         assert!(no_msg.is_err(), "Expected no more messages, but found one");
 
-        // Test 2: Publish 10 more metrics where everything changes EXCEPT the load metrics
-        for i in 0..10 {
-            let metrics = Arc::new(ForwardPassMetrics {
-                kv_stats: KvStats {
-                    kv_active_blocks: 900,                         // Keep same as last published
-                    kv_total_blocks: 1000 + (i * 100) as u64,      // Change other metrics
-                    gpu_cache_usage_perc: 0.3 + (i as f32 * 0.05), // Change other metrics
-                    gpu_prefix_cache_hit_rate: 0.7 + (i as f32 * 0.01), // Change other metrics
-                },
-                worker_stats: WorkerStats {
-                    num_requests_waiting: 90, // Keep same as last published
-                    data_parallel_rank: None,
-                    request_active_slots: 40 + (i * 5) as u64, // Change other metrics
-                    request_total_slots: 100 + (i * 10) as u64, // Change other metrics
-                },
-                spec_decode_stats: None,
-            });
-
-            publisher.publish(metrics).unwrap();
+        // Test 2: Publish 10 more metrics with same active_decode_blocks - should not trigger publish
+        for _ in 0..10 {
+            publisher.publish(None, 900).unwrap(); // Keep same as last published
             tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
         }
 
@@ -1982,86 +1874,5 @@ mod test_integration_publisher {
         drt.shutdown();
 
         Ok(())
-    }
-
-    #[tokio::test]
-    #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
-    async fn test_kvstats_prometheus_gauge_updates() {
-        // Test that publish() updates Prometheus gauges correctly using real Component
-        let publisher = WorkerMetricsPublisher::new().unwrap();
-
-        // Create a real DRT and component for integration testing
-        let drt = create_test_drt_async().await;
-        let namespace = drt.namespace("ns2002".to_string()).unwrap();
-        let component = namespace.component("comp2002".to_string()).unwrap();
-
-        // Register Prometheus metrics using the real constructor
-        publisher.register_prometheus_metrics(&component).unwrap();
-
-        // Get references to the gauges for testing
-        let gauges = publisher.prometheus_gauges.get().unwrap();
-        let active_blocks_gauge = gauges.kv_active_blocks_gauge.clone();
-        let total_blocks_gauge = gauges.kv_total_blocks_gauge.clone();
-        let cache_usage_gauge = gauges.gpu_cache_usage_gauge.clone();
-        let hit_rate_gauge = gauges.gpu_prefix_cache_hit_rate_gauge.clone();
-
-        // Create test metrics with specific values
-        let test_metrics = Arc::new(ForwardPassMetrics {
-            worker_stats: WorkerStats {
-                data_parallel_rank: None,
-                request_active_slots: 5,
-                request_total_slots: 100,
-                num_requests_waiting: 2,
-            },
-            kv_stats: KvStats {
-                kv_active_blocks: 42,
-                kv_total_blocks: 12894,
-                gpu_cache_usage_perc: 0.5,
-                gpu_prefix_cache_hit_rate: 0.75,
-            },
-            spec_decode_stats: None,
-        });
-
-        // Test 1: Initial gauge values should be 0
-        assert_eq!(active_blocks_gauge.get(), 0.0);
-        assert_eq!(total_blocks_gauge.get(), 0.0);
-        assert_eq!(cache_usage_gauge.get(), 0.0);
-        assert_eq!(hit_rate_gauge.get(), 0.0);
-
-        // Test 2: publish() should update all gauges with correct values
-        let result = publisher.publish(test_metrics);
-        assert!(result.is_ok());
-
-        // Test 3: Verify gauges were updated correctly
-        assert_eq!(active_blocks_gauge.get(), 42.0);
-        assert_eq!(total_blocks_gauge.get(), 12894.0);
-        assert_eq!(cache_usage_gauge.get(), 0.5);
-        assert_eq!(hit_rate_gauge.get(), 0.75);
-
-        // Test 4: Verify metrics are properly registered in the component's registry
-        // Component implements MetricsRegistry trait which provides prometheus_expfmt()
-        let prometheus_output = component.metrics().prometheus_expfmt().unwrap();
-
-        // Verify metric names are present
-        assert!(prometheus_output.contains(kvstats::ACTIVE_BLOCKS));
-        assert!(prometheus_output.contains(kvstats::TOTAL_BLOCKS));
-        assert!(prometheus_output.contains(kvstats::GPU_CACHE_USAGE_PERCENT));
-        assert!(prometheus_output.contains(kvstats::GPU_PREFIX_CACHE_HIT_RATE));
-
-        // Test 5: Verify the prometheus output contains the actual values
-        // Print the output to debug format issues
-        println!("Prometheus output:\n{}", prometheus_output);
-
-        // Check for metric values - the format includes labels so we need to be more flexible
-        assert!(prometheus_output.contains("kvstats_active_blocks"));
-        assert!(prometheus_output.contains("42")); // The value should be there
-        assert!(prometheus_output.contains("kvstats_total_blocks"));
-        assert!(prometheus_output.contains("12894")); // The value should be there
-        assert!(prometheus_output.contains("kvstats_gpu_cache_usage_percent"));
-        assert!(prometheus_output.contains("kvstats_gpu_prefix_cache_hit_rate"));
-
-        println!(
-            "✅ KvStatsPrometheusGauges constructor and publish() work correctly with real Component"
-        );
     }
 }
