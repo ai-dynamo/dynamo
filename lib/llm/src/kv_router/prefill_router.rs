@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Result;
 use futures::StreamExt;
-use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
+
+/// Global atomic counter for sequential bootstrap_room generation.
+/// Sequential IDs ensure even DP rank distribution (id % dp_size round-robins perfectly).
+static BOOTSTRAP_ROOM_COUNTER: AtomicU64 = AtomicU64::new(0);
 use tracing::Instrument;
 
 use dynamo_runtime::{
@@ -293,7 +297,10 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room: u64 = rand::rng().random();
+        // Sequential bootstrap_room ensures even DP rank distribution.
+        // When SGLang uses bootstrap_room % dp_size for routing, sequential IDs
+        // guarantee perfect round-robin across DP ranks (vs random which has variance).
+        let bootstrap_room = BOOTSTRAP_ROOM_COUNTER.fetch_add(1, Ordering::Relaxed);
 
         tracing::info!(
             worker_id = worker_id,

@@ -126,6 +126,10 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
+            # Extract dp_rank from routing info (set by KV router)
+            routing = request.get("routing") or {}
+            dp_rank = routing.get("dp_rank")
+
             decode = await self.engine.async_generate(
                 **input_param,
                 sampling_params=sampling_params,
@@ -135,6 +139,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_room=bootstrap_info["bootstrap_room"],
                 external_trace_header=trace_header,
                 rid=trace_id,
+                data_parallel_rank=dp_rank,
             )
 
             if self.skip_tokenizer_init:
