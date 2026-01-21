@@ -2231,4 +2231,345 @@ mod tests {
         assert_eq!(partial.tokens.len(), 4);
         assert_eq!(remaining.len(), 6);
     }
+
+    // ========== Additional tests for coverage improvement ==========
+
+    // === PositionalRadixTree Tests ===
+
+    #[test]
+    fn test_positional_radix_tree_basic_operations() {
+        use crate::PositionalRadixTree;
+
+        // Test new() and is_empty()
+        let tree: PositionalRadixTree<String> = PositionalRadixTree::new();
+        assert!(tree.is_empty());
+        assert_eq!(tree.len(), 0);
+
+        // Test default()
+        let tree2: PositionalRadixTree<i32> = PositionalRadixTree::default();
+        assert!(tree2.is_empty());
+
+        // Test prefix() and insertion
+        let psh1 = PositionalSequenceHash::new(0x1234, 0, 0xABCD);
+        let psh2 = PositionalSequenceHash::new(0x5678, 0, 0xEF01);
+        let psh3 = PositionalSequenceHash::new(0x9ABC, 1, 0x2345);
+
+        tree.prefix(&psh1).insert(psh1, "value1".to_string());
+        assert!(!tree.is_empty());
+        assert_eq!(tree.len(), 1);
+
+        tree.prefix(&psh2).insert(psh2, "value2".to_string());
+        assert_eq!(tree.len(), 2);
+
+        tree.prefix(&psh3).insert(psh3, "value3".to_string());
+        assert_eq!(tree.len(), 3);
+
+        // Test retrieval
+        assert_eq!(
+            tree.prefix(&psh1).get(&psh1).map(|v| v.clone()),
+            Some("value1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_positional_radix_tree_with_lineage_hash() {
+        use crate::PositionalRadixTree;
+
+        // Test generic usage with PositionalLineageHash
+        let tree: PositionalRadixTree<u32, PositionalLineageHash> = PositionalRadixTree::new();
+        assert!(tree.is_empty());
+
+        let plh1 = PositionalLineageHash::new(0x1234, None, 0);
+        let plh2 = PositionalLineageHash::new(0x5678, Some(0x1234), 1);
+
+        tree.prefix(&plh1).insert(plh1, 100);
+        tree.prefix(&plh2).insert(plh2, 200);
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree.prefix(&plh1).get(&plh1).map(|v| *v), Some(100));
+        assert_eq!(tree.prefix(&plh2).get(&plh2).map(|v| *v), Some(200));
+    }
+
+    #[test]
+    fn test_positional_radix_tree_position_lookup() {
+        use crate::PositionalRadixTree;
+
+        let tree: PositionalRadixTree<String> = PositionalRadixTree::new();
+
+        // Insert at different positions
+        let psh0 = PositionalSequenceHash::new(0x1111, 0, 0xAAAA);
+        let psh1 = PositionalSequenceHash::new(0x2222, 1, 0xBBBB);
+        let psh2 = PositionalSequenceHash::new(0x3333, 2, 0xCCCC);
+
+        tree.prefix(&psh0).insert(psh0, "pos0".to_string());
+        tree.prefix(&psh1).insert(psh1, "pos1".to_string());
+        tree.prefix(&psh2).insert(psh2, "pos2".to_string());
+
+        // Test position() method
+        assert!(tree.position(0).is_some());
+        assert!(tree.position(1).is_some());
+        assert!(tree.position(2).is_some());
+        assert!(tree.position(3).is_none()); // No entries at position 3
+
+        // Verify position lookup returns correct submap
+        let pos0_map = tree.position(0).unwrap();
+        assert_eq!(pos0_map.len(), 1);
+    }
+
+    // === PositionalSequenceHash Additional Tests ===
+
+    #[test]
+    fn test_positional_sequence_hash_mode_2_and_3() {
+        // Mode 2: position fits in 24 bits (65536 <= pos < 16777216)
+        let position_mode2 = 100_000u64;
+        let seq_hash = 0x1234567890ABCDEF;
+        let block_hash = 0xFEDCBA9876543210;
+
+        let psh_mode2 = PositionalSequenceHash::new(seq_hash, position_mode2, block_hash);
+        assert_eq!(psh_mode2.mode(), 2, "Position 100,000 should use mode 2");
+        assert_eq!(psh_mode2.position(), position_mode2);
+        assert_eq!(psh_mode2.sequence_hash(), seq_hash);
+        // Local block hash truncated to 38 bits in mode 2
+        assert_eq!(
+            psh_mode2.local_block_hash(),
+            block_hash & ((1u64 << 38) - 1)
+        );
+
+        // Mode 3: position fits in 31 bits (16777216 <= pos < 2147483648)
+        let position_mode3 = 100_000_000u64;
+        let psh_mode3 = PositionalSequenceHash::new(seq_hash, position_mode3, block_hash);
+        assert_eq!(psh_mode3.mode(), 3, "Position 100,000,000 should use mode 3");
+        assert_eq!(psh_mode3.position(), position_mode3);
+        assert_eq!(psh_mode3.sequence_hash(), seq_hash);
+        // Local block hash truncated to 31 bits in mode 3
+        assert_eq!(
+            psh_mode3.local_block_hash(),
+            block_hash & ((1u64 << 31) - 1)
+        );
+    }
+
+    #[test]
+    fn test_positional_sequence_hash_as_u128() {
+        let psh = PositionalSequenceHash::new(0x1234, 100, 0xABCD);
+        let raw = psh.as_u128();
+
+        // Verify we can reconstruct from raw value
+        assert_eq!(raw & 0xFFFF_FFFF_FFFF_FFFF, 0x1234);
+        assert!(raw > 0); // Non-zero
+
+        // Create another and compare
+        let psh2 = PositionalSequenceHash::new(0x1234, 100, 0xABCD);
+        assert_eq!(psh.as_u128(), psh2.as_u128());
+    }
+
+    #[test]
+    fn test_positional_sequence_hash_debug() {
+        let psh = PositionalSequenceHash::new(0x1234567890ABCDEF, 42, 0xFEDCBA98);
+        let debug_str = format!("{:?}", psh);
+
+        // Debug should contain field names and values
+        assert!(debug_str.contains("PositionalSequenceHash"));
+        assert!(debug_str.contains("sequence_hash"));
+        assert!(debug_str.contains("local_block_hash"));
+        assert!(debug_str.contains("position"));
+    }
+
+    // === PositionalLineageHash Additional Tests ===
+
+    #[test]
+    fn test_positional_lineage_hash_debug_and_display() {
+        // Test position 0 (no parent shown)
+        let plh_root = PositionalLineageHash::new(0x123456789ABCDEF0, None, 0);
+        let debug_root = format!("{:?}", plh_root);
+        let display_root = format!("{}", plh_root);
+
+        // Debug and Display should show position 0
+        assert!(debug_root.starts_with("0:"));
+        assert!(display_root.starts_with("0:"));
+        // Position 0 should not show parent
+        assert_eq!(debug_root.matches(':').count(), 1);
+        assert_eq!(display_root.matches(':').count(), 1);
+
+        // Test position > 0 (parent shown)
+        let plh_child = PositionalLineageHash::new(0xABCDEF0123456789, Some(0x123456789ABCDEF0), 5);
+        let debug_child = format!("{:?}", plh_child);
+        let display_child = format!("{}", plh_child);
+
+        // Should show position:current:parent
+        assert!(debug_child.starts_with("5:"));
+        assert!(display_child.starts_with("5:"));
+        // Position > 0 should show parent (3 parts)
+        assert_eq!(debug_child.matches(':').count(), 2);
+        assert_eq!(display_child.matches(':').count(), 2);
+    }
+
+    #[test]
+    fn test_positional_lineage_hash_as_u128() {
+        let plh = PositionalLineageHash::new(0x1234, Some(0x5678), 10);
+        let raw = plh.as_u128();
+
+        assert!(raw > 0);
+
+        // Create another with same params and compare
+        let plh2 = PositionalLineageHash::new(0x1234, Some(0x5678), 10);
+        assert_eq!(plh.as_u128(), plh2.as_u128());
+
+        // Different params should give different hash
+        let plh3 = PositionalLineageHash::new(0x1234, Some(0x5678), 11);
+        assert_ne!(plh.as_u128(), plh3.as_u128());
+    }
+
+    // === Tokens From Impls ===
+
+    #[test]
+    fn test_tokens_from_vec_usize() {
+        let usize_vec: Vec<usize> = vec![1, 2, 3, 4, 5];
+        let tokens = Tokens::from(usize_vec);
+
+        assert_eq!(tokens.as_ref(), &[1u32, 2, 3, 4, 5]);
+        assert_eq!(tokens.len(), 5);
+    }
+
+    #[test]
+    fn test_tokens_partial_eq_slice_ref() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
+        let slice: &[Token] = &[1, 2, 3, 4];
+
+        // Test PartialEq<&[Token]> for Tokens
+        assert!(tokens == slice);
+
+        let different_slice: &[Token] = &[1, 2, 3, 5];
+        assert!(tokens != different_slice);
+    }
+
+    // === TokenBlock Accessors ===
+
+    #[test]
+    fn test_token_block_accessors() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+
+        let block = &seq.blocks()[0];
+
+        // Test block_size()
+        assert_eq!(block.block_size(), 4);
+
+        // Test positional_sequence_hash()
+        let psh = block.positional_sequence_hash();
+        assert_eq!(psh.position(), 0);
+
+        // Test positional_lineage_hash()
+        let plh = block.positional_lineage_hash();
+        assert_eq!(plh.position(), 0);
+        assert_eq!(plh.parent_hash_fragment(), 0); // Root has no parent
+    }
+
+    #[test]
+    fn test_positional_hash_trait_impls() {
+        use crate::PositionalHash;
+
+        // Test PositionalHash for PositionalSequenceHash
+        let psh = PositionalSequenceHash::new(0x1234, 42, 0xABCD);
+        assert_eq!(PositionalHash::position(&psh), 42);
+
+        // Test PositionalHash for PositionalLineageHash
+        let plh = PositionalLineageHash::new(0x1234, None, 99);
+        assert_eq!(PositionalHash::position(&plh), 99);
+    }
+
+    // === TokenBlockSequence Edge Cases ===
+
+    #[test]
+    fn test_sequence_pop_from_full_block() {
+        // Test pop when current partial block is empty (must pop from full block)
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8]);
+        let mut seq = TokenBlockSequence::new(tokens, 4, Some(TEST_SALT_HASH));
+
+        // Current block should be empty, all tokens in completed blocks
+        assert!(seq.current_block().is_empty());
+        assert_eq!(seq.blocks().len(), 2);
+        assert_eq!(seq.total_tokens(), 8);
+
+        // Pop should remove from last full block
+        let popped = seq.pop();
+        assert_eq!(popped, Some(8));
+        assert_eq!(seq.total_tokens(), 7);
+        assert_eq!(seq.blocks().len(), 1);
+        assert_eq!(seq.current_block().tokens.as_ref(), &[5, 6, 7]);
+    }
+
+    #[test]
+    fn test_sequence_tokens_at_edge_cases() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5]);
+        let seq = TokenBlockSequence::new(tokens, 4, Some(TEST_SALT_HASH));
+
+        // Start > end (invalid range)
+        assert!(seq.tokens_at(3..2).is_empty());
+
+        // End > total (out of bounds)
+        assert!(seq.tokens_at(0..10).is_empty());
+
+        // Valid edge case: exact boundaries
+        assert_eq!(seq.tokens_at(0..4).as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(seq.tokens_at(4..5).as_ref(), &[5]);
+    }
+
+    #[test]
+    fn test_sequence_next_block() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4]);
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+
+        let block = &seq.blocks()[0];
+        let next_partial = block.next_block();
+
+        // next_block should create a partial block linked to this block
+        assert!(next_partial.is_empty());
+        assert_eq!(next_partial.remaining(), 4);
+        assert_eq!(
+            next_partial.parent_sequence_hash,
+            Some(block.sequence_hash())
+        );
+        assert_eq!(next_partial.position, 1);
+    }
+
+    #[test]
+    fn test_sequence_reset() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let mut seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+
+        assert_eq!(seq.blocks().len(), 2);
+        assert_eq!(seq.total_tokens(), 9);
+
+        seq.reset();
+
+        assert!(seq.blocks().is_empty());
+        assert!(seq.current_block().is_empty());
+        assert_eq!(seq.total_tokens(), 0);
+        assert_eq!(seq.current_block().parent_sequence_hash, None);
+    }
+
+    #[test]
+    fn test_sequence_into_parts() {
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5]);
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+
+        let (blocks, partial) = seq.into_parts();
+
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(partial.tokens.as_ref(), &[5]);
+    }
+
+    #[test]
+    fn test_sequence_last_complete_block() {
+        // Empty sequence
+        let seq_empty = TokenBlockSequence::new(Tokens::default(), 4, None);
+        assert!(seq_empty.last_complete_block().is_none());
+
+        // With blocks
+        let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5, 6, 7, 8]);
+        let seq = TokenBlockSequence::new(tokens, 4, Some(1337));
+        let last = seq.last_complete_block();
+        assert!(last.is_some());
+        assert_eq!(last.unwrap().tokens().as_ref(), &[5, 6, 7, 8]);
+    }
 }
