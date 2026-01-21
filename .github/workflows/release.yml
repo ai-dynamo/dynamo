@@ -7,13 +7,15 @@ on:
   push:
     branches:
       - 'release/*'
-      - 'pvijayakrish/automate-release'  # TODO: Remove after testing
   workflow_dispatch:
     inputs:
       rc_number:
-        description: 'RC number (e.g., 1 for rc1). Leave empty to auto-increment.'
+        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
         required: false
         type: string
+
+# Note: workflow_dispatch can only be triggered from release/* branches
+# This is enforced in the prepare-release job via branch validation
 
 permissions:
   contents: write
@@ -44,11 +46,17 @@ jobs:
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
 
-          # TODO: Remove test branch handling after testing
-          if [[ "$BRANCH_NAME" == "pvijayakrish/automate-release" ]]; then
-            VERSION="0.0.0-test"
-            echo "Using test version for branch: $BRANCH_NAME"
-          elif [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Enforce workflow_dispatch only runs on release/* branches
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Error: workflow_dispatch can only be triggered from release/* branches"
+              echo "Current branch: $BRANCH_NAME"
+              echo "Expected pattern: release/X.Y.Z (e.g., release/0.7.0)"
+              exit 1
+            fi
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Error: Invalid version format: $VERSION"
             echo "Expected format: X.Y.Z (e.g., 0.7.0)"
             exit 1
@@ -119,9 +127,9 @@ jobs:
 
           # Check if RC number was provided as input
           if [ -n "${INPUT_RC_NUMBER}" ]; then
-            # Validate input is a positive integer
-            if ! [[ "${INPUT_RC_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
-              echo "Error: rc_number must be a positive integer (got: ${INPUT_RC_NUMBER})"
+            # Validate input is a non-negative integer
+            if ! [[ "${INPUT_RC_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo "Error: rc_number must be a non-negative integer (got: ${INPUT_RC_NUMBER})"
               exit 1
             fi
             NEXT_RC="${INPUT_RC_NUMBER}"
@@ -138,8 +146,8 @@ jobs:
             EXISTING_RCS=$(git tag -l "${RC_PATTERN}*" | grep -E "^v${VERSION}-rc[0-9]+$" | sort -V || true)
 
             if [ -z "$EXISTING_RCS" ]; then
-              NEXT_RC=1
-              echo "No existing RC tags found. Starting with rc1."
+              NEXT_RC=0
+              echo "No existing RC tags found. Starting with rc0."
             else
               # Get the highest RC number
               LAST_RC=$(echo "$EXISTING_RCS" | tail -1)
