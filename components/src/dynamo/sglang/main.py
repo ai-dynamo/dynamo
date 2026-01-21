@@ -274,23 +274,23 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     """Initialize diffusion language model worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    # TODO(rust-integration): Add --diffusion-worker flag to DynamoArgs
-    # TODO(rust-integration): Add --dllm-algorithm and --dllm-algorithm-config to config parsing
-    # For now, hardcode diffusion parameters
-
-    # HARDCODED: Configure diffusion algorithm
+    # Validate that diffusion algorithm is configured
     if server_args.dllm_algorithm is None:
-        logging.warning(
-            "No dllm_algorithm specified. Hardcoding to 'LowConfidence' for testing. "
-            "TODO: Add --dllm-algorithm flag to Dynamo args."
+        logging.error(
+            "Diffusion worker requires --dllm-algorithm to be specified. "
+            "Example: --dllm-algorithm LowConfidence"
         )
-        server_args.dllm_algorithm = "LowConfidence"
-        # Optional: hardcode config path if needed
-        # server_args.dllm_algorithm_config = "/path/to/config.yaml"
+        raise ValueError(
+            "Missing required argument: --dllm-algorithm must be set when using --diffusion-worker"
+        )
 
     logging.info(
         f"Initializing diffusion worker with algorithm: {server_args.dllm_algorithm}"
     )
+    if server_args.dllm_algorithm_config:
+        logging.info(
+            f"Using diffusion algorithm config: {server_args.dllm_algorithm_config}"
+        )
 
     # Prevent SGLang from blocking on non-leader nodes
     if server_args.node_rank >= 1:

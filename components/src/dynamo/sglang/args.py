@@ -101,7 +101,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "flags": ["--diffusion-worker"],
         "action": "store_true",
         "default": False,
-        "help": "Run as diffusion language model worker (e.g., LLaDA2.0). Requires --dllm-algorithm to be set in SGLang args.",
+        "help": "Run as diffusion language model worker (e.g., LLaDA2.0). Requires --dllm-algorithm (e.g., 'LowConfidence'). Optional: --dllm-algorithm-config for YAML config file with algorithm parameters.",
     },
     "dump-config-to": {
         "flags": ["--dump-config-to"],
