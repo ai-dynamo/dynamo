@@ -211,6 +211,39 @@ impl Default for RadixTree {
     }
 }
 
+// Dropping Radix blocks can cause a cascade of drops that can overflow the stack.
+// This custom drop implementation avoids this using an iterative approach.
+impl Drop for RadixTree {
+    fn drop(&mut self) {
+        let mut stack: Vec<SharedRadixBlock> = Vec::new();
+        // Break root -> children edge up front
+        {
+            let mut root = self.root.borrow_mut();
+            stack.extend(root.children.drain().map(|(_, v)| v));
+        }
+
+        // Remove all lookup references (they may include blocks not reachable from root)
+        for (_, worker_blocks) in self.lookup.drain() {
+            stack.extend(worker_blocks.into_values());
+        }
+
+        // Iteratively free any uniquely-owned blocks without recursion
+        while let Some(block) = stack.pop() {
+            match Rc::try_unwrap(block) {
+                Ok(cell) => {
+                    // We own the cell, so we can take inner and it will drop after this block.
+                    let mut inner: RadixBlock = cell.into_inner();
+                    stack.extend(inner.children.drain().map(|(_, v)| v));
+                }
+                Err(rc) => {
+                    // We don't own the cell, just call drop on it.
+                    drop(rc);
+                }
+            }
+        }
+    }
+}
+
 impl RadixTree {
     /// Create a new `RadixTree`.
     ///
@@ -2396,6 +2429,20 @@ mod tests {
             result.unwrap_err(),
             KvCacheEventError::InvalidBlockSequence
         ));
+    }
+
+    #[test]
+    fn test_radix_tree_large_stores() {
+        setup();
+        let mut trie = RadixTree::new();
+        for i in 0..=16 {
+            let len = 1 << i;
+            let worker_id = i;
+            tracing::info!("Testing sequence of length {}", len);
+            let sequence = (1..len + 1).collect::<Vec<u64>>();
+            trie.apply_event(create_store_event(worker_id, 1, sequence, None))
+                .unwrap();
+        }
     }
 
     #[test]
