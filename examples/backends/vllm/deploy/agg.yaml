@@ -22,7 +22,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: gnvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/examples/backends/vllm
           command:
             - python3
@@ -31,4 +31,3 @@ spec:
           args:
             - --model
             - Qwen/Qwen3-0.6B
-
