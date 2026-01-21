@@ -282,27 +282,17 @@ async def register_diffusion_model(
         Diffusion models use a simplified registration since they don't fit
         the LLM model type system. They're registered directly with the endpoint.
     """
-    # Register the diffusion model with the runtime so the frontend can discover it
-    try:
-        await register_llm(
-            ModelInput.Text,  # Diffusion takes text prompts as input
-            ModelType.Chat,   # Use Chat type as a generic model type
-            endpoint,
-            dynamo_args.model_path,
-            dynamo_args.model_path,  # Use model_path as served_model_name
-            kv_cache_block_size=None,  # Diffusion doesn't use KV cache
-            migration_limit=None,
-            runtime_config=None,
-            custom_template_path=None,
-        )
-        logging.info(
-            f"Diffusion model registered: {dynamo_args.model_path} on endpoint {endpoint}"
-        )
-    except Exception as e:
-        logging.error(f"Failed to register diffusion model: {e}")
-        raise
+    # Diffusion models DON'T use register_llm because they don't have tokenizers
+    # The endpoint instance is already registered via serve_endpoint() call
+    logging.info(
+        f"Diffusion endpoint ready on: {endpoint} for model: {dynamo_args.model_path}"
+    )
 
+    # Signal readiness - the endpoint is already serving requests
     if readiness_gate:
         readiness_gate.set()
 
-    logging.info("Diffusion model registration succeeded; processing queued requests")
+    logging.info(
+        f"Diffusion model ready: {dynamo_args.model_path}. "
+        "Endpoint is serving but won't appear in /v1/models (diffusion models have no tokenizer)"
+    )
