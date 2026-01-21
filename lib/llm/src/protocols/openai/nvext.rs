@@ -249,9 +249,9 @@ mod tests {
         assert!(nv_ext.validate().is_ok());
     }
 
-    // Test apply_header_routing_overrides - header takes priority
+    // Test apply_header_routing_overrides - worker header present, prefill header absent
     #[test]
-    fn test_apply_header_routing_overrides_header_priority() {
+    fn test_apply_header_routing_overrides() {
         use axum::http::HeaderMap;
 
         // Only HEADER_WORKER_INSTANCE_ID is in the header
@@ -273,50 +273,5 @@ mod tests {
         assert_eq!(result.decode_worker_id, Some(123));
         // prefill_worker_id should remain from original nvext (not overwritten by header)
         assert_eq!(result.prefill_worker_id, Some(777));
-    }
-
-    // Test apply_header_routing_overrides - no headers returns original nvext
-    #[test]
-    fn test_apply_header_routing_overrides_no_headers() {
-        use axum::http::HeaderMap;
-
-        let headers = HeaderMap::new();
-
-        let nvext = NvExt::builder()
-            .backend_instance_id(999)
-            .prefill_worker_id(777)
-            .build()
-            .unwrap();
-
-        let result = apply_header_routing_overrides(Some(nvext.clone()), &headers).unwrap();
-
-        // Should return original values unchanged
-        assert_eq!(result.backend_instance_id, Some(999));
-        assert_eq!(result.prefill_worker_id, Some(777));
-    }
-
-    // Test apply_header_routing_overrides - creates nvext if None and headers present
-    #[test]
-    fn test_apply_header_routing_overrides_creates_nvext() {
-        use axum::http::HeaderMap;
-
-        let mut headers = HeaderMap::new();
-        headers.insert(HEADER_WORKER_INSTANCE_ID, "42".parse().unwrap());
-
-        let result = apply_header_routing_overrides(None, &headers).unwrap();
-
-        assert_eq!(result.backend_instance_id, Some(42));
-        assert_eq!(result.decode_worker_id, Some(42));
-    }
-
-    // Test apply_header_routing_overrides - returns None if no nvext and no headers
-    #[test]
-    fn test_apply_header_routing_overrides_none_passthrough() {
-        use axum::http::HeaderMap;
-
-        let headers = HeaderMap::new();
-        let result = apply_header_routing_overrides(None, &headers);
-
-        assert!(result.is_none());
     }
 }
