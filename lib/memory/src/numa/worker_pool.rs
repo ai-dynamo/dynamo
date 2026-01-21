@@ -239,7 +239,10 @@ impl NumaWorker {
 
             // Touch one byte per page to trigger first-touch policy efficiently
             // This is much faster than zeroing the entire region for large allocations
-            let page_size = (libc::sysconf(libc::_SC_PAGESIZE) as usize).max(4096);
+            let page_size = match libc::sysconf(libc::_SC_PAGESIZE) {
+                n if n > 0 => n as usize,
+                _ => 4096,
+            };
             let mut offset = 0usize;
             while offset < size {
                 std::ptr::write_volatile(ptr.add(offset), 0);
