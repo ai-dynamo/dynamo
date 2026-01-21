@@ -2506,11 +2506,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)] // so we can explicitly test invalid ranges
     fn test_sequence_tokens_at_edge_cases() {
         let tokens = Tokens::from(vec![1u32, 2, 3, 4, 5]);
         let seq = TokenBlockSequence::new(tokens, 4, Some(TEST_SALT_HASH));
 
-        // Start > end (invalid range)
+        // Start > end (invalid range
         assert!(seq.tokens_at(3..2).is_empty());
 
         // End > total (out of bounds)
