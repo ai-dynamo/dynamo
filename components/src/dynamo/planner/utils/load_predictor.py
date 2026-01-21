@@ -168,14 +168,19 @@ class ARIMAPredictor(BasePredictor):
                     if order is not None and len(order) == 3:
                         p, _, q = order
                         if p == 0 and q == 0:
-                            self._mode = ARIMAPredictor.Mode.LOG1P
-                            # Rebuild modeling series in log-space
-                            self.data_buffer = [math.log1p(v) for v in self._raw_buffer]
-                            self.model = pmdarima.auto_arima(
-                                self.data_buffer,
+                            # Build log buffer/model in locals and only swap on success
+                            log_buffer = [math.log1p(v) for v in self._raw_buffer]
+                            log_model = pmdarima.auto_arima(
+                                log_buffer,
                                 suppress_warnings=True,
                                 error_action="ignore",
                             )
+
+                            # Swap mode + model + buffer atomically
+                            self._mode = ARIMAPredictor.Mode.LOG1P
+                            self.data_buffer = log_buffer
+                            self.model = log_model
+
                             order2 = getattr(self.model, "order", None)
                             seasonal_order2 = getattr(
                                 self.model, "seasonal_order", None
