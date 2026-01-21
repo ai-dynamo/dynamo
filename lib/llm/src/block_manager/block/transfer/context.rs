@@ -15,48 +15,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 // ============================================================================
-// CUDA Pool Buffer Cleanup Guard
-// ============================================================================
-
-/// RAII guard for CUDA pool buffers that frees them back to the pool on drop.
-/// Used to defer buffer cleanup until after event synchronization.
-pub struct CudaPoolBufferGuard {
-    src_buffer: u64,
-    dst_buffer: u64,
-    stream: usize,  // Store as usize to make it Send
-    pool: Arc<CudaMemPool>,
-}
-
-impl CudaPoolBufferGuard {
-    pub fn new(src_buffer: u64, dst_buffer: u64, stream: CUstream, pool: Arc<CudaMemPool>) -> Self {
-        Self {
-            src_buffer,
-            dst_buffer,
-            stream: stream as usize,
-            pool,
-        }
-    }
-}
-
-impl Drop for CudaPoolBufferGuard {
-    fn drop(&mut self) {
-        tracing::debug!(
-            "Freeing CUDA pool buffers after event sync: src=0x{:x}, dst=0x{:x}",
-            self.src_buffer,
-            self.dst_buffer
-        );
-
-        let stream = self.stream as CUstream;
-        if let Err(e) = self.pool.free_async(self.src_buffer, stream) {
-            tracing::error!("Failed to free src buffer from CUDA pool: {}", e);
-        }
-        if let Err(e) = self.pool.free_async(self.dst_buffer, stream) {
-            tracing::error!("Failed to free dst buffer from CUDA pool: {}", e);
-        }
-    }
-}
-
-// ============================================================================
 // Legacy: Pinned Buffer Resource for Old Pooling (to be removed)
 // ============================================================================
 
@@ -222,7 +180,7 @@ pub struct TransferContext {
     // LEGACY: Old pinned buffer pool (to be removed after migration)
     pinned_buffer_pool: Option<SyncPinnedBufferPool>,
 
-    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>, Option<CudaPoolBufferGuard>)>,
+    cuda_event_tx: mpsc::UnboundedSender<(CudaEvent, oneshot::Sender<()>)>,
     cuda_event_worker: Option<JoinHandle<()>>,
     cancel_token: CancellationToken,
 }
@@ -235,7 +193,7 @@ impl TransferContext {
         config: Option<PoolConfig>,
     ) -> Self {
         let (cuda_event_tx, cuda_event_rx) =
-            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>, Option<CudaPoolBufferGuard>)>();
+            mpsc::unbounded_channel::<(CudaEvent, oneshot::Sender<()>)>();
 
         let cancel_token = CancellationToken::new();
 
@@ -389,7 +347,7 @@ impl TransferContext {
     }
 
     fn setup_cuda_event_worker(
-        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>, Option<CudaPoolBufferGuard>)>,
+        mut cuda_event_rx: mpsc::UnboundedReceiver<(CudaEvent, oneshot::Sender<()>)>,
         cancel_token: CancellationToken,
     ) -> JoinHandle<()> {
         std::thread::spawn(move || {
@@ -401,13 +359,11 @@ impl TransferContext {
             runtime.block_on(async move {
                 loop {
                     tokio::select! {
-                        Some((event, tx, cleanup_guard)) = cuda_event_rx.recv() => {
+                        Some((event, tx)) = cuda_event_rx.recv() => {
                             if let Err(e) = event.synchronize() {
                                 tracing::error!("Error synchronizing CUDA event: {}", e);
                             }
                             let _ = tx.send(());
-                            // cleanup_guard is dropped here, freeing buffers back to pool
-                            drop(cleanup_guard);
                         }
                         _ = cancel_token.cancelled() => {
                             break;
@@ -436,21 +392,13 @@ impl TransferContext {
     }
 
     pub fn cuda_event(&self, tx: oneshot::Sender<()>) -> Result<(), TransferError> {
-        self.cuda_event_with_cleanup(tx, None)
-    }
-
-    pub fn cuda_event_with_cleanup(
-        &self,
-        tx: oneshot::Sender<()>,
-        cleanup: Option<CudaPoolBufferGuard>,
-    ) -> Result<(), TransferError> {
         let event = self
             .stream
             .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
             .map_err(|e| TransferError::ExecutionError(e.to_string()))?;
 
         self.cuda_event_tx
-            .send((event, tx, cleanup))
+            .send((event, tx))
             .map_err(|_| TransferError::ExecutionError("CUDA event worker exited.".into()))?;
         Ok(())
     }
