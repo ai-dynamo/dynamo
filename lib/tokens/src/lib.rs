@@ -123,7 +123,10 @@ impl PositionalSequenceHash {
             1 => (16, 46), // 2 + 16 + 46 = 64
             2 => (24, 38), // 2 + 24 + 38 = 64
             3 => (31, 31), // 2 + 31 + 31 = 64
-            _ => panic!("Invalid mode: {}", mode),
+            _ => unreachable!(
+                "Invalid mode {} when encoding PositionalSequenceHash; mode must be 0, 1, 2, or 3",
+                mode
+            ),
         };
 
         // Create masks for extracting the relevant bits
@@ -150,7 +153,10 @@ impl PositionalSequenceHash {
             1 => (16, 46),
             2 => (24, 38),
             3 => (31, 31),
-            _ => unreachable!("Invalid mode in stored PSH"),
+            _ => unreachable!(
+                "Invalid mode {} in PositionalSequenceHash - value may be corrupted",
+                mode
+            ),
         };
 
         // Create masks
@@ -304,42 +310,39 @@ impl PositionalLineageHash {
             0 => (8, 59, 59),  // 2 + 8 + 59 + 59 = 128
             1 => (16, 55, 55), // 2 + 16 + 55 + 55 = 128
             2 => (24, 51, 51), // 2 + 24 + 51 + 51 = 128
-            _ => panic!("Invalid mode: {}", mode),
+            _ => unreachable!(
+                "Invalid mode {} in PositionalLineageHash; mode must be 0, 1, or 2",
+                mode
+            ),
+        }
+    }
+}
+
+impl PositionalLineageHash {
+    fn format_impl(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let position = self.position();
+        let current_hash = self.current_hash_fragment();
+        let current_hash_b58 = bs58::encode(current_hash.to_be_bytes()).into_string();
+
+        if position == 0 {
+            write!(f, "{}:{}", position, current_hash_b58)
+        } else {
+            let parent_hash = self.parent_hash_fragment();
+            let parent_hash_b58 = bs58::encode(parent_hash.to_be_bytes()).into_string();
+            write!(f, "{}:{}:{}", position, current_hash_b58, parent_hash_b58)
         }
     }
 }
 
 impl std::fmt::Debug for PositionalLineageHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let position = self.position();
-        let current_hash = self.current_hash_fragment();
-        let current_hash_b58 = bs58::encode(current_hash.to_be_bytes()).into_string();
-
-        if position == 0 {
-            // Position 0: don't show parent hash
-            write!(f, "{}:{}", position, current_hash_b58)
-        } else {
-            let parent_hash = self.parent_hash_fragment();
-            let parent_hash_b58 = bs58::encode(parent_hash.to_be_bytes()).into_string();
-            write!(f, "{}:{}:{}", position, current_hash_b58, parent_hash_b58)
-        }
+        self.format_impl(f)
     }
 }
 
 impl std::fmt::Display for PositionalLineageHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let position = self.position();
-        let current_hash = self.current_hash_fragment();
-        let current_hash_b58 = bs58::encode(current_hash.to_be_bytes()).into_string();
-
-        if position == 0 {
-            // Position 0: don't show parent hash
-            write!(f, "{}:{}", position, current_hash_b58)
-        } else {
-            let parent_hash = self.parent_hash_fragment();
-            let parent_hash_b58 = bs58::encode(parent_hash.to_be_bytes()).into_string();
-            write!(f, "{}:{}:{}", position, current_hash_b58, parent_hash_b58)
-        }
+        self.format_impl(f)
     }
 }
 
@@ -2338,7 +2341,11 @@ mod tests {
         // Mode 3: position fits in 31 bits (16777216 <= pos < 2147483648)
         let position_mode3 = 100_000_000u64;
         let psh_mode3 = PositionalSequenceHash::new(seq_hash, position_mode3, block_hash);
-        assert_eq!(psh_mode3.mode(), 3, "Position 100,000,000 should use mode 3");
+        assert_eq!(
+            psh_mode3.mode(),
+            3,
+            "Position 100,000,000 should use mode 3"
+        );
         assert_eq!(psh_mode3.position(), position_mode3);
         assert_eq!(psh_mode3.sequence_hash(), seq_hash);
         // Local block hash truncated to 31 bits in mode 3
