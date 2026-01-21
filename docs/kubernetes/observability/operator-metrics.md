@@ -93,7 +93,7 @@ All metrics use the `dynamo_operator` namespace prefix.
 
 ```promql
 # P95 reconciliation duration by resource type
-histogram_quantile(0.95, 
+histogram_quantile(0.95,
   sum by (resource_type, le) (
     rate(dynamo_operator_reconcile_duration_seconds_bucket[5m])
   )
