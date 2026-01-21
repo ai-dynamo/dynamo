@@ -292,18 +292,13 @@ impl MemoryDescriptor for Arc<dyn NixlMemory + Send + Sync> {
 // Extension trait for ergonomic API
 // =============================================================================
 
-/// Extension trait providing ergonomic `.registered()` method for NIXL registration.
+/// Extension trait providing ergonomic `.register()` method for NIXL registration.
 ///
 /// This trait is automatically implemented for all types that implement both
 /// `MemoryDescriptor` and `NixlCompatible`. Import this trait to use the
 /// method syntax:
 ///
-/// ```ignore
-/// use dynamo_memory::prelude::*;
 ///
-/// let storage = DeviceStorage::new(device, size)?;
-/// let registered = storage.registered(&agent, None)?;
-/// ```
 pub trait NixlRegisterExt: MemoryDescriptor + NixlCompatible + Sized {
     /// Get this memory as NIXL-registered.
     ///
