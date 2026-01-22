@@ -571,6 +571,14 @@ pub(crate) mod tests {
         fn offload_priority(&self) -> Option<u64> {
             Some(self.priority as u64)
         }
+
+        fn with_priority(&self, priority: u32) -> Self {
+            Self {
+                priority,
+                returned_tick: self.returned_tick,
+                acquired_tick: self.acquired_tick,
+            }
+        }
     }
 
     type TestPriorityKey = PriorityKey<TestMetadata>;
