@@ -294,6 +294,25 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
     }
 }
 
+impl<R: RequestKey> ConnectorSlotManager<R> {
+    /// Ensure a slot exists on the worker's scheduler before transfers start.
+    /// This sends a CreateSlot message through the transfer engine, which will
+    /// be forwarded to the worker's scheduler.
+    ///
+    /// This fixes the race condition where transfers complete before the worker
+    /// slot is created, which previously caused is_complete() to return true
+    /// for missing slots.
+    pub fn ensure_scheduler_slot(&self, request_id: &R) -> Result<(), SlotError> {
+        tracing::debug!(
+            request_id = %request_id,
+            "ensuring scheduler slot exists before transfers start"
+        );
+        self.xfer_tx
+            .send(LocalTransferRequest::CreateSlot(request_id.to_string()))
+            .map_err(|_| SlotError::InvalidOperation("transfer engine closed".to_string()))
+    }
+}
+
 impl<R: RequestKey> Drop for ConnectorSlotManager<R> {
     fn drop(&mut self) {
         if let Some(task) = self._transfer_engine_handle.take() {
