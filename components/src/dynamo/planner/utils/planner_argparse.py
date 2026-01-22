@@ -101,19 +101,49 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--load-predictor",
         default=SLAPlannerDefaults.load_predictor,
-        help="Load predictor type",
+        help="Load predictor type (constant, arima, kalman, prophet)",
     )
     parser.add_argument(
-        "--load-prediction-window-size",
+        "--load-predictor-log1p",
+        action="store_true",
+        default=SLAPlannerDefaults.load_predictor_log1p,
+        help="Model log1p(y) instead of y in the selected load predictor (ARIMA/Kalman/Prophet)",
+    )
+    parser.add_argument(
+        "--prophet-window-size",
         type=int,
-        default=SLAPlannerDefaults.load_prediction_window_size,
-        help="Load prediction window size",
+        default=SLAPlannerDefaults.prophet_window_size,
+        help="Prophet history window size",
     )
     parser.add_argument(
         "--load-predictor-warmup-trace",
         type=str,
         default=None,
         help="Optional path to a mooncake-style JSONL trace file used to warm up load predictors before observing live traffic",
+    )
+    parser.add_argument(
+        "--kalman-q-level",
+        type=float,
+        default=SLAPlannerDefaults.kalman_q_level,
+        help="Kalman process noise for level (higher = more responsive)",
+    )
+    parser.add_argument(
+        "--kalman-q-trend",
+        type=float,
+        default=SLAPlannerDefaults.kalman_q_trend,
+        help="Kalman process noise for trend (higher = faster trend changes)",
+    )
+    parser.add_argument(
+        "--kalman-r",
+        type=float,
+        default=SLAPlannerDefaults.kalman_r,
+        help="Kalman measurement noise (lower = remember less / react more to new measurements)",
+    )
+    parser.add_argument(
+        "--kalman-min-points",
+        type=int,
+        default=SLAPlannerDefaults.kalman_min_points,
+        help="Minimum number of points before Kalman predictor returns forecasts",
     )
     parser.add_argument(
         "--metric-pulling-prometheus-endpoint",
