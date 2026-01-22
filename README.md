@@ -239,6 +239,9 @@ You can pass any sglang flags directly to this worker, see https://docs.sglang.a
 
 ## TensorRT-LLM
 
+> [!Important]
+> **Use `pip`, not `uv`** for TRT-LLM installation. TensorRT-LLM requires `--extra-index-url https://pypi.nvidia.com` to download wheels, and has dependencies that `uv` doesn't support.
+
 It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for running the TensorRT-LLM engine.
 
 > [!Note]
@@ -251,9 +254,9 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 
 ### Install prerequisites
 
-```
+```bash
 # Optional step: Only required for non-container installations. The PyTorch 25.10 container already includes PyTorch 2.9.0 with CUDA 13.0.
-uv pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
+pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
 
 sudo apt-get -y install libopenmpi-dev
 
@@ -266,12 +269,10 @@ sudo apt-get -y install libzmq3-dev
 
 ### After installing the pre-requisites above, install Dynamo
 
-```
+```bash
+# IMPORTANT: Use pip (not uv) with --extra-index-url
 pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo[trtllm]
 ```
-
-> [!Note]
-> We use `pip` instead of `uv` here because `tensorrt-llm` has a URL-based git dependency (`etcd3`) that `uv` does not currently support.
 
 Run the backend/worker like this:
 
