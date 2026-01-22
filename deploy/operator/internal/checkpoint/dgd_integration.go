@@ -326,6 +326,95 @@ func InjectCheckpointSignalVolumeMount(container *corev1.Container) {
 	})
 }
 
+// InjectPodInfoVolume adds a Downward API volume for pod identity and DGD info.
+// This is critical for CRIU checkpoint/restore scenarios where environment variables
+// contain stale values from the checkpoint source pod. The Downward API files
+// always reflect the current pod's identity and DGD configuration.
+func InjectPodInfoVolume(podSpec *corev1.PodSpec) {
+	// Check if volume already exists
+	for _, v := range podSpec.Volumes {
+		if v.Name == consts.PodInfoVolumeName {
+			return
+		}
+	}
+
+	podSpec.Volumes = append(podSpec.Volumes, corev1.Volume{
+		Name: consts.PodInfoVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			DownwardAPI: &corev1.DownwardAPIVolumeSource{
+				Items: []corev1.DownwardAPIVolumeFile{
+					// Pod identity fields
+					{
+						Path: "pod_name",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: consts.PodInfoFieldPodName,
+						},
+					},
+					{
+						Path: "pod_uid",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: consts.PodInfoFieldPodUID,
+						},
+					},
+					{
+						Path: "pod_namespace",
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: consts.PodInfoFieldPodNamespace,
+						},
+					},
+					// DGD info from annotations (for CRIU restore)
+					{
+						Path: consts.PodInfoFileDynNamespace,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + consts.AnnotationDynNamespace + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynComponent,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + consts.AnnotationDynComponent + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynParentDGDName,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + consts.AnnotationDynParentDGDName + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynParentDGDNS,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + consts.AnnotationDynParentDGDNS + "']",
+						},
+					},
+					{
+						Path: consts.PodInfoFileDynDiscoveryBackend,
+						FieldRef: &corev1.ObjectFieldSelector{
+							FieldPath: "metadata.annotations['" + consts.AnnotationDynDiscoveryBackend + "']",
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+// InjectPodInfoVolumeMount adds the Downward API volume mount to a container.
+func InjectPodInfoVolumeMount(container *corev1.Container) {
+	// Check if mount already exists
+	for _, m := range container.VolumeMounts {
+		if m.Name == consts.PodInfoVolumeName {
+			return
+		}
+	}
+
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      consts.PodInfoVolumeName,
+		MountPath: consts.PodInfoMountPath,
+		ReadOnly:  true,
+	})
+}
+
 // InjectCheckpointIntoPodSpec injects checkpoint configuration into a pod spec.
 // This is the single entry point for ALL checkpoint-related pod modifications:
 // 1. Command/Args transformation - moves Command to Args to respect image ENTRYPOINT
@@ -464,6 +553,13 @@ func InjectCheckpointIntoPodSpec(
 	// to match the checkpoint job's mount namespace for CRIU compatibility
 	InjectCheckpointSignalVolume(podSpec, checkpointConfig)
 	InjectCheckpointSignalVolumeMount(mainContainer)
+
+	// Inject Downward API volume for pod identity after CRIU restore
+	// CRIU preserves environment variables from checkpoint time, so pod identity
+	// env vars (POD_NAME, POD_UID, POD_NAMESPACE) contain stale values.
+	// The Dynamo runtime reads from /etc/podinfo/ files first to get correct identity.
+	InjectPodInfoVolume(podSpec)
+	InjectPodInfoVolumeMount(mainContainer)
 
 	// Inject checkpoint environment variables (for all storage types)
 	InjectCheckpointEnvVars(mainContainer, info, checkpointConfig)

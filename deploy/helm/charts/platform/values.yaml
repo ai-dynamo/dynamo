@@ -68,11 +68,11 @@ dynamo-operator:
       # Container image configuration for the operator manager
       image:
         # -- Official NVIDIA Dynamo operator image repository
-        repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
+        repository: "nvcr.io/nvidian/dynamo-dev/schwinns-dynamo-operator"
         # -- Image tag (leave empty to use chart default)
-        tag: ""
+        tag: "82675da"
         # -- Image pull policy - when to pull the image
-        pullPolicy: IfNotPresent
+        pullPolicy: Always
 
       # Command line arguments for the operator manager
       args:
@@ -82,7 +82,8 @@ dynamo-operator:
         - --metrics-bind-address=127.0.0.1:8080
 
   # -- Secrets for pulling private container images
-  imagePullSecrets: []
+  imagePullSecrets:
+    - name: ngc-secret
 
   # Core Dynamo platform configuration
   dynamo:

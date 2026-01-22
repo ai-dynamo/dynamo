@@ -311,6 +311,22 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			},
 		)
 
+		// Add checkpoint PVC volume and mount for mount namespace consistency with restore pods
+		// CRIU requires the exact same mount layout between checkpoint and restore
+		if r.Config.Checkpoint.Storage.PVC.PVCName != "" {
+			pvcName := r.Config.Checkpoint.Storage.PVC.PVCName
+			basePath := r.Config.Checkpoint.Storage.PVC.BasePath
+			if basePath == "" {
+				basePath = consts.CheckpointBasePath
+			}
+			checkpoint.InjectCheckpointVolume(&podTemplate.Spec, pvcName)
+			checkpoint.InjectCheckpointVolumeMount(mainContainer, basePath)
+		}
+
+		// Add Downward API volume for pod identity (mount namespace consistency with restore pods)
+		checkpoint.InjectPodInfoVolume(&podTemplate.Spec)
+		checkpoint.InjectPodInfoVolumeMount(mainContainer)
+
 		// Override probes for checkpoint mode
 		// Checkpoint jobs need different probe behavior than regular worker pods:
 		// - Readiness: Wait for model to load before checkpoint

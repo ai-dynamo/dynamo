@@ -41,12 +41,13 @@ storage:
 daemonset:
   # Container image
   image:
-    repository: jmancuso768/cr-daemonset
-    tag: 0048462e524016a6d2ee51600b2a7360fc47a1d7
-    pullPolicy: IfNotPresent
+    repository: nvcr.io/nvidian/dynamo-dev/schwinns-criu
+    tag: criu-agent-82675da
+    pullPolicy: Always
   
   # Image pull secrets
-  imagePullSecrets: []
+  imagePullSecrets:
+    - name: ngc-secret
   
   # Resource limits and requests
   resources:
@@ -64,6 +65,9 @@ daemonset:
   # Tolerations for GPU nodes
   tolerations:
     - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+    - key: dedicated
       operator: Exists
       effect: NoSchedule
   

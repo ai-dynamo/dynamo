@@ -155,6 +155,31 @@ const (
 	CheckpointBasePath         = "/checkpoints"
 	CheckpointSignalHostPath   = "/var/lib/dynamo-checkpoint/signals"
 	CheckpointSignalMountPath  = "/checkpoint-signal"
+
+	// PodInfo volume for Downward API (critical for CRIU restore)
+	// After CRIU restore, environment variables contain stale values from checkpoint pod.
+	// The Downward API files at /etc/podinfo always have current pod identity.
+	PodInfoVolumeName = "podinfo"
+	PodInfoMountPath  = "/etc/podinfo"
+
+	// Downward API field paths
+	PodInfoFieldPodName      = "metadata.name"
+	PodInfoFieldPodUID       = "metadata.uid"
+	PodInfoFieldPodNamespace = "metadata.namespace"
+
+	// Downward API file names for DGD annotations
+	PodInfoFileDynNamespace        = "dyn_namespace"
+	PodInfoFileDynComponent        = "dyn_component"
+	PodInfoFileDynParentDGDName    = "dyn_parent_dgd_name"
+	PodInfoFileDynParentDGDNS      = "dyn_parent_dgd_namespace"
+	PodInfoFileDynDiscoveryBackend = "dyn_discovery_backend"
+
+	// Annotation keys for DGD info (exposed via Downward API)
+	AnnotationDynNamespace        = "nvidia.com/dyn-namespace"
+	AnnotationDynComponent        = "nvidia.com/dyn-component"
+	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
+	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
+	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
 )
 
 type MultinodeDeploymentType string
