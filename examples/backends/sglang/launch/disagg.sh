@@ -57,17 +57,17 @@ DYNAMO_PID=$!
 # Use DYN_SYSTEM_PORT1/2 instead of *_PREFILL/*_DECODE env names so test
 # harnesses can set one simple pair for disaggregated deployments.
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-python3 -m dynamo.sglang \
-  --model-path silence09/DeepSeek-R1-Small-2layers \
-  --served-model-name silence09/DeepSeek-R1-Small-2layers \
+CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.sglang \
+  --model-path $HOME/proj/models/qwen3-0.6b \
+  --served-model-name model \
   --page-size 16 \
   --tp 2 --dp-size 2 --enable-dp-attention \
   --load-balance-method round_robin \
   --trust-remote-code \
   --disaggregation-mode prefill \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port 13345 \
   --host 0.0.0.0 \
-  --port 40000 \
+  --port 10000 \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}" &
@@ -76,15 +76,22 @@ PREFILL_PID=$!
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
 CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
-  --model-path silence09/DeepSeek-R1-Small-2layers \
-  --served-model-name silence09/DeepSeek-R1-Small-2layers \
+  --model-path $HOME/proj/models/qwen3-0.6b \
+  --served-model-name model \
   --page-size 16 \
   --prefill-round-robin-balance \
   --tp 2 --dp-size 2 --enable-dp-attention \
+  --load-balance-method round_robin \
   --trust-remote-code \
   --disaggregation-mode decode \
-  --disaggregation-bootstrap-port 12345 \
+  --disaggregation-bootstrap-port 13346 \
   --host 0.0.0.0 \
+  --port 11000 \
   --disaggregation-transfer-backend nixl \
   --enable-metrics \
   "${TRACE_ARGS[@]}"
+
+
+  #--cuda-graph-bs 4096 2048 1024 512 64 8 \
+  #--load-watch-interval 2 \
+  #--max-reqs-per-dp-worker 4096 \

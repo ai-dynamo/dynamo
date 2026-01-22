@@ -623,6 +623,11 @@ def main():
             if multi_gpu_mode:
                 worker_env["CUDA_VISIBLE_DEVICES"] = gpu_sets[worker_name]
 
+            if os.environ.get("SGLANG_DISAGG_DECODE_START_DELAY_S"):
+                worker_env["SGLANG_DISAGG_DECODE_START_DELAY_S"] = os.environ[
+                    "SGLANG_DISAGG_DECODE_START_DELAY_S"
+                ]
+
             # decode2 uses single GPU (no DP attention), others use DP attention
             if multi_gpu_mode and worker_name == "decode2":
                 worker_dp_args = decode2_args
