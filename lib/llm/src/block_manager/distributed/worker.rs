@@ -17,7 +17,7 @@ use crate::block_manager::{
     connector::scheduler::TransferSchedulerClient,
     layout::{LayoutType, nixl::SerializedNixlBlockLayout},
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
-    storage::{DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
+    storage::{DeviceAllocator, DeviceStorage, nixl::NixlStorage, DiskAllocator, PinnedAllocator, torch::TorchTensor},
 };
 
 use derive_builder::Builder;
@@ -59,13 +59,21 @@ impl WorkerState {
 // to all other ranks (followers).
 
 /// Handler for MLA worker metadata requests (returns empty metadata)
-struct MlaWorkerMetadataHandler;
+struct MlaWorkerMetadataHandler {
+    device_id: i32,
+}
+
+impl MlaWorkerMetadataHandler {
+    fn new(device_id: i32) -> Self {
+        Self { device_id }
+    }
+}
 
 #[async_trait]
 impl Handler for MlaWorkerMetadataHandler {
     async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
         let payload = bincode::serde::encode_to_vec(
-            &(),
+            &self.device_id,
             bincode::config::standard(),
         )?;
         message
@@ -117,13 +125,47 @@ impl Handler for MlaLeaderMetadataHandler {
     }
 }
 
+struct MlaTransferWorker {
+    device_blocks: Arc<Mutex<Option<Vec<Block<NixlStorage, locality::Local, BasicMetadata>>>>>,
+}
+
+impl MlaTransferWorker {
+    fn new(device_layout_rx: oneshot::Receiver<SerializedNixlBlockLayout>) -> Self {
+        let device_blocks = Arc::new(Mutex::new(None));
+        let device_blocks_clone = device_blocks.clone();
+
+        tokio::spawn(async move {
+            let layout: SerializedNixlBlockLayout = device_layout_rx.await.unwrap();
+
+            let layout = layout.deserialize().unwrap();
+
+            let device_blocks = layout_to_blocks::<_, BasicMetadata>(layout, 0, 0).unwrap();
+
+            device_blocks_clone.lock().await.replace(device_blocks);
+            tracing::info!("MLA Follower: Successfully received device layout from leader");
+        });
+
+        MlaTransferWorker {
+            device_blocks,
+        }
+    }
+}
+
+#[async_trait]
+impl Handler for MlaTransferWorker {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        // TODO
+        message.ack().await?;
+        Ok(())
+    }
+}
 /// MLA Leader: Broadcasts the serialized device layout to all follower ranks
 /// This should be called by device 0 when MLA mode is enabled.
 pub async fn mla_leader_broadcast_layout(
     serialized_layout: SerializedNixlBlockLayout,
     num_workers: usize,
     cancel_token: CancellationToken,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ZmqActiveMessageLeader> {
     let pub_url = format!("tcp://0.0.0.0:{}", MLA_LEADER_PUB_PORT);
     let ack_url = format!("tcp://0.0.0.0:{}", MLA_LEADER_ACK_PORT);
 
@@ -135,27 +177,28 @@ pub async fn mla_leader_broadcast_layout(
 
     let leader_sockets = new_leader_sockets(&pub_url, &ack_url)?;
 
-    let _leader = ZmqActiveMessageLeader::new_with_handshake(
+    let leader = ZmqActiveMessageLeader::new_with_handshake(
         leader_sockets,
         num_workers,
         Duration::from_secs(300), // 5 minute timeout for MLA handshake
         cancel_token,
-        move |_workers: &[()]| {
+        move |_worker_device_ids: &[i32]| {
             serialized_layout.clone()
-        },
+        }
     )
     .await?;
 
     tracing::info!("MLA Leader: All workers acknowledged receiving the device layout");
 
-    Ok(())
+    Ok(leader)
 }
 
 /// MLA Follower: Receives the serialized device layout from the leader (device 0)
 /// This should be called by non-device-0 ranks when MLA mode is enabled.
 pub async fn mla_follower_receive_layout(
+    device_id: i32,
     cancel_token: CancellationToken,
-) -> anyhow::Result<SerializedNixlBlockLayout> {
+) -> anyhow::Result<ZmqActiveMessageWorker> {
     let sub_url = format!("tcp://127.0.0.1:{}", MLA_LEADER_PUB_PORT);
     let push_url = format!("tcp://127.0.0.1:{}", MLA_LEADER_ACK_PORT);
 
@@ -173,7 +216,7 @@ pub async fn mla_follower_receive_layout(
 
     handlers.insert(
         ZMQ_WORKER_METADATA_MESSAGE.to_string(),
-        Arc::new(MlaWorkerMetadataHandler) as Arc<dyn Handler>,
+        Arc::new(MlaWorkerMetadataHandler::new(device_id)) as Arc<dyn Handler>,
     );
 
     handlers.insert(
@@ -188,33 +231,19 @@ pub async fn mla_follower_receive_layout(
         Arc::new(MlaPingHandler) as Arc<dyn Handler>,
     );
 
-    let _zmq_worker = ZmqActiveMessageWorker::new(
+    handlers.insert(
+        ZMQ_MLA_TRANSFER_BLOCKS_MESSAGE.to_string(),
+        Arc::new(MlaTransferWorker::new(layout_rx)) as Arc<dyn Handler>,
+    );
+
+    let zmq_worker = ZmqActiveMessageWorker::new(
         &sub_url,
         &push_url,
         handlers,
         cancel_token.clone(),
     )?;
 
-    tracing::info!("MLA Follower: Waiting for serialized device layout from leader...");
-
-    // Wait for the layout with a timeout
-    tokio::select! {
-        result = layout_rx => {
-            match result {
-                Ok(layout) => {
-                    tracing::info!("MLA Follower: Successfully received device layout from leader");
-                    Ok(layout)
-                }
-                Err(_) => Err(anyhow::anyhow!("MLA Follower: Layout channel closed unexpectedly")),
-            }
-        }
-        _ = tokio::time::sleep(Duration::from_secs(300)) => {
-            Err(anyhow::anyhow!("MLA Follower: Timed out waiting for device layout from leader"))
-        }
-        _ = cancel_token.cancelled() => {
-            Err(anyhow::anyhow!("MLA Follower: Cancelled while waiting for device layout"))
-        }
-    }
+    Ok(zmq_worker)
 }
 
 /// Simple ping handler for MLA followers during handshake
@@ -305,13 +334,57 @@ async fn perform_allocation_and_build_handler(
         Some(pool_config),
     ));
 
-    // device
-    let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
+    let (device_blocks, device_layout) = KvbmWorker::make_layout::<_, BasicMetadata>(
         device_layout,
         transfer_context.nixl_agent().as_ref(),
         0,
         worker_id,
-    )?);
+    )?;
+
+    let device_blocks = Some(device_blocks);
+
+    // MLA optimization: broadcast/receive device layout across ranks
+    // In MLA, KV cache is duplicated across all GPU ranks, so we only need
+    // to create the layout once on device 0 and broadcast it to others.
+    if is_mla_enabled() {
+        tracing::info!(
+            "MLA mode enabled (DYN_KVBM_IS_MLA set), device_id={}",
+            worker_config.device_id,
+        );
+        
+        if worker_config.device_id == 0 {
+
+            let serialized_device_layout = device_layout.serialize()?;
+
+            // Device 0 is the MLA leader - broadcast the serialized layout to followers
+            // num_mla_workers - 1 because device 0 doesn't count as a follower
+            let num_followers = leader_meta.num_workers.saturating_sub(1);
+            
+            tracing::info!(
+                "MLA Leader (device 0): Broadcasting device layout to {} follower(s)",
+                num_followers
+            );
+            
+            let _mla_leader = mla_leader_broadcast_layout(
+                serialized_device_layout,
+                num_followers,
+                worker_config.cancel_token.clone(),
+            )
+            .await?;
+            
+            tracing::info!("MLA Leader (device 0): Successfully broadcast device layout");
+        } else {
+            // Non-device-0 ranks are MLA followers - receive the layout from leader
+            tracing::info!(
+                "MLA Follower (device {}): Receiving device layout from leader (device 0)",
+                worker_config.device_id
+            );
+            
+            // Receive the serialized layout from the MLA leader
+            let _mla_worker = mla_follower_receive_layout(worker_config.device_id as i32, worker_config.cancel_token.clone()).await?;
+        }
+    }
+
     // host
     let host_blocks = if leader_meta.num_host_blocks > 0 {
         let host_allocator = Arc::new(PinnedAllocator::default());
@@ -324,7 +397,7 @@ async fn perform_allocation_and_build_handler(
             transfer_context.nixl_agent().as_ref(),
             1,
             worker_id,
-        )?)
+        )?.0)
     } else {
         None
     };
@@ -340,7 +413,7 @@ async fn perform_allocation_and_build_handler(
             transfer_context.nixl_agent().as_ref(),
             2,
             worker_id,
-        )?)
+        )?.0)
     } else {
         None
     };
@@ -439,53 +512,6 @@ impl Handler for LeaderMetadataHandler {
                 }
             }
         };
-
-        // MLA optimization: broadcast/receive device layout across ranks
-        // In MLA, KV cache is duplicated across all GPU ranks, so we only need
-        // to create the layout once on device 0 and broadcast it to others.
-        if is_mla_enabled() {
-            tracing::info!(
-                "MLA mode enabled (DYN_KVBM_IS_MLA set), device_id={}",
-                self.worker_config.device_id,
-            );
-            
-            if self.worker_config.device_id == 0 {
-
-                let serialized_device_layout = dev_layout.serialize()?;
-
-                // Device 0 is the MLA leader - broadcast the serialized layout to followers
-                // num_mla_workers - 1 because device 0 doesn't count as a follower
-                let num_followers = leader_meta.num_workers.saturating_sub(1);
-                
-                tracing::info!(
-                    "MLA Leader (device 0): Broadcasting device layout to {} follower(s)",
-                    num_followers
-                );
-                
-                mla_leader_broadcast_layout(
-                    serialized_device_layout,
-                    num_followers,
-                    self.worker_config.cancel_token.clone(),
-                )
-                .await?;
-                
-                tracing::info!("MLA Leader (device 0): Successfully broadcast device layout");
-            } else {
-                // Non-device-0 ranks are MLA followers - receive the layout from leader
-                tracing::info!(
-                    "MLA Follower (device {}): Receiving device layout from leader (device 0)",
-                    self.worker_config.device_id
-                );
-                
-                // Receive the serialized layout from the MLA leader
-                let _received_layout = mla_follower_receive_layout(self.worker_config.cancel_token.clone()).await?;
-                
-                tracing::info!(
-                    "MLA Follower (device {}): Successfully received device layout.",
-                    self.worker_config.device_id,
-                );
-            }
-        }
 
         // Capture what we need and run allocation in the background.
         let layout_builder = self.layout_builder.clone();
@@ -887,7 +913,7 @@ impl KvbmWorker {
         agent: &Option<NixlAgent>,
         block_set_idx: usize,
         worker_id: usize,
-    ) -> anyhow::Result<Vec<Block<S, locality::Local, M>>> {
+    ) -> anyhow::Result<(Vec<Block<S, locality::Local, M>>, Arc<dyn NixlLayout<StorageType = S>>)> {
         // Register with NIXL, if applicable.
         if let Some(agent) = agent {
             layout.nixl_register(agent, None)?;
@@ -895,8 +921,10 @@ impl KvbmWorker {
 
         // Convert the layout into blocks.
         let layout: Arc<dyn NixlLayout<StorageType = S>> = Arc::from(layout);
-        let blocks = layout_to_blocks::<_, M>(layout, block_set_idx, worker_id as u64)?;
-        Ok(blocks)
+
+        // Convert the layout into blocks.
+        let blocks = layout_to_blocks::<_, M>(layout.clone(), block_set_idx, worker_id as u64)?;
+        Ok((blocks, layout))
     }
 
     #[allow(clippy::too_many_arguments)]
