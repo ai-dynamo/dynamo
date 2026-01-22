@@ -7,6 +7,7 @@
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   frontend -> frontend EPP image build
 #
 # Filters for coverage only (no CI triggered):
 #   docs, examples, ignore, planner
@@ -118,3 +119,9 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
+
+frontend:
+  - 'container/Dockerfile'
+  - 'container/build.sh'
+  - 'deploy/inference-gateway/**'
+  - '.github/workflows/build-frontend-image.yaml'
