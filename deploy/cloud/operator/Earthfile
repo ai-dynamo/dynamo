@@ -45,7 +45,7 @@ test:
     SAVE ARTIFACT cover.out
 
 docker:
-    ARG DOCKER_SERVER=my-registry
+    ARG DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo
     ARG IMAGE_TAG=latest
     ARG IMAGE_SUFFIX=dynamo-operator
     FROM nvcr.io/nvidia/distroless/go:v3.1.13
