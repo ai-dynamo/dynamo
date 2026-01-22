@@ -249,6 +249,7 @@ impl ConnectorLeader {
                     host_block_count,
                     disk_block_count,
                     object: object_config.clone(),
+                    parallelism: self.runtime.config().cache.parallelism,
                 };
                 futures.push(worker.initialize(leader_config.clone())?);
             }

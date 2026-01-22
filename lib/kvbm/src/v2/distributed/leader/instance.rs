@@ -26,8 +26,8 @@ use crate::{
 use crate::v2::physical::manager::{LayoutHandle, SerializedLayout};
 
 use super::{
-    super::parallelism::{ParallelWorker, ReplicatedWorker},
     super::worker::Worker,
+    super::workers::{ParallelWorkers, SpmdParallelWorkers},
     AsyncSessionResult,
     FindMatchesOptions,
     FindMatchesResult,
@@ -92,7 +92,7 @@ pub struct InstanceLeader {
 
     /// Parallel worker abstraction wrapping the workers.
     /// Used for RDMA transfers with proper handle mapping storage.
-    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 
     /// Map of active sessions (session_id -> message channel).
     sessions: Arc<DashMap<SessionId, OnboardSessionTx>>,
@@ -256,8 +256,8 @@ impl InstanceLeaderBuilder {
         // - we could also use an enum and match as the number of types will be limited
 
         // Create parallel worker if workers are provided
-        let parallel_worker: Option<Arc<dyn ParallelWorker>> = if !self.workers.is_empty() {
-            Some(Arc::new(ReplicatedWorker::new(
+        let parallel_worker: Option<Arc<dyn ParallelWorkers>> = if !self.workers.is_empty() {
+            Some(Arc::new(SpmdParallelWorkers::new(
                 self.workers.to_vec(),
                 events.clone(),
                 runtime.clone(),
@@ -361,7 +361,7 @@ impl InstanceLeader {
     ///
     /// The parallel worker fans out operations to all workers and aggregates results.
     /// It implements `ObjectBlockOps` for coordinated object storage uploads.
-    pub fn parallel_worker(&self) -> Option<Arc<dyn ParallelWorker>> {
+    pub fn parallel_worker(&self) -> Option<Arc<dyn ParallelWorkers>> {
         self.parallel_worker.clone()
     }
 

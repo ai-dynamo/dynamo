@@ -39,7 +39,7 @@ mod service;
 pub use client::NovaWorkerClient;
 pub use service::{NovaWorkerService, NovaWorkerServiceBuilder};
 
-use super::direct::DirectWorker;
+use super::DirectWorker;
 use super::*;
 use crate::physical::layout::LayoutConfig;
 use crate::physical::transfer::TransferOptions;

@@ -969,6 +969,7 @@ impl Scheduler {
     }
 
     /// Calculate how many tokens to prefill for a request.
+    #[expect(unused)]
     fn calculate_prefill_tokens(&self, request: &SchedulerRequest, current_total: usize) -> usize {
         let remaining_budget = self
             .config

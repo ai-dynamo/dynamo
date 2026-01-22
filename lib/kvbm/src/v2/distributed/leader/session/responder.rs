@@ -11,7 +11,7 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::parallelism::ParallelWorker,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::workers::ParallelWorkers,
         logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
     },
 };
@@ -38,7 +38,7 @@ pub struct ResponderSession {
     requester: InstanceId,
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
-    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
     transport: Arc<MessageTransport>,
     // Held blocks using BlockHolder for RAII semantics
     // Blocks are automatically released when the session drops
@@ -54,7 +54,7 @@ impl ResponderSession {
         requester: InstanceId,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
-        parallel_worker: Option<Arc<dyn ParallelWorker>>,
+        parallel_worker: Option<Arc<dyn ParallelWorkers>>,
         transport: Arc<MessageTransport>,
     ) -> Self {
         Self {

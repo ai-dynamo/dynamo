@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::physical::transfer::{TransferCompleteNotification, TransferOptions};
-use crate::v2::distributed::parallelism::ParallelWorker;
+use crate::v2::distributed::workers::ParallelWorkers;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::{BlockId, InstanceId, SequenceHash};
 
@@ -67,7 +67,7 @@ pub struct SessionHandle {
     state_rx: watch::Receiver<SessionStateSnapshot>,
 
     // RDMA transfer support
-    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 }
 
 impl SessionHandle {
@@ -94,7 +94,7 @@ impl SessionHandle {
     }
 
     /// Add RDMA support to this handle.
-    pub fn with_rdma_support(mut self, parallel_worker: Arc<dyn ParallelWorker>) -> Self {
+    pub fn with_rdma_support(mut self, parallel_worker: Arc<dyn ParallelWorkers>) -> Self {
         self.parallel_worker = Some(parallel_worker);
         self
     }

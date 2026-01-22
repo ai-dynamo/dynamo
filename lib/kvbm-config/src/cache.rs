@@ -3,13 +3,45 @@
 
 //! Cache tier configuration for KVBM.
 //!
-//! Defines configuration for G2 (host/pinned memory) and G3 (disk) cache tiers.
+//! Defines configuration for G2 (host/pinned memory) and G3 (disk) cache tiers,
+//! as well as the parallelism mode for distributed workers.
+//!
 //! The leader uses this configuration to coordinate cache tier creation on workers.
 
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+/// Parallelism strategy for KV cache across workers.
+///
+/// This determines how KV blocks are distributed and transferred across
+/// multiple workers in a distributed inference setup.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelismMode {
+    /// Tensor parallel: each worker has a shard of each KV block.
+    ///
+    /// This is the standard approach for tensor-parallel inference where
+    /// attention heads are split across workers. Each worker stores and
+    /// transfers only its portion of each KV block.
+    ///
+    /// All workers have G1, G2, and G3 tiers. Operations execute on all
+    /// workers simultaneously (SPMD).
+    #[default]
+    TensorParallel,
+
+    /// Replicated data: all workers have full KV blocks (MLA scenario).
+    ///
+    /// In MLA (Multi-head Latent Attention) architectures, KV blocks are
+    /// replicated rather than sharded. Only rank 0 has G2/G3 storage;
+    /// data is broadcast to other ranks after loading to G1.
+    ///
+    /// This reduces storage requirements on non-rank-0 workers and is
+    /// suitable when the model's KV representation is the same across
+    /// all attention heads.
+    ReplicatedData,
+}
 
 /// Host cache configuration (G2 tier - pinned CPU memory).
 ///
@@ -104,7 +136,9 @@ impl DiskCacheConfig {
 
 /// Top-level cache configuration.
 ///
-/// Groups host (G2) and disk (G3) cache configurations together.
+/// Groups host (G2) and disk (G3) cache configurations together,
+/// plus the parallelism mode for distributed workers.
+///
 /// Use Figment profiles to configure different cache settings for leader vs worker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Validate)]
 pub struct CacheConfig {
@@ -117,6 +151,15 @@ pub struct CacheConfig {
     /// Optional - only configure if disk caching is needed.
     #[validate(nested)]
     pub disk: Option<DiskCacheConfig>,
+
+    /// Parallelism mode for distributed workers.
+    ///
+    /// - `TensorParallel` (default): Each worker has a shard of each KV block
+    /// - `ReplicatedData`: Only rank 0 has G2/G3; data is broadcast on load
+    ///
+    /// Can be set via env var: `KVBM_CACHE_PARALLELISM=tensor_parallel|replicated_data`
+    #[serde(default)]
+    pub parallelism: ParallelismMode,
 }
 
 #[cfg(test)]
@@ -182,5 +225,47 @@ mod tests {
             Some(PathBuf::from("/mnt/nvme/kv_cache"))
         );
         assert!(config.is_enabled());
+    }
+
+    #[test]
+    fn test_parallelism_mode_default() {
+        let mode = ParallelismMode::default();
+        assert_eq!(mode, ParallelismMode::TensorParallel);
+    }
+
+    #[test]
+    fn test_parallelism_mode_serde() {
+        // Test serialization
+        let tp = ParallelismMode::TensorParallel;
+        let json = serde_json::to_string(&tp).unwrap();
+        assert_eq!(json, "\"tensor_parallel\"");
+
+        let rd = ParallelismMode::ReplicatedData;
+        let json = serde_json::to_string(&rd).unwrap();
+        assert_eq!(json, "\"replicated_data\"");
+
+        // Test deserialization
+        let mode: ParallelismMode = serde_json::from_str("\"tensor_parallel\"").unwrap();
+        assert_eq!(mode, ParallelismMode::TensorParallel);
+
+        let mode: ParallelismMode = serde_json::from_str("\"replicated_data\"").unwrap();
+        assert_eq!(mode, ParallelismMode::ReplicatedData);
+    }
+
+    #[test]
+    fn test_cache_config_with_parallelism() {
+        let config = CacheConfig {
+            host: HostCacheConfig::default(),
+            disk: None,
+            parallelism: ParallelismMode::ReplicatedData,
+        };
+
+        assert_eq!(config.parallelism, ParallelismMode::ReplicatedData);
+    }
+
+    #[test]
+    fn test_cache_config_default_parallelism() {
+        let config = CacheConfig::default();
+        assert_eq!(config.parallelism, ParallelismMode::TensorParallel);
     }
 }

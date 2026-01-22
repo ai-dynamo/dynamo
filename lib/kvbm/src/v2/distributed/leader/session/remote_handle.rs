@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::physical::transfer::TransferCompleteNotification;
-use crate::v2::distributed::parallelism::ParallelWorker;
+use crate::v2::distributed::workers::ParallelWorkers;
 use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::{BlockId, InstanceId, SequenceHash};
 
@@ -85,7 +85,7 @@ pub struct RemoteSessionHandle {
     /// Parallel worker abstraction that handles RDMA transfers and metadata mapping.
     /// This encapsulates all parallelism knowledge - the handle doesn't need to know
     /// about individual workers or handle mappings.
-    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 }
 
 /// Current known state of the remote session.
@@ -127,7 +127,7 @@ impl RemoteSessionHandle {
     ///
     /// # Arguments
     /// * `parallel_worker` - Parallel worker for executing RDMA transfers
-    pub fn with_rdma_support(mut self, parallel_worker: Arc<dyn ParallelWorker>) -> Self {
+    pub fn with_rdma_support(mut self, parallel_worker: Arc<dyn ParallelWorkers>) -> Self {
         self.parallel_worker = Some(parallel_worker);
         self
     }

@@ -154,13 +154,13 @@ impl NixlAgent {
     pub fn require_backend(&self, backend: &str) -> Result<()> {
         let backend_upper = backend.to_uppercase();
         if self.has_backend(&backend_upper) {
-            Ok(())
+            return Ok(());
         } else {
-            anyhow::bail!(
+            return anyhow::bail!(
                 "Operation requires {} backend, but it was not initialized. Available backends: {:?}",
                 backend_upper,
                 self.available_backends
-            )
+            );
         }
     }
 }

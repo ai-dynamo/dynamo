@@ -213,52 +213,74 @@ impl PendingWorkerState {
             None
         };
 
-        // 6. Create G2/G3 layouts based on leader config (G2 is REQUIRED)
-        tracing::info!(
-            host_block_count = config.host_block_count,
-            disk_block_count = ?config.disk_block_count,
-            "Creating G2/G3 layouts via configure_additional_layouts()"
-        );
+        // 6. Create G2/G3 layouts based on leader config and parallelism mode
+        //
+        // For ReplicatedData mode: only rank 0 gets G2/G3 layouts
+        // For TensorParallel mode: all workers get G2/G3 layouts
+        let skip_g2_g3 = config.parallelism == dynamo_kvbm_config::ParallelismMode::ReplicatedData
+            && config.rank > 0;
 
-        let mut host_layout = self.layout_config.clone();
-        host_layout.num_blocks = config.host_block_count;
-        let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
-            .with_config(host_layout)
-            .fully_contiguous()
-            .allocate_pinned(Some(self.cuda_device_id as u32))
-            .build()?;
+        let (g2_handle, g3_handle) = if skip_g2_g3 {
+            tracing::info!(
+                rank = config.rank,
+                parallelism = ?config.parallelism,
+                "Skipping G2/G3 layout creation (ReplicatedData mode, rank > 0)"
+            );
+            (None, None)
+        } else {
+            tracing::info!(
+                host_block_count = config.host_block_count,
+                disk_block_count = ?config.disk_block_count,
+                parallelism = ?config.parallelism,
+                "Creating G2/G3 layouts via configure_additional_layouts()"
+            );
 
-        let g2_handle = transfer_manager.register_layout(host_layout)?;
-        created_layouts.push(LogicalLayoutHandle::G2);
-
-        // todo: we need to get a path from the the config and create a unique file based on the nova instance_id
-        let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
-            let mut disk_layout = self.layout_config.clone();
-            disk_layout.num_blocks = disk_blocks;
-            let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
-                .with_config(disk_layout)
+            let mut host_layout = self.layout_config.clone();
+            host_layout.num_blocks = config.host_block_count;
+            let host_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
+                .with_config(host_layout)
                 .fully_contiguous()
-                .allocate_disk(Some(PathBuf::from(format!(
-                    "/tmp/kvbm_g3_{}.bin",
-                    runtime.nova.instance_id()
-                ))))
+                .allocate_pinned(Some(self.cuda_device_id as u32))
                 .build()?;
 
-            let handle = transfer_manager.register_layout(disk_layout)?;
-            created_layouts.push(LogicalLayoutHandle::G3);
-            Some(handle)
-        } else {
-            None
+            let g2_handle = transfer_manager.register_layout(host_layout)?;
+            created_layouts.push(LogicalLayoutHandle::G2);
+
+            // todo: we need to get a path from the the config and create a unique file based on the nova instance_id
+            let g3_handle = if let Some(disk_blocks) = config.disk_block_count {
+                let mut disk_layout = self.layout_config.clone();
+                disk_layout.num_blocks = disk_blocks;
+                let disk_layout = PhysicalLayoutBuilder::new(nixl_agent.clone())
+                    .with_config(disk_layout)
+                    .fully_contiguous()
+                    .allocate_disk(Some(PathBuf::from(format!(
+                        "/tmp/kvbm_g3_{}.bin",
+                        runtime.nova.instance_id()
+                    ))))
+                    .build()?;
+
+                let handle = transfer_manager.register_layout(disk_layout)?;
+                created_layouts.push(LogicalLayoutHandle::G3);
+                Some(handle)
+            } else {
+                None
+            };
+
+            (Some(g2_handle), g3_handle)
         };
 
         // 7. Build DirectWorker with all handles via builder pattern
         let mut builder = DirectWorker::builder()
             .manager(transfer_manager.clone())
             .g1_handle(g1_handle)
-            .g2_handle(g2_handle)
             .rank(config.rank);
 
-        // optional g3 handle
+        // Optional G2 handle (not present for ReplicatedData rank > 0)
+        if let Some(g2) = g2_handle {
+            builder = builder.g2_handle(g2);
+        }
+
+        // Optional G3 handle
         if let Some(g3) = g3_handle {
             builder = builder.g3_handle(g3);
         }

@@ -5,10 +5,11 @@
 name = "dynamo-kvbm-kernels"
 # Note: Not using workspace = true so this crate can be built from standalone
 # workspaces (like lib/bindings/kvbm) that don't inherit main workspace metadata
-version = "0.7.0"
-edition = "2024"
-authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
-license = "Apache-2.0"
+# using the top-level workspace for now.
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 repository = "https://github.com/ai-dynamo/dynamo.git"
 build = "build.rs"
 

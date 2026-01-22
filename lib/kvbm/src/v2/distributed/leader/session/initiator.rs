@@ -13,7 +13,7 @@ use crate::{
     physical::transfer::TransferOptions,
     v2::{
         BlockId, G2, G3, InstanceId, SequenceHash, distributed::object::ObjectBlockOps,
-        distributed::parallelism::ParallelWorker, logical::LogicalLayoutHandle,
+        distributed::workers::ParallelWorkers, logical::LogicalLayoutHandle,
         physical::manager::LayoutHandle,
     },
 };
@@ -97,7 +97,7 @@ pub struct InitiatorSession {
     mode: StagingMode,
     g2_manager: Arc<BlockManager<G2>>,
     g3_manager: Option<Arc<BlockManager<G3>>>,
-    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
     transport: Arc<MessageTransport>,
     status_tx: watch::Sender<OnboardingStatus>,
 
@@ -138,7 +138,7 @@ impl InitiatorSession {
         mode: StagingMode,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
-        parallel_worker: Option<Arc<dyn ParallelWorker>>,
+        parallel_worker: Option<Arc<dyn ParallelWorkers>>,
         transport: Arc<MessageTransport>,
         status_tx: watch::Sender<OnboardingStatus>,
         all_g2_blocks: Arc<Mutex<Option<Vec<ImmutableBlock<G2>>>>>,
@@ -1196,7 +1196,7 @@ impl InitiatorSession {
         let parallel_worker = self
             .parallel_worker
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G4 load"))?;
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorkers required for G4 load"))?;
 
         // Mark hashes as pending load
         for hash in &won_hashes {

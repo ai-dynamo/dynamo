@@ -542,6 +542,8 @@ pub(crate) fn try_execute_operational_kernel(
         cuda_result::memcpy_htod_async(op_ptrs_device_raw, op_ptrs_slice, stream.cu_stream())?;
     }
 
+    let host_data_copied = stream.record_event(None)?;
+
     // Launch kernel
     let status = unsafe {
         dynamo_kvbm_kernels::operational_copy(
@@ -571,6 +573,8 @@ pub(crate) fn try_execute_operational_kernel(
             status
         ));
     }
+
+    host_data_copied.synchronize()?;
 
     Ok(())
 }

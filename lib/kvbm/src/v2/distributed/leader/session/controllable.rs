@@ -17,7 +17,7 @@ use crate::{
     logical::{blocks::ImmutableBlock, manager::BlockManager},
     physical::transfer::TransferOptions,
     v2::{
-        BlockId, G2, G3, InstanceId, SequenceHash, distributed::parallelism::ParallelWorker,
+        BlockId, G2, G3, InstanceId, SequenceHash, distributed::workers::ParallelWorkers,
         logical::LogicalLayoutHandle, physical::manager::LayoutHandle,
     },
 };
@@ -68,7 +68,7 @@ pub struct ControllableSession {
     transport: Arc<MessageTransport>,
 
     // Parallel worker for G3->G2 staging (fans out to all workers)
-    parallel_worker: Option<Arc<dyn ParallelWorker>>,
+    parallel_worker: Option<Arc<dyn ParallelWorkers>>,
 
     // Managers
     g2_manager: Arc<BlockManager<G2>>,
@@ -94,7 +94,7 @@ impl ControllableSession {
         worker_g2_handles: Vec<LayoutHandle>,
         g2_manager: Arc<BlockManager<G2>>,
         g3_manager: Option<Arc<BlockManager<G3>>>,
-        parallel_worker: Option<Arc<dyn ParallelWorker>>,
+        parallel_worker: Option<Arc<dyn ParallelWorkers>>,
         transport: Arc<MessageTransport>,
         rx: mpsc::Receiver<RemoteSessionMessage>,
         options: ControllableSessionOptions,
@@ -320,7 +320,7 @@ impl ControllableSession {
         let parallel_worker = self
             .parallel_worker
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("ParallelWorker required for G3->G2 staging"))?;
+            .ok_or_else(|| anyhow::anyhow!("ParallelWorkers required for G3->G2 staging"))?;
 
         if self.g3_blocks.is_empty() {
             self.staging_complete = true;
