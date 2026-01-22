@@ -306,10 +306,16 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
 
 # Install Rust/Cargo/Maturin directly in dev stage.
 # This avoids dependency on wheel_builder stage, enabling --remote-runtime builds.
+# Guard maturin install: use venv pip if available, else fall back to system pip3.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
     chmod -R a+rx /usr/local/rustup /usr/local/cargo && \
-    /opt/dynamo/venv/bin/pip install maturin[patchelf] && \
-    cp /opt/dynamo/venv/bin/maturin /usr/local/bin/maturin && \
+    if [ -x /opt/dynamo/venv/bin/pip ]; then \
+        /opt/dynamo/venv/bin/pip install maturin[patchelf] && \
+        cp /opt/dynamo/venv/bin/maturin /usr/local/bin/maturin; \
+    else \
+        pip3 install maturin[patchelf] && \
+        cp $(which maturin) /usr/local/bin/maturin; \
+    fi && \
     chmod +x /usr/local/bin/maturin
 
 # Provide an `uv` binary for SGLang venv creation below.
