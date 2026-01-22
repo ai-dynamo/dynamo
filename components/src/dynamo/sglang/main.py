@@ -439,19 +439,35 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     )
 
 
-    # S3 client for image storage
-    s3_client = None
-    if dynamo_args.diffusion_s3_bucket:
-        try:
-            import boto3
+    # Initialize fsspec filesystems for image storage
+    fs = None
+    fs_url = dynamo_args.diffusion_fs_url
 
-            s3_client = boto3.client("s3")
-            logging.info(f"S3 client initialized for bucket: {dynamo_args.diffusion_s3_bucket}")
-        except ImportError:
-            logging.warning(
-                "boto3 not available. S3 uploads will fail. "
-                "Install with: pip install boto3"
-            )
+    # Initialize primary filesystem
+    if not fs_url:
+        raise ValueError("--diffusion-fs-url is required for diffusion workers")
+
+    try:
+        import fsspec
+
+        # Extract protocol from URL (s3://, gs://, az://, file://)
+        protocol = fs_url.split("://")[0] if "://" in fs_url else "file"
+
+        # Initialize filesystem, configure fsspec using json configuration file
+        #  - json configuration file: ~/.config/fsspec/s3.json
+        #  - environment variables i.e. FSSPEC_S3_SECRET
+        fs = fsspec.filesystem(protocol)
+        logging.info(f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})")
+    except ImportError:
+        logging.warning(
+            "fsspec not available. Filesystem uploads will fail. "
+            "Install with: pip install fsspec"
+        )
+    except Exception as e:
+        logging.warning(
+            f"Failed to initialize fsspec filesystem for {fs_url}: {e}. "
+            "Filesystem uploads may fail."
+        )
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
@@ -463,7 +479,7 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     # Could add custom metrics for images/sec, steps/sec later
 
     handler = DiffusionWorkerHandler(
-        component, generator, config, publisher=None, s3_client=s3_client
+        component, generator, config, publisher=None, fs=fs,
     )
 
     # Create proper health check payload that sends a minimal diffusion request

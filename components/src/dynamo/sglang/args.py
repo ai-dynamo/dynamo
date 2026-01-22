@@ -130,12 +130,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": False,
         "help": "Run as diffusion worker for image generation",
     },
-    "diffusion-s3-bucket": {
-        "flags": ["--diffusion-s3-bucket"],
+    "diffusion-fs-url": {
+        "flags": ["--diffusion-fs-url"],
         "type": str,
-        "default": os.environ.get("DIFFUSION_S3_BUCKET"),
-        "help": "S3 bucket for storing generated images (required for URL response format)",
-    }
+        "default": os.environ.get("DIFFUSION_FS_URL"),
+        "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
+    },
 }
 
 
@@ -169,7 +169,6 @@ class DynamoArgs:
 
     # diffusion language model options (derived from server_args.dllm_algorithm)
     diffusion_worker: bool = False
-
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option

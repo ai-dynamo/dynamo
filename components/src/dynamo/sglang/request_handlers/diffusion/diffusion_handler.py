@@ -5,13 +5,13 @@ import asyncio
 import base64
 import io
 import logging
+import os
 import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
 import torch
 from PIL import Image
-from sglang.multimodal_gen import DiffGenerator
 
 from dynamo._core import Component, Context
 from dynamo.sglang.args import Config
@@ -35,7 +35,7 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
         generator: Any,  # DiffGenerator, not sgl.Engine
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
-        s3_client: Any = None,  # For S3 uploads
+        fs: Any = None,  # fsspec.AbstractFileSystem for primary storage
     ):
         """Initialize diffusion worker handler.
 
@@ -44,16 +44,17 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
             generator: The SGLang DiffGenerator instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for diffusion currently).
-            s3_client: Optional S3 client for image storage.
+            fs: Optional fsspec filesystem for primary image storage.
         """
         # Call parent constructor for common setup
         super().__init__(component, config, publisher)
 
         # Diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
-        self.s3_client = s3_client
-        self.s3_bucket = config.dynamo_args.diffusion_s3_bucket
-        logger.info("Diffusion worker handler initialized")
+        self.fs = fs
+        self.fs_url = config.dynamo_args.diffusion_fs_url
+
+        logger.info(f"Diffusion worker handler initialized with fs_url={self.fs_url}, fallback_dir={self.fallback_dir}")
 
     def cleanup(self) -> None:
         """Cleanup generator resources"""
@@ -118,15 +119,14 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
             #     logger.info(f"Request cancelled after generation: {context.id()}")
             #     return
 
-            # Upload to S3 and get URLs
+            # Upload to filesystem and get URLs
+            # Use user ID from request if available, otherwise fallback to context ID
+            user_id = req.user if req.user else context.id()
+
             image_data = []
             for img in images:
                 if req.response_format == "url":
-                    if self.s3_client is None or self.s3_bucket is None:
-                        logger.warning("S3 client not implemented, using local URL")
-                        url = f"https://localhost:8000/not-implemented/storage/of_files/{uuid.uuid4()}.png"
-                    else:
-                        url = await self._upload_to_s3(img, context.id())
+                    url = await self._upload_to_fs(img, user_id, context.id())
                     image_data.append(ImageData(url=url))
                 else:  # b64_json
                     b64 = self._encode_base64(img)
@@ -193,8 +193,6 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
 
                     if isinstance(img, np.ndarray):
                         # Convert numpy array to PIL Image then to bytes
-                        if Image is None:
-                            raise RuntimeError("PIL/Pillow required for numpy array conversion")
                         pil_img = Image.fromarray(img)
                         buf = io.BytesIO()
                         pil_img.save(buf, format="PNG")
@@ -214,20 +212,88 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
         # TODO: allowed sizes, max 1024? configurable?
         return int(w), int(h)
 
-    async def _upload_to_s3(self, image_bytes: bytes, request_id: str) -> str:
-        """Upload image to S3 and return public URL"""
-        if self.s3_client is None or self.s3_bucket is None:
-            raise RuntimeError("S3 client and bucket not configured")
+    async def _upload_to_fs(self, image_bytes: bytes, user_id: str, request_id: str) -> str:
+        """Upload image to filesystem and return URL.
 
-        key = f"generations/{request_id}/{uuid.uuid4()}.png"
-        await asyncio.to_thread(
-            self.s3_client.put_object,
-            Bucket=self.s3_bucket,
-            Key=key,
-            Body=image_bytes,
-            ContentType="image/png",
+        Uses per-user storage path:
+            users/{user_id}/generations/{request_id}/{image_uuid}.png
+
+        Args:
+            image_bytes: Image data as bytes.
+            user_id: User identifier from request or context.
+            request_id: Request context ID.
+
+        Returns:
+            Public URL for the uploaded image.
+        """
+        image_uuid = str(uuid.uuid4())
+        image_filename = f"{image_uuid}.png"
+
+        # Per-user storage path
+        storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
+
+        try:
+            full_path = f"{self.fs_url.rstrip('/')}/{storage_path}"
+            # Use pipe() for writing bytes (standard fsspec API)
+            await asyncio.to_thread(self.fs.pipe, full_path, image_bytes)
+            logger.debug(f"Uploaded to primary storage: {full_path}")
+            return self._generate_url(full_path, storage_path)
+        except Exception as e:
+            logger.warning(f"Primary storage upload failed: {e}, trying fallback")
+
+        # Both failed
+        raise RuntimeError(
+            f"Failed to upload image to ({self.fs_url}) storage"
         )
-        return f"https://{self.s3_bucket}.s3.amazonaws.com/{key}"
+
+    def _generate_url(self, full_path: str, storage_path: str) -> str:
+        """Generate public URL based on filesystem type.
+
+        Args:
+            full_path: Full filesystem path.
+            storage_path: Relative storage path (users/{user_id}/...).
+
+        Returns:
+            Public URL string.
+        """
+        # If no fs_url configured, return fallback path
+        if not self.fs_url:
+            return f"file://{full_path}"
+
+        # Parse filesystem type from URL
+        if self.fs_url.startswith("s3://"):
+            # Extract bucket and construct S3 URL
+            # s3://bucket/path -> https://bucket.s3.amazonaws.com/path
+            parts = self.fs_url.replace("s3://", "").split("/", 1)
+            bucket = parts[0]
+            base_path = parts[1] if len(parts) > 1 else ""
+            # Try to get region from environment or use default
+            region = os.environ.get("AWS_REGION", "us-east-1")
+            if region != "us-east-1":
+                return f"https://{bucket}.s3.{region}.amazonaws.com/{base_path}/{storage_path}"
+            return f"https://{bucket}.s3.amazonaws.com/{base_path}/{storage_path}"
+        elif self.fs_url.startswith("gs://"):
+            # GCS URL format: gs://bucket/path -> https://storage.googleapis.com/bucket/path
+            bucket_path = self.fs_url.replace("gs://", "")
+            return f"https://storage.googleapis.com/{bucket_path}/{storage_path}"
+        elif self.fs_url.startswith("az://") or self.fs_url.startswith("abfss://"):
+            # Azure Blob Storage
+            # az://container@account/path -> https://account.blob.core.windows.net/container/path
+            if self.fs_url.startswith("az://"):
+                # az://container@account/path format
+                az_path = self.fs_url.replace("az://", "")
+                if "@" in az_path:
+                    container_account, path = az_path.split("/", 1)
+                    container, account = container_account.split("@")
+                    return f"https://{account}.blob.core.windows.net/{container}/{path}/{storage_path}"
+            return full_path  # Return as-is if format unclear
+        elif self.fs_url.startswith("file://"):
+            # Local filesystem
+            return full_path
+        else:
+            # Unknown filesystem type, return path as-is
+            logger.warning(f"Unknown filesystem type for URL generation: {self.fs_url}")
+            return full_path
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""
