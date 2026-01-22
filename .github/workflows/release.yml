@@ -307,18 +307,20 @@ jobs:
             echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
           done
 
-          # Copy frontend images (amd64 and arm64)
+          # Copy frontend images from ECR (built by build-frontend-image.yaml)
+          # Frontend images are pushed to ECR with tag: ${{ github.sha }}-frontend-{arch}
           echo ""
-          echo "Copying frontend images..."
+          echo "Copying frontend images from ECR..."
           FRONTEND_IMAGES=()
           for ARCH in "${ARCHITECTURES[@]}"; do
-            SOURCE_TAG="${IMAGE_PREFIX}-frontend-${ARCH}"
+            # Source from ECR (built by build-frontend-image.yaml workflow)
+            SOURCE_TAG="${{ github.sha }}-frontend-${ARCH}"
             SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
             NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
             NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_TAG}"
 
             echo "----------------------------------------"
-            echo "Copying: dynamo-frontend:${NGC_TAG}"
+            echo "Copying: dynamo-frontend:${NGC_TAG} (from ECR)"
 
             if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
               echo "⚠️  Warning: Failed to copy dynamo-frontend (${ARCH}), skipping..."

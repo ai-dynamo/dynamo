@@ -71,24 +71,6 @@ runs:
       shell: bash
       run: |
         docker system prune -af
-    - name: Install build dependencies (for frontend build)
-      if: inputs.target == 'frontend'
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "Installing system dependencies for frontend build..."
-        # Install build-essential (provides cc/gcc linker) and protobuf-compiler
-        sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-        # Install Rust (cargo + rustc)
-        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-        # Make cargo available to later steps
-        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-    - name: Install cbindgen (for frontend build)
-      if: inputs.target == 'frontend'
-      shell: bash
-      run: |
-        set -euo pipefail
-        cargo install cbindgen
     - name: Build image
       id: build
       shell: bash
