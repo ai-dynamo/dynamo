@@ -229,6 +229,15 @@ func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	return ready, reason
 }
 
+// GetState returns "ready" or "not_ready" based on conditions
+func (d *DynamoComponentDeployment) GetState() string {
+	ready, _ := d.IsReady()
+	if ready {
+		return commonconsts.ResourceStateReady
+	}
+	return commonconsts.ResourceStateNotReady
+}
+
 func (s *DynamoComponentDeployment) GetServiceStatuses() map[string]ServiceReplicaStatus {
 	if s.Status.Service == nil {
 		return map[string]ServiceReplicaStatus{}

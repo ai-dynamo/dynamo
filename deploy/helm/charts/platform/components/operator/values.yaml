@@ -52,6 +52,7 @@ controllerManager:
     - --upstream=http://127.0.0.1:8080/
     - --logtostderr=true
     - --v=0
+    - --ignore-paths=/metrics
     containerSecurityContext:
       allowPrivilegeEscalation: false
       capabilities:
@@ -127,6 +128,7 @@ dynamo:
 #imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
 metricsService:
+  enabled: true
   ports:
   - name: https
     port: 8443

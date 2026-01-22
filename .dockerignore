@@ -42,3 +42,37 @@
 container/Dockerfile*
 .venv
 .venv-docs
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Rust
+target/
+
+# IDE/Editor
+.idea/
+*.swp
+*.swo
+.vscode/
+.build/
+
+# Tests & Linters
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.ruff_cache/
+.mypy_cache/
+
+# Docs
+docs/_build/
+
+# AI
+.cursor/
+.claude/

@@ -62,6 +62,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/etcd"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/namespace_scope"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rbac"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secret"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/secrets"
@@ -339,6 +340,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Initialize observability metrics
+	setupLog.Info("Initializing observability metrics")
+	observability.InitMetrics()
+
 	// Initialize namespace scope mechanism
 	var leaseManager *namespace_scope.LeaseManager
 	var leaseWatcher *namespace_scope.LeaseWatcher
@@ -408,10 +413,14 @@ func main() {
 		}
 
 		setupLog.Info("Namespace scope marker lease watcher started successfully")
+
+		// Pass leaseWatcher to controller config for namespace exclusion filtering
+		ctrlConfig.ExcludedNamespaces = leaseWatcher
 	}
 
-	// Pass leaseWatcher to controller config for namespace exclusion filtering
-	ctrlConfig.ExcludedNamespaces = leaseWatcher
+	// Start resource counter background goroutine (after ExcludedNamespaces is set)
+	setupLog.Info("Starting resource counter")
+	go observability.StartResourceCounter(mainCtx, mgr.GetClient(), ctrlConfig.ExcludedNamespaces)
 
 	// Detect orchestrators availability using discovery client
 	setupLog.Info("Detecting Grove availability...")
