@@ -395,20 +395,20 @@ pub struct CWorkerQueryResult {
 /// Result of tokenization (C-compatible)
 #[repr(C)]
 pub struct CTokenizedResult {
-    /// Pointer to token IDs array (caller must free with router_handles_free_tokenized)
+    /// Pointer to token IDs array (caller must free with free_tokenized)
     pub token_ids: *mut u32,
     /// Number of tokens
     pub token_count: usize,
-    /// Formatted prompt string (caller must free with router_handles_free_tokenized)
+    /// Formatted prompt string (caller must free with free_tokenized)
     pub formatted_prompt: *mut c_char,
 }
 
 /// Complete routing result for a chat completion request (C-compatible)
 ///
-/// This is the result of `router_handles_route_chat_request` which combines
+/// This is the result of `route_chat_request` which combines
 /// tokenization and worker selection in a single call.
 ///
-/// Caller must free `token_ids` using `router_handles_free_routing_result`.
+/// Caller must free `token_ids` using `free_routing_result`.
 #[repr(C)]
 pub struct CRoutingResult {
     /// Whether disaggregated mode is active
@@ -503,9 +503,9 @@ const DEFAULT_PREFILL_TIMEOUT_SECS: u32 = 30;
 ///
 /// # Safety
 /// - All string parameters must be valid null-terminated C strings
-/// - The returned handle must be freed with `router_handles_destroy`
+/// - The returned handle must be freed with `destroy`
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_create(
+pub unsafe extern "C" fn create_routers(
     namespace: *const c_char,
     component: *const c_char,
     model_name: *const c_char,
@@ -721,7 +721,7 @@ pub unsafe extern "C" fn router_handles_create(
 /// - `token_ids` must point to `token_count` valid u32 values
 /// - `out_result` must be a valid pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_query_decode(
+pub unsafe extern "C" fn query_decode(
     handle: RouterHandlesPtr,
     token_ids: *const u32,
     token_count: usize,
@@ -772,14 +772,14 @@ pub unsafe extern "C" fn router_handles_query_decode(
 /// Query optimal prefill worker for a request (disaggregated mode only).
 ///
 /// This queries the prefill router to find the best prefill worker.
-/// Only call this when `router_handles_is_disaggregated()` returns true.
+/// Only call this when `is_disaggregated()` returns true.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
 /// - `token_ids` must point to `token_count` valid u32 values
 /// - `out_worker_id` must be a valid pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_query_prefill(
+pub unsafe extern "C" fn query_prefill(
     handle: RouterHandlesPtr,
     token_ids: *const u32,
     token_count: usize,
@@ -822,7 +822,7 @@ pub unsafe extern "C" fn router_handles_query_prefill(
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_is_disaggregated(handle: RouterHandlesPtr) -> bool {
+pub unsafe extern "C" fn is_disaggregated(handle: RouterHandlesPtr) -> bool {
     if handle.is_null() {
         return false;
     }
@@ -834,7 +834,7 @@ pub unsafe extern "C" fn router_handles_is_disaggregated(handle: RouterHandlesPt
 /// Add a request to the router's bookkeeping after worker selection.
 ///
 /// This registers the request with the KvRouter's scheduler for tracking active blocks
-/// and managing prefill/decode lifecycle. Call this after `router_handles_query` returns
+/// and managing prefill/decode lifecycle. Call this after `query_decode` returns
 /// worker IDs and before sending the request to the worker.
 ///
 /// # Safety
@@ -842,7 +842,7 @@ pub unsafe extern "C" fn router_handles_is_disaggregated(handle: RouterHandlesPt
 /// - `request_id` must be a valid null-terminated C string
 /// - `token_ids` must point to at least `token_count` valid u32 values
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_add_request(
+pub unsafe extern "C" fn add_request(
     handle: RouterHandlesPtr,
     request_id: *const c_char,
     token_ids: *const u32,
@@ -894,7 +894,7 @@ pub unsafe extern "C" fn router_handles_add_request(
                 dp_rank = dp_rank,
                 overlap_blocks = overlap_blocks,
                 token_count = tokens.len(),
-                "router_handles_add_request completed"
+                "add_request completed"
             );
         })
         .await
@@ -906,7 +906,7 @@ pub unsafe extern "C" fn router_handles_add_request(
             tracing::warn!(
                 request_id = %request_id_str,
                 timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
-                "router_handles_add_request timed out"
+                "add_request timed out"
             );
             // Return OK to avoid blocking the caller - the operation may still complete
             QueryRouterResult::Ok
@@ -922,7 +922,7 @@ pub unsafe extern "C" fn router_handles_add_request(
 /// - `handle` must be a valid RouterHandles handle
 /// - `request_id` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_mark_prefill_complete(
+pub unsafe extern "C" fn mark_prefill_complete(
     handle: RouterHandlesPtr,
     request_id: *const c_char,
 ) -> QueryRouterResult {
@@ -955,7 +955,7 @@ pub unsafe extern "C" fn router_handles_mark_prefill_complete(
             } else {
                 tracing::debug!(
                     request_id = %request_id_owned,
-                    "router_handles_mark_prefill_complete completed"
+                    "mark_prefill_complete completed"
                 );
             }
         })
@@ -968,7 +968,7 @@ pub unsafe extern "C" fn router_handles_mark_prefill_complete(
             tracing::warn!(
                 request_id = %request_id_str,
                 timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
-                "router_handles_mark_prefill_complete timed out"
+                "mark_prefill_complete timed out"
             );
             QueryRouterResult::Ok
         }
@@ -983,7 +983,7 @@ pub unsafe extern "C" fn router_handles_mark_prefill_complete(
 /// - `handle` must be a valid RouterHandles handle
 /// - `request_id` must be a valid null-terminated C string
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_free_request(
+pub unsafe extern "C" fn free_request(
     handle: RouterHandlesPtr,
     request_id: *const c_char,
 ) -> QueryRouterResult {
@@ -1013,7 +1013,7 @@ pub unsafe extern "C" fn router_handles_free_request(
             } else {
                 tracing::debug!(
                     request_id = %request_id_owned,
-                    "router_handles_free_request completed"
+                    "free_request completed"
                 );
             }
         })
@@ -1026,7 +1026,7 @@ pub unsafe extern "C" fn router_handles_free_request(
             tracing::warn!(
                 request_id = %request_id_str,
                 timeout_secs = BOOKKEEPING_TIMEOUT_SECS,
-                "router_handles_free_request timed out"
+                "free_request timed out"
             );
             QueryRouterResult::Ok
         }
@@ -1039,7 +1039,7 @@ pub unsafe extern "C" fn router_handles_free_request(
 /// - `handle` must be a valid RouterHandles handle or null
 /// - After this call, `handle` must not be used
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_destroy(handle: RouterHandlesPtr) {
+pub unsafe extern "C" fn destroy(handle: RouterHandlesPtr) {
     if !handle.is_null() {
         drop(unsafe { Box::from_raw(handle) });
     }
@@ -1048,15 +1048,15 @@ pub unsafe extern "C" fn router_handles_destroy(handle: RouterHandlesPtr) {
 /// Tokenize a chat completion request using the embedded preprocessor.
 ///
 /// Takes a JSON request, applies the model's chat template, and tokenizes.
-/// The preprocessor is fetched via discovery during `router_handles_create`.
+/// The preprocessor is fetched via discovery during `create`.
 ///
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
 /// - `request_json` must be a valid null-terminated C string containing JSON
 /// - `out_result` must be a valid pointer
-/// - Caller must free the result using `router_handles_free_tokenized`
+/// - Caller must free the result using `free_tokenized`
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_tokenize_chat(
+pub unsafe extern "C" fn tokenize_chat(
     handle: RouterHandlesPtr,
     request_json: *const c_char,
     out_result: *mut CTokenizedResult,
@@ -1145,9 +1145,9 @@ pub unsafe extern "C" fn router_handles_tokenize_chat(
 /// - `handle` must be a valid RouterHandles handle
 /// - `prompt` must be a valid null-terminated C string
 /// - `out_result` must be a valid pointer
-/// - Caller must free the result using `router_handles_free_tokenized`
+/// - Caller must free the result using `free_tokenized`
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_tokenize_raw(
+pub unsafe extern "C" fn tokenize_raw(
     handle: RouterHandlesPtr,
     prompt: *const c_char,
     out_result: *mut CTokenizedResult,
@@ -1213,7 +1213,7 @@ pub unsafe extern "C" fn router_handles_tokenize_raw(
 /// # Safety
 /// - `result` must be a valid pointer to a CTokenizedResult previously returned by tokenize functions
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_free_tokenized(result: *mut CTokenizedResult) {
+pub unsafe extern "C" fn free_tokenized(result: *mut CTokenizedResult) {
     if result.is_null() {
         return;
     }
@@ -1244,7 +1244,7 @@ pub unsafe extern "C" fn router_handles_free_tokenized(result: *mut CTokenizedRe
 /// # Safety
 /// - `handle` must be a valid RouterHandles handle
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_has_preprocessor(handle: RouterHandlesPtr) -> bool {
+pub unsafe extern "C" fn has_preprocessor(handle: RouterHandlesPtr) -> bool {
     if handle.is_null() {
         return false;
     }
@@ -1264,11 +1264,11 @@ pub unsafe extern "C" fn router_handles_has_preprocessor(handle: RouterHandlesPt
 /// 5. Returns all worker IDs and token_ids
 ///
 /// After this call, EPP should:
-/// - Call `router_handles_add_request()` to register the request for bookkeeping
+/// - Call `add_request()` to register the request for bookkeeping
 /// - Set worker ID headers and forward to backend
-/// - Call `router_handles_free_routing_result()` to free the result
+/// - Call `free_routing_result()` to free the result
 ///
-/// Note: `router_handles_add_request()` could be called internally by this function
+/// Note: `add_request()` could be called internally by this function
 /// if a `request_id` parameter were added. Currently kept separate for flexibility.
 ///
 /// # Safety
@@ -1276,7 +1276,7 @@ pub unsafe extern "C" fn router_handles_has_preprocessor(handle: RouterHandlesPt
 /// - `request_json` must be a valid null-terminated C string containing JSON
 /// - `out_result` must be a valid pointer
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_route_chat_request(
+pub unsafe extern "C" fn route_chat_request(
     handle: RouterHandlesPtr,
     request_json: *const c_char,
     out_result: *mut CRoutingResult,
@@ -1418,7 +1418,7 @@ pub unsafe extern "C" fn router_handles_route_chat_request(
 /// # Safety
 /// - `result` must be a valid pointer to a CRoutingResult previously returned by route functions
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn router_handles_free_routing_result(result: *mut CRoutingResult) {
+pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     if result.is_null() {
         return;
     }
