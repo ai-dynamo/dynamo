@@ -257,7 +257,6 @@ def test_deployment(
     dynamo_dynamic_ports,
     num_system_ports,
     predownload_models,
-    image_server,
 ):
     """
     Test dynamo deployments with different configurations.
