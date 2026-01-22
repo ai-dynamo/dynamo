@@ -150,9 +150,7 @@ class VllmBaseWorker:
         self.stats_logger.set_num_gpu_blocks_all(
             vllm_config.cache_config.num_gpu_blocks
         )
-        self.stats_logger.set_request_total_slots_all(
-            vllm_config.scheduler_config.max_num_seqs
-        )
+        # Note: set_request_total_slots_all was removed in metrics refactor (commit 24b4bff05)
         self.stats_logger.init_publish()
 
         # TODO: We start off with a valid endpoint, then we increment it by dp_rank

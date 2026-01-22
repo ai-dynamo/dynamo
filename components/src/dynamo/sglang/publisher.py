@@ -20,6 +20,7 @@ from dynamo.llm import (
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
 )
+from dynamo.prometheus_names import kvstats
 from dynamo.runtime import Component, Endpoint
 from dynamo.sglang.args import Config
 
@@ -81,6 +82,23 @@ class DynamoSglangPublisher:
         # Set default values (can be overridden later if needed)
         self.dp_rank = 0
 
+        # Create Prometheus gauges for kvstats (observability metrics)
+        # These restore the metrics that were removed in the metrics refactor
+        self.kvstats_active_blocks_gauge = component.metrics.create_intgauge(
+            kvstats.ACTIVE_BLOCKS, "Number of active KV cache blocks currently in use"
+        )
+        self.kvstats_total_blocks_gauge = component.metrics.create_intgauge(
+            kvstats.TOTAL_BLOCKS, "Total number of KV cache blocks available"
+        )
+        self.kvstats_gpu_cache_usage_gauge = component.metrics.create_gauge(
+            kvstats.GPU_CACHE_USAGE_PERCENT, "GPU cache usage as a percentage (0.0-1.0)"
+        )
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge = component.metrics.create_gauge(
+            kvstats.GPU_PREFIX_CACHE_HIT_RATE,
+            "GPU prefix cache hit rate as a percentage (0.0-1.0)",
+        )
+        logging.info("Created kvstats Prometheus gauges for observability")
+
         # ZMQ setup for receiving scheduler metrics
         self._ctx = zmq.asyncio.Context()  # type: ignore
         self._sock = get_zmq_socket(
@@ -97,7 +115,16 @@ class DynamoSglangPublisher:
                     if kv_metrics.data_parallel_rank is not None
                     else self.dp_rank
                 )
+                # Publish to NATS for routing (existing behavior)
                 self.metrics_publisher.publish(dp_rank, kv_metrics.kv_active_blocks)
+
+                # Update Prometheus gauges for observability (restored metrics)
+                self.kvstats_active_blocks_gauge.set(kv_metrics.kv_active_blocks)
+                self.kvstats_total_blocks_gauge.set(kv_metrics.kv_total_blocks)
+                self.kvstats_gpu_cache_usage_gauge.set(kv_metrics.gpu_cache_usage_perc)
+                self.kvstats_gpu_prefix_cache_hit_rate_gauge.set(
+                    kv_metrics.gpu_prefix_cache_hit_rate
+                )
             except Exception:
                 logging.exception(
                     "Failed to receive or publish SGLang scheduler metrics"
@@ -107,6 +134,11 @@ class DynamoSglangPublisher:
         """Publish initial dummy metrics to bootstrap the metrics endpoint."""
         logging.info("Sending dummy metrics to initialize")
         self.metrics_publisher.publish(self.dp_rank, 0)
+        # Initialize gauges to 0
+        self.kvstats_active_blocks_gauge.set(0)
+        self.kvstats_total_blocks_gauge.set(0)
+        self.kvstats_gpu_cache_usage_gauge.set(0.0)
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge.set(0.0)
 
     def init_kv_event_publish(self) -> Optional[ZmqKvEventPublisher]:
         """Initialize KV event publisher if configured.

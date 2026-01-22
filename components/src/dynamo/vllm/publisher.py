@@ -10,6 +10,7 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.llm import WorkerMetricsPublisher
+from dynamo.prometheus_names import kvstats
 from dynamo.runtime import Component
 
 
@@ -44,6 +45,24 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self._component = component
         self.dp_rank = dp_rank
         self.num_gpu_block = 1
+
+        # Create Prometheus gauges for kvstats (observability metrics)
+        # These restore the metrics that were removed in the metrics refactor
+        self.kvstats_active_blocks_gauge = component.metrics.create_intgauge(
+            kvstats.ACTIVE_BLOCKS, "Number of active KV cache blocks currently in use"
+        )
+        self.kvstats_total_blocks_gauge = component.metrics.create_intgauge(
+            kvstats.TOTAL_BLOCKS, "Total number of KV cache blocks available"
+        )
+        self.kvstats_gpu_cache_usage_gauge = component.metrics.create_gauge(
+            kvstats.GPU_CACHE_USAGE_PERCENT, "GPU cache usage as a percentage (0.0-1.0)"
+        )
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge = component.metrics.create_gauge(
+            kvstats.GPU_PREFIX_CACHE_HIT_RATE,
+            "GPU prefix cache hit rate as a percentage (0.0-1.0)",
+        )
+        logging.info("Created kvstats Prometheus gauges for observability")
+
         # Schedule async endpoint creation
         self._endpoint_task = asyncio.create_task(self._create_endpoint())
 
@@ -58,6 +77,8 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
     # TODO: Remove this and pass as metadata through shared storage
     def set_num_gpu_block(self, num_blocks):
         self.num_gpu_block = num_blocks
+        # Update total_blocks gauge when it's set
+        self.kvstats_total_blocks_gauge.set(num_blocks)
 
     def record(
         self,
@@ -68,10 +89,31 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         **kwargs,
     ):
         active_decode_blocks = int(self.num_gpu_block * scheduler_stats.kv_cache_usage)
+
+        # Calculate prefix cache hit rate
+        hit_rate = 0.0
+        if scheduler_stats.prefix_cache_stats.queries > 0:
+            hit_rate = (
+                scheduler_stats.prefix_cache_stats.hits
+                / scheduler_stats.prefix_cache_stats.queries
+            )
+
+        # Publish to NATS for routing (existing behavior)
         self.inner.publish(self.dp_rank, active_decode_blocks)
+
+        # Update Prometheus gauges for observability (restored metrics)
+        self.kvstats_active_blocks_gauge.set(active_decode_blocks)
+        self.kvstats_total_blocks_gauge.set(self.num_gpu_block)
+        self.kvstats_gpu_cache_usage_gauge.set(scheduler_stats.kv_cache_usage)
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge.set(hit_rate)
 
     def init_publish(self):
         self.inner.publish(self.dp_rank, 0)
+        # Initialize gauges to 0
+        self.kvstats_active_blocks_gauge.set(0)
+        self.kvstats_total_blocks_gauge.set(self.num_gpu_block)
+        self.kvstats_gpu_cache_usage_gauge.set(0.0)
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge.set(0.0)
 
     def log_engine_initialized(self) -> None:
         pass

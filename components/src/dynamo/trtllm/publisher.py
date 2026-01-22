@@ -34,6 +34,7 @@ import msgpack
 import zmq
 
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.prometheus_names import kvstats
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -281,6 +282,23 @@ class Publisher:
         self.metrics_labels = metrics_labels
         self.enable_local_indexer = enable_local_indexer
 
+        # Create Prometheus gauges for kvstats (observability metrics)
+        # These restore the metrics that were removed in the metrics refactor
+        self.kvstats_active_blocks_gauge = component.metrics.create_intgauge(
+            kvstats.ACTIVE_BLOCKS, "Number of active KV cache blocks currently in use"
+        )
+        self.kvstats_total_blocks_gauge = component.metrics.create_intgauge(
+            kvstats.TOTAL_BLOCKS, "Total number of KV cache blocks available"
+        )
+        self.kvstats_gpu_cache_usage_gauge = component.metrics.create_gauge(
+            kvstats.GPU_CACHE_USAGE_PERCENT, "GPU cache usage as a percentage (0.0-1.0)"
+        )
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge = component.metrics.create_gauge(
+            kvstats.GPU_PREFIX_CACHE_HIT_RATE,
+            "GPU prefix cache hit rate as a percentage (0.0-1.0)",
+        )
+        logging.info("Created kvstats Prometheus gauges for observability")
+
         # The first few kv events from the model engine are always "created" type events.
         # Use these events to capture the max_window_size of the model.
         # When the first event that is not a "created" type is received, the publisher will set this to False to stop processing "created" type events.
@@ -360,6 +378,11 @@ class Publisher:
 
         # Publish initial metrics with 0 active blocks
         self.metrics_publisher.publish(None, 0)
+        # Initialize gauges to 0
+        self.kvstats_active_blocks_gauge.set(0)
+        self.kvstats_total_blocks_gauge.set(0)
+        self.kvstats_gpu_cache_usage_gauge.set(0.0)
+        self.kvstats_gpu_prefix_cache_hit_rate_gauge.set(0.0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -396,11 +419,29 @@ class Publisher:
         stats = self.engine.llm.get_stats_async(timeout=5)
         async for stat in stats:
             kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
+            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
+            alloc_total_blocks = stat["kvCacheStats"]["allocTotalBlocks"]
+            gpu_cache_usage_perc = (
+                alloc_total_blocks / kv_total_blocks if kv_total_blocks > 0 else 0.0
+            )
+            gpu_prefix_cache_hit_rate = stat["kvCacheStats"]["cacheHitRate"]
 
-            logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
+            logging.debug(
+                f"Publishing stats: kv_active_blocks={kv_active_blocks}, "
+                f"kv_total_blocks={kv_total_blocks}, "
+                f"gpu_cache_usage_perc={gpu_cache_usage_perc}, "
+                f"gpu_prefix_cache_hit_rate={gpu_prefix_cache_hit_rate}"
+            )
 
+            # Publish to NATS for routing (existing behavior)
             # TRT-LLM doesn't use data parallelism currently (dp_rank=None)
             self.metrics_publisher.publish(None, kv_active_blocks)
+
+            # Update Prometheus gauges for observability (restored metrics)
+            self.kvstats_active_blocks_gauge.set(kv_active_blocks)
+            self.kvstats_total_blocks_gauge.set(kv_total_blocks)
+            self.kvstats_gpu_cache_usage_gauge.set(gpu_cache_usage_perc)
+            self.kvstats_gpu_prefix_cache_hit_rate_gauge.set(gpu_prefix_cache_hit_rate)
 
         return True
 
