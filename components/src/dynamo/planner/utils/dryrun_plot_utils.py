@@ -31,6 +31,10 @@ def create_dryrun_plot(
     d_thpt: list,
     safe_d_thpt: list,
     output_path: str,
+    warmup_time: list | None = None,
+    warmup_rr: list | None = None,
+    warmup_isl: list | None = None,
+    warmup_osl: list | None = None,
 ) -> None:
     """
     Create a comprehensive dryrun plot with 4 subplots showing various metrics over time.
@@ -50,12 +54,27 @@ def create_dryrun_plot(
         d_thpt: List of actual decode throughputs
         safe_d_thpt: List of safe decode throughput limits
         output_path: Path where the plot should be saved
+        warmup_time: Optional list of warmup time points (negative seconds)
+        warmup_rr: Optional list of warmup request rates (same units as rr)
+        warmup_isl: Optional list of warmup input sequence lengths
+        warmup_osl: Optional list of warmup output sequence lengths
     """
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
 
     # Plot 1: Request Rate
+    if warmup_time is not None and warmup_rr is not None and len(warmup_time) > 0:
+        ax1.plot(
+            warmup_time,
+            warmup_rr,
+            "b-",
+            alpha=0.35,
+            linewidth=2,
+            label="Warmup Request Rate",
+        )
     ax1.plot(time, rr, "b-", label="Actual Request Rate", linewidth=2)
     ax1.plot(time, est_rr, "r--", label="Predicted Request Rate", linewidth=2)
+    if warmup_time is not None and warmup_rr is not None:
+        ax1.axvline(0, color="k", linestyle=":", linewidth=2, label="Warmup Boundary")
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Request Rate")
     ax1.set_ylim(bottom=0)
@@ -64,10 +83,34 @@ def create_dryrun_plot(
     ax1.grid(True, alpha=0.3)
 
     # Plot 2: Sequence Lengths
+    if (
+        warmup_time is not None
+        and warmup_isl is not None
+        and warmup_osl is not None
+        and len(warmup_time) > 0
+    ):
+        ax2.plot(
+            warmup_time,
+            warmup_isl,
+            "g-",
+            alpha=0.35,
+            linewidth=2,
+            label="Warmup ISL",
+        )
+        ax2.plot(
+            warmup_time,
+            warmup_osl,
+            "m-",
+            alpha=0.35,
+            linewidth=2,
+            label="Warmup OSL",
+        )
     ax2.plot(time, isl, "g-", label="Actual ISL", linewidth=2)
     ax2.plot(time, est_isl, "g--", label="Predicted ISL", linewidth=2)
     ax2.plot(time, osl, "m-", label="Actual OSL", linewidth=2)
     ax2.plot(time, est_osl, "m--", label="Predicted OSL", linewidth=2)
+    if warmup_time is not None and warmup_isl is not None and warmup_osl is not None:
+        ax2.axvline(0, color="k", linestyle=":", linewidth=2, label="Warmup Boundary")
     ax2.set_xlabel("Time (s)")
     ax2.set_ylabel("Num Tokens")
     ax2.set_ylim(bottom=0)
