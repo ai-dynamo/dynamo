@@ -15,39 +15,6 @@ use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-/// Simple pinned memory allocation
-pub fn allocate_pinned_memory(size: usize) -> Result<u64, TransferError> {
-    // 16-byte alignment for vectorized operations
-    let aligned_size = (size + 15) & !15;
-
-    if aligned_size == 0 {
-        return Err(TransferError::ExecutionError(
-            "Invalid allocation size".to_string(),
-        ));
-    }
-
-    unsafe {
-        let result = cuda_result::malloc_host(aligned_size, 0);
-        match result {
-            Ok(ptr) => {
-                let ptr_value = ptr as u64;
-                tracing::debug!(
-                    "Allocated pinned memory: {}KB, ptr=0x{:x}",
-                    aligned_size / 1024,
-                    ptr_value
-                );
-                Ok(ptr_value)
-            }
-            Err(e) => {
-                tracing::error!("Pinned memory allocation failed: {}", e);
-                Err(TransferError::ExecutionError(format!(
-                    "Pinned memory allocation failed: {}",
-                    e
-                )))
-            }
-        }
-    }
-}
 
 // Global storage for kernel function - store as usize to avoid Send/Sync issues
 static COPY_KERNEL_MODULE: Mutex<Option<usize>> = Mutex::new(None);
