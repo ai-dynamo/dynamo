@@ -1558,10 +1558,10 @@ mod tests_startup_helpers {
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
 
-        // Spawn async listener (bind=false since pub_socket binds above)
+        // Spawn async listener (connects to publisher bound above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4, false)
+            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4)
         });
 
         // Give time for the connection to establish

@@ -228,8 +228,14 @@ class DynamoSglangPublisher:
                 # Use SGLang's offset_endpoint_port to ensure alignment with publishers
                 # This is the same function SGLang schedulers use to determine their bind ports
                 zmq_ep = ZmqEventPublisher.offset_endpoint_port(base_ep, dp_rank)
-                if zmq_ep:
-                    zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
+                if not zmq_ep:
+                    logging.warning(
+                        f"Skipping ZMQ subscriber for dp_rank={dp_rank}: "
+                        f"offset_endpoint_port returned None for base_ep={base_ep}"
+                    )
+                    continue
+
+                zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
 
                 zmq_config = ZmqKvEventPublisherConfig(
                     worker_id=self.generate_endpoint.connection_id(),
