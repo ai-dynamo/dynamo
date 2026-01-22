@@ -135,6 +135,11 @@ pub trait Slot: std::fmt::Debug {
     /// Take all pending operations for the slot.
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>>;
 
+    /// Returns true if this slot ever had operations (onboarding or offloading).
+    /// Used by request_finished() to determine if vLLM should wait for the worker's
+    /// finished_sending signal.
+    fn had_operations(&self) -> bool;
+
     /// Record the number of tokens that were cached on the device.
     fn record_cached_device_tokens(&mut self, num_tokens: usize);
 
@@ -366,6 +371,13 @@ pub struct VllmConnectorSlot {
 
     pending_operations: Option<Vec<WorkerTransferRequest>>,
 
+    /// Tracks whether this slot ever had operations (onboarding or offloading).
+    /// This is set to true when operations are added and never reset.
+    /// Used by request_finished() to determine if vLLM should wait for the worker's
+    /// finished_sending signal. If true, return true to make vLLM wait.
+    /// If false (no operations ever), return false so vLLM can free immediately.
+    had_operations: bool,
+
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
 
@@ -417,6 +429,7 @@ impl VllmConnectorSlot {
             staging_from_host: None,
             staging_from_disk: None,
             pending_operations: None,
+            had_operations: false,
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
             tokens_cached_from_disk: 0,
@@ -726,6 +739,10 @@ impl Slot for VllmConnectorSlot {
 
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>> {
         self.pending_operations.take()
+    }
+
+    fn had_operations(&self) -> bool {
+        self.had_operations
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1091,6 +1108,10 @@ impl VllmConnectorSlot {
     }
 
     fn append_pending_operation(&mut self, operation: WorkerTransferRequest) {
+        // Mark that this slot has had operations - used by request_finished() to determine
+        // if vLLM should wait for the worker's finished_sending signal
+        self.had_operations = true;
+
         if let Some(pending_operations) = self.pending_operations.as_mut() {
             pending_operations.push(operation);
         } else {
