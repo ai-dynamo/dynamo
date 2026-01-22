@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "dynamo-nova"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+
+[features]
+default = ["http", "nats", "grpc"]
+ucx = ["dynamo-nova-backend/ucx"]
+http = ["dynamo-nova-backend/http"]
+grpc = ["dynamo-nova-backend/grpc"]
+nats = ["dynamo-nova-backend/nats"]
+
+[dependencies]
+dynamo-identity = { workspace = true }
+dynamo-nova-backend = { workspace = true }
+dynamo-nova-discovery = { workspace = true }
+
+anyhow = { workspace = true }
+bs58 = { workspace = true }
+bytes = { workspace = true }
+derive_builder = { workspace = true }
+derive-getters = { workspace = true }
+futures = { workspace = true }
+parking_lot = { workspace = true }
+rmp-serde = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+xxhash-rust = { workspace = true }
+
+clap = { version = "4.5", features = ["derive"] }
+dashmap = "6.1.0"
+either = "1.13"
+flume = "0.11.1"
+lru = "0.16"
+
+async-ucx = { git = "https://github.com/ryanolson/async-ucx.git", branch = "ryan/ucx", optional = true}
+
+[[example]]
+name = "ping_pong"
+path = "examples/ping_pong.rs"

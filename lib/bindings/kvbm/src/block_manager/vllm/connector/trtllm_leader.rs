@@ -4,7 +4,6 @@
 use super::*;
 
 use crate::block_manager::BlockManagerBuilder;
-use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
 };
@@ -12,8 +11,9 @@ use crate::block_manager::vllm::connector::leader::{
     kvbm_metrics_endpoint_enabled, parse_kvbm_metrics_port,
 };
 use crate::block_manager::{distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest};
-use crate::get_current_tokio_handle;
+use crate::dynamo::get_current_tokio_handle;
 use anyhow;
+use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};

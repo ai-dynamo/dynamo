@@ -528,6 +528,15 @@ impl RadixTree {
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        // BFS queue entry: (current_block, parent_hashes_per_worker, tokens_hash)
+        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
+        // Using Rc to avoid cloning the HashMap for each child
+        type BfsQueueEntry = (
+            SharedRadixBlock,
+            Rc<HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
+            LocalBlockHash,
+        );
+
         tracing::debug!(
             "Dumping radix tree as events (contains information about {:?} workers)",
             self.lookup.len()
@@ -536,18 +545,17 @@ impl RadixTree {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        // BFS queue: (current_block, parent_hashes_per_worker, tokens_hash)
-        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
-        let mut queue: VecDeque<(
-            SharedRadixBlock,
-            HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
-            LocalBlockHash,
-        )> = VecDeque::new();
+        let mut queue: VecDeque<BfsQueueEntry> = VecDeque::new();
 
         // Process root's children first
         let root_borrow = self.root.borrow();
+        let empty_parent_hashes = Rc::new(HashMap::new());
         for (tokens_hash, child_block) in &root_borrow.children {
-            queue.push_back((child_block.clone(), HashMap::new(), *tokens_hash));
+            queue.push_back((
+                child_block.clone(),
+                empty_parent_hashes.clone(),
+                *tokens_hash,
+            ));
         }
         drop(root_borrow);
 
@@ -585,11 +593,12 @@ impl RadixTree {
                 current_external_hashes.insert(*worker_id, *external_hash);
             }
 
-            // Enqueue children with per-worker parent hashes
+            // Enqueue children with shared parent hashes (Rc avoids cloning HashMap)
+            let parent_hashes_rc = Rc::new(current_external_hashes);
             for (child_tokens_hash, child_block) in &current_borrow.children {
                 queue.push_back((
                     child_block.clone(),
-                    current_external_hashes.clone(),
+                    parent_hashes_rc.clone(),
                     *child_tokens_hash,
                 ));
             }

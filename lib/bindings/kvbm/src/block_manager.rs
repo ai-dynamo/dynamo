@@ -1,18 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::dynamo::{Component, get_current_tokio_handle};
 use super::*;
+
 use anyhow::Result;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
-use dynamo_llm::block_manager::kv_consolidator::{
-    EventSource, KvEventConsolidatorConfig,
-};
+use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
-use dynamo_runtime::DistributedRuntime;
 use dynamo_runtime::config::environment_names::kvbm as env_kvbm;
+use dynamo_runtime::{DistributedRuntime, traits::DistributedRuntimeProvider};
+
 use pyo3::PyResult;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -368,7 +369,8 @@ impl BlockManagerBuilder {
         }
 
         if let Some((engine_ep, output_ep, engine_source)) = self.consolidator_config {
-            config_builder = config_builder.consolidator_config(engine_ep, output_ep, engine_source);
+            config_builder =
+                config_builder.consolidator_config(engine_ep, output_ep, engine_source);
         }
 
         let config = config_builder.build()?;
