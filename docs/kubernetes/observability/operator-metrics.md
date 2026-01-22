@@ -80,12 +80,14 @@ All metrics use the `dynamo_operator` namespace prefix.
 | `dynamo_operator_resources_total` | Gauge | `resource_type`, `namespace`, `status` | Current count of resources by state |
 
 **Labels:**
-- `resource_type`: Currently only `DynamoGraphDeployment` (simplified inventory tracking)
+- `resource_type`: `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, `DynamoGraphDeploymentScalingAdapter`
 - `namespace`: Resource namespace
-- `status`: Resource state from `.status.state` field. Possible values for DynamoGraphDeployment:
-  - `"pending"` - Deployment is being created/configured
-  - `"successful"` - Deployment is healthy and ready
-  - `"failed"` - Deployment has encountered an error
+- `status`: Resource state derived from each CRD's status. Common values:
+  - `"ready"` - Resource is healthy and operational (DCD, DM, DGDSA)
+  - `"not_ready"` - Resource exists but is not operational (DCD, DM, DGDSA)
+  - `"unknown"` - State cannot be determined (default for empty status)
+  - DGD uses: `"pending"`, `"successful"`, `"failed"` from `.status.state`
+  - DGDR uses: `"Pending"`, `"Profiling"`, `"Deploying"`, `"Ready"`, `"DeploymentDeleted"`, `"Failed"` from `.status.state`
 
 ## Example Queries
 
@@ -129,14 +131,19 @@ sum by (resource_type, operation, reason) (
 ### Resource Inventory
 
 ```promql
-# Total DynamoGraphDeployments by state
+# Total resources by type and state
+sum by (resource_type, status) (
+  dynamo_operator_resources_total
+)
+
+# DynamoGraphDeployments by state
 sum by (status) (
   dynamo_operator_resources_total{resource_type="DynamoGraphDeployment"}
 )
 
-# DGDs by namespace and state
-sum by (namespace, status) (
-  dynamo_operator_resources_total{resource_type="DynamoGraphDeployment"}
+# All resources by namespace and state
+sum by (resource_type, namespace, status) (
+  dynamo_operator_resources_total
 )
 ```
 
@@ -157,8 +164,8 @@ A pre-built Grafana dashboard is available for visualizing operator metrics.
    - Webhook denials by reason
 
 3. **Resource Inventory** (2 panels)
-   - DynamoGraphDeployment inventory timeline (stacked by state)
-   - Current DGD count by state
+   - Resource inventory timeline by state and namespace (filterable by resource type)
+   - Current resource count by state (filterable by resource type)
 
 4. **Operational Health** (2 panels)
    - Reconciliation success rate gauges
@@ -183,7 +190,14 @@ The dashboard will automatically appear in Grafana (assuming you have the Grafan
 
 3. Navigate to **Dashboards** → Search for **"Dynamo Operator"**
 
-The dashboard includes a namespace filter variable to view metrics across all namespaces or filter by specific ones.
+### Dashboard Filters
+
+The dashboard includes two filter variables:
+
+- **Namespace**: View metrics across all namespaces or filter by specific ones (multi-select)
+- **Resource Type**: Filter all panels by resource type or select "All" to see aggregated metrics across all CRDs (single select)
+
+When "All" is selected for Resource Type, all panels will show data for all five managed CRDs with resource_type labels for differentiation.
 
 ## Accessing Metrics Directly
 
