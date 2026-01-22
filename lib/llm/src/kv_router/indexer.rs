@@ -270,7 +270,15 @@ impl RadixTree {
             }
         }
 
-        tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
+        // The max score across all workers represents the deepest tree depth reached during lookup
+        let max_depth = scores.scores.values().max().copied().unwrap_or(0);
+        tracing::info!(
+            max_depth = max_depth,
+            sequence_len = sequence.len(),
+            num_workers_matched = scores.scores.len(),
+            "RadixTree::find_matches: final scores={:?}",
+            scores.scores
+        );
 
         // Populate tree sizes for all workers that have scores
         for worker in scores.scores.keys() {
@@ -330,16 +338,17 @@ impl RadixTree {
                     worker: WorkerWithDpRank,
                     worker_lookup: &mut HashMap<ExternalSequenceBlockHash, SharedRadixBlock>,
                     id: u64,
-                ) -> Result<(), KvCacheEventError> {
+                    depth: u32,
+                ) -> Result<u32, KvCacheEventError> {
                     if blocks.is_empty() {
-                        return Ok(());
+                        return Ok(depth);
                     }
 
                     let mut parent_mut = parent.borrow_mut();
                     let block_data = &blocks[0];
 
-                    let child = match parent_mut.children.get(&block_data.tokens_hash) {
-                        Some(block) => block.clone(),
+                    let (child, is_new_node) = match parent_mut.children.get(&block_data.tokens_hash) {
+                        Some(block) => (block.clone(), false),
                         None => {
                             // create new block - automatically added to the lookup table
                             let new_block = worker_lookup
@@ -352,9 +361,11 @@ impl RadixTree {
                                 .children
                                 .insert(block_data.tokens_hash, new_block.clone());
 
-                            new_block
+                            (new_block, true)
                         }
                     };
+
+                    let current_depth = depth + 1;
 
                     // Update child and check for cycles
                     {
@@ -368,6 +379,7 @@ impl RadixTree {
                                     dp_rank = worker.dp_rank,
                                     id,
                                     block_hash = ?block_data.block_hash,
+                                    depth = current_depth,
                                     "Detected cycle in store event (block already in parent chain); rejecting sequence"
                                 );
                                 return Err(KvCacheEventError::InvalidBlockSequence);
@@ -376,16 +388,49 @@ impl RadixTree {
 
                         // add our worker to the block with its external hash
                         child_mut.workers.insert(worker, block_data.block_hash);
+
+                        if is_new_node {
+                            tracing::info!(
+                                worker_id = worker.worker_id.to_string(),
+                                dp_rank = worker.dp_rank,
+                                id,
+                                depth = current_depth,
+                                num_children = parent_mut.children.len(),
+                                "Created new radix tree node"
+                            );
+                        }
                     }
 
                     // add the block to the worker_id lookup table
                     worker_lookup.insert(block_data.block_hash, child.clone());
 
                     // Recurse with the child and remaining blocks
-                    process_blocks(child, &blocks[1..], worker, worker_lookup, id)
+                    process_blocks(child, &blocks[1..], worker, worker_lookup, id, current_depth)
                 }
 
-                process_blocks(current, &op.blocks, worker, worker_lookup, id)
+                // Starting depth depends on whether we're starting from root or a parent block
+                let starting_depth = if op.parent_hash.is_some() {
+                    // When parent exists, we need to estimate starting depth
+                    // The exact depth isn't tracked, but we know we're not at root
+                    // For accurate depth tracking, we'd need to traverse from root
+                    0u32 // Relative depth from parent
+                } else {
+                    0u32 // Starting from root
+                };
+
+                let result = process_blocks(current, &op.blocks, worker, worker_lookup, id, starting_depth);
+                if let Ok(final_depth) = &result {
+                    tracing::info!(
+                        worker_id = worker.worker_id.to_string(),
+                        dp_rank = worker.dp_rank,
+                        id,
+                        blocks_added = op.blocks.len(),
+                        final_depth = *final_depth,
+                        had_parent = op.parent_hash.is_some(),
+                        "Completed store operation"
+                    );
+                }
+                result.map(|_| ())
             }
             KvCacheEventData::Removed(remove) => {
                 // tracing::trace!(id, "KV Remove Operation: {:?}", op);
