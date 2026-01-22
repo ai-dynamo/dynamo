@@ -130,11 +130,11 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 ```bash
 # Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
 # For local dev: --store-kv file avoids etcd (workers and frontend must share a disk)
-python -m dynamo.frontend --http-port 8000 --store-kv file
+python3 -m dynamo.frontend --http-port 8000 --store-kv file
 
 # Start the SGLang engine. You can run several of these for the same or different models.
 # The frontend will discover them automatically.
-python -m dynamo.sglang --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --store-kv file
+python3 -m dynamo.sglang --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --store-kv file
 ```
 
 > **Note:** vLLM workers enable prefix caching by default, which requires NATS. For dependency-free local development with vLLM, add `--no-enable-prefix-caching`. See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
