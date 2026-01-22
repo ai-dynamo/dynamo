@@ -128,7 +128,7 @@ jobs:
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
-    runs-on: p-builder-arm-v1 
+    runs-on: p-builder-arm-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
