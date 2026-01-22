@@ -27,11 +27,6 @@ on:
         required: false
         type: boolean
         default: false
-      skip_tests:
-        description: 'Skip test jobs (builds will still run)'
-        required: false
-        type: boolean
-        default: false
     secrets:
       AWS_ACCOUNT_ID:
         required: true
@@ -433,7 +428,7 @@ jobs:
   integration-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-integ
     needs: [build-amd64, build-arm64]
-    if: always() && inputs.skip_tests != true
+    if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -567,7 +562,7 @@ jobs:
   e2e-single-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-1gpu-e2e
     needs: [build-amd64, build-arm64]
-    if: always() && inputs.skip_tests != true
+    if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -703,7 +698,7 @@ jobs:
   e2e-multi-gpu-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-2gpu-e2e
     needs: [build-amd64, build-arm64]
-    if: always() && inputs.skip_tests != true
+    if: always()
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: ${{ matrix.arch.timeout }}
     strategy:
@@ -840,7 +835,7 @@ jobs:
   fault-tolerance-tests:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
-    if: always() && inputs.skip_tests != true
+    if: always()
     runs-on: cpu-amd-m5-4xlarge
     timeout-minutes: 60
     strategy:

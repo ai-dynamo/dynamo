@@ -66,7 +66,7 @@ jobs:
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
 
-  # Run the CI test suite (builds only - tests temporarily disabled)
+  # Run the CI test suite (builds + tests)
   ci-pipeline:
     name: Release CI
     needs: [prepare-release, manual-approval]
@@ -81,7 +81,6 @@ jobs:
       include_nightly_marks: false
       image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
       enable_slack_notification: false
-      skip_tests: true  # TEMPORARY: Remove to re-enable tests
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
