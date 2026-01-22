@@ -280,6 +280,7 @@ RUN if [ -e /usr/bin/python3 ]; then cp -a /usr/bin/python3 /tmp/python3.pretool
 COPY --from=dynamo_tools /usr/bin/ /usr/bin/
 COPY --from=dynamo_tools /usr/sbin/ /usr/sbin/
 COPY --from=dynamo_tools /usr/lib/ /usr/lib/
+COPY --from=dynamo_tools /usr/libexec/ /usr/libexec/
 COPY --from=dynamo_tools /lib/ /lib/
 COPY --from=dynamo_tools /usr/share/ /usr/share/
 COPY --from=dynamo_tools /etc/alternatives/ /etc/alternatives/
@@ -345,8 +346,8 @@ RUN git lfs install
 ARG FRAMEWORK
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
-    UV_GIT_LFS=1 uv pip install \
-        --no-cache \
+    --mount=type=cache,target=/root/.cache/uv \
+    UV_GIT_LFS=1 UV_HTTP_TIMEOUT=300 UV_HTTP_RETRIES=5 uv pip install \
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \

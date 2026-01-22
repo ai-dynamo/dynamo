@@ -11,6 +11,8 @@ when given the same inputs with fixed seed and temperature=0.
 The test uses comprehensive server warmup (sending all test prompts
 before validation) to avoid server initialization effects that could
 impact determinism measurements.
+
+This is a TensorRTLLM only test.
 """
 
 import logging
@@ -24,7 +26,12 @@ from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 
+from .common import check_module_available
+
 logger = logging.getLogger(__name__)
+
+
+HAS_TRTLLM = check_module_available("tensorrt_llm")
 
 # Just need a model to show the config works rather than any stress of the system.
 MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -151,6 +158,7 @@ def send_completion_request(
 @pytest.mark.nightly
 @pytest.mark.slow
 @pytest.mark.gpu_1
+@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config not defined and
@@ -187,6 +195,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 @pytest.mark.slow
 @pytest.mark.nightly
 @pytest.mark.gpu_1
+@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config defined and
