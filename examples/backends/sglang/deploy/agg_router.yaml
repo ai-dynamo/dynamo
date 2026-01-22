@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${VERSION}
       envs:
         - name: DYN_ROUTER_MODE
           value: kv
@@ -25,7 +25,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${VERSION}
           workingDir: /workspace/examples/backends/sglang
           command:
           - python3

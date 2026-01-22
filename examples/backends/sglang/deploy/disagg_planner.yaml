@@ -12,14 +12,14 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${VERSION}
     Planner:
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${VERSION}
           workingDir: /workspace/components/src/dynamo/planner
           command:
           - python3
@@ -50,7 +50,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${VERSION}
           workingDir: /workspace/examples/backends/sglang
           command:
             - python3
@@ -85,7 +85,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/sglang-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/sglang-runtime:${VERSION}
           workingDir: /workspace/examples/backends/sglang
           command:
             - python3
