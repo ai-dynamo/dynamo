@@ -15,8 +15,8 @@
 #   - container/Dockerfile.sglang
 #
 # The concatenated file provides the stages this Dockerfile depends on:
-#   - `dynamo_base`   (framework base stage; used for cached tool binaries like maturin)
-#   - `wheel_builder` (framework wheel_builder stage; used for cached Rust/Cargo and SGLang NIXL deps)
+#   - `runtime`       (framework runtime stage; base for dev image)
+#   - `wheel_builder` (framework wheel_builder stage; only used for SGLang NIXL deps)
 #
 # Dependency graph (concat flow):
 #
@@ -39,7 +39,7 @@
 #
 # Both targets share:
 # - Developer utilities and tools from dynamo-tools
-# - Rust toolchain + maturin for editable installs (from concatenated framework stages)
+# - Rust toolchain + maturin for editable installs (installed directly in dev stage)
 # - NIXL dependencies for SGLang (from concatenated framework wheel_builder stage)
 #
 # Note on build args:
@@ -304,12 +304,13 @@ ENV WORKSPACE_DIR=${WORKSPACE_DIR} \
     VIRTUAL_ENV=/opt/dynamo/venv \
     PATH=/opt/dynamo/venv/bin:/usr/local/cargo/bin:$PATH
 
-# Copy Rust/Cargo/Maturin from the concatenated framework stages.
-# - Rust/Cargo: from `wheel_builder` (already installed there)
-# - maturin: from `wheel_builder` venv (installed there via uv pip)
-COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/rustup /usr/local/rustup
-COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /usr/local/cargo /usr/local/cargo
-COPY --from=wheel_builder --chown=dynamo:0 --chmod=775 /workspace/.venv/bin/maturin /usr/local/bin/maturin
+# Install Rust/Cargo/Maturin directly in dev stage.
+# This avoids dependency on wheel_builder stage, enabling --remote-runtime builds.
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
+    chmod -R a+rx /usr/local/rustup /usr/local/cargo && \
+    /opt/dynamo/venv/bin/pip install maturin[patchelf] && \
+    cp /opt/dynamo/venv/bin/maturin /usr/local/bin/maturin && \
+    chmod +x /usr/local/bin/maturin
 
 # Provide an `uv` binary for SGLang venv creation below.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /tmp/uv-binary
@@ -403,7 +404,7 @@ ARG USER_UID
 ARG USER_GID
 
 # Copy rustup home into a writable per-user location so sanity_check passes.
-# (dev target already has rustup/cargo/maturin from concatenated wheel_builder/dynamo_base)
+# (dev target already has rustup/cargo/maturin installed directly)
 RUN cp -r /usr/local/rustup /home/dynamo/.rustup && \
     chown -R dynamo:0 /home/dynamo/.rustup
 
