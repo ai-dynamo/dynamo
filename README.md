@@ -22,7 +22,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/2486)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Support matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 
 # NVIDIA Dynamo
 
@@ -362,6 +362,23 @@ For local development, pass `--store-kv file` to avoid external dependencies (se
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+
+# Contributing
+
+We welcome contributions! Whether it's bug reports, documentation improvements, or code contributions—every bit helps.
+
+- **[Contributing Guide](CONTRIBUTING.md)** – How to get started
+- **[Report a Bug](https://github.com/ai-dynamo/dynamo/issues/new?template=bug_report.yml)** – Found an issue?
+- **[Feature Request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml)** – Have an idea?
+
+# Community
+
+Dynamo thrives on community contributions.
+
+![External Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
+![Community PRs](https://img.shields.io/badge/PRs_merged-130%2B-blue)
+
+See our [contributor graph](https://github.com/ai-dynamo/dynamo/graphs/contributors) for the full picture.
 
 <!-- Reference links for Feature Compatibility Matrix -->
 [disagg]: docs/design_docs/disagg_serving.md

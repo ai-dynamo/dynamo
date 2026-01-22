@@ -38,10 +38,10 @@ sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
 # Now import after mocking
 from dynamo.planner.utils.planner_core import Metrics, Planner  # noqa: E402
 
+pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
+
 
 @pytest.fixture
-@pytest.mark.pre_merge
-@pytest.mark.gpu_0
 def planner():
     """Set up test environment with mocked dependencies."""
     # Create mock arguments

@@ -211,6 +211,39 @@ impl Default for RadixTree {
     }
 }
 
+// Dropping Radix blocks can cause a cascade of drops that can overflow the stack.
+// This custom drop implementation avoids this using an iterative approach.
+impl Drop for RadixTree {
+    fn drop(&mut self) {
+        let mut stack: Vec<SharedRadixBlock> = Vec::new();
+        // Break root -> children edge up front
+        {
+            let mut root = self.root.borrow_mut();
+            stack.extend(root.children.drain().map(|(_, v)| v));
+        }
+
+        // Remove all lookup references (they may include blocks not reachable from root)
+        for (_, worker_blocks) in self.lookup.drain() {
+            stack.extend(worker_blocks.into_values());
+        }
+
+        // Iteratively free any uniquely-owned blocks without recursion
+        while let Some(block) = stack.pop() {
+            match Rc::try_unwrap(block) {
+                Ok(cell) => {
+                    // We own the cell, so we can take inner and it will drop after this block.
+                    let mut inner: RadixBlock = cell.into_inner();
+                    stack.extend(inner.children.drain().map(|(_, v)| v));
+                }
+                Err(rc) => {
+                    // We don't own the cell, just call drop on it.
+                    drop(rc);
+                }
+            }
+        }
+    }
+}
+
 impl RadixTree {
     /// Create a new `RadixTree`.
     ///
@@ -495,6 +528,15 @@ impl RadixTree {
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        // BFS queue entry: (current_block, parent_hashes_per_worker, tokens_hash)
+        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
+        // Using Rc to avoid cloning the HashMap for each child
+        type BfsQueueEntry = (
+            SharedRadixBlock,
+            Rc<HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
+            LocalBlockHash,
+        );
+
         tracing::debug!(
             "Dumping radix tree as events (contains information about {:?} workers)",
             self.lookup.len()
@@ -503,18 +545,17 @@ impl RadixTree {
         let mut events = Vec::new();
         let mut event_id = 0u64;
 
-        // BFS queue: (current_block, parent_hashes_per_worker, tokens_hash)
-        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
-        let mut queue: VecDeque<(
-            SharedRadixBlock,
-            HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>,
-            LocalBlockHash,
-        )> = VecDeque::new();
+        let mut queue: VecDeque<BfsQueueEntry> = VecDeque::new();
 
         // Process root's children first
         let root_borrow = self.root.borrow();
+        let empty_parent_hashes = Rc::new(HashMap::new());
         for (tokens_hash, child_block) in &root_borrow.children {
-            queue.push_back((child_block.clone(), HashMap::new(), *tokens_hash));
+            queue.push_back((
+                child_block.clone(),
+                empty_parent_hashes.clone(),
+                *tokens_hash,
+            ));
         }
         drop(root_borrow);
 
@@ -552,11 +593,12 @@ impl RadixTree {
                 current_external_hashes.insert(*worker_id, *external_hash);
             }
 
-            // Enqueue children with per-worker parent hashes
+            // Enqueue children with shared parent hashes (Rc avoids cloning HashMap)
+            let parent_hashes_rc = Rc::new(current_external_hashes);
             for (child_tokens_hash, child_block) in &current_borrow.children {
                 queue.push_back((
                     child_block.clone(),
-                    current_external_hashes.clone(),
+                    parent_hashes_rc.clone(),
                     *child_tokens_hash,
                 ));
             }
@@ -2396,6 +2438,20 @@ mod tests {
             result.unwrap_err(),
             KvCacheEventError::InvalidBlockSequence
         ));
+    }
+
+    #[test]
+    fn test_radix_tree_large_stores() {
+        setup();
+        let mut trie = RadixTree::new();
+        for i in 0..=16 {
+            let len = 1 << i;
+            let worker_id = i;
+            tracing::info!("Testing sequence of length {}", len);
+            let sequence = (1..len + 1).collect::<Vec<u64>>();
+            trie.apply_event(create_store_event(worker_id, 1, sequence, None))
+                .unwrap();
+        }
     }
 
     #[test]

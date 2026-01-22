@@ -118,3 +118,6 @@ profiling_results*
 # Node.js
 node_modules/
 package-lock.json
+
+# Compiled static libraries
+*.a
