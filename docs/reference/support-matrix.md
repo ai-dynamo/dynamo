@@ -123,4 +123,4 @@ The following table shows the dependency versions included with each Dynamo rele
   - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
   - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation).
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#local-quick-start) in the README.
