@@ -71,6 +71,18 @@ runs:
       shell: bash
       run: |
         docker system prune -af
+    - name: Install Rust (for frontend build)
+      if: inputs.target == 'frontend'
+      shell: bash
+      run: |
+        echo "Installing Rust toolchain for frontend build..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env"
+        # Install cbindgen for generating C headers
+        cargo install cbindgen
+        # Export for subsequent steps
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        echo "CARGO_HOME=$HOME/.cargo" >> $GITHUB_ENV
     - name: Build image
       id: build
       shell: bash
@@ -88,6 +100,10 @@ runs:
         CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
+        # Source cargo env if available (for frontend builds)
+        if [ -f "$HOME/.cargo/env" ]; then
+          source "$HOME/.cargo/env"
+        fi
         # Determine image tag
         if [ -n "${{ inputs.image_tag }}" ]; then
           IMAGE_TAG="${{ inputs.image_tag }}"
