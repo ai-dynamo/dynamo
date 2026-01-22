@@ -72,7 +72,7 @@ Small doc fixes can be submitted directly as PRs without an issue.
 
 ### Propose a Feature
 
-Have an idea for a new feature? [Open a feature request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml) to discuss it with maintainers before implementation.
+Have an idea for a new feature? [Open a feature request](https://github.com/ai-dynamo/dynamo/issues/new?template=feature_request.yml) to discuss it with Dynamo maintainers before implementation.
 
 ### Contribute Code
 
@@ -127,7 +127,9 @@ Issues labeled `good-first-issue` are sized for new contributors. We provide ext
 
 ## Project Architecture
 
-Understanding Dynamo's architecture helps you find where to make changes.
+<!-- We were given the feedback that having information on architecture, languages used, etc. would be helpful for external contributors -->
+
+Understanding Dynamo's architecture helps you find where to make changes. For the complete picture, see the [Architecture Documentation](docs/design_docs/architecture.md) and [Support Matrix](docs/reference/support-matrix.md).
 
 ![Dynamo Architecture](docs/images/architecture.png)
 
@@ -169,10 +171,6 @@ Understanding Dynamo's architecture helps you find where to make changes.
 | Planner & Router | Python | Extensible policies, easy customization | `components/src/dynamo/{planner,router}/` |
 | Kubernetes Operator | Go | K8s controller patterns, client-go ecosystem | `deploy/operator/` |
 
-> **Design Philosophy**: We built performance-sensitive modules in Rust for speed, memory safety, and robust concurrency. We use Python for flexibility, enabling rapid prototyping and effortless customization.
-
-For detailed architecture documentation, see [docs/design_docs/architecture.md](docs/design_docs/architecture.md). For supported versions of critical dependencies (vLLM, SGLang, TensorRT-LLM, CUDA, etc.), see the [Support Matrix](docs/reference/support-matrix.md).
-
 ---
 
 ## Contribution Workflow
@@ -201,13 +199,13 @@ For larger contributions, follow these steps:
    - **Files affected**: Approximate number and components
    - **Type of change**: Bug fix, new feature, refactoring, or performance improvement
 
-4. **Get Approval** – Wait for maintainers to review and apply the `approved-for-pr` label.
+4. **Get Approval** – Wait for Dynamo maintainers to review and apply the `approved-for-pr` label.
 
 5. **Submit a Pull Request** – [Open a PR](https://github.com/ai-dynamo/dynamo/compare) that references the issue using GitHub keywords (e.g., "Fixes #123").
 
 6. **Address Code Rabbit Review** – Respond to automated Code Rabbit suggestions, including nitpicks.
 
-7. **Ensure CI Passes** – Fix any failing tests before requesting human review.
+7. **Trigger CI Tests** – For external contributors, a Dynamo maintainer must comment `/ok to test <commit-id>` to run the full CI suite, where `<commit-id>` is the short SHA of your latest commit. Fix any failing tests before requesting human review.
 
 8. **Request Review** – Add the person who approved your issue as a reviewer. Check [CODEOWNERS](CODEOWNERS) for required approvers based on files modified.
 
