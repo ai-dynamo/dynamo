@@ -1,0 +1,76 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Linear Issue Matcher - Automatically suggests related Linear issues for PRs
+#
+# This workflow:
+# 1. Triggers on PR open/edit for Dynamo team members
+# 2. Fetches Linear issues assigned to the PR author
+# 3. Uses LLM-based semantic matching to find related issues
+# 4. Posts a collapsed comment with suggestions and linking instructions
+#
+# Required secrets:
+#   LINEAR_API_KEY  - Linear API key (https://linear.app/settings/api)
+#   NVIDIA_API_KEY  - NVIDIA Inference Hub API key (https://inference.nvidia.com)
+
+name: Linear Issue Matcher
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+# Only allow one run per PR at a time
+concurrency:
+  group: linear-matcher-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  match-issues:
+    name: Find Related Linear Issues
+    runs-on: ubuntu-latest
+    # Skip dependabot and bot PRs
+    if: github.actor != 'dependabot[bot]' && !contains(github.actor, '[bot]')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/scripts
+            .github/config
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          separator: ','
+
+      - name: Run Linear Issue Matcher
+        env:
+          # PR context
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          # API keys
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Paths
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_WORKSPACE: ${{ github.workspace }}
+        run: python .github/scripts/linear_issue_matcher.py
