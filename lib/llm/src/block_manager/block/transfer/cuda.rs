@@ -15,7 +15,6 @@ use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-
 // Global storage for kernel function - store as usize to avoid Send/Sync issues
 static COPY_KERNEL_MODULE: Mutex<Option<usize>> = Mutex::new(None);
 static COPY_KERNEL_FUNCTION: Mutex<Option<usize>> = Mutex::new(None);
