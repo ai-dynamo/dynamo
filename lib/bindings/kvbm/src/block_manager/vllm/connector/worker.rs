@@ -394,8 +394,15 @@ impl Worker for KvConnectorWorker {
         for request_id in self.maybe_finished_offloading.iter() {
             if self.connector.has_slot(request_id) {
                 if self.connector.is_complete(request_id) {
-                    tracing::debug!(request_id, "request slot is finished");
-                    is_finished_offloading.insert(request_id.clone());
+                    // Only signal finished_sending for requests that had operations.
+                    // For requests with no cache hits (no operations), the leader handles
+                    // cleanup via request_finished() returning false.
+                    if self.connector.has_operations(request_id) {
+                        tracing::debug!(request_id, "request slot is finished (has operations)");
+                        is_finished_offloading.insert(request_id.clone());
+                    } else {
+                        tracing::debug!(request_id, "request slot is finished (no operations - leader handles cleanup)");
+                    }
                 } else {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
@@ -427,8 +434,15 @@ impl Worker for KvConnectorWorker {
         for request_id in self.maybe_finished_onboarding.iter() {
             if self.connector.has_slot(request_id) {
                 if self.connector.is_complete(request_id) {
-                    tracing::debug!(request_id, "request slot is finished");
-                    is_finished_onboarding.insert(request_id.clone());
+                    // Only signal finished_sending for requests that had operations.
+                    // For requests with no cache hits (no operations), the leader handles
+                    // cleanup via request_finished() returning false.
+                    if self.connector.has_operations(request_id) {
+                        tracing::debug!(request_id, "request slot is finished (has operations)");
+                        is_finished_onboarding.insert(request_id.clone());
+                    } else {
+                        tracing::debug!(request_id, "request slot is finished (no operations - leader handles cleanup)");
+                    }
                 } else {
                     tracing::debug!(request_id, "request slot is not finished");
                 }

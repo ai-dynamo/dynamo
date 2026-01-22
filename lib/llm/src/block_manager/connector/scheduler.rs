@@ -260,6 +260,16 @@ impl WorkerSchedulerClient {
         }
     }
 
+    /// Check if a slot has any operations registered.
+    /// Returns false if the slot doesn't exist or has no operations.
+    /// This is used to determine if a request had cache hits - requests with no cache hits
+    /// have no operations and should not signal finished_sending (the leader handles cleanup).
+    pub fn has_operations(&self, request_id: &str) -> bool {
+        self.slots
+            .get(request_id)
+            .map_or(false, |slot| !slot.operations.is_empty())
+    }
+
     /// Clone the scheduler channel for async use.
     pub fn get_scheduler_tx(&self) -> mpsc::UnboundedSender<SchedulerMessage> {
         self.scheduler_tx.clone()

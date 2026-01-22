@@ -14,6 +14,7 @@ use dynamo_llm::{
     tokens::TokenBlock,
 };
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::cache_stats::CacheStatsTracker;
@@ -1159,6 +1160,9 @@ struct LocalTransferEngine {
     block_manager: VllmBlockManager,
     leader: Arc<KvbmLeader>,
     xfer_rx: mpsc::UnboundedReceiver<LocalTransferRequest>,
+    /// Tracks spawned CreateSlot tasks so they can be cancelled during shutdown.
+    /// This prevents CUDA_ERROR_DEINITIALIZED errors when tasks outlive the CUDA context.
+    create_slot_tasks: JoinSet<()>,
 }
 
 impl LocalTransferEngine {
@@ -1171,6 +1175,7 @@ impl LocalTransferEngine {
             block_manager,
             leader,
             xfer_rx,
+            create_slot_tasks: JoinSet::new(),
         }
     }
 
@@ -1304,8 +1309,10 @@ impl LocalTransferEngine {
                                     // Send a slot creation request to the worker's scheduler.
                                     // This creates the slot BEFORE transfers start, fixing the
                                     // race condition where transfers complete before the slot exists.
+                                    // Use JoinSet to track these tasks so they can be cancelled during
+                                    // shutdown, preventing CUDA_ERROR_DEINITIALIZED errors.
                                     let leader_clone = self.leader.clone();
-                                    tokio::spawn(async move {
+                                    self.create_slot_tasks.spawn(async move {
                                         if let Err(e) = process_create_slot_request(request_id.clone(), &leader_clone).await {
                                             tracing::error!(
                                                 request_id = %request_id,
@@ -1326,6 +1333,23 @@ impl LocalTransferEngine {
         }
 
         tracing::debug!("LocalTransferEngine: shutting down");
+
+        // Abort all pending create slot tasks to prevent CUDA_ERROR_DEINITIALIZED errors.
+        // These tasks may be in-flight and accessing CUDA resources, so we must cancel them
+        // before the CUDA context is destroyed during Python/vLLM shutdown.
+        let pending_count = self.create_slot_tasks.len();
+        if pending_count > 0 {
+            tracing::debug!(
+                "LocalTransferEngine: aborting {} pending create slot tasks",
+                pending_count
+            );
+            self.create_slot_tasks.abort_all();
+            // Wait for all tasks to complete (they will return JoinError due to abort)
+            while self.create_slot_tasks.join_next().await.is_some() {
+                // Tasks are being cancelled, ignore results
+            }
+            tracing::debug!("LocalTransferEngine: all create slot tasks aborted");
+        }
 
         // drop all tx channels
         drop(onboard_tx);
