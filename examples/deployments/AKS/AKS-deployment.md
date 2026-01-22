@@ -58,6 +58,88 @@ kubectl get pods -n dynamo-system
 
 Follow the [Deploy Model/Workflow](../../../docs/kubernetes/installation_guide.md#next-steps) guide to deploy and test a model on your AKS cluster.
 
+## AKS Storage options for Model Caching and Runtime Data
+
+For implementing tiered storage you can take advantage of the different storage options available in Azure such as:
+| Storage Option | Performance |	Best For |
+|----------------|-------------|-------------|
+|Local CSI (Ephemeral Disk)	| Very high | Fast model caching, warm restarts |
+|[Azure Managed Lustre](https://learn.microsoft.com/en-us/azure/azure-managed-lustre/use-csi-driver-kubernetes) |	Extremely high | Large multi-node models, shared cache |
+|[Azure Disk (Managed Disk)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-disk#create-azure-disk-pvs-using-built-in-storage-classes) | High |	Persistent single-writer model cache |
+|[Azure Files](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-files#use-a-persistent-volume-for-storage) |	Medium | Shared small/medium models |
+|[Azure Blob (via Fuse or init)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-blob#create-a-pvc-using-built-in-storage-class) | Low–Medium	| Cold model storage, bootstrap downloads |
+
+In the cache.yaml in the different [recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes), you can set the storageClassName to a predefined storage option that are available in your AKS cluster:
+
+```bash
+kubectl get storageclass
+
+NAME                           PROVISIONER                 RECLAIMPOLICY   
+azureblob-csi                  blob.csi.azure.com          Delete         
+azurefile                      file.csi.azure.com          Delete                                           
+azurefile-csi                  file.csi.azure.com          Delete                                           
+azurefile-csi-premium          file.csi.azure.com          Delete                                           
+azurefile-premium              file.csi.azure.com          Delete                                           
+default                        disk.csi.azure.com          Delete                                
+managed                        disk.csi.azure.com          Delete                                
+managed-csi                    disk.csi.azure.com          Delete                                
+managed-csi-premium            disk.csi.azure.com          Delete                                
+managed-premium                disk.csi.azure.com          Delete                                
+sc.azurelustre.csi.azure.com   azurelustre.csi.azure.com   Retain  
+
+```
+The recommendation for storage options for the Dynamo caches are:
+
+Model Cache storing raw model artifacts, configuration files, tokenizers etc.  
+Persistence: Required to avoid repeated downloads and reduce cold-start latency.  
+Recommended storage: Azure Managed Lustre (shared, high throughput) or Azure Disk (single-replica, persistent).
+
+Compilation Cache stores backend-specific compiled artifacts (e.g., TensorRT engines).  
+Persistence: Optional  
+Recommended storage: Local CSI (fast, node-local) or Azure Disk (persistent when GPU configuration is fixed).  
+
+Performance Cache stores runtime tuning and profiling data.  
+Persistence: Not required  
+Recommended storage: Local CSI (or other ephemeral storage).
+
+cache.yaml example:
+```bash
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: "sc.azurelustre.csi.azure.com"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: compilation-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: "managed-csi"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: perf-cache
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: "managed-csi-premium"
+```
 ## Clean Up Resources
 
 If you want to clean up the Dynamo resources created during this guide, you can run the following commands:
