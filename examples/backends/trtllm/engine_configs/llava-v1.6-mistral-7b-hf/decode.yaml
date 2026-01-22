@@ -22,8 +22,9 @@ backend: pytorch
 enable_chunked_prefill: true
 disable_overlap_scheduler: false
 kv_cache_config:
-  free_gpu_memory_fraction: 0.30
+  free_gpu_memory_fraction: 0.9
   enable_block_reuse: false
 
 cache_transceiver_config:
   backend: DEFAULT
+  max_tokens_in_buffer: 10240
