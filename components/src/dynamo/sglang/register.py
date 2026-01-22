@@ -279,20 +279,28 @@ async def register_diffusion_model(
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Diffusion models use a simplified registration since they don't fit
-        the LLM model type system. They're registered directly with the endpoint.
+        Diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
     """
-    # Diffusion models DON'T use register_llm because they don't have tokenizers
-    # The endpoint instance is already registered via serve_endpoint() call
-    logging.info(
-        f"Diffusion endpoint ready on: {endpoint} for model: {dynamo_args.model_path}"
-    )
+    # Use model_path as the model name (diffusion workers don't have served_model_name)
+    model_name = dynamo_args.model_path
 
-    # Signal readiness - the endpoint is already serving requests
+    try:
+        await register_llm(
+            ModelInput.Text,
+            ModelType.Images,
+            endpoint,
+            model_name,
+            model_name,
+        )
+        logging.info(
+            f"Successfully registered diffusion model: {model_name}"
+        )
+    except Exception as e:
+        logging.error(f"Failed to register diffusion model: {e}")
+        raise RuntimeError("Diffusion model registration failed")
+
+    # Signal readiness
     if readiness_gate:
         readiness_gate.set()
 
-    logging.info(
-        f"Diffusion model ready: {dynamo_args.model_path}. "
-        "Endpoint is serving but won't appear in /v1/models (diffusion models have no tokenizer)"
-    )
+    logging.info(f"Diffusion model ready: {model_name}")

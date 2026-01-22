@@ -33,6 +33,7 @@ use crate::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
             embeddings::OpenAIEmbeddingsStreamingEngine,
+            images::OpenAIImagesStreamingEngine,
         },
     },
 };
@@ -65,6 +66,7 @@ pub struct ModelManager {
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
+    images_engines: RwLock<ModelEngines<OpenAIImagesStreamingEngine>>,
     tensor_engines: RwLock<ModelEngines<TensorStreamingEngine>>,
     // Prefill models don't have engines - they're only tracked for discovery/lifecycle
     prefill_engines: RwLock<ModelEngines<()>>,
@@ -103,6 +105,7 @@ impl ModelManager {
             completion_engines: RwLock::new(ModelEngines::default()),
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
+            images_engines: RwLock::new(ModelEngines::default()),
             tensor_engines: RwLock::new(ModelEngines::default()),
             prefill_engines: RwLock::new(ModelEngines::default()),
             cards: Mutex::new(HashMap::new()),
@@ -126,6 +129,7 @@ impl ModelManager {
                 ModelType::Completions => self.completion_engines.read().checksum(model_name),
                 ModelType::Embedding => self.embeddings_engines.read().checksum(model_name),
                 ModelType::TensorBased => self.tensor_engines.read().checksum(model_name),
+                ModelType::Images => self.images_engines.read().checksum(model_name),
                 ModelType::Prefill => self.prefill_engines.read().checksum(model_name),
                 _ => {
                     continue;
@@ -242,6 +246,16 @@ impl ModelManager {
         clients.add(model, card_checksum, engine)
     }
 
+    pub fn add_images_model(
+        &self,
+        model: &str,
+        card_checksum: &str,
+        engine: OpenAIImagesStreamingEngine,
+    ) -> Result<(), ModelManagerError> {
+        let mut clients = self.images_engines.write();
+        clients.add(model, card_checksum, engine)
+    }
+
     pub fn add_prefill_model(
         &self,
         model: &str,
@@ -268,6 +282,11 @@ impl ModelManager {
 
     pub fn remove_tensor_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.tensor_engines.write();
+        clients.remove(model)
+    }
+
+    pub fn remove_images_model(&self, model: &str) -> Result<(), ModelManagerError> {
+        let mut clients = self.images_engines.write();
         clients.remove(model)
     }
 
@@ -314,6 +333,17 @@ impl ModelManager {
         model: &str,
     ) -> Result<TensorStreamingEngine, ModelManagerError> {
         self.tensor_engines
+            .read()
+            .get(model)
+            .cloned()
+            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
+    }
+
+    pub fn get_images_engine(
+        &self,
+        model: &str,
+    ) -> Result<OpenAIImagesStreamingEngine, ModelManagerError> {
+        self.images_engines
             .read()
             .get(model)
             .cloned()
