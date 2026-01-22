@@ -39,10 +39,17 @@ def get_aiperf_cmd(
     num_prefix_prompts,
     artifact_dir,
     url="http://localhost:8888",
+    use_expected_osl=False,
 ):
     """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
+
+    # Build nvext JSON with optional expected_output_tokens
+    nvext_dict = {"ignore_eos": True}
+    if use_expected_osl:
+        nvext_dict["expected_output_tokens"] = osl
+    nvext_json = json.dumps({"nvext": nvext_dict})
 
     return [
         "aiperf",
@@ -69,7 +76,7 @@ def get_aiperf_cmd(
         "--extra-inputs",
         "ignore_eos:true",
         "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
+        nvext_json,
         "--concurrency",
         str(concurrency),
         "--request-count",
@@ -122,6 +129,7 @@ def run_benchmark_single_url(
     num_prefix_prompts,
     artifact_dir,
     url,
+    use_expected_osl=False,
 ) -> Optional[Dict]:
     """Run aiperf benchmark for a single URL"""
     aiperf_cmd = get_aiperf_cmd(
@@ -136,6 +144,7 @@ def run_benchmark_single_url(
         num_prefix_prompts,
         artifact_dir,
         url,
+        use_expected_osl,
     )
 
     logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
@@ -201,6 +210,7 @@ def run_benchmark(
     num_prefix_prompts,
     output_dir,
     urls,
+    use_expected_osl=False,
 ) -> Optional[Dict]:
     """Run aiperf benchmark for a specific prefix ratio"""
     logger.info(
@@ -227,6 +237,7 @@ def run_benchmark(
             num_prefix_prompts,
             artifact_dir,
             urls[0],
+            use_expected_osl,
         )
 
     # Multiple URLs: split requests and concurrency
@@ -259,6 +270,7 @@ def run_benchmark(
             num_prefix_prompts,
             artifact_dir,
             url,
+            use_expected_osl,
         )
 
         logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
@@ -332,6 +344,11 @@ def main():
         default=[0.1, 0.3, 0.5, 0.7, 0.9],
         help="List of prefix ratios to test",
     )
+    parser.add_argument(
+        "--use-expected-osl",
+        action="store_true",
+        help="Pass expected_output_tokens to nvext for router tracking",
+    )
 
     args = parser.parse_args()
 
@@ -363,6 +380,7 @@ def main():
             args.num_prefix_prompts,
             args.output_dir,
             args.url,  # Now passing list of URLs
+            args.use_expected_osl,
         )
 
         if result is not None:
