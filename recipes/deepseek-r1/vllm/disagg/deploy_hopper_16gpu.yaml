@@ -49,6 +49,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 2
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/dynamo
           env:
@@ -110,6 +117,13 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 9090
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 2
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
           workingDir: /workspace/dynamo
           env:
