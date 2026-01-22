@@ -553,7 +553,7 @@ impl RadixTree {
         for (tokens_hash, child_block) in &root_borrow.children {
             queue.push_back((
                 child_block.clone(),
-                Rc::clone(&empty_parent_hashes),
+                empty_parent_hashes.clone(),
                 *tokens_hash,
             ));
         }
@@ -598,7 +598,7 @@ impl RadixTree {
             for (child_tokens_hash, child_block) in &current_borrow.children {
                 queue.push_back((
                     child_block.clone(),
-                    Rc::clone(&parent_hashes_rc),
+                    parent_hashes_rc.clone(),
                     *child_tokens_hash,
                 ));
             }
