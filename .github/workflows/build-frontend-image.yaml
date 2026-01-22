@@ -7,8 +7,8 @@ on:
   push:
     branches:
     - main
-    - release/*.*.*
     - "pull-request/[0-9]+"
+    # Note: release/* branches are handled by release.yml which calls this workflow
   workflow_call:
     secrets:
       AWS_ACCOUNT_ID:
