@@ -12,6 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# InferencePool for kGateway (stable API - inference.networking.k8s.io/v1)
+# This is used by kGateway to resolve HTTPRoute backends
+apiVersion: inference.networking.k8s.io/v1
+kind: InferencePool
+metadata:
+  name: {{ .Values.model.shortName }}-pool
+  namespace: {{ .Release.Namespace }}
+spec:
+  targetPorts:
+    - number: {{ .Values.inferencePool.port }}
+  selector:
+    matchLabels:
+      nvidia.com/dynamo-component: Frontend
+      nvidia.com/dynamo-namespace: {{ include "dynamo-gaie.dynamoNamespace" . }}
+  endpointPickerRef:
+    group: ""
+    kind: Service
+    name: {{ .Values.model.shortName }}-epp
+    port:
+      number: 9002
+---
+# InferencePool for EPP (experimental API - inference.networking.x-k8s.io/v1alpha2)
+# This is used by the EPP to discover and route to backend pods
 apiVersion: inference.networking.x-k8s.io/v1alpha2
 kind: InferencePool
 metadata:

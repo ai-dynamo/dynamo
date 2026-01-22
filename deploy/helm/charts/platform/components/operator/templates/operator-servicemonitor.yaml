@@ -12,15 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceModel
+{{- if and .Values.metricsService.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
 metadata:
-  name: {{ .Values.model.shortName }}-model
+  name: {{ include "dynamo-operator.fullname" . }}-operator
   namespace: {{ .Release.Namespace }}
+  labels:
+    release: prometheus
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
 spec:
-  criticality: {{ .Values.model.criticality }}
-  modelName: {{ .Values.model.identifier }}
-  poolRef:
-    group: inference.networking.x-k8s.io
-    kind: InferencePool
-    name: {{ .Values.model.shortName }}-pool
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      {{- include "dynamo-operator.selectorLabels" . | nindent 6 }}
+  endpoints:
+  - port: https
+    scheme: https
+    path: /metrics
+    interval: 15s
+    tlsConfig:
+      insecureSkipVerify: true
+{{- end }}
