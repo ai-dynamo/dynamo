@@ -69,15 +69,6 @@ var (
 		[]string{"resource_type", "namespace", "status"},
 	)
 
-	managedPodsTotal = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Name:      "managed_pods_total",
-			Help:      "Total number of pods managed by the operator",
-		},
-		[]string{"component_type", "namespace"},
-	)
-
 	// Webhook metrics
 	webhookDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -115,7 +106,6 @@ func InitMetrics() error {
 		reconcileTotal,
 		reconcileErrors,
 		resourcesTotal,
-		managedPodsTotal,
 		webhookDuration,
 		webhookRequestsTotal,
 		webhookDenialsTotal,
@@ -158,11 +148,6 @@ func RecordWebhookDenial(resourceType, operation string, err error) {
 // UpdateResourceCount updates the gauge for a specific resource type and status
 func UpdateResourceCount(resourceType, namespace, status string, count float64) {
 	resourcesTotal.WithLabelValues(resourceType, namespace, status).Set(count)
-}
-
-// UpdateManagedPodCount updates the gauge for managed pods by component type
-func UpdateManagedPodCount(componentType, namespace string, count float64) {
-	managedPodsTotal.WithLabelValues(componentType, namespace).Set(count)
 }
 
 // categorizeError categorizes Kubernetes errors for better metrics granularity

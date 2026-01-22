@@ -57,7 +57,7 @@ All metrics use the `dynamo_operator` namespace prefix.
 - `resource_type`: `DynamoGraphDeployment`, `DynamoComponentDeployment`, `DynamoModel`, `DynamoGraphDeploymentRequest`, `DynamoGraphDeploymentScalingAdapter`
 - `namespace`: Target namespace of the resource
 - `result`: `success`, `error`, `requeue`
-- `error_type`: `api_error`, `validation_error`, `not_found`, `conflict`, `timeout`, `unknown`
+- `error_type`: `not_found`, `already_exists`, `conflict`, `validation`, `bad_request`, `unauthorized`, `forbidden`, `timeout`, `server_timeout`, `unavailable`, `rate_limited`, `internal`
 
 ### Webhook Metrics
 
