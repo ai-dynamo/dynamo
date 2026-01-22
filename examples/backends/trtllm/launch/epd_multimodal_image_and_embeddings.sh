@@ -29,7 +29,7 @@ trap cleanup EXIT INT TERM
 
 
 # run frontend
-python3 -m dynamo.frontend --http-port 8000 &
+python3 -m dynamo.frontend --http-port 8123 &
 DYNAMO_PID=$!
 
 # run encode worker
@@ -50,8 +50,8 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
-  --encode-endpoint "$ENCODE_ENDPOINT" \
-  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  --encode-endpoint "$ENCODE_ENDPOINT" &
+#   --custom-jinja-template "$CUSTOM_TEMPLATE" &
 PREFILL_PID=$!
 
 # run decode worker
@@ -63,7 +63,8 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
   --disaggregation-mode decode \
-  --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  --disaggregation-mode decode &
+#   --custom-jinja-template "$CUSTOM_TEMPLATE" &
 DECODE_PID=$!
 
 wait $DYNAMO_PID

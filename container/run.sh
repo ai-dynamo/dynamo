@@ -240,7 +240,13 @@ get_options() {
     if [[ ${GPUS^^} == "NONE" ]]; then
         GPU_STRING=""
     else
-        GPU_STRING="--gpus ${GPUS}"
+        GPUS_ARG="${GPUS}"
+        # Docker's --gpus parser treats commas as separators unless the value is quoted.
+        # When passing multiple UUIDs via device=..., wrap the value in quotes.
+        if [[ "${GPUS}" == device=* && "${GPUS}" == *,* && "${GPUS}" != \"*\" ]]; then
+            GPUS_ARG="\"${GPUS}\""
+        fi
+        GPU_STRING="--gpus ${GPUS_ARG}"
     fi
 
     if [[ ${NAME^^} == "" ]]; then
@@ -257,8 +263,8 @@ get_options() {
 
     if [ -n "$MOUNT_WORKSPACE" ]; then
         VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
-        VOLUME_MOUNTS+=" -v /tmp:/tmp "
-        VOLUME_MOUNTS+=" -v /mnt/:/mnt "
+        # VOLUME_MOUNTS+=" -v /tmp:/tmp "
+        # VOLUME_MOUNTS+=" -v /mnt/:/mnt "
 
         if [ -z "$HF_HOME" ]; then
             HF_HOME=$DEFAULT_HF_HOME
