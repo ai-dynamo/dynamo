@@ -124,16 +124,16 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
         "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
     },
-    "diffusion-worker": {
-        "flags": ["--diffusion-worker"],
+    "image-diffusion-worker": {
+        "flags": ["--image-diffusion-worker"],
         "action": "store_true",
         "default": False,
-        "help": "Run as diffusion worker for image generation",
+        "help": "Run as image diffusion worker for image generation",
     },
-    "diffusion-fs-url": {
-        "flags": ["--diffusion-fs-url"],
+    "image-diffusion-fs-url": {
+        "flags": ["--image-diffusion-fs-url"],
         "type": str,
-        "default": os.environ.get("DIFFUSION_FS_URL"),
+        "default": None,
         "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
     },
 }
@@ -175,6 +175,10 @@ class DynamoArgs:
     enable_local_indexer: bool = False
     # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
     use_kv_events: bool = False
+
+    # image diffusion options
+    image_diffusion_worker: bool = False
+    image_diffusion_fs_url: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -438,7 +442,7 @@ async def parse_args(args: list[str]) -> Config:
     if endpoint is None:
         if parsed_args.embedding_worker:
             endpoint = f"dyn://{namespace}.backend.generate"
-        elif getattr(parsed_args, "diffusion_worker", False):
+        elif getattr(parsed_args, "image_diffusion_worker", False):
             endpoint = f"dyn://{namespace}.backend.generate"
         elif (
             hasattr(parsed_args, "disaggregation_mode")
@@ -521,12 +525,12 @@ async def parse_args(args: list[str]) -> Config:
 
     # For diffusion workers, create a minimal dummy ServerArgs since diffusion
     # doesn't use transformer models or sglang Engine - it uses DiffGenerator directly
-    diffusion_worker = getattr(parsed_args, "diffusion_worker", False)
+    image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
 
-    if diffusion_worker:
-        logging.info(f"Diffusion worker detected with model: {model_path}, creating minimal ServerArgs stub")
+    if image_diffusion_worker:
+        logging.info(f"Image diffusion worker detected with model: {model_path}, creating minimal ServerArgs stub")
         # Create a minimal ServerArgs-like object that bypasses model config loading
-        # Diffusion workers don't actually use ServerArgs - they use DiffGenerator
+        # Image diffusion workers don't actually use ServerArgs - they use DiffGenerator
         import types
         server_args = types.SimpleNamespace()
         # Copy over any attrs that might be needed, but avoid triggering __post_init__
@@ -594,6 +598,9 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
         diffusion_worker=diffusion_worker,
+        image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
+        image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
+        model_path=getattr(parsed_args, "model_path", None),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,

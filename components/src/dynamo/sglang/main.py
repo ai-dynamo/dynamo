@@ -17,7 +17,7 @@ from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.args import Config, DisaggregationMode, parse_args
 from dynamo.sglang.health_check import (
-    DiffusionHealthCheckPayload,
+    ImageDiffusionHealthCheckPayload,
     SglangHealthCheckPayload,
     SglangPrefillHealthCheckPayload,
 )
@@ -28,7 +28,7 @@ from dynamo.sglang.register import (
 )
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
-    DiffusionWorkerHandler,
+    ImageDiffusionWorkerHandler,
     EmbeddingWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
@@ -91,10 +91,10 @@ async def worker():
 
     logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
 
-    if config.dynamo_args.embedding_worker:
+    if config.dynamo_args.image_diffusion_worker:
+        await init_image_diffusion(runtime, config)
+    elif config.dynamo_args.embedding_worker:
         await init_embedding(runtime, config)
-    elif config.dynamo_args.diffusion_worker:
-        await init_diffusion(runtime, config)
     elif config.dynamo_args.multimodal_processor:
         await init_multimodal_processor(runtime, config)
     elif config.dynamo_args.multimodal_encode_worker:
@@ -108,6 +108,7 @@ async def worker():
         await init_diffusion(runtime, config)
     elif config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
+
     else:
         await init_prefill(runtime, config)
 
@@ -423,8 +424,8 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
         handler.cleanup()
 
 
-async def init_diffusion(runtime: DistributedRuntime, config: Config):
-    """Initialize diffusion worker component"""
+async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
+    """Initialize image diffusion worker component"""
     dynamo_args = config.dynamo_args
 
     # Initialize DiffGenerator (not sgl.Engine)
@@ -441,7 +442,7 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     # Initialize fsspec filesystems for image storage
     fs = None
-    fs_url = dynamo_args.diffusion_fs_url
+    fs_url = dynamo_args.image_diffusion_fs_url
 
     # Initialize primary filesystem
     if not fs_url:
@@ -475,15 +476,15 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Diffusion doesn't have metrics publisher like LLM
+    # Image diffusion doesn't have metrics publisher like LLM
     # Could add custom metrics for images/sec, steps/sec later
 
-    handler = DiffusionWorkerHandler(
+    handler = ImageDiffusionWorkerHandler(
         component, generator, config, publisher=None, fs=fs,
     )
 
     # Create proper health check payload that sends a minimal diffusion request
-    health_check_payload = DiffusionHealthCheckPayload(
+    health_check_payload = ImageDiffusionHealthCheckPayload(
         model_path=dynamo_args.model_path
     ).to_dict()
 
