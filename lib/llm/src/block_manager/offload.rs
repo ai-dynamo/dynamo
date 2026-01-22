@@ -381,9 +381,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         continue;
                     }
 
-                    // FrequencyFilter: Skip blocks that haven't been accessed frequently enough.
-                    // Note: Priority-based filtering for contiguity is handled at the slot level
-                    // (VllmConnectorSlot.offload_terminated flag), not here.
                     if let Some(offload_filter) = offload_filter.as_ref()
                         && !offload_filter.should_offload(request.sequence_hash)
                     {
