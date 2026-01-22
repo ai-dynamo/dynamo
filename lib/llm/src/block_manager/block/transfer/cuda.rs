@@ -257,17 +257,7 @@ where
     let dst_buffer = pool.alloc_async(size, stream)
         .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
 
-    tracing::trace!(
-        "Allocated DEVICE buffers from pool: src=0x{:x}, dst=0x{:x} ({} bytes each)",
-        src_buffer,
-        dst_buffer,
-        size
-    );
-
     // Copy address buffers from host to device using stream-ordered H2D memcpy
-    // This provides proper memory visibility guarantees
-    tracing::debug!("Copying {} address pairs to device via H2D memcpy", src_addresses.len());
-
     let result_src = unsafe {
         cuMemcpyHtoDAsync_v2(
             src_buffer,
@@ -306,8 +296,6 @@ where
     h2d_event.synchronize()
         .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
 
-    tracing::debug!("H2D memcpy completed - host memory no longer needed");
-
     // Launch kernel (reads from device buffers)
     unsafe {
         launch_copy_kernel_direct(
@@ -319,15 +307,12 @@ where
         )?;
     }
 
-    tracing::debug!("Kernel launched - reading from DEVICE memory");
-
     // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
     pool.free_async(src_buffer, stream)
         .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
     pool.free_async(dst_buffer, stream)
         .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
 
-    tracing::trace!("CUDA pool path complete: DEVICE buffers freed (stream-ordered)");
     Ok(())
 }
 
