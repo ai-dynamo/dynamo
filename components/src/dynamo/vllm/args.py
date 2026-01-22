@@ -24,7 +24,7 @@ from . import __version__, envs
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
+VALID_CONNECTORS = {"nixl", "lmcache", "flexkv", "kvbm", "null", "none"}
 
 
 class Config:
@@ -142,7 +142,7 @@ def parse_args() -> Config:
         nargs="*",
         default=["nixl"],
         help="List of connectors to use in order (e.g., --connector nixl lmcache). "
-        "Options: nixl, lmcache, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
+        "Options: nixl, lmcache, flexkv, kvbm, null, none. Default: nixl. Order will be preserved in MultiConnector.",
     )
     # To avoid name conflicts with different backends, adopted prefix "dyn-" for dynamo specific args
     parser.add_argument(
@@ -575,6 +575,8 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
     for connector in config.connector_list:
         if connector == "lmcache":
             connector_cfg = {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"}
+        elif connector == "flexkv":
+            connector_cfg = {"kv_connector": "FlexKVDynamoConnectorV1", "kv_role": "kv_both"}
         elif connector == "nixl":
             connector_cfg = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
         elif connector == "kvbm":
