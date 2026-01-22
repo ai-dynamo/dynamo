@@ -3,6 +3,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::grpc::service::kserve::inference::DataType;
 use crate::grpc::service::kserve::inference::ModelInput;
@@ -162,8 +163,32 @@ impl KserveService {
         let address = format!("{}:{}", self.host, self.port);
         tracing::info!(address, "Starting KServe gRPC service on: {address}");
 
+        // Log tuning settings for deployment verification
+        tracing::info!(
+            "gRPC server tuning: tcp_nodelay=true, http2_adaptive_window=true, \
+             connection_window=16MB, stream_window=8MB, max_concurrent_streams=256"
+        );
+
         let observer = cancel_token.child_token();
+
+        // Performance tuning for high concurrency (32+ concurrent requests)
+        // These settings match C++ grpcio defaults for production workloads
         Server::builder()
+            // Disable Nagle's algorithm - reduces latency for small messages
+            .tcp_nodelay(true)
+            // HTTP/2 keepalive to prevent connection drops under load
+            .http2_keepalive_interval(Some(Duration::from_secs(10)))
+            .http2_keepalive_timeout(Some(Duration::from_secs(20)))
+            // Enable adaptive flow control - auto-tunes window sizes based on RTT
+            .http2_adaptive_window(Some(true))
+            // Increase HTTP/2 connection window from 64KB default to 16MB
+            // Critical for high-throughput streaming at scale
+            .initial_connection_window_size(16 * 1024 * 1024)
+            // Increase per-stream window from 64KB default to 8MB
+            .initial_stream_window_size(8 * 1024 * 1024)
+            // Limit concurrent streams per connection to prevent thrashing
+            // Allows efficient multiplexing without overwhelming the server
+            .concurrency_limit_per_connection(256)
             .add_service(GrpcInferenceServiceServer::new(self.clone()))
             .serve_with_shutdown(address.parse()?, observer.cancelled_owned())
             .await
