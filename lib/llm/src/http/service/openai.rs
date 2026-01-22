@@ -104,6 +104,7 @@ fn classify_error_for_metrics(code: StatusCode, message: &str) -> ErrorType {
         }
         StatusCode::NOT_FOUND => ErrorType::NotFound,
         StatusCode::NOT_IMPLEMENTED => ErrorType::NotImplemented,
+        StatusCode::TOO_MANY_REQUESTS => ErrorType::Overload,
         StatusCode::SERVICE_UNAVAILABLE => ErrorType::Overload,
         StatusCode::INTERNAL_SERVER_ERROR => ErrorType::Internal,
         _ if code.is_client_error() => ErrorType::Validation,
@@ -917,13 +918,30 @@ async fn chat_completions(
 
     let request_id = request.id().to_string();
 
-    // Determine streaming mode and model early for guard creation
+    // Determine streaming mode early
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
+
+    // Apply template values first to resolve the model before creating metrics guards
+    if let Some(template) = template {
+        if request.inner.model.is_empty() {
+            request.inner.model = template.model.clone();
+        }
+        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
+            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+
+    // Capture the resolved model after template application for metrics and engine lookup
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     // todo - determine the proper error code for when a request model is not present
     let model = request.inner.model.clone();
+
+    tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
     let mut inflight_guard =
@@ -957,20 +975,6 @@ async fn chat_completions(
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         return Err(err_response);
     }
-
-    // Apply template values if present
-    if let Some(template) = template {
-        if request.inner.model.is_empty() {
-            request.inner.model = template.model.clone();
-        }
-        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
-            request.inner.temperature = Some(template.temperature);
-        }
-        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
-            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
-        }
-    }
-    tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // Create HTTP queue guard after template resolution so labels are correct
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(&model);
@@ -1250,8 +1254,32 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Determine streaming mode and model early for guard creation
+    // Determine streaming mode early for guard creation
     let streaming = request.inner.stream.unwrap_or(false);
+
+    // Apply template values first to resolve the model before creating metrics guards.
+    // Unlike chat completions where backends may have their own defaults, the Responses API
+    // should provide a generous default to avoid truncated responses (especially with
+    // reasoning models that emit <think> tokens).
+    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
+
+    if let Some(template) = template {
+        if request.inner.model.as_deref().unwrap_or("").is_empty() {
+            request.inner.model = Some(template.model.clone());
+        }
+        if request.inner.temperature.is_none() {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_output_tokens.is_none() {
+            request.inner.max_output_tokens = Some(template.max_completion_tokens);
+        }
+    } else if request.inner.max_output_tokens.is_none() {
+        request.inner.max_output_tokens = Some(DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    tracing::trace!("Received responses request: {:?}", request.inner);
+
+    // Capture the resolved model after template application for metrics
     // model is Option<String> in upstream; extract to String, defaulting to empty
     let model = request.inner.model.clone().unwrap_or_default();
 
@@ -1272,27 +1300,6 @@ async fn responses(
         // So we don't mark_error here - they're successful HTTP responses with 501 status
         return Ok(resp.into_response());
     }
-
-    // Apply template values if present, with sensible defaults for the Responses API.
-    // Unlike chat completions where backends may have their own defaults, the Responses API
-    // should provide a generous default to avoid truncated responses (especially with
-    // reasoning models that emit <think> tokens).
-    const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-
-    if let Some(template) = template {
-        if request.inner.model.as_deref().unwrap_or("").is_empty() {
-            request.inner.model = Some(template.model.clone());
-        }
-        if request.inner.temperature.is_none() {
-            request.inner.temperature = Some(template.temperature);
-        }
-        if request.inner.max_output_tokens.is_none() {
-            request.inner.max_output_tokens = Some(template.max_completion_tokens);
-        }
-    } else if request.inner.max_output_tokens.is_none() {
-        request.inner.max_output_tokens = Some(DEFAULT_MAX_OUTPUT_TOKENS);
-    }
-    tracing::trace!("Received responses request: {:?}", request.inner);
 
     // Extract request parameters before into_parts() consumes the request.
     // These are echoed back in the Response object per the OpenAI spec.
@@ -2603,6 +2610,10 @@ mod tests {
         assert_eq!(
             classify_error_for_metrics(StatusCode::NOT_IMPLEMENTED, "Feature not supported"),
             ErrorType::NotImplemented
+        );
+        assert_eq!(
+            classify_error_for_metrics(StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded"),
+            ErrorType::Overload
         );
         assert_eq!(
             classify_error_for_metrics(StatusCode::SERVICE_UNAVAILABLE, "Overloaded"),

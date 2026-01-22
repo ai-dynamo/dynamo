@@ -672,6 +672,7 @@ impl Metrics {
         endpoint: &Endpoint,
         request_type: &RequestType,
         status: &Status,
+        error_type: &ErrorType,
     ) -> u64 {
         self.request_counter
             .with_label_values(&[
@@ -679,6 +680,7 @@ impl Metrics {
                 endpoint.as_str(),
                 request_type.as_str(),
                 status.as_str(),
+                error_type.as_str(),
             ])
             .get()
     }

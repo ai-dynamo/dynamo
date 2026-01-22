@@ -184,6 +184,8 @@ pub fn monitor_for_disconnects(
                             // Mark error as internal since it's a streaming error
                             inflight_guard.mark_error(ErrorType::Internal);
                             yield Event::default().event("error").comment(err.to_string());
+                            // Break to prevent any subsequent mark_ok() from overwriting the error
+                            break;
                         }
                         None => {
                             // Stream ended normally
