@@ -140,10 +140,6 @@ impl OffloadFilter for FrequencyFilter {
     }
 }
 
-// Note: PriorityFilter has been removed. Priority-based filtering is now handled
-// at the slot level (VllmConnectorSlot.offload_terminated flag) to ensure global
-// contiguity across multi-turn requests. See slot.rs for implementation details.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,7 +256,4 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(filter.frequency_map.lock().unwrap().len(), 1);
     }
-
-    // Note: PriorityFilter tests removed. Priority-based filtering is now handled
-    // at the slot level to ensure global contiguity.
 }
