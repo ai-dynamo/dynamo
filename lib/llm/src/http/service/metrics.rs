@@ -1669,11 +1669,10 @@ mod tests {
         let model = "test-model";
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
             guard.mark_ok();
         } // guard drops here
 
@@ -1700,11 +1699,10 @@ mod tests {
         let model = "test-model";
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
             guard.mark_error(ErrorType::Validation);
         } // guard drops here
 
@@ -1731,11 +1729,10 @@ mod tests {
         let model = "test-model";
 
         {
-            let _guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-            );
+            let _guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
             // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
         } // guard drops with default error_type=Internal
 
@@ -1773,7 +1770,9 @@ mod tests {
         ];
 
         for error_type in &error_types {
-            let mut guard = metrics.clone().create_inflight_guard(model, endpoint, false);
+            let mut guard = metrics
+                .clone()
+                .create_inflight_guard(model, endpoint, false);
             guard.mark_error(error_type.clone());
             drop(guard);
         }
@@ -1791,7 +1790,8 @@ mod tests {
                 ])
                 .get();
             assert_eq!(
-                counter_value, 1,
+                counter_value,
+                1,
                 "Should have 1 request for error_type={}",
                 error_type.as_str()
             );
@@ -1808,31 +1808,28 @@ mod tests {
 
         // Record 2 validation errors, 3 internal errors, 1 success
         for _ in 0..2 {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::ChatCompletions,
-                false,
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
             guard.mark_error(ErrorType::Validation);
             drop(guard);
         }
 
         for _ in 0..3 {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::Completions,
-                false,
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Completions, false);
             guard.mark_error(ErrorType::Internal);
             drop(guard);
         }
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(
-                model,
-                Endpoint::Embeddings,
-                false,
-            );
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::Embeddings, false);
             guard.mark_ok();
             drop(guard);
         }
