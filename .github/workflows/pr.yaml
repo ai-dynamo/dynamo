@@ -77,7 +77,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
-          version: v0.14.1 
+          version: v0.14.1
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
