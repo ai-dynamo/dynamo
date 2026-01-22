@@ -49,8 +49,8 @@ TRT-LLM supports aggregated and traditional disaggregated patterns. See [Archite
 |---------|-----------|---------------|-------|
 | Aggregated | ✅ | `agg.sh` | Easiest setup, single worker |
 | EP/D (Traditional Disaggregated) | ✅ | `disagg_multimodal.sh` | Prefill handles encoding, 2 workers |
-| E/P/D (Full - Image URLs) | ✅ | `epd_multimodal_image.sh` | Standalone encoder with `MultimodalEncoder`, 3 workers |
-| E/P/D (Full - Pre-computed Embeddings) | ✅ | `epd_multimodal_embeddings.sh` | Standalone encoder with NIXL transfer, 3 workers |
+| E/P/D (Full - Image URLs) | ✅ | `epd_multimodal_image_and_embeddings.sh` | Standalone encoder with `MultimodalEncoder`, 3 workers |
+| E/P/D (Full - Pre-computed Embeddings) | ✅ | `epd_multimodal_image_and_embeddings.sh` | Standalone encoder with NIXL transfer, 3 workers |
 | E/P/D (Large Models) | ✅ | `epd_disagg.sh` | For Llama-4 Scout/Maverick, multi-node |
 
 ### Component Flags
@@ -171,7 +171,7 @@ The encode worker uses TRT-LLM's `MultimodalEncoder` class (which inherits from 
 cd $DYNAMO_HOME
 
 # Launch 3-worker E/P/D flow with image URL support
-./examples/backends/trtllm/launch/epd_multimodal_image.sh
+./examples/backends/trtllm/launch/epd_multimodal_image_and_embeddings.sh
 ```
 
 ### Example Request
@@ -226,7 +226,7 @@ sequenceDiagram
 | **Encoding** | Prefill worker handles image encoding | Dedicated encode worker |
 | **Prefill Load** | Higher (encoding + prefill) | Lower (prefill only) |
 | **Use Case** | Simpler setup | Better scalability for vision-heavy workloads |
-| **Launch Script** | `disagg_multimodal.sh` | `epd_multimodal_image.sh` |
+| **Launch Script** | `disagg_multimodal.sh` | `epd_multimodal_image_and_embeddings.sh` |
 
 ## Pre-computed Embeddings with E/P/D Flow
 
@@ -405,8 +405,8 @@ pkill srun
 |----------|--------|------------|---------------|
 | Aggregated | `agg.sh` | No | All in one worker |
 | EP/D (Traditional Disaggregated) | `disagg_multimodal.sh` | Optional | Prefill → Decode (KV cache via UCX or NIXL) |
-| E/P/D (Image URLs) | `epd_multimodal_image.sh` | No | Encoder → Prefill (handles via params), Prefill → Decode (KV cache) |
-| E/P/D (Pre-computed Embeddings) | `epd_multimodal_embeddings.sh` | Yes | Encoder → Prefill (embeddings via NIXL RDMA) |
+| E/P/D (Image URLs) | `epd_multimodal_image_and_embeddings.sh` | No | Encoder → Prefill (handles via params), Prefill → Decode (KV cache) |
+| E/P/D (Pre-computed Embeddings) | `epd_multimodal_image_and_embeddings.sh` | Yes | Encoder → Prefill (embeddings via NIXL RDMA) |
 | E/P/D (Large Models) | `epd_disagg.sh` | Yes | Encoder → Prefill (embeddings via NIXL), Prefill → Decode (KV cache) |
 
 > **Note:** NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
@@ -447,6 +447,8 @@ await register_llm(
 - **No audio support** - No audio encoder implementation
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
+- **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibilty with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.
+- **Embeddings file crash** - Known issue with TRTLLM backend compatibilty with `TensorRT LLM version: 1.2.0rc6.post1`. Embedding file parsing crashes in `attach_multimodal_embeddings(`. To be fixed in next TRTLLM upgrade. 
 
 ## Supported Models
 
