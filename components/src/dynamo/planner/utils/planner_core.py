@@ -165,6 +165,36 @@ class Planner:
             window_size=args.load_prediction_window_size,
         )
 
+        # Optional warmup: preload predictors with historical observations from a
+        # mooncake-style JSONL trace (request_count/avg_isl/avg_osl per interval).
+        if getattr(args, "load_predictor_warmup_trace", None):
+            warmup_trace = args.load_predictor_warmup_trace
+            try:
+                metrics = extract_metrics_from_mooncake(
+                    warmup_trace, args.adjustment_interval
+                )
+                for m in metrics:
+                    self.num_req_predictor.add_data_point(float(m["request_count"]))
+                    self.isl_predictor.add_data_point(float(m["avg_isl"]))
+                    self.osl_predictor.add_data_point(float(m["avg_osl"]))
+                logger.info(
+                    f"Warmed load predictors with {len(metrics)} intervals from {warmup_trace}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to warm load predictors from {warmup_trace}: {e}"
+                )
+            finally:
+                # Even with warmup data, ignore the initial post-deploy idle
+                # period (leading zeros) when live metrics start coming in.
+                for p in (
+                    self.num_req_predictor,
+                    self.isl_predictor,
+                    self.osl_predictor,
+                ):
+                    if hasattr(p, "reset_idle_skip"):
+                        p.reset_idle_skip()
+
         if "use-pre-swept-results" in args.profile_results_dir:
             config_list = args.profile_results_dir.split(":")
             configs = {
@@ -625,6 +655,13 @@ class Planner:
 
     def dryrun_run(self):
         """Run planner in dry-run mode with dataset"""
+        warmup_metrics = None
+        if getattr(self.args, "load_predictor_warmup_trace", None):
+            warmup_metrics = extract_metrics_from_mooncake(
+                self.args.load_predictor_warmup_trace,
+                self.args.adjustment_interval,
+            )
+
         metrics = extract_metrics_from_mooncake(
             self.args.dataset, self.args.adjustment_interval
         )
@@ -723,6 +760,18 @@ class Planner:
         # plot the results
         from dynamo.planner.utils.dryrun_plot_utils import create_dryrun_plot
 
+        warmup_time = None
+        warmup_rr = None
+        warmup_isl = None
+        warmup_osl = None
+        if warmup_metrics:
+            interval = self.args.adjustment_interval
+            n = len(warmup_metrics)
+            warmup_time = [-(n - i) * interval for i in range(n)]
+            warmup_rr = [m["request_count"] for m in warmup_metrics]
+            warmup_isl = [m["avg_isl"] for m in warmup_metrics]
+            warmup_osl = [m["avg_osl"] for m in warmup_metrics]
+
         create_dryrun_plot(
             time=time,
             rr=rr,
@@ -738,6 +787,10 @@ class Planner:
             d_thpt=d_thpt,
             safe_d_thpt=safe_d_thpt,
             output_path=self.args.output_plot,
+            warmup_time=warmup_time,
+            warmup_rr=warmup_rr,
+            warmup_isl=warmup_isl,
+            warmup_osl=warmup_osl,
         )
 
 

@@ -7,8 +7,28 @@ on:
   push:
     branches:
     - main
-    - release/*.*.*
     - "pull-request/[0-9]+"
+    # Note: release/* branches are handled by release.yml which calls this workflow
+  workflow_call:
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      CI_TOKEN:
+        required: true
+      SCCACHE_S3_BUCKET:
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
@@ -75,7 +95,7 @@ jobs:
         with:
           local_image: ${{ steps.build-image.outputs.image_tag }}
           push_tags: ai-dynamo/dynamo:${{ github.sha }}-frontend-${{ matrix.platform.arch }}
-          aws_push: 'false'
+          aws_push: 'true'
           azure_push: 'true'
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}

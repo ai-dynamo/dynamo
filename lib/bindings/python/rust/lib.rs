@@ -159,7 +159,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::local_model::ModelRuntimeConfig>()?;
-    m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::preprocessor::MediaDecoder>()?;
     m.add_class::<llm::preprocessor::MediaFetcher>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
@@ -853,6 +852,35 @@ impl Endpoint {
     #[getter]
     fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
         prometheus_metrics::RuntimeMetrics::from_endpoint(self.inner.clone())
+    }
+
+    /// Unregister this endpoint instance from discovery.
+    ///
+    /// This removes the endpoint from the instances bucket, preventing the router
+    /// from sending requests to this worker. Use this when a worker is sleeping
+    /// and should not receive any requests.
+    fn unregister_endpoint_instance<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner
+                .unregister_endpoint_instance()
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+
+    /// Re-register this endpoint instance to discovery.
+    ///
+    /// This adds the endpoint back to the instances bucket, allowing the router
+    /// to send requests to this worker again. Use this when a worker wakes up
+    /// and should start receiving requests.
+    fn register_endpoint_instance<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.register_endpoint_instance().await.map_err(to_pyerr)?;
+            Ok(())
+        })
     }
 }
 

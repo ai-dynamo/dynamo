@@ -205,6 +205,26 @@ class Endpoint:
         """
         ...
 
+    async def unregister_endpoint_instance(self) -> None:
+        """
+        Unregister this endpoint instance from discovery.
+
+        This removes the endpoint from the instances bucket, preventing the router
+        from sending requests to this worker. Use this when a worker is sleeping
+        and should not receive any requests.
+        """
+        ...
+
+    async def register_endpoint_instance(self) -> None:
+        """
+        Re-register this endpoint instance to discovery.
+
+        This adds the endpoint back to the instances bucket, allowing the router
+        to send requests to this worker again. Use this when a worker wakes up
+        and should start receiving requests.
+        """
+        ...
+
 
 class Client:
     """
@@ -512,19 +532,6 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
-        ...
-
-class OAIChatPreprocessor:
-    """
-    A preprocessor for OpenAI chat completions
-    """
-
-    ...
-
-    async def start(self) -> None:
-        """
-        Start the preprocessor
-        """
         ...
 
 class OverlapScores:
@@ -1650,7 +1657,6 @@ __all__ = [
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",
-    "OAIChatPreprocessor",
     "PythonAsyncEngine",
     "prometheus_names",
 ]
