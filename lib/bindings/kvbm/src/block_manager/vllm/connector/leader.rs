@@ -544,26 +544,19 @@ impl Leader for KvConnectorLeader {
         //            The worker side of the connector API will later call `finish_requests()`
         //            to notify vLLM when the request is truly complete.
         //
-        // TODO(jthomson04): This is a temporary fix to ensure vLLM 0.11.2 compatibility.
-        //     IMPORTANT: We must ALWAYS return `true` here, even when the slot is already Finished.
-        //
-        //      Why? If we return `false`, vLLM removes the request from `self.requests` immediately.
-        //      However, our worker connector may still report completion later via `finish_requests()`.
-        //      When that happens, vLLM's scheduler.py has an assertion `req_id in self.requests`
-        //      that will fail because the request was already removed from the hash table.
-        //
-        //      By always returning `true`, we ensure vLLM keeps the request in its hash table until
-        //      our worker explicitly signals completion, avoiding the race condition.
-        //
-        //      If the slot is already Finished (no pending operations), we clean it up from our side
-        //      but still return `true` so vLLM waits for the worker's completion signal.
+        // With synchronous slot creation (Phases 1-5), worker slots are now created BEFORE
+        // async transfers start. This ensures:
+        // 1. Worker slot exists and accurately tracks all operations (shared atomic counter)
+        // 2. When leader's slot is Finished, worker's slot has also received all completions
+        // 3. Worker will NOT send `finished_sending` for already-freed requests
+        // 4. Therefore returning `false` is safe - it eliminates the ~2-3ms cudaDeviceSynchronize overhead
         if let SlotState::Finished = slot.state() {
             self.slot_manager().remove_slot(&request_id)?;
+            Ok(false) // Safe to return false - worker slot exists and is tracking
         } else {
             debug_assert!(matches!(slot.state(), SlotState::Finishing));
+            Ok(true) // Still has pending operations
         }
-
-        Ok(true)
     }
 
     fn has_slot(&self, request_id: String) -> bool {
