@@ -123,8 +123,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
@@ -188,8 +186,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   # CUDA 13 builds (vllm and sglang only, both architectures)
   build-cuda13-amd64:
@@ -242,8 +238,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-cuda13-arm64:
     name: Build ${{ matrix.framework }} CUDA13 (arm64)
@@ -295,8 +289,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
 ############################## TEST JOBS ##############################
 
