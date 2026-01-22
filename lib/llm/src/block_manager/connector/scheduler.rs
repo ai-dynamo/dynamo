@@ -35,6 +35,18 @@ impl TransferSchedulerClient {
         Self { scheduler_tx }
     }
 
+    /// Create a slot for the given request_id before transfers start.
+    /// This enables synchronous slot creation to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    ///
+    /// This is idempotent - if the slot already exists, it's a no-op.
+    pub async fn create_slot(&self, request_id: String) -> Result<(), SchedulerError> {
+        self.scheduler_tx
+            .send(TransferToSchedulerMessage::CreateSlot(request_id))
+            .await
+            .map_err(|_| SchedulerError::Disconnected)
+    }
+
     /// If the [SchedulingDecision::Execute] is returned, the caller receives a completion handle.
     /// The completion handle be marked as completed after the
     ///
