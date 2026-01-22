@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: /tensorrtllm-runtime:0.8.1
     TRTLLMPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -23,7 +23,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: /tensorrtllm-runtime:0.8.1
           workingDir: /workspace/
           command:
           - python3
@@ -48,7 +48,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: /tensorrtllm-runtime:0.8.1
           workingDir: /workspace/
           command:
           - python3

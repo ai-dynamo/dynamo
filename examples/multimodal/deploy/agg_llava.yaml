@@ -13,7 +13,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: /vllm-runtime:0.8.1
     EncodeWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -23,7 +23,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: /vllm-runtime:0.8.1
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh
@@ -39,7 +39,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: /vllm-runtime:0.8.1
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh
@@ -55,7 +55,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/vllm-runtime:my-tag
+          image: /vllm-runtime:0.8.1
           workingDir: /workspace/examples/multimodal
           command:
             - /bin/sh

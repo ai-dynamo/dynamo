@@ -13,7 +13,7 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1"
 
     # NOTE: any image built before January 10 and any release prior to 0.8.1
     # will need to use snake_case within profilingConfig.config
@@ -47,6 +47,6 @@ spec:
       key: tep16p-dep16d-disagg.yaml
 
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1"
   autoApply: true
 

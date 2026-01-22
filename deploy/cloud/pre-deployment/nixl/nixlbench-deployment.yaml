@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: nixl-benchmark
-        image: "my-registry/nixlbench:version-arch"
+        image: "/nixlbench:version-arch"
         command: ["sh", "-c"]
         env:
           - name: ETCD_ENDPOINTS
