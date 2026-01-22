@@ -230,6 +230,11 @@ impl WorkerSchedulerClient {
 
         match request.request_type {
             RequestType::Immediate => {}
+            RequestType::CreateSlot => {
+                // CreateSlot is handled via the transfer channel, not through enqueue_request.
+                // This case should not be reached in normal operation.
+                tracing::warn!("CreateSlot request type passed to enqueue_request - ignoring");
+            }
             RequestType::Scheduled => {
                 self.scheduler_tx
                     .send(SchedulerMessage::EnqueueRequest(request))
