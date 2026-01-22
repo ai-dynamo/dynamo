@@ -22,7 +22,7 @@ use dynamo_llm::{
         service::{
             Metrics,
             error::HttpError,
-            metrics::{Endpoint, RequestType, Status},
+            metrics::{Endpoint, ErrorType, RequestType, Status},
             service_v2::HttpService,
         },
     },
@@ -197,16 +197,18 @@ fn compare_counter(
     endpoint: &Endpoint,
     request_type: &RequestType,
     status: &Status,
+    error_type: &ErrorType,
     expected: u64,
 ) {
     assert_eq!(
-        metrics.get_request_counter(model, endpoint, request_type, status),
+        metrics.get_request_counter(model, endpoint, request_type, status, error_type),
         expected,
-        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}",
+        "model: {}, endpoint: {:?}, request_type: {:?}, status: {:?}, error_type: {:?}",
         model,
         endpoint.as_str(),
         request_type.as_str(),
-        status.as_str()
+        status.as_str(),
+        error_type.as_str()
     );
 }
 
@@ -237,12 +239,17 @@ fn compare_counters(metrics: &Metrics, model: &str, expected: &[u64; 8]) {
         for request_type in &[RequestType::Unary, RequestType::Stream] {
             for status in &[Status::Success, Status::Error] {
                 let index = compute_index(endpoint, request_type, status);
+                let error_type = match status {
+                    Status::Success => &ErrorType::None,
+                    Status::Error => &ErrorType::Validation, // Test engines return 4xx errors
+                };
                 compare_counter(
                     metrics,
                     model,
                     endpoint,
                     request_type,
                     status,
+                    error_type,
                     expected[index],
                 );
             }
