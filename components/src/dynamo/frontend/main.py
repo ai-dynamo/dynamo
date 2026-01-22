@@ -21,14 +21,16 @@ import logging
 import os
 import pathlib
 import signal
+import time
 import uuid
 
 import uvloop
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.output_processor import OutputProcessorOutput
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.config_dump.config_dumper import add_config_dump_args
@@ -36,6 +38,7 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
+    ModelCardInstanceId,
     ModelDeploymentCard,
     PythonAsyncEngine,
     RouterConfig,
@@ -44,7 +47,7 @@ from dynamo.llm import (
     make_engine,
     run_input,
 )
-from dynamo.runtime import DistributedRuntime
+from dynamo.runtime import Client, DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 
 from . import __version__
@@ -63,8 +66,9 @@ def random_uuid() -> str:
 
 
 class VllmEngine:
-    def __init__(self, vllm_engine):
+    def __init__(self, vllm_engine: AsyncLLM, router: Client):
         self.engine = vllm_engine
+        self.router = router
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -100,36 +104,129 @@ class VllmEngine:
             # queue: RequestOutputCollector | None = None,
         )
 
-        # Convert to our type
-        # our_preproc: dynamo.PreprocessedRequest = convert(vllm_preproc)
+        # Convert to a Python object that has fields that match our PreprocessedRequest
+        sp = vllm_preproc.sampling_params
+        dynamo_preproc = {
+            "model": request["model"],
+            "token_ids": vllm_preproc.prompt_token_ids,
+            # protocols.common.StopConditions
+            "stop_conditions": {
+                "max_tokens": sp.max_tokens,
+                "stop": sp.stop,
+                "min_tokens": sp.min_tokens,
+                "ignore_eos": sp.ignore_eos,
+            },
+            # protocols.common.SamplingOptions
+            "sampling_options": {
+                # Is there a better way than typing it out like this?
+                "n": sp.n,
+                "presence_penalty": sp.presence_penalty,
+                "frequency_penalty": sp.frequency_penalty,
+                "repetition_penalty": sp.repetition_penalty,
+                "temperature": sp.temperature,
+                "top_p": sp.top_p,
+                "top_k": sp.top_k,
+                "min_p": sp.min_p,
+                "seed": sp.seed,
+            },
+            # protocols.common.OutputOptions
+            "output_options": {
+                "logprobs": sp.logprobs,
+                "prompt_logprobs": sp.prompt_logprobs,
+                "skip_special_tokens": sp.skip_special_tokens,
+            },
+            "eos_token_ids": [vllm_preproc.eos_token_id],
+            "annotations": [],
+            # "prompt_embeds": vllm_preproc.prompt_embeds,
+        }
 
         # Dynamo Router. This goes to the backend, waits, gets the streaming response, returns it
         # stream is AsyncResponseStream
-        # dynamo_stream: dynamo.AsyncResponseStream = await self.endpoint_client.round_robin(our_preproc)
+        dynamo_stream = await self.router.random(dynamo_preproc)
 
-        # async for dynamo_response in dynamo_stream:
-        #    vllm_response: [EngineCoreOutput] = convert(dynamo_response)
+        # dynamo_response: Annotated
+        async for dynamo_response in dynamo_stream:
+            # Mock
+            # Stream got: Annotated(data={'token_ids': [1714], 'tokens': [' method'], 'text': ' method', 'cum_log_probs': None, 'log_probs': None, 'top_logprobs': None, 'finish_reason': None, 'index': None}, event=None, comment=[], id=None)
+            #
+            # vllm
+            # Stream got: Annotated(data={'token_ids': [7281]}, event=None, comment=[], id=None)
+            print(f"Stream got: {dynamo_response}")
 
-        # Let vllm handle all post-processing
-        #    vlm_out: vllm.RequestOutput = self.engine.output_processor.process_output(vllm_response)
+            output = dynamo_response.data()
+            if output is None:
+                yield {
+                    "finish_reason": "error: No outputs from vLLM engine",
+                    "token_ids": [],
+                }
+                break
 
-        #    dynamo_out: dynamo.NvCreateChatCompletionResponse = convert(vllm_out)
+            finish_reason = (
+                output["finish_reason"] if hasattr(output, "finish_reason") else None
+            )
+            vllm_response = EngineCoreOutput(
+                request_id=request_id,
+                new_token_ids=output["token_ids"],
+                finish_reason=finish_reason,
+                # new_logprobs=new_logprobs,
+                # new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                # pooling_output=pooler_output,
+                # stop_reason=request.stop_reason,
+                # events=request.take_events(),
+                # kv_transfer_params=kv_transfer_params,
+                # trace_headers=request.trace_headers,
+                # num_cached_tokens=request.num_cached_tokens,
+                # num_nans_in_logits=request.num_nans_in_logits,
+            )
 
-        # Rust now handles Server Sent Events back to user
-        #    yield dynamo_out
-        return
-        yield
+            # Let vllm handle all post-processing
+            vllm_out: OutputProcessorOutput = (
+                self.engine.output_processor.process_outputs([vllm_response])
+            )
+            # vllm
+            # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
+
+            print(f"RequestOutput: {vllm_out}")
+
+            # Vec<ChatChoiceStream>
+            choices = []
+            for output in vllm_out.request_outputs[0].outputs:
+                choices.append(
+                    {
+                        "index": output.index,
+                        # ChatCompletionStreamResponseDelta
+                        "delta": {"content": output.text, "role": "assistant"},
+                        # TODO: These three likely need converting, it won't just work
+                        "finish_reason": output.finish_reason,
+                        "stop_reason": output.stop_reason,
+                        "logprobs": output.logprobs,
+                    }
+                )
+            # dynamo_out: NvCreateChatCompletionStreamResponse
+            dynamo_out = {
+                "id": request_id,
+                "choices": choices,
+                "created": int(time.time()),
+                "model": request["model"],
+                "object": "chat.completion.chunk",
+                # usage (from output.metrics maybe)
+            }
+            # Rust handles Server Sent Events back to user
+            yield dynamo_out
 
 
 class EngineFactory:
-    def __init__(self):
-        pass
+    def __init__(self, runtime: DistributedRuntime):
+        self.runtime = runtime
 
-    async def engine_factory(self, mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+    async def engine_factory(
+        self, instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard
+    ) -> PythonAsyncEngine:
         """
         Called by Rust when a model is discovered.
         """
         logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()}")
+        logger.info(f"Engine_factory called with instance ID: {instance_id}")
         loop = asyncio.get_running_loop()
 
         source_path = mdc.source_path()
@@ -146,18 +243,26 @@ class EngineFactory:
         vllm_config = engine_args.create_engine_config(
             usage_context=UsageContext.OPENAI_API_SERVER
         )
-        engine_client = AsyncLLM.from_vllm_config(
+        vllm_engine = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
         )
 
-        gen = VllmEngine(engine_client)
+        (namespace_name, component_name, endpoint_name) = instance_id.triple()
+        generate_endpoint = (
+            self.runtime.namespace(namespace_name)
+            .component(component_name)
+            .endpoint(endpoint_name)
+        )
+        router = await generate_endpoint.client()
+
+        gen = VllmEngine(vllm_engine, router)
         return PythonAsyncEngine(gen.generator, loop)
 
 
-def setup_engine_factory() -> EngineFactory:
+def setup_engine_factory(runtime: DistributedRuntime) -> EngineFactory:
     """Create the EngineFactory that creates the engines that run requests."""
-    return EngineFactory().engine_factory
+    return EngineFactory(runtime).engine_factory
 
 
 def validate_model_name(value):
@@ -536,7 +641,7 @@ async def async_main():
     if flags.exp_python_factory:
         # TODO: I think we also need to tell the engine factory when the model is removed,
         # so it can stop vllm
-        kwargs["engine_factory"] = setup_engine_factory()
+        kwargs["engine_factory"] = setup_engine_factory(runtime)
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
