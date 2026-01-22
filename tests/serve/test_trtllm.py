@@ -214,15 +214,7 @@ trtllm_configs = {
         frontend_port=DefaultPort.FRONTEND.value,
         timeout=1200,
         delayed_start=120,
-        request_payloads=[
-            multimodal_payload_default(
-                image_url=MULTIMODAL_IMG_URL,
-                text="What colors are in the image? Respond only with the colors.",
-                expected_response=["purple"],
-                temperature=0.0,
-                max_tokens=120,
-            )
-        ],
+        request_payloads=[multimodal_payload_default()],
     ),
     "completions_only": TRTLLMConfig(
         name="completions_only",
