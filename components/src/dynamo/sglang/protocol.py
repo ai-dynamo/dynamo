@@ -112,18 +112,32 @@ class MultiModalRequest(BaseModel):
 
 
 class MultiModalInput(BaseModel):
-    image_url: Optional[str] = None
+    # Support multiple image URLs per request
+    image_urls: Optional[List[str]] = None
     video_url: Optional[str] = None
+
+    def get_first_image_url(self) -> Optional[str]:
+        """Get first image URL for backward compatibility"""
+        if self.image_urls and len(self.image_urls) > 0:
+            return self.image_urls[0]
+        return None
 
 
 class SglangMultimodalRequest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     request: PreprocessedRequest
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
+    # Combined grid_thw for all images: [[t1,h1,w1], [t2,h2,w2], ...]
     image_grid_thw: Optional[List[Any]] = None
+    # Total shape of concatenated embeddings tensor
     embeddings_shape: Optional[
-        Union[Tuple[int, int, int], Tuple[int, int, int, int]]
+        Union[Tuple[int, int, int], Tuple[int, int, int, int], List[Tuple]]
     ] = None
+    # Number of images in this request
+    num_images: int = 1
+    # Per-image token counts for unpacking concatenated embeddings
+    # e.g., [1024, 1024, 512] means image1 has 1024 tokens, image2 has 1024, image3 has 512
+    per_image_num_tokens: Optional[List[int]] = None
     serialized_request: Optional[connect.RdmaMetadata] = None
 
 

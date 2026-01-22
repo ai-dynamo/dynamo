@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, List
 
 import torch
-from sglang.srt.parser.conversation import chat_templates
-from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
+from transformers import AutoImageProcessor, AutoModel
 
 import dynamo.nixl_connect as connect
 from dynamo._core import Client, Component, Context
@@ -63,29 +62,6 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             trust_remote_code=True,
         )
 
-        # Load tokenizer to convert image token string to integer ID
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.model, trust_remote_code=True
-        )
-
-        # Get image token string and handle it properly
-        image_token_str = (
-            chat_templates[getattr(config.server_args, "chat_template")]
-            .copy()
-            .image_token
-        )
-
-        # For Qwen2.5-VL, the image token might be multiple tokens
-        if image_token_str == "<|vision_start|><|image_pad|><|vision_end|>":
-            # These are likely the individual special tokens for Qwen2.5-VL
-            image_pad_id = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
-
-            # Use the image_pad token as the main image token
-            self.image_token_id = image_pad_id
-        else:
-            # Fallback for other models
-            self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token_str)
-
         self.min_workers = 1
 
     def cleanup(self):
@@ -96,6 +72,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncIterator[str]:
         """
         Generate precomputed embeddings for multimodal input.
+        Supports multiple images per request.
 
         Args:
             request: Multimodal request with image/video data.
@@ -107,54 +84,67 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
             else:
                 request = SglangMultimodalRequest.model_validate(request)
 
-        # The following steps encode the requested image for SGLang:
-        # 1. Open the image from the provided URL.
-        # 2. Process the image using the processor (which handles tokenization).
-        # 3. Extract input_ids and image data from processed result.
-        # 4. Run the image through the vision model to get precomputed embeddings.
-        # 5. Create SGLang-specific multimodal data format.
-        # 6. Create a descriptor for the embeddings and send to downstream worker.
+        # The following steps encode the requested images for SGLang:
+        # 1. Open all images from the provided URLs.
+        # 2. Process each image using the processor.
+        # 3. Run images through the vision model to get precomputed embeddings.
+        # 4. Concatenate embeddings from all images.
+        # 5. Create a descriptor for the embeddings and send to downstream worker.
+        # Note: Token IDs are NOT modified - the tokenizer already generates correct
+        # number of image tokens based on image resolution.
 
         try:
-            if not request.multimodal_input.image_url:
-                raise ValueError("image_url is required for the encode worker.")
+            image_urls = request.multimodal_input.image_urls
+            if not image_urls:
+                raise ValueError("image_urls is required for the encode worker.")
 
-            image = await self.image_loader.load_image(
-                request.multimodal_input.image_url
-            )
+            num_images = len(image_urls)
+            logger.debug(f"Processing {num_images} image(s)")
 
-            image_embeds = self.image_processor(images=image, return_tensors="pt")
-            precomputed_embeddings = encode_image_embeddings(
-                model_name=self.served_model_name,
-                image_embeds=image_embeds,
-                vision_encoder=self.vision_model,
-                projector=None,
-            )
+            # Process all images and collect embeddings
+            all_embeddings = []
+            all_grid_thw = []
+            all_num_tokens = []
 
-            image_grid_thw = (
-                image_embeds["image_grid_thw"].tolist()
-                if "image_grid_thw" in image_embeds
-                else None
+            for idx, image_url in enumerate(image_urls):
+                logger.debug(f"Processing image {idx + 1}/{num_images}: {image_url[:50]}...")
+
+                image = await self.image_loader.load_image(image_url)
+                image_embeds = self.image_processor(images=image, return_tensors="pt")
+
+                embeddings = encode_image_embeddings(
+                    model_name=self.served_model_name,
+                    image_embeds=image_embeds,
+                    vision_encoder=self.vision_model,
+                    projector=None,
+                )
+
+                all_embeddings.append(embeddings)
+                all_num_tokens.append(embeddings.shape[1])  # Number of image patches
+
+                if "image_grid_thw" in image_embeds:
+                    all_grid_thw.extend(image_embeds["image_grid_thw"].tolist())
+
+            # Concatenate all embeddings along the sequence dimension
+            # Shape: [1, total_tokens, hidden_dim]
+            precomputed_embeddings = torch.cat(all_embeddings, dim=1)
+
+            logger.debug(
+                f"Total embeddings shape: {precomputed_embeddings.shape}, "
+                f"from {num_images} images with token counts: {all_num_tokens}"
             )
 
             # Store the image data info in the request for downstream
-            request.image_grid_thw = image_grid_thw
+            request.image_grid_thw = all_grid_thw
             request.embeddings_shape = tuple(precomputed_embeddings.shape)
+            request.num_images = num_images
+            # Store per-image token counts for unpacking on the worker side
+            request.per_image_num_tokens = all_num_tokens
 
-            # Replace the single image token with multiple image tokens based on embedding shape
-            image_token_id_index = request.request.token_ids.index(self.image_token_id)
-
-            num_image_tokens = precomputed_embeddings.shape[
-                1
-            ]  # Number of image patches
-            # Replace single image token with multiple image tokens
-            request.request.token_ids = (
-                request.request.token_ids[:image_token_id_index]
-                + [self.image_token_id] * num_image_tokens
-                + request.request.token_ids[
-                    image_token_id_index + 1 :
-                ]  # Skip the original token
-            )
+            # NOTE: Do NOT modify token_ids here!
+            # The tokenizer has already generated the correct number of <|image_pad|> tokens
+            # for each image based on its resolution. Modifying them would cause a mismatch
+            # between token count and embedding count.
 
             # Create descriptor for the multimodal data
             descriptor = connect.Descriptor(precomputed_embeddings)
