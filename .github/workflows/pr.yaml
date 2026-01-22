@@ -124,8 +124,6 @@ jobs:
     steps: *runtime-container-build-push-test
 
   trtllm:
-    needs: changed-files
-    if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
     strategy:
       fail-fast: false
       matrix:
