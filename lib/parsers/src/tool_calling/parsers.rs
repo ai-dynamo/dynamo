@@ -210,6 +210,7 @@ mod tests {
             "qwen3_coder",
             "jamba",
             "nemotron_nano",
+            "minimax_m2",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
@@ -2999,14 +3000,23 @@ weather forecasting
         let input = r#"<minimax:tool_call>
 <invoke name="search_web">
 <parameter name="query_tag">["technology", "events"]</parameter>
-<parameter name="query_list">["\"OpenAI\" \"latest\" \"release\""]</parameter>
+<parameter name="query_list">["OpenAI", "latest", "release"]</parameter>
 </invoke>
 <invoke name="search_web">
 <parameter name="query_tag">["technology", "events"]</parameter>
-<parameter name="query_list">["\"Gemini\" \"latest\" \"release\""]</parameter>
+<parameter name="query_list">["Gemini", "latest", "release"]</parameter>
 </invoke>
 </minimax:tool_call>"#;
-        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), None)
+        let tools = vec![ToolDefinition {
+            name: "search_web".to_string(),
+            parameters: Some(serde_json::json!({
+                "properties": {
+                    "query_tag": {"type": "array"},
+                    "query_list": {"type": "array"}
+                }
+            })),
+        }];
+        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
             .await
             .unwrap();
         assert_eq!(result.len(), 2);
@@ -3014,14 +3024,30 @@ weather forecasting
         // First call
         let (name1, args1) = extract_name_and_args(result[0].clone());
         assert_eq!(name1, "search_web");
-        assert_eq!(args1["query_tag"], "[\"technology\", \"events\"]");
-        assert_eq!(args1["query_list"], "[\"\\\"OpenAI\\\" \\\"latest\\\" \\\"release\\\"\"]");
+        assert!(args1["query_tag"].is_array());
+        assert_eq!(
+            args1["query_tag"],
+            serde_json::json!(["technology", "events"])
+        );
+        assert!(args1["query_list"].is_array());
+        assert_eq!(
+            args1["query_list"],
+            serde_json::json!(["OpenAI", "latest", "release"])
+        );
 
         // Second call
         let (name2, args2) = extract_name_and_args(result[1].clone());
         assert_eq!(name2, "search_web");
-        assert_eq!(args2["query_tag"], "[\"technology\", \"events\"]");
-        assert_eq!(args2["query_list"], "[\"\\\"Gemini\\\" \\\"latest\\\" \\\"release\\\"\"]");
+        assert!(args2["query_tag"].is_array());
+        assert_eq!(
+            args2["query_tag"],
+            serde_json::json!(["technology", "events"])
+        );
+        assert!(args2["query_list"].is_array());
+        assert_eq!(
+            args2["query_list"],
+            serde_json::json!(["Gemini", "latest", "release"])
+        );
     }
 
     #[tokio::test]
@@ -3036,7 +3062,11 @@ weather forecasting
             .await
             .unwrap();
         assert!(content.is_some());
-        assert!(content.unwrap().contains("I'll help you check the weather."));
+        assert!(
+            content
+                .unwrap()
+                .contains("I'll help you check the weather.")
+        );
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "get_weather");
