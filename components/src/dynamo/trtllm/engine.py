@@ -22,7 +22,11 @@ class Backend(str, enum.Enum):
 
 
 class TensorRTLLMEngine:
-    def __init__(self, engine_args, disaggregation_mode: DisaggregationMode):
+    def __init__(
+        self,
+        engine_args,
+        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+    ):
         self._llm: Optional[LLM] = None
         self.disaggregation_mode = disaggregation_mode
         # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
@@ -119,7 +123,8 @@ class TensorRTLLMEngine:
 
 @asynccontextmanager
 async def get_llm_engine(
-    engine_args, disaggregation_mode: DisaggregationMode
+    engine_args,
+    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
