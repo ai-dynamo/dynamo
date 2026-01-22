@@ -42,7 +42,7 @@ daemonset:
   # Container image
   image:
     repository: nvcr.io/nvidian/dynamo-dev/schwinns-criu
-    tag: criu-agent-82675da
+    tag: criu-agent-cf34e68
     pullPolicy: Always
   
   # Image pull secrets

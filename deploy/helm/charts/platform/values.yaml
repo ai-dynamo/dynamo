@@ -70,7 +70,7 @@ dynamo-operator:
         # -- Official NVIDIA Dynamo operator image repository
         repository: "nvcr.io/nvidian/dynamo-dev/schwinns-dynamo-operator"
         # -- Image tag (leave empty to use chart default)
-        tag: "82675da"
+        tag: "07df00b-loc-fix"
         # -- Image pull policy - when to pull the image
         pullPolicy: Always
 

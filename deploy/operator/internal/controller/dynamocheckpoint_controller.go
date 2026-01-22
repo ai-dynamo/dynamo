@@ -192,6 +192,16 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		now := metav1.Now()
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		ckpt.Status.CreatedAt = &now
+
+		// Set checkpoint location and storage type for restore pods
+		// These are derived from operator config (helm values), not CR spec
+		basePath := r.Config.Checkpoint.Storage.PVC.BasePath
+		if basePath == "" {
+			basePath = consts.CheckpointBasePath
+		}
+		ckpt.Status.Location = fmt.Sprintf("%s/%s", basePath, ckpt.Status.IdentityHash)
+		ckpt.Status.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(commonController.CheckpointStorageTypePVC)
+
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
 			Status:             metav1.ConditionTrue,
