@@ -5,10 +5,29 @@
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CONCURRENCY=1
 
+python local_media_server.py \
+    --image test.jpg:https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg &
+
+# Wait for the server to start
+for i in {1..10}; do
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" localhost:8233/test.jpg)
+    if [[ "$HTTP_CODE" -eq 200 ]]; then
+        echo "Server is responding with HTTP 200."
+        break
+    else
+        echo "Server did not respond with HTTP 200. Response code: $HTTP_CODE. Retrying in 1 second..."
+        sleep 1
+    fi
+    if [[ $i -eq 10 ]]; then
+        echo "Server did not respond with HTTP 200 after 10 attempts. Exiting."
+        exit 1
+    fi
+done
+
 # Create a JSONL file with 11 identical large image URLs
 # NOTE: any kind of caching can significantly affect the benchmark results,
 # should make sure what you are doing.
-echo '{"images": ["https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg", "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"]}' \
+echo '{"images": ["http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg", "http://localhost:8233/test.jpg"]}' \
     > data_large.jsonl
 echo "This benchmark uses duplicate image urls, so any kind of caching can significantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
 
