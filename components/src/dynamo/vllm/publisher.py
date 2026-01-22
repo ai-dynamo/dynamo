@@ -54,6 +54,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             logging.debug("vLLM metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create vLLM metrics publisher endpoint")
+            raise
 
     # TODO: Remove this and pass as metadata through shared storage
     def set_num_gpu_block(self, num_blocks):

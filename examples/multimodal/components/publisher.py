@@ -65,6 +65,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             logging.debug("Multimodal metrics publisher endpoint created")
         except Exception:
             logging.exception("Failed to create multimodal metrics publisher endpoint")
+            raise
 
     # TODO: Remove this and pass as metadata through etcd
     def set_num_gpu_block(self, num_blocks):
