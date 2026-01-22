@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - 'release/*'
-      - 'pvijayakrish/add-builds-to-release'  #TODO: revert Temporary: for testing
   workflow_dispatch:
     inputs:
       rc_number:
@@ -39,7 +38,6 @@ jobs:
     outputs:
       version: ${{ steps.extract.outputs.version }}
       image_prefix: ${{ steps.extract.outputs.image_prefix }}
-      is_test_branch: ${{ steps.extract.outputs.is_test_branch }}
     steps:
       - name: Extract version from branch
         id: extract
@@ -47,16 +45,6 @@ jobs:
           # Extract version from branch name (e.g., release/0.7.0 -> 0.7.0)
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
-
-          # Handle test branch - use test version
-          if [[ "$BRANCH_NAME" == "pvijayakrish/add-builds-to-release" ]]; then
-            VERSION="0.0.0"
-            echo "Test branch detected, using test version: ${VERSION}"
-            echo "version=${VERSION}" >> $GITHUB_OUTPUT
-            echo "image_prefix=test" >> $GITHUB_OUTPUT
-            echo "is_test_branch=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
 
           # Enforce workflow_dispatch only runs on release/* branches
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -76,7 +64,6 @@ jobs:
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
-          echo "is_test_branch=false" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
 
   # Run the CI test suite (builds + tests)
@@ -94,7 +81,6 @@ jobs:
       include_nightly_marks: false
       image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
       enable_slack_notification: false
-      skip_tests: ${{ needs.prepare-release.outputs.is_test_branch == 'true' }}
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -147,7 +133,6 @@ jobs:
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
-      IS_TEST_BRANCH: ${{ needs.prepare-release.outputs.is_test_branch }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
@@ -163,32 +148,6 @@ jobs:
           INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
         run: |
           set -euo pipefail
-
-          # Handle test branch - use test tag format
-          if [[ "${IS_TEST_BRANCH}" == "true" ]]; then
-            # For test branches, use test-0.0.0-N format
-            TEST_PATTERN="test-0.0.0-"
-            EXISTING_TESTS=$(git tag -l "${TEST_PATTERN}*" | grep -E "^test-0\.0\.0-[0-9]+$" | sort -V || true)
-
-            if [ -z "$EXISTING_TESTS" ]; then
-              NEXT_NUM=0
-              echo "No existing test tags found. Starting with test-0.0.0-0."
-            else
-              LAST_TEST=$(echo "$EXISTING_TESTS" | tail -1)
-              LAST_NUM=${LAST_TEST#test-0.0.0-}
-              NEXT_NUM=$((LAST_NUM + 1))
-              echo "Found existing test tags:"
-              echo "$EXISTING_TESTS"
-              echo "Last test tag: ${LAST_TEST}, Next number: ${NEXT_NUM}"
-            fi
-
-            RC_TAG="test-0.0.0-${NEXT_NUM}"
-            echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
-            echo "rc_number=${NEXT_NUM}" >> $GITHUB_OUTPUT
-            echo "ngc_version_tag=test0.0.0rc${NEXT_NUM}" >> $GITHUB_OUTPUT
-            echo "Will create test tag: ${RC_TAG}"
-            exit 0
-          fi
 
           # Check if RC number was provided as input
           if [ -n "${INPUT_RC_NUMBER}" ]; then
