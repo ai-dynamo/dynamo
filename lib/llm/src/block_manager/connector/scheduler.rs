@@ -224,8 +224,11 @@ impl WorkerSchedulerClient {
         match self.slots.get(request_id) {
             Some(slot) => slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64,
             None => {
-                tracing::debug!(request_id, "slot not found - likely aborted");
-                true
+                // Return false for missing slots to prevent premature completion signals.
+                // This handles the race condition where transfers complete before the worker
+                // slot is created. Returning false ensures we don't falsely signal completion.
+                tracing::warn!(request_id, "is_complete called for missing slot - returning false");
+                false
             }
         }
     }
