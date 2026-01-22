@@ -102,6 +102,10 @@ pub struct LeaderTransferRequest {
 pub enum TransferToSchedulerMessage {
     ScheduleRequest(TransferScheduleRequest),
     ImmediateResult(ImmediateTransferResult),
+    /// Create a slot for tracking operations before transfers start.
+    /// This enables synchronous slot creation to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    CreateSlot(String),
 }
 
 /// Issued by the TransferEngine, received by the Scheduler.

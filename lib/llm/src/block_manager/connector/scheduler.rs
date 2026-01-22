@@ -373,6 +373,9 @@ impl Scheduler {
                     Some(TransferToSchedulerMessage::ImmediateResult(result)) => {
                         self.handle_immediate_result(result);
                     }
+                    Some(TransferToSchedulerMessage::CreateSlot(request_id)) => {
+                        self.handle_create_slot_from_transfer(request_id);
+                    }
                     None => {
                         return false;
                     }
@@ -468,6 +471,30 @@ impl Scheduler {
             layers_completed,
             "layer {last_layer_name} is complete"
         );
+    }
+
+    /// Handle a CreateSlot message from the transfer channel.
+    /// This creates a slot early (before metadata arrives) to prevent race conditions
+    /// where transfers complete before the worker slot is created.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request_id))]
+    fn handle_create_slot_from_transfer(&mut self, request_id: String) {
+        if self.slots.contains_key(&request_id) {
+            tracing::debug!("slot already exists, skipping creation");
+            return;
+        }
+
+        tracing::debug!("creating slot from transfer channel before metadata arrives");
+
+        // Create a slot with a new shared atomic counter.
+        // Note: This slot won't be visible to the WorkerSchedulerClient until
+        // bind_connector_metadata creates the worker-side slot. However, immediate
+        // transfer results can now increment the completed counter here.
+        let completed = Arc::new(AtomicU64::new(0));
+        let slot_details = SchedulerCreateSlotDetails {
+            request_id: request_id.clone(),
+            completed,
+        };
+        self.add_slot(slot_details);
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]
