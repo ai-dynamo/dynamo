@@ -448,7 +448,7 @@ await register_llm(
 - **Multimodal preprocessing/tokenization happens in Python** - Rust may forward token_ids, but multimodal requests are parsed and re-tokenized in the Python worker
 - **Multi-node H100 limitation** - Loading `meta-llama/Llama-4-Maverick-17B-128E-Instruct` with 8 nodes of H100 with TP=16 is not possible due to head count divisibility (`num_attention_heads: 40` not divisible by `tp_size: 16`)
 - **llava-v1.6-mistral-7b-hf model crash** - Known issue with TRTLLM backend compatibilty with `TensorRT LLM version: 1.2.0rc6.post1`. To use Llava model download revision `revision='52320fb52229` locally using HF.
-- **Embeddings file crash** - Known issue with TRTLLM backend compatibilty with `TensorRT LLM version: 1.2.0rc6.post1`. Embedding file parsing crashes in `attach_multimodal_embeddings(`. To be fixed in next TRTLLM upgrade. 
+- **Embeddings file crash** - Known issue with TRTLLM backend compatibilty with `TensorRT LLM version: 1.2.0rc6.post1`. Embedding file parsing crashes in `attach_multimodal_embeddings(`. To be fixed in next TRTLLM upgrade.
 
 ## Supported Models
 
