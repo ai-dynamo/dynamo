@@ -22,7 +22,7 @@ from dynamo.sglang.request_handlers.handler_base import BaseGenerativeHandler
 logger = logging.getLogger(__name__)
 
 
-class DiffusionWorkerHandler(BaseGenerativeHandler):
+class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
     """Handler for diffusion image generation.
 
     Inherits from BaseGenerativeHandler for common infrastructure like
@@ -49,19 +49,19 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
         # Call parent constructor for common setup
         super().__init__(component, config, publisher)
 
-        # Diffusion-specific initialization
+        # Image diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
-        self.fs_url = config.dynamo_args.diffusion_fs_url
+        self.fs_url = config.dynamo_args.image_diffusion_fs_url
 
-        logger.info(f"Diffusion worker handler initialized with fs_url={self.fs_url}, fallback_dir={self.fallback_dir}")
+        logger.info(f"Image diffusion worker handler initialized with fs_url={self.fs_url}")
 
     def cleanup(self) -> None:
         """Cleanup generator resources"""
         if self.generator is not None:
             del self.generator
         torch.cuda.empty_cache()
-        logger.info("Diffusion generator cleanup complete")
+        logger.info("Image diffusion generator cleanup complete")
         # Call parent cleanup for any base class cleanup
         super().cleanup()
 
@@ -80,12 +80,12 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated images (OpenAI-compatible format).
         """
-        logger.debug(f"Diffusion request: {request}")
+        logger.debug(f"Image diffusion request: {request}")
 
         # Get trace header for distributed tracing (for logging/observability)
         trace_header = self._get_trace_header(context)
         if trace_header:
-            logger.debug(f"Diffusion request with trace: {trace_header}")
+            logger.debug(f"Image diffusion request with trace: {trace_header}")
 
         try:
             # # Check for cancellation before starting generation
@@ -230,21 +230,15 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
         image_filename = f"{image_uuid}.png"
 
         # Per-user storage path
-        storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
+        storage_dir = f"users/{user_id}/generations/{request_id}"
+        storage_path = f"{storage_dir}/{image_filename}"
+        full_path = f"{self.fs_url.rstrip('/')}/{storage_path}"
 
-        try:
-            full_path = f"{self.fs_url.rstrip('/')}/{storage_path}"
-            # Use pipe() for writing bytes (standard fsspec API)
-            await asyncio.to_thread(self.fs.pipe, full_path, image_bytes)
-            logger.debug(f"Uploaded to primary storage: {full_path}")
-            return self._generate_url(full_path, storage_path)
-        except Exception as e:
-            logger.warning(f"Primary storage upload failed: {e}, trying fallback")
+        # Use pipe() for writing bytes (standard fsspec API)
+        await asyncio.to_thread(self.fs.mkdirs, storage_dir, exist_ok=True) # only for local filesystem
+        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
 
-        # Both failed
-        raise RuntimeError(
-            f"Failed to upload image to ({self.fs_url}) storage"
-        )
+        return self._generate_url(full_path, storage_path)
 
     def _generate_url(self, full_path: str, storage_path: str) -> str:
         """Generate public URL based on filesystem type.

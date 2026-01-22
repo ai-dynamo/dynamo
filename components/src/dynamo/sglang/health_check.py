@@ -120,8 +120,8 @@ class SglangPrefillHealthCheckPayload(HealthCheckPayload):
         super().__init__()
 
 
-class DiffusionHealthCheckPayload(HealthCheckPayload):
-    """Diffusion-specific health check payload for image generation workers.
+class ImageDiffusionHealthCheckPayload(HealthCheckPayload):
+    """Image diffusion-specific health check payload for image generation workers.
 
     Sends a minimal image generation request to verify the diffusion worker
     is responding and the model is loaded. Uses minimal resources for fast checks.

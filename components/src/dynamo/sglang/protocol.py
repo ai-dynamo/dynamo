@@ -134,7 +134,7 @@ class DisaggSglangMultimodalRequest(BaseModel):
 
 
 # ============================================================================
-# Diffusion Protocol Types
+# Image diffusion Protocol Types
 # ============================================================================
 
 

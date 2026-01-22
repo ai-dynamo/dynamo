@@ -279,7 +279,7 @@ async def register_diffusion_model(
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
-        Diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
+        Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
     """
     # Use model_path as the model name (diffusion workers don't have served_model_name)
     model_name = dynamo_args.model_path
@@ -297,10 +297,10 @@ async def register_diffusion_model(
         )
     except Exception as e:
         logging.error(f"Failed to register diffusion model: {e}")
-        raise RuntimeError("Diffusion model registration failed")
+        raise RuntimeError("Image diffusion model registration failed")
 
     # Signal readiness
     if readiness_gate:
         readiness_gate.set()
 
-    logging.info(f"Diffusion model ready: {model_name}")
+    logging.info(f"Image diffusion model ready: {model_name}")
