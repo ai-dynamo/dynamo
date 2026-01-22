@@ -507,9 +507,9 @@ ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-        /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+        /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
         sglang==${SGLANG_VERSION}
 
 # Install common and test dependencies as root

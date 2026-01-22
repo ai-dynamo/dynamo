@@ -431,6 +431,10 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+RUN source ${VIRTUAL_ENV}/bin/activate && \
+    uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service
+
 ##############################################
 ########## Runtime image ##############
 ##############################################
@@ -505,7 +509,8 @@ ARG ENABLE_KVBM
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    /opt/dynamo/wheelhouse/gpu_memory_service*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -596,7 +601,8 @@ ARG ENABLE_KVBM
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-    /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    /opt/dynamo/wheelhouse/gpu_memory_service*.whl && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \

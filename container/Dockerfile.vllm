@@ -752,9 +752,9 @@ ARG ENABLE_KVBM
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
-      /opt/dynamo/wheelhouse/gpu_memory_service*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-      /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+      /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+      /opt/dynamo/wheelhouse/gpu_memory_service*.whl && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
