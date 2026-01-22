@@ -138,10 +138,6 @@ SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_CUDA_VERSION_CU13="13.0.1"
 SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
 
-# GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
-GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
-GAIE_VERSION="v0.5.1"
-
 PYTHON_VERSION="3.12"
 
 NIXL_REF=0.8.0
@@ -969,39 +965,33 @@ show_image_options
 # Handle FRONTEND target: build EPP image first
 if [[ ${TARGET^^} == "FRONTEND" ]]; then
     echo "Building FRONTEND image - requires EPP image"
-
-    # Build base dynamo image first (framework=NONE, target=dev)
     echo ""
-    echo "Building EPP image for Frontend..."
-    # Set up paths for GAIE
-    GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
+    echo "Building EPP image for Frontend using Makefile..."
 
-    # Clone GAIE repo
-    echo ""
-    echo "Cloning GAIE repository at ${GAIE_VERSION}..."
-    $RUN_PREFIX rm -rf "${GAIE_CLONE_DIR}"
-    $RUN_PREFIX mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
-    $RUN_PREFIX git clone ${GAIE_REPO_URL} "${GAIE_CLONE_DIR}"
-    $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
-    $RUN_PREFIX git checkout ${GAIE_VERSION}
-    $RUN_PREFIX cd "${BUILD_CONTEXT}"
-
-    # Build EPP image
-    echo ""
-    echo "Building EPP image..."
-    export GAIE_DIR="${GAIE_CLONE_DIR}"
-    export DYNAMO_DIR="${BUILD_CONTEXT}"
+    # EPP directory with the new self-contained build
+    EPP_DIR="${BUILD_CONTEXT}/deploy/inference-gateway/epp"
 
     # Set DOCKER_PROXY from ECR_HOSTNAME if available (for pulling base images through proxy)
+    # This prevents rate-limiting when building in CI across multiple PRs
+    DOCKER_PROXY_ARG=""
     if [[ -n "${ECR_HOSTNAME}" ]]; then
-        export DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        DOCKER_PROXY_ARG="DOCKER_PROXY=${DOCKER_PROXY}"
         echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
     fi
 
-    $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
+    # Build EPP image using the Makefile
+    # The Makefile handles: building Dynamo library, building Docker image, loading it locally
+    $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}" ${DOCKER_PROXY_ARG}
 
-    # Set EPP image tag (matches what build-epp-dynamo.sh produces)
-    EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
+    # Compute EPP image tag (must match Makefile's IMAGE_TAG)
+    # IMAGE_TAG = $(IMAGE_REPO):$(GIT_TAG)
+    # IMAGE_REPO = $(DOCKER_SERVER)/$(IMAGE_NAME)
+    # Image lives in local cache only, not pushed to any registry
+    EPP_DOCKER_SERVER="dynamo"
+    EPP_IMAGE_NAME="dynamo-epp"
+    EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+    EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
 
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
 

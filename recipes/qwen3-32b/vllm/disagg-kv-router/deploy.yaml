@@ -26,7 +26,7 @@ spec:
             - python
             - -m
             - dynamo.frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
       replicas: 1
       resources:
@@ -60,7 +60,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
@@ -112,7 +112,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"
