@@ -327,7 +327,7 @@ func initFFI() error {
 			C.double(ffiOverlapScoreWeight),
 			C.double(ffiRouterTemperature),
 			C.bool(getEnvBoolOrDefault("DYNAMO_USE_KV_EVENTS", true)),
-			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", true)),
+			C.bool(getEnvBoolOrDefault("DYNAMO_ROUTER_REPLICA_SYNC", false)), // no need as long as we call the Router Book keeping operations from the EPP.
 			C.bool(ffiEnforceDisagg),
 			&pipeline,
 		)

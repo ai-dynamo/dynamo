@@ -359,16 +359,17 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 
 This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
 
-### v1.2.1 API Changes
+### Router bookkeeping operations
 
+EPP performs Dynamo router book keeping operations so the FrontEnd does not have to sync.
 
-### Building for v1.2.1
+### Building
 
 The plugin code for v1.2.1 is in:
 - `pkg/plugins/dynamo_kv_scorer/plugin.go`
 
 
-### Header-Only Routing for v1.2.1
+### Header Routing Hints
 
 In v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
 The plugins set HTTP headers that are forwarded to the backend workers.
