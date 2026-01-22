@@ -243,6 +243,47 @@ jobs:
             done
           done
 
+          # Copy CUDA 13 images (vllm and sglang only)
+          echo ""
+          echo "Copying CUDA 13 images..."
+          CUDA13_FRAMEWORKS=("vllm" "sglang")
+          for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
+            SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-cuda13-amd64"
+            SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+            NGC_TAG="${VERSION}rc${RC_NUMBER}-cuda13-amd64"
+            NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
+
+            echo "----------------------------------------"
+            echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
+
+            if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+              echo "⚠️  Warning: Failed to copy ${FRAMEWORK} CUDA13 (amd64), skipping..."
+              continue
+            fi
+
+            echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
+          done
+
+          # Copy frontend images (amd64 and arm64)
+          echo ""
+          echo "Copying frontend images..."
+          for ARCH in "${ARCHITECTURES[@]}"; do
+            SOURCE_TAG="${IMAGE_PREFIX}-frontend-${ARCH}"
+            SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+            NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
+            NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_TAG}"
+
+            echo "----------------------------------------"
+            echo "Copying: dynamo-frontend:${NGC_TAG}"
+
+            if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+              echo "⚠️  Warning: Failed to copy dynamo-frontend (${ARCH}), skipping..."
+              continue
+            fi
+
+            echo "✅ Copied: dynamo-frontend:${NGC_TAG}"
+          done
+
           echo "========================================"
           echo "✅ NGC publishing completed for ${VERSION}rc${RC_NUMBER}"
           echo "========================================"
@@ -268,4 +309,7 @@ jobs:
           echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`trtllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
 
