@@ -310,6 +310,7 @@ jobs:
           # Copy frontend images (amd64 and arm64)
           echo ""
           echo "Copying frontend images..."
+          FRONTEND_IMAGES=()
           for ARCH in "${ARCHITECTURES[@]}"; do
             SOURCE_TAG="${IMAGE_PREFIX}-frontend-${ARCH}"
             SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
@@ -325,7 +326,29 @@ jobs:
             fi
 
             echo "✅ Copied: dynamo-frontend:${NGC_TAG}"
+            FRONTEND_IMAGES+=("${NGC_IMAGE}")
           done
+
+          # Create multi-arch manifest for frontend
+          echo ""
+          echo "Creating multi-arch manifest for dynamo-frontend..."
+          FRONTEND_MULTIARCH="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_VERSION_TAG}"
+
+          if [ ${#FRONTEND_IMAGES[@]} -eq 2 ]; then
+            echo "Creating manifest index: ${FRONTEND_MULTIARCH}"
+            # Use docker manifest to create multi-arch image
+            docker manifest create "${FRONTEND_MULTIARCH}" \
+              "${FRONTEND_IMAGES[0]}" \
+              "${FRONTEND_IMAGES[1]}" || true
+
+            if docker manifest push "${FRONTEND_MULTIARCH}"; then
+              echo "✅ Created multi-arch manifest: dynamo-frontend:${NGC_VERSION_TAG}"
+            else
+              echo "⚠️  Warning: Failed to create multi-arch manifest, arch-specific tags still available"
+            fi
+          else
+            echo "⚠️  Warning: Not all architectures available, skipping multi-arch manifest"
+          fi
 
           echo "========================================"
           echo "✅ NGC publishing completed with tag: ${NGC_VERSION_TAG}"
@@ -355,5 +378,7 @@ jobs:
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
           echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}\` (multi-arch: amd64, arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-arm64\`" >> $GITHUB_STEP_SUMMARY
 
