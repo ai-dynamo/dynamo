@@ -138,8 +138,8 @@ runs:
         TEST_RESULTS_DIR="$(pwd)/test-results"
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
-
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        # Added --privlieged for Bottlerocket compatibility
+        docker run --privileged ${GPU_FLAGS} --rm -w /workspace \
           --cpus=${NUM_CPUS} \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
