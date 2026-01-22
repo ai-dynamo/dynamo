@@ -159,7 +159,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 config.nixl_agent.clone(),
                 cuda_ctx.new_stream()?,
                 config.async_rt_handle.clone(),
-                Some(pool_config),
+                Some(pool_config.clone()),
             )
             .map_err(|e| {
                 anyhow::anyhow!(
