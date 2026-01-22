@@ -306,6 +306,17 @@ impl Leader for KvConnectorLeader {
         // the second call will show num_external_tokens == 0
         // this call is just letting us know the other blocks that are being used for the remainder of the prefill
         if num_external_tokens > 0 {
+            // Create scheduler slot BEFORE starting async transfers.
+            // This fixes the race condition where transfers complete before the worker
+            // slot is created, which previously caused is_complete() to return true
+            // for missing slots.
+            if let Err(e) = self.slot_manager().ensure_scheduler_slot(&request_id) {
+                tracing::warn!(
+                    request_id = request_id,
+                    "failed to ensure scheduler slot: {:?}; continuing anyway", e
+                );
+            }
+
             let num_computed_tokens = block_ids.len() * self.block_size - num_external_tokens;
             slot.record_cached_device_tokens(num_computed_tokens);
             slot.advance_computed_position(num_computed_tokens)?;
