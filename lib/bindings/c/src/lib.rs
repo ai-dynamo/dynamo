@@ -1132,12 +1132,21 @@ pub fn add_query_instance_id(
     set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
-/// Set worker IDs directly on the NvExt fields for GAIE Stage 2
+/// Header name for decode/aggregated worker instance ID
+pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
+/// Header name for prefill worker instance ID (disaggregated mode only)
+pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
+
+/// Prepare request for GAIE Stage 2 by setting `enable_local_updates: false`.
 ///
-/// For disaggregated mode: sets `prefill_worker_id` and `decode_worker_id`
-/// For aggregated mode: sets `backend_instance_id` (when both IDs are the same)
+/// Worker IDs should be passed via HTTP headers, not in the request body:
+/// - `x-worker-instance-id`: decode worker ID (or aggregated worker ID)
+/// - `x-prefill-instance-id`: prefill worker ID (only for disaggregated mode)
 ///
-/// Also sets `enable_local_updates: false` since the external caller (EPP/GAIE)
+/// The frontend's `apply_header_routing_overrides` function will read these headers
+/// and apply them to the routing configuration.
+///
+/// Sets `enable_local_updates: false` since the external caller (EPP/GAIE)
 /// will handle bookkeeping via C FFI functions.
 pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
@@ -1156,27 +1165,22 @@ pub fn set_worker_ids_for_stage2(
     // Check if this is aggregated mode (same worker for both)
     let is_aggregated = prefill_worker_id == decode_worker_id;
 
+    // Log the worker IDs for debugging - caller should set these as HTTP headers:
+    // - HEADER_WORKER_INSTANCE_ID ("x-worker-instance-id") for decode/aggregated worker
+    // - HEADER_PREFILL_INSTANCE_ID ("x-prefill-instance-id") for prefill worker (disagg only)
     if is_aggregated {
-        // Aggregated: use backend_instance_id for direct routing
-        if let Some(id) = decode_worker_id {
-            nvext.backend_instance_id = Some(id as u64);
-            tracing::debug!(
-                backend_instance_id = id,
-                "GAIE Stage 2 Aggregated: Setting backend_instance_id"
-            );
-        }
+        tracing::debug!(
+            decode_worker_id = ?decode_worker_id,
+            header = HEADER_WORKER_INSTANCE_ID,
+            "GAIE Stage 2 Aggregated: Worker ID should be set via HTTP header"
+        );
     } else {
-        // Disaggregated: use separate prefill and decode worker IDs
-        if let Some(id) = prefill_worker_id {
-            nvext.prefill_worker_id = Some(id as u64);
-        }
-        if let Some(id) = decode_worker_id {
-            nvext.decode_worker_id = Some(id as u64);
-        }
         tracing::debug!(
             prefill_worker_id = ?prefill_worker_id,
             decode_worker_id = ?decode_worker_id,
-            "GAIE Stage 2 Disaggregated: Setting prefill and decode worker IDs"
+            prefill_header = HEADER_PREFILL_INSTANCE_ID,
+            decode_header = HEADER_WORKER_INSTANCE_ID,
+            "GAIE Stage 2 Disaggregated: Worker IDs should be set via HTTP headers"
         );
     }
 
