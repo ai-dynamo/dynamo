@@ -64,10 +64,10 @@ curl http://localhost:8000/v1/chat/completions \
 
 This is a large MoE model requiring significant GPU resources:
 
-| Configuration | GPUs | Min Memory |
-|--------------|------|------------|
-| Aggregated | 16x H100/H200 | ~1.3TB total |
-| Disaggregated | 16x H100/H200 | ~1.3TB total |
+| Configuration | GPUs | Min GPU VRAM (Total) |
+|--------------|------|----------------------|
+| Aggregated | 16x H100/H200 | ~1.3TB |
+| Disaggregated | 16x H100/H200 | ~1.3TB |
 
 ## Notes
 
