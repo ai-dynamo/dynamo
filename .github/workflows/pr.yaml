@@ -578,10 +578,78 @@ jobs:
       MODEL_NAME: "Qwen/Qwen3-0.6B"
     steps: *deploy-test-steps
 
+  deploy-test-pytest:
+    runs-on: cpu-amd-m5-2xlarge
+    # Run if push to main, or manually triggered (same conditions as legacy tests)
+    if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
+    needs: [changed-files, deploy-operator, vllm, sglang, trtllm]
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1  # Sequential execution to avoid resource conflicts
+      matrix:
+        framework: [vllm, sglang, trtllm]
+    name: deploy-test-pytest (${{ matrix.framework }})
+    timeout-minutes: 60
+    env:
+      DYNAMO_DEPLOY_NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+      DYNAMO_INGRESS_SUFFIX: dev.aire.nvidia.com
+      MODEL_NAME: "Qwen/Qwen3-0.6B"
+    steps:
+      - name: Output Node Name
+        shell: bash
+        run: |
+          echo ${K8S_NODE_NAME}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Kubeconfig
+        env:
+          NAMESPACE: ${{ needs.deploy-operator.outputs.NAMESPACE }}
+        run: |
+          set -x
+          # Setup kubeconfig
+          echo "${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}" | base64 -d > .kubeconfig
+          chmod 600 .kubeconfig
+          echo "KUBECONFIG=$(pwd)/.kubeconfig" >> $GITHUB_ENV
+
+      - name: Set Runtime Image
+        run: |
+          IMAGE="${{ secrets.AZURE_ACR_HOSTNAME }}/ai-dynamo/dynamo:${{ github.sha }}-${{ matrix.framework }}-amd64"
+          echo "DYNAMO_RUNTIME_IMAGE=${IMAGE}" >> $GITHUB_ENV
+          echo "Runtime image: ${IMAGE}"
+
+      - name: Install Python Dependencies
+        run: |
+          python3 -m pip install --user pytest pytest-asyncio pyyaml kubernetes kr8s
+
+      - name: Run Deploy Tests via Pytest
+        run: |
+          set -x
+          export KUBECONFIG=$(pwd)/.kubeconfig
+
+          # Run pytest with deploy markers for this framework
+          python3 -m pytest -v \
+            -m "deploy and pre_merge and ${{ matrix.framework }}" \
+            --junitxml=test-results/deploy_${{ matrix.framework }}_${{ github.run_id }}.xml \
+            --tb=short \
+            --log-cli-level=INFO \
+            tests/deploy/test_ci_deployments.py
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-deploy-pytest-${{ matrix.framework }}-${{ github.run_id }}
+          path: test-results/deploy_${{ matrix.framework }}_${{ github.run_id }}.xml
+          retention-days: 7
+
   cleanup:
     runs-on: cpu-amd-m5-2xlarge
     if: always()
-    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-vllm-disagg-router]
+    needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-vllm-disagg-router, deploy-test-pytest]
     steps:
     - name: Output Node Name
       shell: bash
