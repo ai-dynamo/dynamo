@@ -99,7 +99,7 @@ class ConstantPredictor(BasePredictor):
     Assume load is constant and predict the next load to be the same as most recent load
     """
 
-    def __init__(self, args: Namespace):
+    def __init__(self, _args: Namespace):
         super().__init__(minimum_data_points=1)
 
     def predict_next(self):

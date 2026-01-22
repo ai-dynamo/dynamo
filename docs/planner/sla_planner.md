@@ -67,7 +67,7 @@ The SLA planner uses a load predictor to forecast the number of requests, ISL, a
 - **Behavior**: Uses auto-ARIMA to fit optimal model parameters
 - **Configuration**: `load-predictor: "arima"`
 - **Tunable parameters**:
-  - `--load-predictor-log1p` (or `--load-predictor-lop1p`): model `log1p(y)` instead of `y`. If not set, ARIMA starts in raw space, and if it collapses to `(0,d,0)`, it falls back to `log1p` automatically.
+  - `--load-predictor-log1p`: model `log1p(y)` instead of `y`. If not set, ARIMA starts in raw space, and if it collapses to `(0,d,0)`, it falls back to `log1p` automatically.
 
 ### Kalman Predictor
 - **Use case**: Low-latency online forecasting (observe 1 → predict 1) with smooth adaptation
@@ -78,7 +78,7 @@ The SLA planner uses a load predictor to forecast the number of requests, ISL, a
   - `--kalman-q-trend`: process noise for trend (higher = trend changes faster)
   - `--kalman-r`: measurement noise (lower = trusts new measurements more)
   - `--kalman-min-points`: minimum points before forecasting
-  - `--load-predictor-log1p` (or `--load-predictor-lop1p`): model `log1p(y)` instead of `y` (often helps request-rate/count series)
+  - `--load-predictor-log1p`: model `log1p(y)` instead of `y` (often helps request-rate/count series)
 
 ### Prophet Predictor
 - **Use case**: Complex seasonal patterns and trend changes
@@ -86,7 +86,7 @@ The SLA planner uses a load predictor to forecast the number of requests, ISL, a
 - **Configuration**: `load-predictor: "prophet"`
 - **Tunable parameters**:
   - `--prophet-window-size`: bounds internal history to control refit cost
-  - `--load-predictor-log1p` (or `--load-predictor-lop1p`): model `log1p(y)` instead of `y`
+  - `--load-predictor-log1p`: model `log1p(y)` instead of `y`
 
 ### Warm-starting Load Predictors (Optional)
 You can warm-start the load predictors with a mooncake-style JSONL trace file to provide historical context before live traffic is observed:
