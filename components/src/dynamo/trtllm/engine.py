@@ -25,10 +25,14 @@ class TensorRTLLMEngine:
     def __init__(
         self,
         engine_args,
-        disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+        disaggregation_mode: Optional[DisaggregationMode] = None,
     ):
         self._llm: Optional[LLM] = None
-        self.disaggregation_mode = disaggregation_mode
+        self.disaggregation_mode = (
+            disaggregation_mode
+            if disaggregation_mode is not None
+            else DisaggregationMode.AGGREGATED
+        )
         # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
         # Copy it so that our internal `pop()` / pruning doesn't leak side effects.
         engine_args = dict(engine_args)
@@ -124,7 +128,7 @@ class TensorRTLLMEngine:
 @asynccontextmanager
 async def get_llm_engine(
     engine_args,
-    disaggregation_mode: DisaggregationMode = DisaggregationMode.AGGREGATED,
+    disaggregation_mode: Optional[DisaggregationMode] = None,
 ) -> AsyncGenerator[TensorRTLLMEngine, None]:
     engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
