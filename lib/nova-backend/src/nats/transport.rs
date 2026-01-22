@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
-use dynamo_identity::InstanceId;
+use crate::InstanceId;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -70,7 +70,7 @@ pub struct NatsTransport {
 impl NatsTransport {
     /// Create a new NATS transport
     fn new(key: TransportKey, nats_url: String, nats_client: Option<Client>) -> Self {
-        let mut addr_builder = WorkerAddress::builder();
+        let mut addr_builder = crate::address::WorkerAddressBuilder::new();
         addr_builder
             .add_entry(key.clone(), nats_url.as_bytes().to_vec())
             .expect("Failed to build WorkerAddress");

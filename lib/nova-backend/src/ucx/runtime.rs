@@ -9,7 +9,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow};
 use async_ucx::ucp::{Context as UcxContext, Endpoint, Worker, WorkerAddress as UcpWorkerAddress};
 use bytes::Bytes;
-use dynamo_identity::InstanceId;
+use crate::InstanceId;
 use hashbrown::HashMap;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
@@ -297,7 +297,7 @@ async fn sender_task(
     debug!("Starting sender task for lane {}", lane_id);
 
     // Local endpoint cache for fast path lookups
-    let mut endpoint_cache: HashMap<dynamo_identity::InstanceId, Rc<Endpoint>> = HashMap::new();
+    let mut endpoint_cache: HashMap<crate::InstanceId, Rc<Endpoint>> = HashMap::new();
     let mut draining = false;
 
     loop {

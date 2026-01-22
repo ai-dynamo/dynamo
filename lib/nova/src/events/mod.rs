@@ -4,7 +4,7 @@
 //! Generational event system for coordinating local awaiters with minimal overhead.
 
 mod local;
-use dynamo_identity::WorkerId;
+use crate::am::WorkerId;
 pub use local::{LocalEvent, LocalEventSystem};
 
 use anyhow::{Result, anyhow, bail};

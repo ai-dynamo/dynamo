@@ -12,7 +12,6 @@
 //! 1. **Type Safety**: InstanceId cannot be confused with message IDs or other UUIDs
 //! 2. **Deterministic Derivation**: WorkerId is always computed from InstanceId (xxh3_64 hash)
 //! 3. **Single Source of Truth**: InstanceId is the primary identifier, WorkerId is derived
-//!
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -106,7 +105,7 @@ impl AsRef<Uuid> for InstanceId {
 /// # Example
 ///
 /// ```ignore
-/// use dynamo_am::api::identity::{InstanceId, WorkerId};
+/// use dynamo_nova_common::{InstanceId, WorkerId};
 ///
 /// # fn get_instance_id() -> InstanceId { unimplemented!() }
 /// let instance_id = get_instance_id(); // From ActiveMessageClient

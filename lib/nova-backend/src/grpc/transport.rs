@@ -35,10 +35,10 @@ pub struct GrpcTransport {
     local_address: OnceLock<WorkerAddress>,
 
     // Peer registry (instance_id → gRPC URL)
-    peers: Arc<DashMap<dynamo_identity::InstanceId, String>>,
+    peers: Arc<DashMap<crate::InstanceId, String>>,
 
     // Active connections (instance_id → connection handle)
-    connections: Arc<DashMap<dynamo_identity::InstanceId, ConnectionHandle>>,
+    connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
 
     // Runtime handle for spawning tasks
     runtime: OnceLock<tokio::runtime::Handle>,
@@ -79,7 +79,7 @@ impl Transport for GrpcTransport {
         self.local_address
             .get()
             .cloned()
-            .unwrap_or_else(|| WorkerAddress::builder().build().unwrap())
+            .unwrap_or_else(|| crate::address::WorkerAddressBuilder::new().build().unwrap())
     }
 
     fn register(&self, peer_info: PeerInfo) -> Result<(), TransportError> {
@@ -128,7 +128,7 @@ impl Transport for GrpcTransport {
     #[inline]
     fn send_message(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         header: Vec<u8>,
         payload: Vec<u8>,
         message_type: MessageType,
@@ -192,7 +192,7 @@ impl Transport for GrpcTransport {
 
     fn start(
         &self,
-        _instance_id: dynamo_identity::InstanceId,
+        _instance_id: crate::InstanceId,
         channels: TransportAdapter,
         rt: tokio::runtime::Handle,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
@@ -225,7 +225,7 @@ impl Transport for GrpcTransport {
                 actual_addr
             };
             let local_url = format!("grpc://{}", advertise_addr);
-            let mut addr_builder = WorkerAddress::builder();
+            let mut addr_builder = crate::address::WorkerAddressBuilder::new();
             addr_builder.add_entry(key, local_url.as_bytes().to_vec())?;
             let local_address = addr_builder.build()?;
 
@@ -270,7 +270,7 @@ impl Transport for GrpcTransport {
 
     fn check_health(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         timeout: Duration,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,

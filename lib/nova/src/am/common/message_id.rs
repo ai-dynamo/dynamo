@@ -11,7 +11,7 @@
 //! - **Alternate**: UUID format for compatibility
 
 use super::responses::ResponseId;
-use dynamo_identity::WorkerId;
+use crate::am::WorkerId;
 use std::fmt;
 
 /// A message identifier that provides human-readable display formats

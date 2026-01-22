@@ -3213,19 +3213,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dynamo-identity"
-version = "0.8.0"
-dependencies = [
- "bytes",
- "serde",
- "serde_bytes",
- "serde_json",
- "thiserror 2.0.18",
- "uuid 1.19.0",
- "xxhash-rust",
-]
-
-[[package]]
 name = "dynamo-kvbm"
 version = "0.8.0"
 dependencies = [
@@ -3246,7 +3233,6 @@ dependencies = [
  "derive-getters",
  "derive_builder",
  "dynamo-config",
- "dynamo-identity",
  "dynamo-kvbm-config",
  "dynamo-kvbm-kernels",
  "dynamo-memory",
@@ -3451,7 +3437,6 @@ dependencies = [
  "dashmap 6.1.0",
  "derive-getters",
  "derive_builder",
- "dynamo-identity",
  "dynamo-nova-backend",
  "dynamo-nova-discovery",
  "either",
@@ -3483,7 +3468,7 @@ dependencies = [
  "bytes",
  "dashmap 6.1.0",
  "derive_builder",
- "dynamo-identity",
+ "dynamo-nova-common",
  "flume",
  "futures",
  "hashbrown 0.16.1",
@@ -3516,6 +3501,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-nova-common"
+version = "0.8.0"
+dependencies = [
+ "bytes",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid 1.19.0",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "dynamo-nova-discovery"
 version = "0.8.0"
 dependencies = [
@@ -3527,8 +3526,8 @@ dependencies = [
  "clap 4.5.54",
  "dashmap 6.1.0",
  "derive_builder",
- "dynamo-identity",
  "dynamo-nova-backend",
+ "dynamo-nova-common",
  "etcd-client",
  "figment",
  "fs4",

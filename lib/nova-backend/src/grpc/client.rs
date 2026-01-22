@@ -91,7 +91,7 @@ impl ConnectionHandle {
 /// Establish a gRPC connection to a peer
 pub async fn establish_connection(
     url: String,
-    instance_id: dynamo_identity::InstanceId,
+    instance_id: crate::InstanceId,
     cancel_token: CancellationToken,
 ) -> anyhow::Result<ConnectionHandle> {
     // Parse URL to get endpoint

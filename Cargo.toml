@@ -17,8 +17,8 @@ members = [
     "lib/config",
     "lib/nova",
     "lib/nova-backend",
+    "lib/nova-common",
     "lib/nova-discovery",
-    "lib/identity",
     "lib/kvbm",
     "lib/kvbm-config",
     "lib/kvbm-kernels",
@@ -37,8 +37,8 @@ default-members = [
     "lib/bindings/c",
     "lib/nova",
     "lib/nova-backend",
+    "lib/nova-common",
     "lib/nova-discovery",
-    "lib/identity",
     "lib/kvbm",
     "lib/kvbm-config",
     "lib/kvbm-kernels",
@@ -76,8 +76,8 @@ dynamo-kvbm-kernels = { path = "lib/kvbm-kernels", version = "0.8.0" }
 # nova
 dynamo-nova = { path = "lib/nova", version = "0.8.0" }
 dynamo-nova-backend = { path = "lib/nova-backend", version = "0.8.0" }
+dynamo-nova-common = { path = "lib/nova-common", version = "0.8.0" }
 dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.8.0" }
-dynamo-identity = { path = "lib/identity", version = "0.8.0" }
 
 # nixl
 nixl-sys = { version = "0.8.0" }

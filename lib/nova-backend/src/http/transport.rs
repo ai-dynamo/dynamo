@@ -35,7 +35,7 @@ pub struct HttpTransport {
     local_address: OnceLock<WorkerAddress>,
 
     // Peer registry (instance_id → base URL)
-    peers: Arc<DashMap<dynamo_identity::InstanceId, String>>,
+    peers: Arc<DashMap<crate::InstanceId, String>>,
 
     // HTTP client for sending requests
     client: reqwest::Client,
@@ -119,7 +119,7 @@ impl Transport for HttpTransport {
         self.local_address
             .get()
             .cloned()
-            .unwrap_or_else(|| WorkerAddress::builder().build().unwrap())
+            .unwrap_or_else(|| crate::address::WorkerAddressBuilder::new().build().unwrap())
     }
 
     fn register(&self, peer_info: PeerInfo) -> Result<(), TransportError> {
@@ -158,7 +158,7 @@ impl Transport for HttpTransport {
     #[inline]
     fn send_message(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         header: Vec<u8>,
         payload: Vec<u8>,
         message_type: MessageType,
@@ -206,7 +206,7 @@ impl Transport for HttpTransport {
 
     fn start(
         &self,
-        _instance_id: dynamo_identity::InstanceId,
+        _instance_id: crate::InstanceId,
         channels: TransportAdapter,
         rt: tokio::runtime::Handle,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
@@ -231,7 +231,7 @@ impl Transport for HttpTransport {
 
             // Build WorkerAddress with actual address
             let local_url = format!("http://{}", actual_addr);
-            let mut addr_builder = WorkerAddress::builder();
+            let mut addr_builder = crate::address::WorkerAddressBuilder::new();
             addr_builder.add_entry(key, local_url.as_bytes().to_vec())?;
             let local_address = addr_builder.build()?;
 
@@ -282,7 +282,7 @@ impl Transport for HttpTransport {
 
     fn check_health(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         timeout: Duration,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,

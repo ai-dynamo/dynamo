@@ -204,7 +204,7 @@ impl ActiveMessageClient {
     /// 3. SKIP events.register_worker_mapping() - events self-populate via own discovery
     pub(crate) async fn resolve_peer_via_discovery(
         &self,
-        worker_id: dynamo_identity::WorkerId,
+        worker_id: crate::am::WorkerId,
     ) -> Result<InstanceId> {
         tracing::debug!(
             target: "dynamo_nova::client",

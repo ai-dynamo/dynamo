@@ -20,7 +20,6 @@ grpc = ["dynamo-nova-backend/grpc"]
 nats = ["dynamo-nova-backend/nats"]
 
 [dependencies]
-dynamo-identity = { workspace = true }
 dynamo-nova-backend = { workspace = true }
 dynamo-nova-discovery = { workspace = true }
 

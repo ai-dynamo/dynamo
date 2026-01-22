@@ -26,14 +26,18 @@ use std::{collections::HashMap, sync::Arc};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-// Public re-exports from dynamo-identity
-pub use dynamo_identity::{InstanceId, WorkerId};
+// Public re-exports from dynamo-nova-common
+pub use dynamo_nova_common::{
+    InstanceId, PeerInfo, TransportKey, WorkerAddress, WorkerAddressError, WorkerId,
+};
 
-// Re-export identity types
-pub use address::{PeerInfo, WorkerAddress};
+// Internal builder for address construction
+use address::WorkerAddressBuilder;
+
+// Re-export transport types
 pub use transport::{
     DataStreams, HealthCheckError, MessageType, Transport, TransportAdapter, TransportError,
-    TransportErrorHandler, TransportKey, make_channels,
+    TransportErrorHandler, make_channels,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +79,7 @@ impl NovaBackend {
 
         // build worker address
         let mut priorities = Vec::new();
-        let mut builder = WorkerAddress::builder();
+        let mut builder = WorkerAddressBuilder::new();
         let mut transports = HashMap::new();
 
         let (adapter, data_streams) = transport::make_channels();

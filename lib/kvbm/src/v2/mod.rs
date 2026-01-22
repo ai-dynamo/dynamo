@@ -41,9 +41,8 @@ pub mod test_config;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use dynamo_identity::InstanceId;
 pub use dynamo_kvbm_config::KvbmConfig;
-pub use dynamo_nova::{PeerInfo, WorkerAddress};
+pub use dynamo_nova::{InstanceId, PeerInfo, WorkerAddress};
 pub use dynamo_tokens::{PositionalLineageHash, SequenceHash as SequenceHashV1};
 
 pub type BlockId = usize;

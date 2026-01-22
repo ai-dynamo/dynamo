@@ -12,4 +12,4 @@ pub mod events;
 pub use am::Nova;
 pub use events::EventHandle;
 
-pub use dynamo_nova_backend::{PeerInfo, WorkerAddress};
+pub use dynamo_nova_backend::{InstanceId, PeerInfo, WorkerAddress, WorkerId};

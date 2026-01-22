@@ -28,7 +28,7 @@ pub struct UcxTransport {
     local_address: Arc<std::sync::Mutex<WorkerAddress>>,
 
     // Shared mutable state with DashMap (lock-free)
-    peers: Arc<DashMap<dynamo_identity::InstanceId, Bytes>>, // decoded UCX worker addresses
+    peers: Arc<DashMap<crate::InstanceId, Bytes>>, // decoded UCX worker addresses
 
     // Channels to send tasks to LocalSet runtime
     msg_tx: flume::Sender<SendTask>,
@@ -68,7 +68,7 @@ impl UcxTransport {
         Self {
             key,
             local_address: Arc::new(std::sync::Mutex::new(
-                WorkerAddress::builder().build().unwrap(),
+                crate::address::WorkerAddressBuilder::new().build().unwrap(),
             )),
             peers: Arc::new(DashMap::new()),
             msg_tx,
@@ -141,7 +141,7 @@ impl Transport for UcxTransport {
     #[inline]
     fn send_message(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         header: Vec<u8>,
         payload: Vec<u8>,
         message_type: MessageType,
@@ -190,7 +190,7 @@ impl Transport for UcxTransport {
 
     fn start(
         &self,
-        _instance_id: dynamo_identity::InstanceId,
+        _instance_id: crate::InstanceId,
         channels: TransportAdapter,
         _rt: tokio::runtime::Handle,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
@@ -232,7 +232,7 @@ impl Transport for UcxTransport {
 
             // Build local address with base64 encoded UCX blob
             let base64_blob = base64::engine::general_purpose::STANDARD.encode(&ucx_blob);
-            let mut addr_builder = WorkerAddress::builder();
+            let mut addr_builder = crate::address::WorkerAddressBuilder::new();
             addr_builder.add_entry(key, base64_blob.as_bytes().to_vec())?;
             let local_address = addr_builder.build()?;
 
@@ -264,7 +264,7 @@ impl Transport for UcxTransport {
 
     fn check_health(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         timeout: Duration,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,

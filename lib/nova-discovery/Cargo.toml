@@ -10,7 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-dynamo-identity = { workspace = true }
+dynamo-nova-common = { workspace = true }
 dynamo-nova-backend = { workspace = true }
 
 # Core dependencies (always present)

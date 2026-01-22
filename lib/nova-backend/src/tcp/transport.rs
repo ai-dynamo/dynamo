@@ -34,8 +34,8 @@ pub struct TcpTransport {
     local_address: WorkerAddress,
 
     // Shared mutable state with DashMap (lock-free)
-    peers: Arc<DashMap<dynamo_identity::InstanceId, SocketAddr>>,
-    connections: Arc<DashMap<dynamo_identity::InstanceId, ConnectionHandle>>,
+    peers: Arc<DashMap<crate::InstanceId, SocketAddr>>,
+    connections: Arc<DashMap<crate::InstanceId, ConnectionHandle>>,
 
     // Runtime handle for spawning tasks
     runtime: OnceLock<tokio::runtime::Handle>,
@@ -97,16 +97,13 @@ impl TcpTransport {
     ///
     /// This can be called after `register()` to eagerly establish the TCP connection
     /// instead of waiting for the first `send_message()` call.
-    pub fn ensure_connected(&self, instance_id: dynamo_identity::InstanceId) -> Result<()> {
+    pub fn ensure_connected(&self, instance_id: crate::InstanceId) -> Result<()> {
         self.get_or_create_connection(instance_id)?;
         Ok(())
     }
 
     /// Get or create a connection to a peer (lazy initialization)
-    fn get_or_create_connection(
-        &self,
-        instance_id: dynamo_identity::InstanceId,
-    ) -> Result<ConnectionHandle> {
+    fn get_or_create_connection(&self, instance_id: crate::InstanceId) -> Result<ConnectionHandle> {
         // Fast path: check if connection exists
         if let Some(handle) = self.connections.get(&instance_id) {
             return Ok(handle.clone());
@@ -173,7 +170,7 @@ impl Transport for TcpTransport {
     #[inline]
     fn send_message(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         header: Vec<u8>,
         payload: Vec<u8>,
         message_type: MessageType,
@@ -229,7 +226,7 @@ impl Transport for TcpTransport {
 
     fn start(
         &self,
-        _instance_id: dynamo_identity::InstanceId,
+        _instance_id: crate::InstanceId,
         channels: TransportAdapter,
         rt: tokio::runtime::Handle,
     ) -> futures::future::BoxFuture<'_, anyhow::Result<()>> {
@@ -285,7 +282,7 @@ impl Transport for TcpTransport {
 
     fn check_health(
         &self,
-        instance_id: dynamo_identity::InstanceId,
+        instance_id: crate::InstanceId,
         timeout: Duration,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<(), HealthCheckError>> + Send + '_>,
@@ -500,7 +497,7 @@ impl TcpTransportBuilder {
         // Resolve advertise address (handle 0.0.0.0 -> 127.0.0.1 for local testing)
         let advertise_addr = resolve_advertise_address(bind_addr);
         let local_endpoint = format!("tcp://{}", advertise_addr);
-        let mut addr_builder = WorkerAddress::builder();
+        let mut addr_builder = crate::address::WorkerAddressBuilder::new();
         addr_builder.add_entry(key.clone(), local_endpoint.as_bytes().to_vec())?;
         let local_address = addr_builder.build()?;
 

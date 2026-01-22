@@ -9,7 +9,6 @@
 #![allow(dead_code)]
 
 use bytes::Bytes;
-use dynamo_identity::InstanceId;
 #[cfg(feature = "grpc")]
 use dynamo_nova_backend::grpc::{GrpcTransport, GrpcTransportBuilder};
 #[cfg(feature = "http")]
@@ -19,7 +18,7 @@ use dynamo_nova_backend::nats::{NatsTransport, NatsTransportBuilder};
 #[cfg(feature = "ucx")]
 use dynamo_nova_backend::ucx::{UcxTransport, UcxTransportBuilder};
 use dynamo_nova_backend::{
-    DataStreams, MessageType, PeerInfo, Transport, TransportErrorHandler,
+    DataStreams, InstanceId, MessageType, PeerInfo, Transport, TransportErrorHandler,
     tcp::{TcpTransport, TcpTransportBuilder},
 };
 use std::sync::{Arc, Mutex};

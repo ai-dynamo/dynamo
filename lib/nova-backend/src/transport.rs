@@ -2,12 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use bytes::Bytes;
-use dynamo_identity::InstanceId;
 use futures::future::BoxFuture;
 
-use super::{PeerInfo, WorkerAddress};
+use crate::{InstanceId, PeerInfo, TransportKey, WorkerAddress};
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TransportError {
@@ -167,104 +166,6 @@ pub fn make_channels() -> (TransportAdapter, DataStreams) {
             event_stream: event_rx,
         },
     )
-}
-
-/// A type-safe wrapper around transport keys for WorkerAddress.
-///
-/// This provides a zero-cost abstraction over `Arc<str>` with type safety
-/// to prevent accidentally mixing transport keys with other string types.
-///
-/// # Examples
-///
-/// ```
-/// use dynamo_nova_backend::TransportKey;
-///
-/// let key = TransportKey::new("tcp");
-/// assert_eq!(key.as_str(), "tcp");
-///
-/// // Ergonomic conversions
-/// let key2: TransportKey = "rdma".into();
-/// let key3 = TransportKey::from("udp");
-///
-/// // Use in collections
-/// use std::collections::HashMap;
-/// let mut transports = HashMap::new();
-/// transports.insert(TransportKey::from("tcp"), "tcp://127.0.0.1:5555");
-/// ```
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TransportKey(Arc<str>);
-
-impl TransportKey {
-    /// Create a new TransportKey from any type that can be converted into Arc<str>.
-    pub fn new(key: impl Into<Arc<str>>) -> Self {
-        Self(key.into())
-    }
-
-    /// Get the key as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-// Deref to str for ergonomic usage
-impl std::ops::Deref for TransportKey {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-// AsRef for flexible parameter types
-impl AsRef<str> for TransportKey {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-// From conversions for ergonomic construction
-impl From<&str> for TransportKey {
-    fn from(s: &str) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-impl From<String> for TransportKey {
-    fn from(s: String) -> Self {
-        Self(Arc::from(s))
-    }
-}
-
-impl From<Arc<str>> for TransportKey {
-    fn from(s: Arc<str>) -> Self {
-        Self(s)
-    }
-}
-
-impl From<&String> for TransportKey {
-    fn from(s: &String) -> Self {
-        Self(Arc::from(s.as_str()))
-    }
-}
-
-impl From<TransportKey> for String {
-    fn from(val: TransportKey) -> Self {
-        val.0.to_string()
-    }
-}
-
-// Borrow trait for HashMap lookups with &str
-impl std::borrow::Borrow<str> for TransportKey {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-// Display for printing
-impl fmt::Display for TransportKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
 }
 
 #[allow(dead_code)]

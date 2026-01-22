@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "dynamo-identity"
+name = "dynamo-nova-common"
 version.workspace = true
 edition.workspace = true
-description = "Shared identity and peer types for Dynamo Nova"
+description = "Common types for Nova distributed systems (identity, address, transport)"
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -20,4 +20,5 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 xxhash-rust = { workspace = true }
 
+rmp-serde = "1.1"
 serde_bytes = "0.11"

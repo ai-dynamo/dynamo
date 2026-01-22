@@ -22,7 +22,7 @@ use crate::am::{
     InstanceId,
     common::{ActiveMessage, MessageMetadata},
 };
-use dynamo_identity::WorkerId;
+use crate::am::WorkerId;
 
 /// Fire-and-forget builder.
 pub struct AmSendBuilder {
@@ -488,7 +488,7 @@ impl MessageBuilder {
 
     fn spawn_discovery_task(
         &self,
-        worker_id: dynamo_identity::WorkerId,
+        worker_id: crate::am::WorkerId,
         response_id: crate::am::common::responses::ResponseId,
         message_type: MessageType,
     ) {

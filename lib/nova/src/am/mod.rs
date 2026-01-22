@@ -15,9 +15,8 @@ use server::ActiveMessageServer;
 use anyhow::Result;
 use std::sync::Arc;
 
-// Re-export shared identity types
-pub use dynamo_identity::{InstanceId, WorkerId};
-pub use dynamo_nova_backend::{PeerInfo, WorkerAddress};
+// Re-export shared identity and address types
+pub use dynamo_nova_backend::{InstanceId, PeerInfo, WorkerAddress, WorkerId};
 pub use handlers::NovaHandler;
 
 use dynamo_nova_backend::{NovaBackend, Transport};

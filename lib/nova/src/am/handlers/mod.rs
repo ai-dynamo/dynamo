@@ -83,7 +83,7 @@ use crate::am::common::events::{EventType, Outcome, encode_event_header};
 use crate::am::common::messages::ResponseType;
 use crate::am::common::responses::{ResponseId, encode_response_header};
 use derive_getters::Dissolve;
-use dynamo_identity::WorkerId;
+use crate::am::WorkerId;
 use dynamo_nova_backend::{MessageType, NovaBackend};
 use tokio_util::task::TaskTracker;
 

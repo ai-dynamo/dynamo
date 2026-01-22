@@ -20,7 +20,7 @@ nats = ["dep:async-nats", "dep:bs58"]
 grpc = ["dep:tonic", "dep:prost", "dep:tower", "dep:hyper", "dep:http", "dep:http-body", "dep:http-body-util", "dep:hyper-util", "dep:tokio-stream"]
 
 [dependencies]
-dynamo-identity = { workspace = true }
+dynamo-nova-common = { workspace = true }
 
 anyhow = { workspace = true }
 bytes = { workspace = true }
