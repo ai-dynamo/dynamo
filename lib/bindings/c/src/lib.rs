@@ -4,7 +4,9 @@
 use async_once_cell::OnceCell as AsyncOnceCell;
 use libc::c_char;
 use once_cell::sync::OnceCell;
+use serde::Serialize;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1137,22 +1139,32 @@ pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 /// Header name for prefill worker instance ID (disaggregated mode only)
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
 
-/// Prepare request for GAIE Stage 2 by setting `enable_local_updates: false`.
+/// Wrapper for the annotated request that includes HTTP headers to set.
 ///
-/// Worker IDs should be passed via HTTP headers, not in the request body:
-/// - `x-worker-instance-id`: decode worker ID (or aggregated worker ID)
-/// - `x-prefill-instance-id`: prefill worker ID (only for disaggregated mode)
+/// When serialized to JSON, this structure provides:
+/// - `headers`: A map of HTTP header names to values that EPP should set on the request
+/// - `request`: The annotated chat completion request body
+#[derive(Serialize)]
+pub struct AnnotatedRequestWithHeaders {
+    /// HTTP headers that should be set on the Stage 2 request
+    pub headers: HashMap<String, String>,
+    /// The annotated request body ready for Stage 2
+    pub request: NvCreateChatCompletionRequest,
+}
+
+/// Prepare request for GAIE Stage 2, returning headers and annotated request.
+///
+/// Returns a wrapper containing:
+/// - `headers`: Map of HTTP headers to set (worker instance IDs)
+/// - `request`: The modified request with `enable_local_updates: false`
 ///
 /// The frontend's `apply_header_routing_overrides` function will read these headers
 /// and apply them to the routing configuration.
-///
-/// Sets `enable_local_updates: false` since the external caller (EPP/GAIE)
-/// will handle bookkeeping via C FFI functions.
 pub fn set_worker_ids_for_stage2(
     request: &mut NvCreateChatCompletionRequest,
     decode_worker_id: Option<i64>,
     prefill_worker_id: Option<i64>,
-) -> &mut NvCreateChatCompletionRequest {
+) -> HashMap<String, String> {
     let nvext = request.nvext.get_or_insert_with(|| {
         NvExt::builder()
             .build()
@@ -1162,17 +1174,29 @@ pub fn set_worker_ids_for_stage2(
     // Disable local updates - external caller handles bookkeeping via C FFI
     nvext.enable_local_updates = Some(false);
 
+    // Build headers map for routing
+    let mut headers = HashMap::new();
+
     // Check if this is aggregated mode (same worker for both)
     let is_aggregated = prefill_worker_id == decode_worker_id;
 
-    // Log the worker IDs for debugging - caller should set these as HTTP headers:
-    // - HEADER_WORKER_INSTANCE_ID ("x-worker-instance-id") for decode/aggregated worker
-    // - HEADER_PREFILL_INSTANCE_ID ("x-prefill-instance-id") for prefill worker (disagg only)
+    // Set decode/aggregated worker ID header
+    if let Some(id) = decode_worker_id {
+        headers.insert(HEADER_WORKER_INSTANCE_ID.to_string(), id.to_string());
+    }
+
+    // Set prefill worker ID header only in disaggregated mode
+    if !is_aggregated {
+        if let Some(id) = prefill_worker_id {
+            headers.insert(HEADER_PREFILL_INSTANCE_ID.to_string(), id.to_string());
+        }
+    }
+
     if is_aggregated {
         tracing::debug!(
             decode_worker_id = ?decode_worker_id,
             header = HEADER_WORKER_INSTANCE_ID,
-            "GAIE Stage 2 Aggregated: Worker ID should be set via HTTP header"
+            "GAIE Stage 2 Aggregated: Setting worker ID header"
         );
     } else {
         tracing::debug!(
@@ -1180,11 +1204,11 @@ pub fn set_worker_ids_for_stage2(
             decode_worker_id = ?decode_worker_id,
             prefill_header = HEADER_PREFILL_INSTANCE_ID,
             decode_header = HEADER_WORKER_INSTANCE_ID,
-            "GAIE Stage 2 Disaggregated: Worker IDs should be set via HTTP headers"
+            "GAIE Stage 2 Disaggregated: Setting worker ID headers"
         );
     }
 
-    request
+    headers
 }
 
 /// Set token_data directly on the NvExt field for GAIE Stage 2
@@ -1237,25 +1261,28 @@ fn set_kv_annotation(
 /// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_id info and tokens from the response stream
-/// 4. Sets the appropriate NvExt fields on the original request for Stage 2:
-///    - Disaggregated: prefill_worker_id, decode_worker_id, token_data
-///    - Aggregated: backend_instance_id, token_data
-/// 5. Returns WorkerSelectionResult and the modified request ready for Stage 2
+/// 4. Prepares the request for Stage 2:
+///    - Sets `enable_local_updates: false` in nvext
+///    - Sets token_data in nvext
+///    - Builds HTTP headers map with worker IDs for routing
+/// 5. Returns WorkerSelectionResult and AnnotatedRequestWithHeaders
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (WorkerSelectionResult, modified_original_request)
-/// where the modified_original_request is ready for GAIE Stage 2 execution
+/// A tuple containing (WorkerSelectionResult, AnnotatedRequestWithHeaders)
+/// where AnnotatedRequestWithHeaders contains:
+/// - `headers`: HTTP headers to set (x-worker-instance-id, x-prefill-instance-id)
+/// - `request`: The modified request ready for Stage 2
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
     mut original_request: NvCreateChatCompletionRequest,
-) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
+) -> anyhow::Result<(WorkerSelectionResult, AnnotatedRequestWithHeaders)> {
     // GAIE Stage 1: Query for worker selection
     let mut query_request = original_request.clone();
     add_query_instance_id(&mut query_request);
@@ -1263,15 +1290,22 @@ pub async fn query_worker_selection_and_annotate(
     let response_stream = engine.generate(single_in).await?;
     let result = extract_worker_selection_from_stream(response_stream).await?;
 
-    // Prepare request for GAIE Stage 2: Set NvExt fields directly
-    set_worker_ids_for_stage2(
+    // Prepare request for GAIE Stage 2:
+    // - Set enable_local_updates: false
+    // - Build headers map with worker IDs
+    let headers = set_worker_ids_for_stage2(
         &mut original_request,
         result.decode_worker_id,
         result.prefill_worker_id,
     );
     set_token_data_for_stage2(&mut original_request, &result.tokens);
 
-    Ok((result, original_request))
+    let annotated_with_headers = AnnotatedRequestWithHeaders {
+        headers,
+        request: original_request,
+    };
+
+    Ok((result, annotated_with_headers))
 }
 
 /// Spawn a background task to watch for prefill models and activate prefill routers.
