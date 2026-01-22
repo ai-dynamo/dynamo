@@ -402,7 +402,7 @@ impl Leader for KvConnectorLeader {
                 .get(request_id)
                 .unwrap_or(&0);
 
-            slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens)?;
+            slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens, None)?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
                 tracing::debug!(
@@ -464,6 +464,7 @@ impl Leader for KvConnectorLeader {
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
+                None,
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {

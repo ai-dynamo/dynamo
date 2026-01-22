@@ -108,18 +108,6 @@ pub trait Slot: std::fmt::Debug {
         block_ids: &[usize],
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
-    ) -> Result<(), SlotError>;
-
-    // TRT-LLM does not include scheduled tokens in the scheduler output.
-    // Ideally, we should have a dedicated implementation for the TRT-LLM slot.
-    // However, since only this single function needs to be rewritten for now,
-    // we keep it as a separate function in Slot.
-    fn apply_scheduler_output_with_computed_position(
-        &mut self,
-        tokens: &[u32],
-        block_ids: &[usize],
-        computed_position: usize,
-        is_new_request: bool,
         priorities: Option<&[u32]>,
     ) -> Result<(), SlotError>;
 
@@ -551,6 +539,7 @@ impl Slot for VllmConnectorSlot {
         block_ids: &[BlockId],
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
+        priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
         if !tokens.is_empty() {
             tracing::debug!(
@@ -613,7 +602,6 @@ impl Slot for VllmConnectorSlot {
             self.evaluated_blocks
         );
 
-        // TODO(ryan) - apply policy
         let next_position = self.current_position + num_scheduled_tokens;
 
         debug_assert!(next_position / self.block_size >= self.evaluated_blocks);
@@ -629,131 +617,6 @@ impl Slot for VllmConnectorSlot {
         );
 
         if num_candidate_blocks != 0 {
-            // do we have a mechanism for skipping gpu cache hit blocks?  not sure yet.
-            // for now, offload all the blocks to the host
-            let offload_block_ids: Vec<usize> = self
-                .device_blocks
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .copied()
-                .collect::<Vec<_>>();
-
-            assert_eq!(
-                offload_block_ids.len(),
-                num_candidate_blocks,
-                "device block overflow - candidate blocks exceed block count at offset {}",
-                self.evaluated_blocks
-            );
-
-            let offload_token_blocks: Vec<TokenBlock> = self
-                .sequence
-                .blocks()
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_candidate_blocks)
-                .cloned()
-                .collect::<Vec<_>>();
-
-            // Default priorities (0) when no priorities are provided
-            let offload_priorities: Vec<u32> = vec![0; num_candidate_blocks];
-
-            self.offload_blocks(&offload_block_ids, &offload_token_blocks, &offload_priorities)
-                .expect("failed to offload blocks");
-
-            self.evaluated_blocks += num_candidate_blocks;
-        }
-
-        // done applying policy
-        tracing::debug!(
-            "done applying kv cache policy at current_position: {}; num_scheduled_tokens: {}",
-            self.current_position,
-            num_scheduled_tokens
-        );
-
-        // advance current and computed position
-        self.current_position += num_scheduled_tokens;
-
-        Ok(())
-    }
-
-    #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id.as_str()))]
-    fn apply_scheduler_output_with_computed_position(
-        &mut self,
-        tokens: &[u32],
-        block_ids: &[usize],
-        computed_position: usize,
-        is_new_request: bool,
-        priorities: Option<&[u32]>,
-    ) -> Result<(), SlotError> {
-        // TRTLLM's KV Connector Manager will have (computed_position - external matches)
-        // in onborading case
-        if computed_position < self.current_position {
-            tracing::debug!(
-                "computed_position={} < current_position={}, so we are onboarding during prefilling phase",
-                computed_position,
-                self.current_position
-            );
-            return Ok(());
-        }
-
-        // now we decide what we should do for the new computed tokens
-        tracing::debug!(
-            "applying scheduler output, computed_position={}, sequence_total_tokens={}",
-            computed_position,
-            self.sequence.total_tokens()
-        );
-
-        if computed_position < self.sequence.total_tokens() {
-            // no need to apply new tokens, since it's applied when created the slot during prefilling
-            self.state = SlotState::Prefilling;
-        } else {
-            tracing::debug!(
-                "appending {} newly decoded tokens to sequence",
-                tokens.len()
-            );
-            self.sequence.extend(tokens.into()).unwrap();
-            self.state = SlotState::Decoding;
-        }
-
-        // apply new block_ids, this should be applied for both prefilling and decoding
-        // because this is unknown when creating the slot
-        if !block_ids.is_empty() {
-            tracing::debug!("assigning {} new device blocks slot", block_ids.len());
-            self.device_blocks.extend(block_ids);
-        }
-
-        // Early exit if offload has been permanently terminated.
-        // This ensures global contiguity: once a gap is created by priority filtering,
-        // no subsequent blocks will be offloaded for this request.
-        if self.offload_terminated {
-            tracing::debug!(
-                "offload terminated at block {}; skipping offload evaluation",
-                self.offload_terminated_at_block.unwrap_or(0)
-            );
-            // Still need to update evaluated_blocks for tracking
-            let num_candidate_blocks =
-                ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
-            self.evaluated_blocks += num_candidate_blocks;
-            self.current_position = computed_position;
-            return Ok(());
-        }
-
-        // This approach is fragile, but it's the only way currently to skip evaluating
-        // the device matched blocks and to avoid offloading them again.
-        // TODO: Consider adding an indicator in the scheduler output to distinguish between
-        // matched and unmatched device blocks/tokens from the scheduler.
-        let maybe_have_device_matched_blocks =
-            is_new_request && computed_position > 0 && self.evaluated_blocks == 0;
-
-        if maybe_have_device_matched_blocks {
-            self.evaluated_blocks = (computed_position + 1) / self.block_size;
-        }
-
-        let num_candidate_blocks =
-            ((computed_position + 1) / self.block_size).saturating_sub(self.evaluated_blocks);
-
-        if num_candidate_blocks > 0 {
             // Get candidate block IDs
             let candidate_block_ids: Vec<usize> = self
                 .device_blocks
@@ -763,18 +626,12 @@ impl Slot for VllmConnectorSlot {
                 .copied()
                 .collect();
 
-            // Get candidate priorities from the priorities parameter directly.
-            // The priorities parameter maps to the block_ids parameter, which are the new blocks.
-            // After extending device_blocks, candidate blocks come from the end, so we take
-            // priorities from the corresponding positions.
+            // Get candidate priorities from the priorities parameter.
+            // When priorities are provided, extract priorities for candidate blocks.
             let candidate_priorities: Vec<u32> = if let Some(prios) = priorities {
-                // Calculate offset into the priorities array
-                // candidate_block_ids come from device_blocks[evaluated_blocks..evaluated_blocks+num_candidate_blocks]
-                // block_ids were appended to device_blocks, so new blocks start at device_blocks.len() - block_ids.len()
                 let new_blocks_start = self.device_blocks.len() - block_ids.len();
                 let candidate_start = self.evaluated_blocks;
 
-                // If candidate_start >= new_blocks_start, we're within the new blocks range
                 if candidate_start >= new_blocks_start {
                     let prio_offset = candidate_start - new_blocks_start;
                     prios
@@ -784,12 +641,9 @@ impl Slot for VllmConnectorSlot {
                         .copied()
                         .collect()
                 } else {
-                    // Some candidate blocks are from before this call (shouldn't happen in normal flow)
-                    // Fall back to default priority
                     vec![0; num_candidate_blocks]
                 }
             } else {
-                // No priorities provided, use default (0)
                 vec![0; num_candidate_blocks]
             };
 
@@ -808,17 +662,18 @@ impl Slot for VllmConnectorSlot {
                     .take_while(|&&priority| priority >= self.offload_min_priority)
                     .count()
             } else {
-                // No filtering, offload all candidate blocks
                 num_candidate_blocks
             };
 
             if num_blocks_to_offload > 0 {
-                tracing::debug!(
-                    "priority filtering: offloading {}/{} blocks (threshold={})",
-                    num_blocks_to_offload,
-                    num_candidate_blocks,
-                    self.offload_min_priority
-                );
+                if self.offload_min_priority > 0 {
+                    tracing::debug!(
+                        "priority filtering: offloading {}/{} blocks (threshold={})",
+                        num_blocks_to_offload,
+                        num_candidate_blocks,
+                        self.offload_min_priority
+                    );
+                }
 
                 let offload_block_ids: Vec<usize> = candidate_block_ids
                     .into_iter()
@@ -834,7 +689,6 @@ impl Slot for VllmConnectorSlot {
                     .cloned()
                     .collect();
 
-                // Pass priorities to offload_blocks so they can be stored in BasicMetadata
                 let offload_priorities: Vec<u32> = candidate_priorities
                     .iter()
                     .take(num_blocks_to_offload)
@@ -868,19 +722,18 @@ impl Slot for VllmConnectorSlot {
                 );
             }
 
-            // Mark all candidate blocks as evaluated (even if not offloaded)
             self.evaluated_blocks += num_candidate_blocks;
         }
 
         // done applying policy
         tracing::debug!(
-            "done applying kv cache policy at current_position: {}; computed_position: {}",
+            "done applying kv cache policy at current_position: {}; num_scheduled_tokens: {}",
             self.current_position,
-            computed_position,
+            num_scheduled_tokens
         );
 
-        // advance current position to computed position
-        self.current_position = computed_position;
+        // advance current and computed position
+        self.current_position += num_scheduled_tokens;
 
         Ok(())
     }
