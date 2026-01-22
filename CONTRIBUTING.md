@@ -19,38 +19,32 @@ limitations under the License.
 
 Thank you for your interest in contributing to Dynamo! Whether you're fixing a typo, reporting a bug, improving documentation, or building a new feature—every contribution matters and helps make Dynamo better for everyone.
 
-This guide will help you get started. If you have questions, join us on [Discord](https://discord.gg/D92uqZRjCZ) or open a [GitHub Discussion](https://github.com/ai-dynamo/dynamo/discussions).
+This guide will help you get started. If you have questions, join us on [Discord](https://discord.gg/nvidia-dynamo) or open a [GitHub Discussion](https://github.com/ai-dynamo/dynamo/discussions).
+
+**TL;DR for experienced contributors:**
+
+1. Fork and clone the repo
+2. Create a branch: `git checkout -b yourname/fix-description`
+3. Make changes, run `pre-commit`
+4. Commit with DCO sign-off: `git commit -s -m "fix: description"`
+5. Open a PR targeting `main`
 
 ## New to Dynamo?
 
 If this is your first contribution, here's the recommended path:
 
-1. **Read** the [Code of Conduct](CODE_OF_CONDUCT.md) and this guide
-2. **Set up** your development environment using the [Developing Locally](README.md#developing-locally) guide
-3. **Find an issue** — Browse [open issues](https://github.com/ai-dynamo/dynamo/issues) or propose a fix you've identified
+1. **Set up** your development environment using the [Developing Locally](README.md#developing-locally) guide
+2. **Find an issue** — Browse [open issues](https://github.com/ai-dynamo/dynamo/issues) or look for:
 
    | Issue Type | Description |
    |------------|-------------|
    | [Good first issues](https://github.com/ai-dynamo/dynamo/labels/good-first-issue) | Beginner-friendly |
    | [Help wanted](https://github.com/ai-dynamo/dynamo/labels/help-wanted) | Community contributions welcome |
-   | [Needs info](https://github.com/ai-dynamo/dynamo/labels/needs-info) | Issues needing clarification |
 
-4. **Start small** — Documentation fixes, bug fixes, and test improvements are great first contributions
-5. **Ask questions** — Join [Discord](https://discord.gg/D92uqZRjCZ) or open a [Discussion](https://github.com/ai-dynamo/dynamo/discussions) if you get stuck
+3. **Start small** — Documentation fixes, bug fixes, and test improvements are great first contributions
+4. **Ask questions** — Join [Discord](https://discord.gg/nvidia-dynamo) or open a [Discussion](https://github.com/ai-dynamo/dynamo/discussions) if you get stuck
 
-> **Community Impact**
-> - 70+ external contributors have merged PRs
-> - 130+ community contributions merged since launch
-> - ~8 new contributors join each month
->
-> Your contribution matters. [See our contributors](https://github.com/ai-dynamo/dynamo/graphs/contributors).
-
-> **TL;DR for experienced contributors:**
-> 1. Fork and clone the repo
-> 2. Create a branch: `git checkout -b yourname/fix-description`
-> 3. Make changes, run `pre-commit`
-> 4. Commit with DCO sign-off: `git commit -s -m "fix: description"`
-> 5. Open a PR targeting `main`
+**Community Impact:** 70+ external contributors have merged PRs, with 130+ community contributions since launch and ~8 new contributors joining each month. Your contribution matters—[see our contributors](https://github.com/ai-dynamo/dynamo/graphs/contributors).
 
 ## Code of Conduct
 
@@ -111,10 +105,11 @@ When triaged, issues are assigned a priority based on impact:
 
 ### Response Expectations
 
-- **Initial response:** Within 2 business days for most issues
-- **Triage complete:** Within 1 week for P0/P1, longer for lower priority
-- **No activity for 60 days:** We'll check if the issue is still relevant
-- **No activity for 90 days:** Issue may be auto-closed (can be reopened)
+We aim to:
+- **Respond** to new issues within a few business days
+- **Triage** high-priority issues (P0/P1) within a week
+
+Issues with no activity for 30 days may be auto-closed (can be reopened).
 
 ### Good First Issues
 
@@ -291,7 +286,7 @@ By contributing, you agree that your contributions will be licensed under the [A
 
 ## Getting Help
 
-- **Discord**: [Join our community](https://discord.gg/D92uqZRjCZ)
+- **Discord**: [Join our community](https://discord.gg/nvidia-dynamo)
 - **Discussions**: [GitHub Discussions](https://github.com/ai-dynamo/dynamo/discussions)
 - **Documentation**: [docs.nvidia.com/dynamo](https://docs.nvidia.com/dynamo/latest/index.html)
 
