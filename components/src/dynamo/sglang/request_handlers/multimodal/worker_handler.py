@@ -4,7 +4,7 @@
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, List
 
 import sglang as sgl
 import torch
@@ -111,21 +111,79 @@ class EmbeddingsProcessor:
         return embeddings, descriptor
 
     @staticmethod
-    def create_multimodal_item(
+    def create_multimodal_items(
         embeddings: torch.Tensor, request: SglangMultimodalRequest
-    ) -> dict:
-        """Create multimodal item for SGLang generation"""
+    ) -> List[dict]:
+        """
+        Create list of multimodal items for SGLang generation.
+        Creates one mm_item per image by splitting the concatenated embeddings.
 
-        precomputed_embeddings = embeddings.to(MultimodalConfig.EMBEDDINGS_DTYPE)
-        grid_thw_tensor = torch.tensor(request.image_grid_thw)
+        Args:
+            embeddings: Concatenated precomputed embeddings tensor [1, total_tokens, hidden_dim]
+            request: The multimodal request with per-image metadata
 
-        mm_item = dict(
-            modality="IMAGE",
-            image_grid_thw=grid_thw_tensor,
-            precomputed_embeddings=precomputed_embeddings,
+        Returns:
+            List of multimodal item dicts, one per image
+        """
+        num_images = request.num_images
+        per_image_num_tokens = request.per_image_num_tokens
+        image_grid_thw = request.image_grid_thw
+
+        # For single image, create a simple item
+        if num_images == 1 or per_image_num_tokens is None:
+            # Squeeze batch dimension: [1, tokens, hidden] -> [tokens, hidden]
+            # SGLang expects 2D embeddings tensor
+            precomputed_embeddings = embeddings.squeeze(0).to(MultimodalConfig.EMBEDDINGS_DTYPE)
+            grid_thw_tensor = torch.tensor(image_grid_thw)
+
+            mm_item = dict(
+                modality="IMAGE",
+                image_grid_thw=grid_thw_tensor,
+                precomputed_embeddings=precomputed_embeddings,
+            )
+
+            logger.debug(
+                f"Created single multimodal item with grid_thw shape: {grid_thw_tensor.shape}, "
+                f"embeddings shape: {precomputed_embeddings.shape}"
+            )
+            return [mm_item]
+
+        # For multiple images, split the concatenated embeddings
+        mm_items = []
+        current_offset = 0
+
+        for idx in range(num_images):
+            num_tokens = per_image_num_tokens[idx]
+
+            # Extract this image's embeddings from the concatenated tensor
+            # embeddings shape: [1, total_tokens, hidden_dim] -> [num_tokens, hidden_dim]
+            # SGLang expects 2D embeddings tensor (no batch dimension)
+            image_embeddings = embeddings[:, current_offset:current_offset + num_tokens, :]
+            image_embeddings = image_embeddings.squeeze(0).to(MultimodalConfig.EMBEDDINGS_DTYPE)
+
+            # Get this image's grid_thw (each image has one [t, h, w] entry)
+            image_grid_thw_entry = [image_grid_thw[idx]]
+            grid_thw_tensor = torch.tensor(image_grid_thw_entry)
+
+            mm_item = dict(
+                modality="IMAGE",
+                image_grid_thw=grid_thw_tensor,
+                precomputed_embeddings=image_embeddings,
+            )
+
+            mm_items.append(mm_item)
+            current_offset += num_tokens
+
+            logger.debug(
+                f"Created mm_item {idx + 1}/{num_images}: "
+                f"grid_thw={image_grid_thw_entry}, embeddings_shape={image_embeddings.shape}"
+            )
+
+        logger.debug(
+            f"Created {len(mm_items)} multimodal items from {num_images} images"
         )
 
-        return mm_item
+        return mm_items
 
 
 class StreamProcessor:
@@ -237,7 +295,8 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         config: Config,
         prefill_client: Client = None,
     ):
-        super().__init__(component, engine, config, None, prefill_client)
+        #super().__init__(component, engine, config, None, prefill_client)
+        super().__init__(component, engine, config, None)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -337,19 +396,19 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 request
             )
 
-            # Create multimodal item
-            mm_item = self.embeddings_processor.create_multimodal_item(
+            # Create multimodal items (supports multiple images)
+            mm_items = self.embeddings_processor.create_multimodal_items(
                 embeddings, request
             )
 
             logger.debug(
-                f"Generated multimodal item with embeddings shape: {embeddings.shape}"
+                f"Generated {len(mm_items)} multimodal item(s) with embeddings shape: {embeddings.shape}"
             )
             logger.debug(f"Input token sequence length: {len(input_ids)}")
 
             agg_stream = await self.engine.async_generate(
                 input_ids=input_ids,
-                image_data=[mm_item],
+                image_data=mm_items,
                 sampling_params=sampling_params,
                 stream=True,
             )
@@ -492,13 +551,18 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
             request
         )
 
-        # Create multimodal item for prefill generation
-        mm_item = self.embeddings_processor.create_multimodal_item(embeddings, request)
+        # Create multimodal items for prefill generation (supports multiple images)
+        mm_items = self.embeddings_processor.create_multimodal_items(embeddings, request)
+
+        logger.debug(
+            f"Prefill: generated {len(mm_items)} multimodal item(s) with "
+            f"embeddings shape: {embeddings.shape}"
+        )
 
         # Start SGLang prefill generation (like regular SGLang)
         results = await self.engine.async_generate(
             input_ids=input_ids,
-            image_data=[mm_item],
+            image_data=mm_items,
             sampling_params=sampling_params,
             stream=True,
             bootstrap_host=self.bootstrap_host,

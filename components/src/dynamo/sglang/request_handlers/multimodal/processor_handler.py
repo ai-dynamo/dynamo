@@ -68,17 +68,24 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
 
         multimodal_input = MultiModalInput()
 
+        # Collect all image URLs from the request (supports multiple images)
+        image_urls = []
         for message in raw_request.messages:
             for item in message.content:
                 if item.type == "image_url":
-                    multimodal_input.image_url = item.image_url.url
+                    image_urls.append(item.image_url.url)
                 elif item.type == "video_url":
-                    if multimodal_input.image_url is not None:
+                    if image_urls:
                         raise ValueError("Cannot provide both image and video URLs")
                     multimodal_input.video_url = item.video_url.url
 
-        if multimodal_input.image_url is None and multimodal_input.video_url is None:
-            raise ValueError("Either image URL or video URL is required")
+        # Set collected image URLs
+        if image_urls:
+            multimodal_input.image_urls = image_urls
+            logger.debug(f"Collected {len(image_urls)} image(s) from request")
+
+        if not multimodal_input.image_urls and multimodal_input.video_url is None:
+            raise ValueError("Either image URL(s) or video URL is required")
 
         async for response in self._generate(raw_request, multimodal_input):
             logger.debug(
