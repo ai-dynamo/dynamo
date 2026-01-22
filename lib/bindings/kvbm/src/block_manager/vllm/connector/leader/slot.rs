@@ -1082,6 +1082,10 @@ impl VllmConnectorSlot {
 enum LocalTransferRequest {
     Offload(LocalOffloadRequest),
     Onboard(LocalOnboardRequest),
+    /// Create a slot for the given request_id before transfers start.
+    /// This enables synchronous slot creation to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    CreateSlot(String),
 }
 
 struct LocalOffloadRequest {
@@ -1276,6 +1280,20 @@ impl LocalTransferEngine {
                                     if let Err(e) = onboard_tx.send(onboard_req) {
                                         tracing::error!("LocalTransferEngine: error sending onboard request: {:?}", e);
                                     }
+                                }
+                                LocalTransferRequest::CreateSlot(request_id) => {
+                                    // Send a slot creation request to the worker's scheduler.
+                                    // This creates the slot BEFORE transfers start, fixing the
+                                    // race condition where transfers complete before the slot exists.
+                                    let leader_clone = self.leader.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = process_create_slot_request(request_id.clone(), &leader_clone).await {
+                                            tracing::error!(
+                                                request_id = %request_id,
+                                                "LocalTransferEngine: error creating slot: {:?}", e
+                                            );
+                                        }
+                                    });
                                 }
                             }
                         }
@@ -1527,6 +1545,64 @@ async fn process_onboard_request(
             return Err(anyhow::anyhow!(
                 "Onboarding transfer completion notification failed"
             ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Process a slot creation request by sending it to the worker's scheduler.
+/// This creates the slot BEFORE transfers start, fixing the race condition
+/// where transfers complete before the worker slot exists.
+async fn process_create_slot_request(
+    request_id: String,
+    leader: &Arc<KvbmLeader>,
+) -> anyhow::Result<()> {
+    tracing::debug!(
+        request_id = %request_id,
+        "Processing slot creation request"
+    );
+
+    // Send a transfer request with no blocks and RequestType::CreateSlot.
+    // The worker will interpret this as a slot creation request.
+    let block_xfer_req = BlockTransferRequest {
+        from_pool: BlockTransferPool::Device,
+        to_pool: BlockTransferPool::Device,
+        blocks: vec![],
+        connector_req: Some(LeaderTransferRequest {
+            request_id: request_id.clone(),
+            uuid: uuid::Uuid::nil(), // Use nil UUID for slot creation (no operation tracking)
+            requirement: None,
+            request_type: RequestType::CreateSlot,
+        }),
+    };
+
+    // Fire and forget - we don't need to wait for the slot creation to complete.
+    // The important thing is that the message is sent before any transfers start.
+    match leader.transfer_blocks_request(block_xfer_req).await {
+        Ok(notify_receiver) => {
+            // Wait for acknowledgment to ensure the slot is created
+            match notify_receiver.await {
+                Ok(_) => {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        "Slot creation request completed successfully"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        "Slot creation notification failed - slot may not be created"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                request_id = %request_id,
+                "Failed to send slot creation request: {:?}", e
+            );
+            return Err(e);
         }
     }
 

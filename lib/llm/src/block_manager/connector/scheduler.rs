@@ -59,6 +59,16 @@ impl TransferSchedulerClient {
     ) -> anyhow::Result<Box<dyn TransferCompletionHandle>> {
         let scheduler_tx = self.scheduler_tx.clone();
         match request.request_type {
+            RequestType::CreateSlot => {
+                // Create a slot for this request_id before any transfers start.
+                // This is used to fix the race condition where transfers complete
+                // before the worker slot exists.
+                tracing::debug!("creating slot via transfer scheduler");
+                scheduler_tx
+                    .send(TransferToSchedulerMessage::CreateSlot(request.request_id))
+                    .await?;
+                Ok(Box::new(CreateSlotCompletionHandle))
+            }
             RequestType::Immediate => {
                 let handle = ImmediateTransferCompletionHandle::new(
                     request.request_id,
