@@ -633,18 +633,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MutableBlock<S, L, M> {
     }
 }
 
-/// Implementation for MutableBlock with BasicMetadata to support priority-based offload filtering.
-impl<S: Storage, L: LocalityProvider> MutableBlock<S, L, BasicMetadata> {
-    /// Set the priority on the block's metadata.
-    /// This is used to carry priority through the block lifecycle for offload filtering.
-    pub fn set_priority(&mut self, priority: u32) {
-        if let Some(block) = self.block.as_mut() {
-            let updated = block.metadata().update_priority(priority);
-            block.update_metadata(updated);
-        }
-    }
-}
-
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Debug for MutableBlock<S, L, M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.block {
