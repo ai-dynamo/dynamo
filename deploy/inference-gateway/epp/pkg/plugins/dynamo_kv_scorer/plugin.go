@@ -108,6 +108,7 @@ import (
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
+	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
@@ -161,13 +162,15 @@ func (s *DynamoRoutingState) Clone() plugins.StateData {
 }
 
 type KVAwareScorer struct {
-	typedName   plugins.TypedName
-	pluginState *plugins.PluginState
+	typedName      plugins.TypedName
+	pluginState    *plugins.PluginState
+	firstTokenSeen sync.Map // map[requestID]bool - tracks which requests have received first token
 }
 
 var _ plugins.Plugin = (*KVAwareScorer)(nil)
 var _ framework.Scorer = (*KVAwareScorer)(nil)
 var _ rc.PreRequest = (*KVAwareScorer)(nil)
+var _ rc.ResponseStreaming = (*KVAwareScorer)(nil)
 var _ rc.ResponseComplete = (*KVAwareScorer)(nil)
 
 func NewKVAwareScorer(ctx context.Context) *KVAwareScorer {
@@ -438,6 +441,33 @@ func (k *KVAwareScorer) PreRequest(
 	)
 }
 
+// ResponseStreaming is called for each chunk of a streaming response.
+// On the first token, it marks prefill as complete in the Dynamo router's bookkeeping.
+func (k *KVAwareScorer) ResponseStreaming(
+	ctx context.Context,
+	request *schedtypes.LLMRequest,
+	response *rc.Response,
+	targetPod *datalayer.EndpointMetadata,
+) {
+	if request == nil || request.RequestId == "" {
+		return
+	}
+
+	// Check if we've already seen the first token for this request
+	// LoadOrStore returns (value, loaded) - if loaded is false, this is the first time
+	if _, alreadySeen := k.firstTokenSeen.LoadOrStore(request.RequestId, true); !alreadySeen {
+		// This is the first token - mark prefill as complete
+		logger := log.FromContext(ctx)
+		if err := CallMarkPrefillComplete(request.RequestId); err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "ResponseStreaming: failed to mark prefill complete",
+				"requestID", request.RequestId)
+			return
+		}
+		logger.V(logutil.VERBOSE).Info("ResponseStreaming: marked prefill complete (first token received)",
+			"requestID", request.RequestId)
+	}
+}
+
 // ResponseComplete is called after the complete response is sent to the client.
 // It cleans up the router bookkeeping state for the completed request by calling
 // dynamo_router_free_request to release resources associated with the request.
@@ -459,6 +489,9 @@ func (k *KVAwareScorer) ResponseComplete(
 		logger.V(logutil.DEBUG).Info("ResponseComplete: no request ID, skipping cleanup")
 		return
 	}
+
+	// Clean up the first token tracking map
+	k.firstTokenSeen.Delete(requestID)
 
 	// Call the dynamo router to free the request bookkeeping
 	if err := callFreeRequestInternal(requestID); err != nil {

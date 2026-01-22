@@ -952,7 +952,7 @@ pub unsafe extern "C" fn dynamo_router_add_request(
 }
 
 /// Mark prefill as completed for a request.
-/// Call this from GAIE hook when the first token is generated.
+/// Call this from the EPP extension point when the first token is generated.
 ///
 /// # Safety
 /// - `pipeline` must be a valid, non-null pointer from `dynamo_create_worker_selection_pipeline`
