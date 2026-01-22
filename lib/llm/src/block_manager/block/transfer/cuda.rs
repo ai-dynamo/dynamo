@@ -9,11 +9,11 @@ use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
 use cudarc::driver::result as cuda_result;
+use cudarc::driver::sys::{CUevent_flags, CUresult, cuMemcpyHtoDAsync_v2};
 use dynamo_runtime::config::environment_names::cuda as env_cuda;
 use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-use cudarc::driver::sys::{cuMemcpyHtoDAsync_v2, CUevent_flags, CUresult};
 
 /// Simple pinned memory allocation
 pub fn allocate_pinned_memory(size: usize) -> Result<u64, TransferError> {
@@ -252,10 +252,12 @@ where
     let pool = ctx.cuda_mem_pool().unwrap();
 
     // Allocate DEVICE memory from pool (stream-ordered)
-    let src_buffer = pool.alloc_async(size, stream)
-        .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
-    let dst_buffer = pool.alloc_async(size, stream)
-        .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
+    let src_buffer = pool.alloc_async(size, stream).map_err(|e| {
+        TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e))
+    })?;
+    let dst_buffer = pool.alloc_async(size, stream).map_err(|e| {
+        TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e))
+    })?;
 
     // Copy address buffers from host to device using stream-ordered H2D memcpy
     let result_src = unsafe {
@@ -291,9 +293,11 @@ where
     // Record event and synchronize to ensure H2D completes before host vectors drop
     // This is critical: the async H2D memcpy is still reading from src_addresses/dst_addresses
     // host memory when it returns. We must wait for completion before those vectors are dropped.
-    let h2d_event = stream.record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
+    let h2d_event = stream
+        .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
         .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
-    h2d_event.synchronize()
+    h2d_event
+        .synchronize()
         .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
 
     // Launch kernel (reads from device buffers)

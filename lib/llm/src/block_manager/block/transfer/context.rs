@@ -7,8 +7,8 @@ use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
 use nixl_sys::Agent as NixlAgent;
 
 use anyhow::Result;
-use dynamo_runtime::utils::pool::{Returnable, SyncPool, SyncPoolItem};
 use dynamo_memory::pool::CudaMemPool;
+use dynamo_runtime::utils::pool::{Returnable, SyncPool, SyncPoolItem};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use tokio::runtime::Handle;
@@ -202,7 +202,9 @@ impl TransferContext {
         let cuda_event_worker = Self::setup_cuda_event_worker(cuda_event_rx, cancel_token_clone);
 
         let pool = {
-           tracing::debug!("Pinned buffer pool is no longer used for kernel transfers and will be removed in the future");
+            tracing::debug!(
+                "Pinned buffer pool is no longer used for kernel transfers and will be removed in the future"
+            );
             None
         };
 
