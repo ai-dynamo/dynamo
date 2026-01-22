@@ -55,9 +55,9 @@ python -m dynamo.frontend &
 # Configure GPU memory optimization for specific models (if no extra args override)
 MODEL_SPECIFIC_ARGS=""
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85"
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 30426"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85"
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 30426"
 fi
 
 # Start vLLM worker with vision model

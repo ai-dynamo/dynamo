@@ -58,7 +58,7 @@ if [[ "$SINGLE_GPU" == "true" ]]; then
     EXTRA_ARGS="--gpu-memory-utilization 0.5 --max-model-len 30426"
 else
     # Multi-GPU mode: standard memory settings
-    EXTRA_ARGS="--gpu-memory-utilization 0.85"
+    EXTRA_ARGS="--gpu-memory-utilization 0.85 --max-model-len 30426"
 fi
 
 # Start processor (Python-based preprocessing, handles prompt templating)
