@@ -276,19 +276,16 @@ class VLLMEncodeWorkerHandler:
             f"for request_id={request.request_id}"
         )
 
-        # Process each multimodal input
+        # Load all images
+        # TODO: support video and audio encoding later
+        media_list = []
+        modality = "image"
         for idx, mm_group in enumerate(request.multimodal_inputs):
             mm_input = mm_group.multimodal_input
-            item_request_id = f"{request.request_id}_mm_{idx}"
-
-            # Load media (image/video/audio)
-            # TODO: Add support for video_url and audio
             if mm_input.image_url:
                 media = await self.image_loader.load_image(mm_input.image_url)
-                media_key = "image"
-                modality = "image"
+                media_list.append(media)
             elif mm_input.video_url:
-                # TODO: Implement video loading
                 raise NotImplementedError("Video encoding not yet supported")
             else:
                 raise ValueError(
@@ -296,43 +293,44 @@ class VLLMEncodeWorkerHandler:
                     "Specify image_url or video_url."
                 )
 
-            # Compute mm_hash using vLLM's hasher
+        # Process all images in one vLLM request
+        prompt_dict = TokensPrompt(
+            prompt_token_ids=request.token_ids,
+            multi_modal_data={"image": media_list},
+        )
+
+        try:
+            gen = self.engine_client.generate(
+                prompt=prompt_dict,
+                sampling_params=SamplingParams(max_tokens=1, min_tokens=0),
+                request_id=request.request_id,
+            )
+
+            # Consume generator to trigger encoder execution
+            async for _ in gen:
+                pass
+
+            logger.info(
+                f"[{request.request_id}] Encoder execution completed for all {len(media_list)} image(s)"
+            )
+
+        except Exception as e:
+            logger.error(f"[{request.request_id}] Encoder execution failed: {e}")
+            raise
+
+        # Compute mm_hash for each image and yield responses
+        for idx, media in enumerate(media_list):
+            item_request_id = f"{request.request_id}_mm_{idx}"
+
             try:
                 mm_hash = MultiModalHasher.hash_kwargs(
-                    model_id=self.config.model, **{media_key: media}
+                    model_id=self.config.model, image=media
                 )
                 logger.debug(f"[{item_request_id}] Computed mm_hash: {mm_hash}")
             except Exception as e:
                 logger.error(f"[{item_request_id}] Failed to compute mm_hash: {e}")
                 raise
 
-            try:
-                prompt_dict = TokensPrompt(
-                    prompt_token_ids=request.token_ids,
-                    multi_modal_data={media_key: media},
-                )
-
-                gen = self.engine_client.generate(
-                    prompt=prompt_dict,
-                    sampling_params=SamplingParams(max_tokens=1, min_tokens=0),
-                    request_id=item_request_id,
-                )
-
-                # Consume generator to trigger encoder execution
-                async for _ in gen:
-                    pass
-
-                logger.info(
-                    f"[{item_request_id}] Encoder execution completed "
-                    f"({idx + 1}/{len(request.multimodal_inputs)})"
-                )
-
-            except Exception as e:
-                logger.error(f"[{item_request_id}] Encoder execution failed: {e}")
-                raise
-
-            # Yield metadata for each item (PD workers can use these to lookup from cache)
-            # Right now this is not used. Can be used for logging purpose later.
             response = VLLMNativeEncoderResponse(
                 request_id=item_request_id,
                 mm_hash=mm_hash,

@@ -1,0 +1,271 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Release Pipeline
+
+on:
+  push:
+    branches:
+      - 'release/*'
+  workflow_dispatch:
+    inputs:
+      rc_number:
+        description: 'RC number (e.g., 0 for rc0). Leave empty to auto-increment.'
+        required: false
+        type: string
+
+# Note: workflow_dispatch can only be triggered from release/* branches
+# This is enforced in the prepare-release job via branch validation
+
+permissions:
+  contents: write
+
+jobs:
+  # Gate job for manual triggers - requires automated-release approval
+  manual-approval:
+    name: Approve Manual Run
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: automated-release
+    steps:
+      - name: Manual run approved
+        run: echo "✅ Manual workflow run approved via automated-release environment"
+
+  # Extract version from branch name for downstream jobs
+  prepare-release:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+      image_prefix: ${{ steps.extract.outputs.image_prefix }}
+    steps:
+      - name: Extract version from branch
+        id: extract
+        run: |
+          # Extract version from branch name (e.g., release/0.7.0 -> 0.7.0)
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          VERSION="${BRANCH_NAME#release/}"
+
+          # Enforce workflow_dispatch only runs on release/* branches
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ ! "$BRANCH_NAME" =~ ^release/[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Error: workflow_dispatch can only be triggered from release/* branches"
+              echo "Current branch: $BRANCH_NAME"
+              echo "Expected pattern: release/X.Y.Z (e.g., release/0.7.0)"
+              exit 1
+            fi
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Error: Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z (e.g., 0.7.0)"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
+          echo "Detected version: ${VERSION}"
+
+  # Run the CI test suite (builds + tests)
+  ci-pipeline:
+    name: Release CI
+    needs: [prepare-release, manual-approval]
+    # Run if: prepare-release succeeded AND (push event OR manual-approval succeeded)
+    if: |
+      always() &&
+      needs.prepare-release.result == 'success' &&
+      (github.event_name == 'push' || needs.manual-approval.result == 'success')
+    uses: ./.github/workflows/ci-test-suite.yml
+    with:
+      pipeline_type: release
+      include_nightly_marks: false
+      image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
+      enable_slack_notification: false
+    secrets:
+      AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      NGC_CI_ACCESS_TOKEN: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+      CI_TOKEN: ${{ secrets.CI_TOKEN }}
+      SCCACHE_S3_BUCKET: ${{ secrets.SCCACHE_S3_BUCKET }}
+      AZURE_ACR_HOSTNAME: ${{ secrets.AZURE_ACR_HOSTNAME }}
+      AZURE_ACR_USER: ${{ secrets.AZURE_ACR_USER }}
+      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD }}
+      AZURE_AKS_CI_KUBECONFIG_B64: ${{ secrets.AZURE_AKS_CI_KUBECONFIG_B64 }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      DYNAMO_INGRESS_SUFFIX: ${{ secrets.DYNAMO_INGRESS_SUFFIX }}
+
+  # Tag the commit as release candidate and publish to NGC
+  # This job uses the automated-release environment for sensitive secrets
+  # Runs after ci-pipeline completes (regardless of test results) - environment approval is the gate
+  release-publish:
+    name: Tag RC & Publish to NGC
+    needs: [prepare-release, ci-pipeline]
+    if: |
+      always() && !cancelled() && needs.prepare-release.result == 'success'
+    runs-on: cpu-amd-m5-4xlarge  # Self-hosted runner with IAM instance role for ECR access
+    environment: automated-release
+    env:
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
+      REGISTRY_IMAGE: ai-dynamo/dynamo
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine next RC tag
+        id: rc_tag
+        env:
+          INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
+        run: |
+          set -euo pipefail
+
+          # Check if RC number was provided as input
+          if [ -n "${INPUT_RC_NUMBER}" ]; then
+            # Validate input is a non-negative integer
+            if ! [[ "${INPUT_RC_NUMBER}" =~ ^[0-9]+$ ]]; then
+              echo "Error: rc_number must be a non-negative integer (got: ${INPUT_RC_NUMBER})"
+              exit 1
+            fi
+            NEXT_RC="${INPUT_RC_NUMBER}"
+            echo "Using provided RC number: ${NEXT_RC}"
+          else
+            # Auto-increment: Find existing RC tags for this version
+            echo "No RC number provided. Auto-incrementing..."
+            echo "Looking for existing RC tags for version ${VERSION}..."
+
+            # Pattern: vX.Y.Z-rcN
+            RC_PATTERN="v${VERSION}-rc"
+
+            # Get all matching tags sorted by RC number
+            EXISTING_RCS=$(git tag -l "${RC_PATTERN}*" | grep -E "^v${VERSION}-rc[0-9]+$" | sort -V || true)
+
+            if [ -z "$EXISTING_RCS" ]; then
+              NEXT_RC=0
+              echo "No existing RC tags found. Starting with rc0."
+            else
+              # Get the highest RC number
+              LAST_RC=$(echo "$EXISTING_RCS" | tail -1)
+              LAST_RC_NUM=${LAST_RC#v${VERSION}-rc}
+              NEXT_RC=$((LAST_RC_NUM + 1))
+              echo "Found existing RC tags:"
+              echo "$EXISTING_RCS"
+              echo "Last RC: ${LAST_RC}, Next RC number: ${NEXT_RC}"
+            fi
+          fi
+
+          RC_TAG="v${VERSION}-rc${NEXT_RC}"
+          echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
+          echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "Will create tag: ${RC_TAG}"
+
+      - name: Create RC tag
+        env:
+          RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create annotated tag
+          git tag -a "${RC_TAG}" -m "Release candidate ${RC_TAG}"
+
+          # Push the tag
+          git push origin "${RC_TAG}"
+
+          echo "✅ Created and pushed tag: ${RC_TAG}"
+
+      - name: Setup crane
+        env:
+          CRANE_VERSION: v0.20.2
+        run: |
+          # Download crane from official Google releases
+          curl -sL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | tar -xzf - crane
+          sudo mv crane /usr/local/bin/
+          crane version
+
+      - name: Login to ECR
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+          echo "Logging into ECR..."
+          aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin "${ECR_HOSTNAME}"
+          echo "✅ ECR login successful"
+
+      - name: Login to NGC
+        env:
+          NGC_TOKEN: ${{ secrets.NGC_PUBLISH_TOKEN }}
+        run: |
+          echo "${NGC_TOKEN}" | docker login nvcr.io -u '$oauthtoken' --password-stdin
+          echo "${NGC_TOKEN}" | crane auth login nvcr.io -u '$oauthtoken' --password-stdin
+
+      - name: Copy images to NGC
+        env:
+          NGC_REGISTRY: nvcr.io
+          NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
+          RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+        run: |
+          set -euo pipefail
+
+          # Get ECR hostname from instance role
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_HOSTNAME="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+          FRAMEWORKS=("vllm" "trtllm" "sglang")
+          ARCHITECTURES=("amd64" "arm64")
+
+          echo "Copying images from ECR to NGC (registry-to-registry)"
+          echo "Version: ${VERSION}, RC: rc${RC_NUMBER}"
+
+          for FRAMEWORK in "${FRAMEWORKS[@]}"; do
+            for ARCH in "${ARCHITECTURES[@]}"; do
+              SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
+              SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
+              NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
+              NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
+
+              echo "----------------------------------------"
+              echo "Copying: ${FRAMEWORK}-runtime:${NGC_TAG}"
+
+              if ! crane copy "${SOURCE_IMAGE}" "${NGC_IMAGE}"; then
+                echo "⚠️  Warning: Failed to copy ${FRAMEWORK} (${ARCH}), skipping..."
+                continue
+              fi
+
+              echo "✅ Copied: ${FRAMEWORK}-runtime:${NGC_TAG}"
+            done
+          done
+
+          echo "========================================"
+          echo "✅ NGC publishing completed for ${VERSION}rc${RC_NUMBER}"
+          echo "========================================"
+
+      - name: Create release summary
+        env:
+          RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
+          RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
+          echo "| RC Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
+          echo "| RC Number | ${RC_NUMBER} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Published Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Image tags published to NGC:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`trtllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+

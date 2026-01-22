@@ -13,7 +13,6 @@ This test validates that:
 """
 
 import concurrent.futures
-import importlib.util
 import logging
 import os
 import re
@@ -27,22 +26,11 @@ import yaml
 from tests.kvbm_integration.common import ApiTester, check_logs_for_patterns
 from tests.utils.managed_process import ManagedProcess
 
-
 # Check if engines are available and build list of available engines
-# Use find_spec first (fast check), then verify import works (functional check)
-def _check_engine_available(module_name: str) -> bool:
-    """Check if an engine module is available and importable."""
-    if importlib.util.find_spec(module_name) is None:
-        return False
-    try:
-        importlib.import_module(module_name)
-        return True
-    except ImportError:
-        return False
+from .common import check_module_available
 
-
-HAS_VLLM = _check_engine_available("vllm")
-HAS_TRTLLM = _check_engine_available("tensorrt_llm")
+HAS_VLLM = check_module_available("vllm")
+HAS_TRTLLM = check_module_available("tensorrt_llm")
 
 # Build list of available engines for parameterization
 AVAILABLE_ENGINES = []
