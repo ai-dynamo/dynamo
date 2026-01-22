@@ -1394,7 +1394,7 @@ mod tests_startup_helpers {
         }
         assert!(no_blocks, "worker should have no blocks after removal");
 
-        // Global kvindexer should have recieved two events (create/remove)
+        // Global kvindexer should have received two events (create/remove)
         let published = published.lock().unwrap();
         assert_eq!(
             published.len(),
@@ -1473,7 +1473,7 @@ mod tests_startup_helpers {
         }
         assert!(no_blocks, "worker should have no blocks after clearing");
 
-        // Global kvindexer should have recieved two events (create/remove)
+        // Global kvindexer should have received two events (create/remove)
         let published = published.lock().unwrap();
         assert_eq!(
             published.len(),

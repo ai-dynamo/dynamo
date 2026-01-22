@@ -61,7 +61,7 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
-    # Emebdding Cache Processor is different from the regular processor
+    # Embedding Cache Processor is different from the regular processor
     # TODO: Have a single processor for all cases and adopting rust based processor
     ec_processor: bool = False
     multimodal_encode_worker: bool = False
