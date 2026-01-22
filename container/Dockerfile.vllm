@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.10.0
+# syntax=docker/dockerfile:1.10.0-labs
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -692,7 +692,14 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
 COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
 # Remaining packages and venv structure (bin/, include/, share/, etc.)
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+COPY --chmod=775 --chown=dynamo:0 --from=framework \
+    --exclude=lib/python*/site-packages/nvidia \
+    --exclude=lib/python*/site-packages/flashinfer_jit_cache \
+    --exclude=lib/python*/site-packages/torch \
+    --exclude=lib/python*/site-packages/vllm \
+    --exclude=lib/python*/site-packages/triton \
+    --exclude=lib/python*/site-packages/flashinfer_cubin \
+    ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy vllm with correct ownership (read-only, no group-write needed)
 COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
