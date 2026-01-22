@@ -249,7 +249,12 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    let pool = ctx.cuda_mem_pool().unwrap();
+    let pool = ctx.cuda_mem_pool().ok_or_else(|| {
+        TransferError::ExecutionError(
+            "TransferContext was not instantiated with a CudaPool; please report this error"
+                .to_string(),
+        )
+    })?;
 
     // Allocate DEVICE memory from pool (stream-ordered)
     let src_buffer = pool.alloc_async(size, stream).map_err(|e| {
@@ -296,9 +301,6 @@ where
     let h2d_event = stream
         .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
         .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
-    h2d_event
-        .synchronize()
-        .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
 
     // Launch kernel (reads from device buffers)
     unsafe {
@@ -316,6 +318,13 @@ where
         .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
     pool.free_async(dst_buffer, stream)
         .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
+
+    // By synchronizing here, we enqueue all the work to the stream, then wait.
+    // There is cpu overheads associated with each of those calls.
+    // We might as well amortize the transfer of the pointers with those launch overheads.
+    h2d_event
+        .synchronize()
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
 
     Ok(())
 }
