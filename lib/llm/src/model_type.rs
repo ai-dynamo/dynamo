@@ -37,6 +37,7 @@ bitflags! {
         const Embedding = 1 << 2;
         const TensorBased = 1 << 3;
         const Prefill = 1 << 4;
+        const Images = 1 << 5;
     }
 }
 
@@ -60,6 +61,9 @@ impl ModelType {
     pub fn supports_prefill(&self) -> bool {
         self.contains(ModelType::Prefill)
     }
+    pub fn supports_images(&self) -> bool {
+        self.contains(ModelType::Images)
+    }
 
     pub fn as_vec(&self) -> Vec<&'static str> {
         let mut result = Vec::new();
@@ -77,6 +81,9 @@ impl ModelType {
         }
         if self.supports_prefill() {
             result.push("prefill");
+        }
+        if self.supports_images() {
+            result.push("images");
         }
         result
     }
@@ -100,6 +107,9 @@ impl ModelType {
         if self.supports_prefill() {
             result.push(ModelType::Prefill);
         }
+        if self.supports_images() {
+            result.push(ModelType::Images);
+        }
         result
     }
 
@@ -115,6 +125,9 @@ impl ModelType {
         }
         if self.contains(Self::Embedding) {
             endpoint_types.push(crate::endpoint_type::EndpointType::Embedding);
+        }
+        if self.contains(Self::Images) {
+            endpoint_types.push(crate::endpoint_type::EndpointType::Images);
         }
         // [gluo NOTE] ModelType::Tensor doesn't map to any endpoint type,
         // current use of endpoint type is LLM specific and so does the HTTP

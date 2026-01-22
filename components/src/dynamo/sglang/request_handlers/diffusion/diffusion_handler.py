@@ -87,10 +87,10 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
             logger.debug(f"Diffusion request with trace: {trace_header}")
 
         try:
-            # Check for cancellation before starting generation
-            if await self._check_cancellation(context):
-                logger.info(f"Request cancelled before generation: {context.id()}")
-                return
+            # # Check for cancellation before starting generation
+            # if await self._check_cancellation(context):
+            #     logger.info(f"Request cancelled before generation: {context.id()}")
+            #     return
 
             req = CreateImageRequest(**request)
 
@@ -98,9 +98,9 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
             width, height = self._parse_size(req.size)
 
             # Check for cancellation after parsing
-            if await self._check_cancellation(context):
-                logger.info(f"Request cancelled during setup: {context.id()}")
-                return
+            # if await self._check_cancellation(context):
+            #     logger.info(f"Request cancelled during setup: {context.id()}")
+            #     return
 
             # Generate images (may batch multiple requests at same step)
             images = await self._generate_images(
@@ -113,10 +113,10 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
                 seed=req.seed,
             )
 
-            # Check for cancellation after generation
-            if await self._check_cancellation(context):
-                logger.info(f"Request cancelled after generation: {context.id()}")
-                return
+            # # Check for cancellation after generation
+            # if await self._check_cancellation(context):
+            #     logger.info(f"Request cancelled after generation: {context.id()}")
+            #     return
 
             # Upload to S3 and get URLs
             image_data = []
@@ -159,20 +159,26 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
         """Generate images using SGLang DiffGenerator"""
         # DiffGenerator handles batching internally if multiple images
         # Run in thread pool to avoid blocking event loop
-        images = await asyncio.to_thread(
+        args = {
+            "prompt": prompt,
+            "height": height,
+            "width": width,
+            "num_inference_steps": num_images,
+            "save_output": False,  # We handle saving ourselves
+            # "guidance_scale": guidance_scale,
+            # "seed": seed,
+        }
+        result = await asyncio.to_thread(
             self.generator.generate,
-            prompt=prompt,
-            num_images=num_images,
-            width=width,
-            height=height,
-            num_inference_steps=num_steps,
-            guidance_scale=guidance_scale,
-            seed=seed,
+            sampling_params_kwargs=args,
         )
+
+        images = result["frames"] if "frames" in result else []
 
         # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
         image_bytes_list = []
         for img in images:
+            # TODO: checkdoes sglang return only int arrays?
             if isinstance(img, bytes):
                 image_bytes_list.append(img)
             elif Image is not None and isinstance(img, Image.Image):
@@ -205,6 +211,7 @@ class DiffusionWorkerHandler(BaseGenerativeHandler):
     def _parse_size(self, size_str: str) -> tuple[int, int]:
         """Parse '1024x1024' -> (1024, 1024)"""
         w, h = size_str.split("x")
+        # TODO: allowed sizes, max 1024? configurable?
         return int(w), int(h)
 
     async def _upload_to_s3(self, image_bytes: bytes, request_id: str) -> str:

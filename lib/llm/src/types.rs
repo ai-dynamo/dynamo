@@ -59,6 +59,20 @@ pub mod openai {
         pub type OpenAIEmbeddingsStreamingEngine =
             ServerStreamingEngine<NvCreateEmbeddingRequest, Annotated<NvCreateEmbeddingResponse>>;
     }
+
+    pub mod images {
+        use super::*;
+
+        pub use protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
+
+        /// A [`UnaryEngine`] implementation for the OpenAI Images API
+        pub type OpenAIImagesUnaryEngine =
+            UnaryEngine<NvCreateImageRequest, NvImagesResponse>;
+
+        /// A [`ServerStreamingEngine`] implementation for the OpenAI Images API
+        pub type OpenAIImagesStreamingEngine =
+            ServerStreamingEngine<NvCreateImageRequest, Annotated<NvImagesResponse>>;
+    }
 }
 
 pub mod generic {
