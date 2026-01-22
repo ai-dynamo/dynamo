@@ -23,6 +23,10 @@ pub trait OffloadFilter: Send + Sync + Debug {
     /// # Arguments
     /// * `sequence_hash` - The sequence hash of the block
     /// * `priority` - The retention priority of the block (0-100, higher = more important)
+    ///
+    /// TODO: This method is currently unused. Priority-based filtering is handled at the
+    /// slot level (VllmConnectorSlot.offload_terminated). Consider removing this method
+    /// or finding a use case where manager-level priority filtering is needed.
     fn should_offload_with_priority(&self, sequence_hash: SequenceHash, priority: u64) -> bool {
         // Default: ignore priority, use existing logic
         let _ = priority;

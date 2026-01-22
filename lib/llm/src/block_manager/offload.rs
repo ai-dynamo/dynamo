@@ -327,7 +327,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         target_pool: Option<Arc<dyn BlockPool<Target, Locality, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
-        _offload_filter: Option<Arc<dyn OffloadFilter>>,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
         offload_metric: Option<prometheus::IntCounter>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
@@ -381,9 +381,14 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         continue;
                     }
 
-                    // Note: Priority-based filtering is now handled at the slot level
-                    // (VllmConnectorSlot.offload_terminated flag) to ensure global contiguity.
-                    // The slot only queues contiguous blocks for offload, so no filtering is needed here.
+                    // FrequencyFilter: Skip blocks that haven't been accessed frequently enough.
+                    // Note: Priority-based filtering for contiguity is handled at the slot level
+                    // (VllmConnectorSlot.offload_terminated flag), not here.
+                    if let Some(offload_filter) = offload_filter.as_ref()
+                        && !offload_filter.should_offload(request.sequence_hash)
+                    {
+                        continue;
+                    }
 
                     let target_block = 'target_block: {
                         if let Ok(blocks) = target_pool.allocate_blocks(1).await
