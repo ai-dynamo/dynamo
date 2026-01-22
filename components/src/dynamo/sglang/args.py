@@ -372,15 +372,27 @@ async def parse_args(args: list[str]) -> Config:
             # Remove --config-key from args (not recognized by SGLang)
             args = args[:key_index] + args[key_index + 2 :]
 
-        # Extract boolean actions from the parser to handle them correctly in YAML
-        boolean_actions = []
-        for action in parser._actions:
-            if hasattr(action, "dest") and hasattr(action, "action"):
-                if action.action in ["store_true", "store_false"]:
-                    boolean_actions.append(action.dest)
+        # Merge config file arguments with CLI arguments.
+        # ConfigArgumentMerger API changed after SGLang v0.5.7:
+        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
+        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
+        # We use inspect.signature to detect the API rather than version checking
+        # since unreleased builds may have the new API while still reporting v0.5.7.
+        # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
+        # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
+        import inspect
 
-        # Merge config file arguments with CLI arguments
-        config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        sig = inspect.signature(ConfigArgumentMerger.__init__)
+        if "parser" in sig.parameters:
+            config_merger = ConfigArgumentMerger(parser=parser)
+        else:
+            # Legacy path: extract store_true actions manually
+            boolean_actions = [
+                action.dest
+                for action in parser._actions
+                if isinstance(action, argparse._StoreTrueAction)
+            ]
+            config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
         args = config_merger.merge_config_with_args(args)
 
     parsed_args = parser.parse_args(args)
