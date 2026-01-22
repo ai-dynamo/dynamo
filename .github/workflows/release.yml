@@ -7,6 +7,7 @@ on:
   push:
     branches:
       - 'release/*'
+      - 'pvijayakrish/add-builds-to-release'  #TODO: revert Temporary: for testing
   workflow_dispatch:
     inputs:
       rc_number:
@@ -38,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.extract.outputs.version }}
       image_prefix: ${{ steps.extract.outputs.image_prefix }}
+      is_test_branch: ${{ steps.extract.outputs.is_test_branch }}
     steps:
       - name: Extract version from branch
         id: extract
@@ -45,6 +47,16 @@ jobs:
           # Extract version from branch name (e.g., release/0.7.0 -> 0.7.0)
           BRANCH_NAME="${GITHUB_REF#refs/heads/}"
           VERSION="${BRANCH_NAME#release/}"
+
+          # Handle test branch - use test version
+          if [[ "$BRANCH_NAME" == "pvijayakrish/add-builds-to-release" ]]; then
+            VERSION="0.0.0"
+            echo "Test branch detected, using test version: ${VERSION}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "image_prefix=test" >> $GITHUB_OUTPUT
+            echo "is_test_branch=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
           # Enforce workflow_dispatch only runs on release/* branches
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
@@ -64,6 +76,7 @@ jobs:
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "image_prefix=release-${VERSION}" >> $GITHUB_OUTPUT
+          echo "is_test_branch=false" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
 
   # Run the CI test suite (builds + tests)
@@ -81,6 +94,7 @@ jobs:
       include_nightly_marks: false
       image_prefix: ${{ needs.prepare-release.outputs.image_prefix }}
       enable_slack_notification: false
+      skip_tests: ${{ needs.prepare-release.outputs.is_test_branch == 'true' }}
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
@@ -109,6 +123,7 @@ jobs:
     env:
       VERSION: ${{ needs.prepare-release.outputs.version }}
       IMAGE_PREFIX: ${{ needs.prepare-release.outputs.image_prefix }}
+      IS_TEST_BRANCH: ${{ needs.prepare-release.outputs.is_test_branch }}
       REGISTRY_IMAGE: ai-dynamo/dynamo
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
     steps:
@@ -124,6 +139,32 @@ jobs:
           INPUT_RC_NUMBER: ${{ github.event.inputs.rc_number }}
         run: |
           set -euo pipefail
+
+          # Handle test branch - use test tag format
+          if [[ "${IS_TEST_BRANCH}" == "true" ]]; then
+            # For test branches, use test-0.0.0-N format
+            TEST_PATTERN="test-0.0.0-"
+            EXISTING_TESTS=$(git tag -l "${TEST_PATTERN}*" | grep -E "^test-0\.0\.0-[0-9]+$" | sort -V || true)
+
+            if [ -z "$EXISTING_TESTS" ]; then
+              NEXT_NUM=0
+              echo "No existing test tags found. Starting with test-0.0.0-0."
+            else
+              LAST_TEST=$(echo "$EXISTING_TESTS" | tail -1)
+              LAST_NUM=${LAST_TEST#test-0.0.0-}
+              NEXT_NUM=$((LAST_NUM + 1))
+              echo "Found existing test tags:"
+              echo "$EXISTING_TESTS"
+              echo "Last test tag: ${LAST_TEST}, Next number: ${NEXT_NUM}"
+            fi
+
+            RC_TAG="test-0.0.0-${NEXT_NUM}"
+            echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
+            echo "rc_number=${NEXT_NUM}" >> $GITHUB_OUTPUT
+            echo "ngc_version_tag=test0.0.0rc${NEXT_NUM}" >> $GITHUB_OUTPUT
+            echo "Will create test tag: ${RC_TAG}"
+            exit 0
+          fi
 
           # Check if RC number was provided as input
           if [ -n "${INPUT_RC_NUMBER}" ]; then
@@ -162,6 +203,7 @@ jobs:
           RC_TAG="v${VERSION}-rc${NEXT_RC}"
           echo "rc_tag=${RC_TAG}" >> $GITHUB_OUTPUT
           echo "rc_number=${NEXT_RC}" >> $GITHUB_OUTPUT
+          echo "ngc_version_tag=${VERSION}rc${NEXT_RC}" >> $GITHUB_OUTPUT
           echo "Will create tag: ${RC_TAG}"
 
       - name: Create RC tag
@@ -211,6 +253,7 @@ jobs:
           NGC_REGISTRY: nvcr.io
           NGC_ORG: ${{ secrets.NGC_PUBLISH_ORG }}
           RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
         run: |
           set -euo pipefail
 
@@ -222,13 +265,13 @@ jobs:
           ARCHITECTURES=("amd64" "arm64")
 
           echo "Copying images from ECR to NGC (registry-to-registry)"
-          echo "Version: ${VERSION}, RC: rc${RC_NUMBER}"
+          echo "NGC Version Tag: ${NGC_VERSION_TAG}"
 
           for FRAMEWORK in "${FRAMEWORKS[@]}"; do
             for ARCH in "${ARCHITECTURES[@]}"; do
               SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-${ARCH}"
               SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-              NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
+              NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
               NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
 
               echo "----------------------------------------"
@@ -250,7 +293,7 @@ jobs:
           for FRAMEWORK in "${CUDA13_FRAMEWORKS[@]}"; do
             SOURCE_TAG="${IMAGE_PREFIX}-${FRAMEWORK}-cuda13-amd64"
             SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-            NGC_TAG="${VERSION}rc${RC_NUMBER}-cuda13-amd64"
+            NGC_TAG="${NGC_VERSION_TAG}-cuda13-amd64"
             NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/${FRAMEWORK}-runtime:${NGC_TAG}"
 
             echo "----------------------------------------"
@@ -270,7 +313,7 @@ jobs:
           for ARCH in "${ARCHITECTURES[@]}"; do
             SOURCE_TAG="${IMAGE_PREFIX}-frontend-${ARCH}"
             SOURCE_IMAGE="${ECR_HOSTNAME}/${REGISTRY_IMAGE}:${SOURCE_TAG}"
-            NGC_TAG="${VERSION}rc${RC_NUMBER}-${ARCH}"
+            NGC_TAG="${NGC_VERSION_TAG}-${ARCH}"
             NGC_IMAGE="${NGC_REGISTRY}/${NGC_ORG}/ai-dynamo/dynamo-frontend:${NGC_TAG}"
 
             echo "----------------------------------------"
@@ -285,31 +328,32 @@ jobs:
           done
 
           echo "========================================"
-          echo "✅ NGC publishing completed for ${VERSION}rc${RC_NUMBER}"
+          echo "✅ NGC publishing completed with tag: ${NGC_VERSION_TAG}"
           echo "========================================"
 
       - name: Create release summary
         env:
           RC_TAG: ${{ steps.rc_tag.outputs.rc_tag }}
           RC_NUMBER: ${{ steps.rc_tag.outputs.rc_number }}
+          NGC_VERSION_TAG: ${{ steps.rc_tag.outputs.ngc_version_tag }}
         run: |
           echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
           echo "| Version | ${VERSION} |" >> $GITHUB_STEP_SUMMARY
-          echo "| RC Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
-          echo "| RC Number | ${RC_NUMBER} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Git Tag | ${RC_TAG} |" >> $GITHUB_STEP_SUMMARY
+          echo "| NGC Version Tag | ${NGC_VERSION_TAG} |" >> $GITHUB_STEP_SUMMARY
           echo "| Commit | ${{ github.sha }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Published Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Image tags published to NGC:" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`trtllm-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`vllm-runtime:${VERSION}rc${RC_NUMBER}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`sglang-runtime:${VERSION}rc${RC_NUMBER}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`dynamo-frontend:${VERSION}rc${RC_NUMBER}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`trtllm-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`vllm-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`sglang-runtime:${NGC_VERSION_TAG}-cuda13-amd64\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dynamo-frontend:${NGC_VERSION_TAG}-{amd64,arm64}\`" >> $GITHUB_STEP_SUMMARY
 
