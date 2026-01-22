@@ -129,7 +129,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (resource_type, result) (rate(dynamo_operator_reconcile_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "sum by (resource_type, result) (rate(dynamo_operator_reconcile_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{resource_type}} - {{result}}",
               "range": true,
               "refId": "A"
@@ -221,7 +221,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (resource_type, le) (rate(dynamo_operator_reconcile_duration_seconds_bucket{namespace=~\"$namespace\"}[5m])))",
+              "expr": "histogram_quantile(0.95, sum by (resource_type, le) (rate(dynamo_operator_reconcile_duration_seconds_bucket{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m])))",
               "legendFormat": "{{resource_type}} p95",
               "range": true,
               "refId": "A"
@@ -317,7 +317,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (resource_type, error_type) (rate(dynamo_operator_reconcile_errors_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "sum by (resource_type, error_type) (rate(dynamo_operator_reconcile_errors_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{resource_type}} - {{error_type}}",
               "range": true,
               "refId": "A"
@@ -421,7 +421,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (resource_type, operation, result) (rate(dynamo_operator_webhook_requests_total[5m]))",
+              "expr": "sum by (resource_type, operation, result) (rate(dynamo_operator_webhook_requests_total{resource_type=~\"$resource_type\"}[5m]))",
               "legendFormat": "{{resource_type}} - {{operation}} - {{result}}",
               "range": true,
               "refId": "A"
@@ -513,7 +513,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum by (resource_type, le) (rate(dynamo_operator_webhook_duration_seconds_bucket[5m])))",
+              "expr": "histogram_quantile(0.95, sum by (resource_type, le) (rate(dynamo_operator_webhook_duration_seconds_bucket{resource_type=~\"$resource_type\"}[5m])))",
               "legendFormat": "{{resource_type}} p95",
               "range": true,
               "refId": "A"
@@ -609,7 +609,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (resource_type, operation, reason) (rate(dynamo_operator_webhook_denials_total[5m]))",
+              "expr": "sum by (resource_type, operation, reason) (rate(dynamo_operator_webhook_denials_total{resource_type=~\"$resource_type\"}[5m]))",
               "legendFormat": "{{resource_type}} - {{operation}} - {{reason}}",
               "range": true,
               "refId": "A"
@@ -635,7 +635,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Total count of DynamoGraphDeployments by state and namespace",
+          "description": "Total count of resources by state and namespace",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -713,13 +713,13 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (namespace, status) (dynamo_operator_resources_total{resource_type=\"DynamoGraphDeployment\", namespace=~\"$namespace\"})",
-              "legendFormat": "{{namespace}} - {{status}}",
+              "expr": "sum by (resource_type, namespace, status) (dynamo_operator_resources_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"})",
+              "legendFormat": "{{resource_type}} - {{namespace}} - {{status}}",
               "range": true,
               "refId": "A"
             }
           ],
-          "title": "DynamoGraphDeployment Inventory",
+          "title": "Resource Inventory by State",
           "type": "timeseries"
         },
         {
@@ -727,7 +727,7 @@ data:
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "description": "Current count of DynamoGraphDeployments by state",
+          "description": "Current count of resources by state",
           "fieldConfig": {
             "defaults": {
               "color": {
@@ -777,13 +777,13 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "sum by (status) (dynamo_operator_resources_total{resource_type=\"DynamoGraphDeployment\", namespace=~\"$namespace\"})",
-              "legendFormat": "{{status}}",
+              "expr": "sum by (resource_type, status) (dynamo_operator_resources_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"})",
+              "legendFormat": "{{resource_type}} - {{status}}",
               "range": true,
               "refId": "A"
             }
           ],
-          "title": "DGD Count by State",
+          "title": "Resource Count by State",
           "type": "stat"
         },
         {
@@ -861,7 +861,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "100 * sum by (resource_type) (rate(dynamo_operator_reconcile_total{result=\"success\", namespace=~\"$namespace\"}[5m])) / sum by (resource_type) (rate(dynamo_operator_reconcile_total{namespace=~\"$namespace\"}[5m]))",
+              "expr": "100 * sum by (resource_type) (rate(dynamo_operator_reconcile_total{resource_type=~\"$resource_type\", result=\"success\", namespace=~\"$namespace\"}[5m])) / sum by (resource_type) (rate(dynamo_operator_reconcile_total{resource_type=~\"$resource_type\", namespace=~\"$namespace\"}[5m]))",
               "legendFormat": "{{resource_type}}",
               "range": true,
               "refId": "A"
@@ -933,7 +933,7 @@ data:
                 "uid": "${datasource}"
               },
               "editorMode": "code",
-              "expr": "100 * sum by (resource_type) (rate(dynamo_operator_webhook_requests_total{result=\"allowed\"}[5m])) / sum by (resource_type) (rate(dynamo_operator_webhook_requests_total[5m]))",
+              "expr": "100 * sum by (resource_type) (rate(dynamo_operator_webhook_requests_total{resource_type=~\"$resource_type\", result=\"allowed\"}[5m])) / sum by (resource_type) (rate(dynamo_operator_webhook_requests_total{resource_type=~\"$resource_type\"}[5m]))",
               "legendFormat": "{{resource_type}}",
               "range": true,
               "refId": "A"
@@ -988,6 +988,35 @@ data:
             "query": {
               "qryType": 1,
               "query": "label_values(dynamo_operator_reconcile_total, namespace)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
+            },
+            "refresh": 2,
+            "regex": "",
+            "skipUrlSync": false,
+            "sort": 1,
+            "type": "query"
+          },
+          {
+            "allValue": ".*",
+            "current": {
+              "selected": true,
+              "text": "All",
+              "value": "$__all"
+            },
+            "datasource": {
+              "type": "prometheus",
+              "uid": "${datasource}"
+            },
+            "definition": "label_values(dynamo_operator_resources_total, resource_type)",
+            "hide": 0,
+            "includeAll": true,
+            "label": "Resource Type",
+            "multi": false,
+            "name": "resource_type",
+            "options": [],
+            "query": {
+              "qryType": 1,
+              "query": "label_values(dynamo_operator_resources_total, resource_type)",
               "refId": "PrometheusVariableQueryEditor-VariableQuery"
             },
             "refresh": 2,

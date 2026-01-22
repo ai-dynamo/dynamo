@@ -342,10 +342,7 @@ func main() {
 
 	// Initialize observability metrics
 	setupLog.Info("Initializing observability metrics")
-	if err := observability.InitMetrics(); err != nil {
-		setupLog.Error(err, "unable to initialize observability metrics")
-		os.Exit(1)
-	}
+	observability.InitMetrics()
 
 	// Initialize namespace scope mechanism
 	var leaseManager *namespace_scope.LeaseManager

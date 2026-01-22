@@ -105,6 +105,11 @@ const (
 	ResourceTypeDynamoModel                         = "DynamoModel"
 	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
 	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
+
+	// Resource state constants - used in status reporting and metrics
+	ResourceStateReady    = "ready"
+	ResourceStateNotReady = "not_ready"
+	ResourceStateUnknown  = "unknown"
 )
 
 type MultinodeDeploymentType string

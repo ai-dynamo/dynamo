@@ -100,7 +100,7 @@ var (
 )
 
 // InitMetrics registers all custom metrics with the controller-runtime metrics registry
-func InitMetrics() error {
+func InitMetrics() {
 	ctrlmetrics.Registry.MustRegister(
 		reconcileDuration,
 		reconcileTotal,
@@ -110,7 +110,6 @@ func InitMetrics() error {
 		webhookRequestsTotal,
 		webhookDenialsTotal,
 	)
-	return nil
 }
 
 // RecordReconciliation records metrics for a reconciliation loop
