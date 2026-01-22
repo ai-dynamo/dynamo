@@ -9,6 +9,26 @@ on:
     - main
     - release/*.*.*
     - "pull-request/[0-9]+"
+  workflow_call:
+    secrets:
+      AWS_ACCOUNT_ID:
+        required: true
+      AWS_DEFAULT_REGION:
+        required: true
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      AZURE_ACR_HOSTNAME:
+        required: true
+      AZURE_ACR_USER:
+        required: true
+      AZURE_ACR_PASSWORD:
+        required: true
+      CI_TOKEN:
+        required: true
+      SCCACHE_S3_BUCKET:
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}

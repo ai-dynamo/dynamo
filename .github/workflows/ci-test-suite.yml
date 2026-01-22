@@ -196,6 +196,7 @@ jobs:
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
+  # CUDA 13 builds (vllm and sglang only, amd64)
   build-cuda13-amd64:
     name: Build ${{ matrix.framework }} CUDA13 (amd64)
     runs-on: cpu-amd-m5-4xlarge
