@@ -833,6 +833,7 @@ pub unsafe extern "C" fn is_disaggregated(handle: RouterHandlesPtr) -> bool {
 
 /// Add a request to the router's bookkeeping after worker selection.
 ///
+/// Do NOT call this function if you use update_states=true in query_decode!
 /// This registers the request with the KvRouter's scheduler for tracking active blocks
 /// and managing prefill/decode lifecycle. Call this after `query_decode` returns
 /// worker IDs and before sending the request to the worker.
@@ -1070,7 +1071,9 @@ pub unsafe extern "C" fn tokenize_chat(
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
-            tracing::error!("Preprocessor not available - model card may not have been fetched via discovery");
+            tracing::error!(
+                "Preprocessor not available - model card may not have been fetched via discovery"
+            );
             return QueryRouterResult::ErrInitFailed;
         }
     };
@@ -1120,9 +1123,7 @@ pub unsafe extern "C" fn tokenize_chat(
     let prompt_cstring = match CString::new(formatted_prompt) {
         Ok(s) => s,
         Err(_) => {
-            drop(unsafe {
-                Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count))
-            });
+            drop(unsafe { Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count)) });
             return QueryRouterResult::ErrQueryFailed;
         }
     };
@@ -1161,7 +1162,9 @@ pub unsafe extern "C" fn tokenize_raw(
     let preprocessor = match &handles.preprocessor {
         Some(p) => p,
         None => {
-            tracing::error!("Preprocessor not available - model card may not have been fetched via discovery");
+            tracing::error!(
+                "Preprocessor not available - model card may not have been fetched via discovery"
+            );
             return QueryRouterResult::ErrInitFailed;
         }
     };
@@ -1191,9 +1194,7 @@ pub unsafe extern "C" fn tokenize_raw(
     let prompt_cstring = match CString::new(prompt_str) {
         Ok(s) => s,
         Err(_) => {
-            drop(unsafe {
-                Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count))
-            });
+            drop(unsafe { Box::from_raw(std::slice::from_raw_parts_mut(token_ptr, token_count)) });
             return QueryRouterResult::ErrQueryFailed;
         }
     };
@@ -1223,7 +1224,10 @@ pub unsafe extern "C" fn free_tokenized(result: *mut CTokenizedResult) {
     // Free token IDs
     if !res.token_ids.is_null() && res.token_count > 0 {
         drop(unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(res.token_ids, res.token_count))
+            Box::from_raw(std::slice::from_raw_parts_mut(
+                res.token_ids,
+                res.token_count,
+            ))
         });
         res.token_ids = ptr::null_mut();
         res.token_count = 0;
@@ -1428,7 +1432,10 @@ pub unsafe extern "C" fn free_routing_result(result: *mut CRoutingResult) {
     // Free token IDs
     if !res.token_ids.is_null() && res.token_count > 0 {
         drop(unsafe {
-            Box::from_raw(std::slice::from_raw_parts_mut(res.token_ids, res.token_count))
+            Box::from_raw(std::slice::from_raw_parts_mut(
+                res.token_ids,
+                res.token_count,
+            ))
         });
         res.token_ids = ptr::null_mut();
         res.token_count = 0;
@@ -1473,9 +1480,8 @@ async fn fetch_preprocessor_from_discovery(
         }
     }
 
-    let mut card = model_card.ok_or_else(|| {
-        anyhow::anyhow!("Model '{}' not found in discovery", model_name)
-    })?;
+    let mut card = model_card
+        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in discovery", model_name))?;
 
     // Download config (tokenizer files) if not local
     card.download_config().await?;
