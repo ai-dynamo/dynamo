@@ -119,7 +119,10 @@ pub struct ZmqKvEventPublisherConfig {
     pub zmq_topic: String,
     #[pyo3(get, set)]
     pub enable_local_indexer: bool, // whether the underlying KvEventPublisher publishes to
-                                    // both global and worker-local KvIndexers
+    // both global and worker-local KvIndexers
+    #[pyo3(get, set)]
+    pub bind: bool, // If true, bind to endpoint; if false, connect to it.
+                    // Use bind=true for remote DP ranks in multi-node setups.
 }
 
 #[pymethods]
@@ -130,7 +133,8 @@ impl ZmqKvEventPublisherConfig {
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
         zmq_topic = "".to_string(),
-        enable_local_indexer = false
+        enable_local_indexer = false,
+        bind = false
     ))]
     pub fn new(
         worker_id: WorkerId,
@@ -138,6 +142,7 @@ impl ZmqKvEventPublisherConfig {
         zmq_endpoint: String,
         zmq_topic: String,
         enable_local_indexer: bool,
+        bind: bool,
     ) -> Self {
         Self {
             worker_id,
@@ -145,6 +150,7 @@ impl ZmqKvEventPublisherConfig {
             zmq_endpoint,
             zmq_topic,
             enable_local_indexer,
+            bind,
         }
     }
 }
@@ -164,6 +170,7 @@ impl ZmqKvEventPublisher {
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
+                bind: config.bind,
             }),
             config.enable_local_indexer,
         )
@@ -187,7 +194,13 @@ pub(crate) struct ZmqKvEventListener {
 #[pymethods]
 impl ZmqKvEventListener {
     #[new]
-    fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (zmq_endpoint, zmq_topic, kv_block_size, bind = false))]
+    fn new(
+        zmq_endpoint: String,
+        zmq_topic: String,
+        kv_block_size: usize,
+        bind: bool,
+    ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
@@ -203,6 +216,7 @@ impl ZmqKvEventListener {
                 tx,
                 shutdown_token.clone(),
                 kv_block_size as u32,
+                bind,
             ));
 
             Ok(Self {

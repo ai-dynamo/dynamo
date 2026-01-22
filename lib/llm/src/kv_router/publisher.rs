@@ -43,7 +43,13 @@ const MAX_BACKOFF_EXPONENT: u32 = 8; // Cap at 2^8 = 256x multiplier to prevent 
 /// Configure the source of KV events.
 /// Currently, only ZMQ is supported.
 pub enum KvEventSourceConfig {
-    Zmq { endpoint: String, topic: String },
+    Zmq {
+        endpoint: String,
+        topic: String,
+        /// If true, bind to the endpoint (act as server); if false, connect to it (act as client).
+        /// Use bind=true when Dynamo needs to accept connections from remote SGLang workers.
+        bind: bool,
+    },
 }
 
 /// The source of KV events.
@@ -63,7 +69,11 @@ impl KvEventSource {
         tx: mpsc::UnboundedSender<KvCacheEvent>,
     ) -> Result<Self> {
         match source_config {
-            KvEventSourceConfig::Zmq { endpoint, topic } => {
+            KvEventSourceConfig::Zmq {
+                endpoint,
+                topic,
+                bind,
+            } => {
                 let zmq_handle = component
                     .drt()
                     .runtime()
@@ -74,6 +84,7 @@ impl KvEventSource {
                         tx,
                         cancellation_token.clone(),
                         kv_block_size,
+                        bind,
                     ));
 
                 Ok(KvEventSource::Zmq { zmq_handle })
@@ -321,9 +332,12 @@ pub async fn start_zmq_listener(
     tx: mpsc::UnboundedSender<KvCacheEvent>,
     cancellation_token: CancellationToken,
     kv_block_size: u32,
+    bind: bool,
 ) {
+    let mode = if bind { "binding to" } else { "connecting to" };
     tracing::debug!(
-        "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
+        "KVEventPublisher {} ZMQ endpoint {} (topic '{}')",
+        mode,
         zmq_endpoint,
         zmq_topic
     );
@@ -338,9 +352,23 @@ pub async fn start_zmq_listener(
         return;
     }
 
-    if let Err(e) = socket.connect(&zmq_endpoint).await {
-        tracing::error!("Failed to connect ZMQ SUB socket: {}", e);
-        return;
+    // Either bind or connect based on the configuration.
+    // Use bind=true when Dynamo needs to accept connections from remote SGLang workers.
+    // Use bind=false (connect) when SGLang is local and already binding.
+    if bind {
+        if let Err(e) = socket.bind(&zmq_endpoint).await {
+            tracing::error!("Failed to bind ZMQ SUB socket to {}: {}", zmq_endpoint, e);
+            return;
+        }
+    } else {
+        if let Err(e) = socket.connect(&zmq_endpoint).await {
+            tracing::error!(
+                "Failed to connect ZMQ SUB socket to {}: {}",
+                zmq_endpoint,
+                e
+            );
+            return;
+        }
     }
 
     let mut consecutive_errors = 0u32;
@@ -1551,10 +1579,10 @@ mod tests_startup_helpers {
         // Cancellation token so we can stop the listener
         let token = dynamo_runtime::CancellationToken::new();
 
-        // Spawn async listener
+        // Spawn async listener (bind=false since pub_socket binds above)
         let listener_handle = tokio::spawn({
             let token = token.clone();
-            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4)
+            start_zmq_listener(endpoint.to_string(), topic, tx, token, 4, false)
         });
 
         // Give time for the connection to establish

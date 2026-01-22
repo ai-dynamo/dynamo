@@ -98,7 +98,10 @@ class DynamoSglangPublisher:
         # ZMQ setup for receiving scheduler metrics
         self._ctx = zmq.asyncio.Context()  # type: ignore
         self._sock = get_zmq_socket(
-            self._ctx, zmq.PULL, self.engine.port_args.metrics_ipc_name, True  # type: ignore
+            self._ctx,
+            zmq.PULL,
+            self.engine.port_args.metrics_ipc_name,
+            True,  # type: ignore
         )
 
         self._running = True
@@ -181,6 +184,11 @@ class DynamoSglangPublisher:
         Each SGLang scheduler in DP attention mode publishes to a unique port
         (base_port + attn_dp_rank), so we need to subscribe to all of them.
 
+        Multi-node handling:
+        - Only the head node (node_rank == 0) creates ZMQ subscribers
+        - For local DP ranks (on the same node as Dynamo): SGLang binds, Dynamo connects
+        - For remote DP ranks (on other nodes): Dynamo binds, SGLang connects
+
         Returns:
             List of ZmqKvEventPublisher instances if kv_events_config is set,
             empty list otherwise.
@@ -196,18 +204,32 @@ class DynamoSglangPublisher:
             enable_dp_attention = getattr(
                 self.server_args, "enable_dp_attention", False
             )
+            nnodes = getattr(self.server_args, "nnodes", 1) or 1
+            node_rank = getattr(self.server_args, "node_rank", 0) or 0
+
+            # Only create subscribers on the head node (where Dynamo frontend runs)
+            if node_rank != 0:
+                logging.info(
+                    f"Skipping ZMQ subscriber setup on non-head node (node_rank={node_rank})"
+                )
+                self.kv_publisher = None
+                return self.kv_publishers
 
             if enable_dp_attention and dp_size > 1:
                 # Subscribe to all DP rank ports
                 num_subscribers = dp_size
                 logging.info(
-                    f"DP attention mode detected (dp_size={dp_size}). "
+                    f"DP attention mode detected (dp_size={dp_size}, nnodes={nnodes}). "
                     f"Creating {num_subscribers} ZMQ subscribers for ports "
                     f"{base_ep} through port+{dp_size - 1}"
                 )
             else:
                 # Standard mode: single subscriber
                 num_subscribers = 1
+
+            # Calculate local_dp_size for hybrid bind/connect logic
+            # Local ranks are those on the same node as Dynamo (node 0)
+            local_dp_size = dp_size // nnodes if nnodes > 0 else dp_size
 
             for dp_rank in range(num_subscribers):
                 # Use SGLang's offset_endpoint_port to ensure alignment with publishers
@@ -216,14 +238,25 @@ class DynamoSglangPublisher:
                 if zmq_ep:
                     zmq_ep = format_zmq_endpoint(zmq_ep, local_ip)
 
+                # Hybrid bind/connect logic for multi-node DP attention:
+                # - Local DP ranks (dp_rank < local_dp_size): SGLang binds, Dynamo connects (bind=False)
+                # - Remote DP ranks (dp_rank >= local_dp_size): Dynamo binds, SGLang connects (bind=True)
+                #
+                # This solves the ZMQ bind/connect problem in multi-node setups where
+                # SGLang uses specific IPs (not wildcards) and both sides would try to connect.
+                should_bind = dp_rank >= local_dp_size
+
                 zmq_config = ZmqKvEventPublisherConfig(
                     worker_id=self.generate_endpoint.connection_id(),
                     kv_block_size=self.server_args.page_size,
                     zmq_endpoint=zmq_ep,
                     enable_local_indexer=self.dynamo_args.enable_local_indexer,
+                    bind=should_bind,
                 )
+                mode = "binding to" if should_bind else "connecting to"
                 logging.info(
-                    f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} at {zmq_ep}"
+                    f"Setting up ZMQ kv event subscriber for dp_rank={dp_rank} "
+                    f"({mode} {zmq_ep})"
                 )
                 publisher = ZmqKvEventPublisher(
                     component=self.component, config=zmq_config
