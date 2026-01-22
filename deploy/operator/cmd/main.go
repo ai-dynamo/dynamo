@@ -416,10 +416,10 @@ func main() {
 		}
 
 		setupLog.Info("Namespace scope marker lease watcher started successfully")
-	}
 
-	// Pass leaseWatcher to controller config for namespace exclusion filtering
-	ctrlConfig.ExcludedNamespaces = leaseWatcher
+		// Pass leaseWatcher to controller config for namespace exclusion filtering
+		ctrlConfig.ExcludedNamespaces = leaseWatcher
+	}
 
 	// Start resource counter background goroutine (after ExcludedNamespaces is set)
 	setupLog.Info("Starting resource counter")
