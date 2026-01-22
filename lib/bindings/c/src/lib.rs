@@ -377,6 +377,12 @@ use dynamo_runtime::pipeline::RouterMode;
 const BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
 
 /// C-compatible result of a worker query (worker ID and dp_rank)
+///
+/// NOTE: EPP patches need to be updated to:
+/// 1. Add `DpRankHeader = "x-dp-rank"` constant
+/// 2. Set header: `req.Headers[DpRankHeader] = fmt.Sprintf("%d", decode_result.dp_rank)`
+/// 3. Read header in callAddRequest: parse dp_rank from `req.Headers[DpRankHeader]`
+/// 4. Pass parsed dp_rank to `dynamo_router_add_request` instead of hardcoded 0
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct CWorkerQueryResult {
