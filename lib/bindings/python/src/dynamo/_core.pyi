@@ -251,6 +251,18 @@ class Client:
         ...
 
 
+class ModelCardInstanceId:
+    """
+    Unique identifier for a worker instance: namespace, component, endpoint and instance_id.
+    The instance_id is not currently exposed in the Python bindings.
+    """
+    def triple(self) -> (str, str, str):
+        """
+        Triple of namespace, component and endpoint this worker is serving.
+        """
+        ...
+
+
 def compute_block_hash_for_seq_py(
     tokens: List[int],
     kv_block_size: int,

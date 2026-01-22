@@ -149,6 +149,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Namespace>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
+    m.add_class::<ModelCardInstanceId>()?;
     m.add_class::<Client>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
@@ -476,6 +477,12 @@ struct Component {
 struct Endpoint {
     inner: rs::component::Endpoint,
     event_loop: PyObject,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct ModelCardInstanceId {
+    inner: rs::discovery::ModelCardInstanceId,
 }
 
 #[pyclass]
@@ -882,6 +889,19 @@ impl Namespace {
             inner,
             event_loop: self.event_loop.clone(),
         })
+    }
+}
+
+#[pymethods]
+impl ModelCardInstanceId {
+    // (namespace, component, endpoint)
+    // TODO: Can these be borrowed as &str?
+    fn triple(&self) -> (String, String, String) {
+        (
+            self.inner.namespace.clone(),
+            self.inner.component.clone(),
+            self.inner.endpoint.clone(),
+        )
     }
 }
 
