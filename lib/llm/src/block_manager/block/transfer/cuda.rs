@@ -105,25 +105,8 @@ where
                 let dst_view = dst_data.layer_view(layer_idx, outer_idx)?;
 
                 unsafe {
-                    let src_addr = src_view.as_ptr() as u64;
-                    let dst_addr = dst_view.as_ptr() as u64;
-
-                    // Validate addresses are not NULL
-                    if src_addr == 0 {
-                        return Err(TransferError::ExecutionError(format!(
-                            "NULL source address at layer {} outer_dim {}",
-                            layer_idx, outer_idx
-                        )));
-                    }
-                    if dst_addr == 0 {
-                        return Err(TransferError::ExecutionError(format!(
-                            "NULL destination address at layer {} outer_dim {}",
-                            layer_idx, outer_idx
-                        )));
-                    }
-
-                    src_addresses.push(src_addr);
-                    dst_addresses.push(dst_addr);
+                    src_addresses.push(src_view.as_ptr() as u64);
+                    dst_addresses.push(dst_view.as_ptr() as u64);
                 }
             }
         }
@@ -201,7 +184,6 @@ unsafe fn launch_copy_kernel_direct(
         )));
     }
 
-    tracing::debug!("Kernel launched successfully, waiting for completion");
     Ok(())
 }
 
@@ -267,123 +249,86 @@ where
 
     let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    if ctx.cuda_mem_pool().is_some() {  // CUDA pool path (DEVICE memory with H2D memcpy)
-        let pool = ctx.cuda_mem_pool().unwrap();
-        tracing::trace!("CUDA pool path: DEVICE memory with H2D memcpy ({} addresses)", src_addresses.len());
+    let pool = ctx.cuda_mem_pool().unwrap();
 
-        // Allocate DEVICE memory from pool (stream-ordered)
-        let src_buffer = pool.alloc_async(size, stream.cu_stream())
-            .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
-        let dst_buffer = pool.alloc_async(size, stream.cu_stream())
-            .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
+    // Allocate DEVICE memory from pool (stream-ordered)
+    let src_buffer = pool.alloc_async(size, stream)
+        .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
+    let dst_buffer = pool.alloc_async(size, stream)
+        .map_err(|e| TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e)))?;
 
-        tracing::trace!(
-            "Allocated DEVICE buffers from pool: src=0x{:x}, dst=0x{:x} ({} bytes each)",
+    tracing::trace!(
+        "Allocated DEVICE buffers from pool: src=0x{:x}, dst=0x{:x} ({} bytes each)",
+        src_buffer,
+        dst_buffer,
+        size
+    );
+
+    // Copy address buffers from host to device using stream-ordered H2D memcpy
+    // This provides proper memory visibility guarantees
+    tracing::debug!("Copying {} address pairs to device via H2D memcpy", src_addresses.len());
+
+    let result_src = unsafe {
+        cuMemcpyHtoDAsync_v2(
+            src_buffer,
+            src_addresses.as_ptr() as *const std::ffi::c_void,
+            size,
+            stream.cu_stream(),
+        )
+    };
+    if result_src != CUresult::CUDA_SUCCESS {
+        return Err(TransferError::ExecutionError(format!(
+            "H2D memcpy for src buffer failed: {:?}",
+            result_src
+        )));
+    }
+
+    let result_dst = unsafe {
+        cuMemcpyHtoDAsync_v2(
+            dst_buffer,
+            dst_addresses.as_ptr() as *const std::ffi::c_void,
+            size,
+            stream.cu_stream(),
+        )
+    };
+    if result_dst != CUresult::CUDA_SUCCESS {
+        return Err(TransferError::ExecutionError(format!(
+            "H2D memcpy for dst buffer failed: {:?}",
+            result_dst
+        )));
+    }
+
+    // Record event and synchronize to ensure H2D completes before host vectors drop
+    // This is critical: the async H2D memcpy is still reading from src_addresses/dst_addresses
+    // host memory when it returns. We must wait for completion before those vectors are dropped.
+    let h2d_event = stream.record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
+    h2d_event.synchronize()
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
+
+    tracing::debug!("H2D memcpy completed - host memory no longer needed");
+
+    // Launch kernel (reads from device buffers)
+    unsafe {
+        launch_copy_kernel_direct(
             src_buffer,
             dst_buffer,
-            size
-        );
-
-        // Copy address buffers from host to device using stream-ordered H2D memcpy
-        // This provides proper memory visibility guarantees
-        tracing::debug!("Copying {} address pairs to device via H2D memcpy", src_addresses.len());
-
-        let result_src = unsafe {
-            cuMemcpyHtoDAsync_v2(
-                src_buffer,
-                src_addresses.as_ptr() as *const std::ffi::c_void,
-                size,
-                stream.cu_stream(),
-            )
-        };
-        if result_src != CUresult::CUDA_SUCCESS {
-            return Err(TransferError::ExecutionError(format!(
-                "H2D memcpy for src buffer failed: {:?}",
-                result_src
-            )));
-        }
-
-        let result_dst = unsafe {
-            cuMemcpyHtoDAsync_v2(
-                dst_buffer,
-                dst_addresses.as_ptr() as *const std::ffi::c_void,
-                size,
-                stream.cu_stream(),
-            )
-        };
-        if result_dst != CUresult::CUDA_SUCCESS {
-            return Err(TransferError::ExecutionError(format!(
-                "H2D memcpy for dst buffer failed: {:?}",
-                result_dst
-            )));
-        }
-
-        // Record event and synchronize to ensure H2D completes before host vectors drop
-        // This is critical: the async H2D memcpy is still reading from src_addresses/dst_addresses
-        // host memory when it returns. We must wait for completion before those vectors are dropped.
-        let h2d_event = stream.record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
-            .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
-        h2d_event.synchronize()
-            .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
-
-        tracing::debug!("H2D memcpy completed - host memory no longer needed");
-
-        // Launch kernel (reads from device buffers)
-        unsafe {
-            launch_copy_kernel_direct(
-                src_buffer,
-                dst_buffer,
-                src_addresses.len(),
-                dims.layer_size,
-                stream,
-            )?;
-        }
-
-        tracing::debug!("Kernel launched - reading from DEVICE memory");
-
-        // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
-        pool.free_async(src_buffer, stream.cu_stream())
-            .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
-        pool.free_async(dst_buffer, stream.cu_stream())
-            .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
-
-        tracing::trace!("CUDA pool path complete: DEVICE buffers freed (stream-ordered)");
-        Ok(())  // No guard needed - stream ordering handles cleanup
-    } else {
-        // LEGACY PATH: Use TransferResources pool (fallback when CUDA pool not available)
-        tracing::warn!("LEGACY PATH: CUDA pool not available, using TransferResources fallback ({} addresses)", src_addresses.len());
-
-        let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
-            ctx,
-            src_addresses.len()
+            src_addresses.len(),
+            dims.layer_size,
+            stream,
         )?;
-
-        resources.copy_addresses_to_buffers(&src_addresses, &dst_addresses)?;
-
-        tracing::warn!(
-            "Legacy pool: Addresses copied to buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
-            resources.src_ptr(),
-            resources.dst_ptr(),
-            src_addresses.len()
-        );
-
-        tracing::trace!("Legacy buffers: src=0x{:x}, dst=0x{:x}", resources.src_ptr(), resources.dst_ptr());
-
-        tracing::trace!("Legacy path: launching kernel with {} address pairs", src_addresses.len());
-
-        unsafe {
-            launch_copy_kernel_direct(
-                resources.src_ptr(),
-                resources.dst_ptr(),
-                src_addresses.len(),
-                dims.layer_size,
-                stream,
-            )?;
-        }
-
-        tracing::debug!("Legacy path: Kernel launched, waiting for completion in event worker");
-        Ok(())
     }
+
+    tracing::debug!("Kernel launched - reading from DEVICE memory");
+
+    // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
+    pool.free_async(src_buffer, stream)
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
+    pool.free_async(dst_buffer, stream)
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
+
+    tracing::trace!("CUDA pool path complete: DEVICE buffers freed (stream-ordered)");
+    Ok(())
 }
 
 /// Copy a block from a source to a destination using CUDA memcpy

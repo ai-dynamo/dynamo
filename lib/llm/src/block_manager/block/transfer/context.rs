@@ -3,7 +3,7 @@
 
 use super::*;
 
-use cudarc::driver::{CudaEvent, CudaStream, sys::{CUevent_flags, CUstream}};
+use cudarc::driver::{CudaEvent, CudaStream, sys::CUevent_flags};
 use nixl_sys::Agent as NixlAgent;
 
 use dynamo_runtime::utils::pool::{Returnable, SyncPool, SyncPoolItem};
@@ -308,7 +308,6 @@ impl TransferContext {
                 );
 
                 match CudaMemPool::builder(stream.context().clone(), reserve_size)
-                    .use_device_memory()  // Use DEVICE memory (GPU VRAM) with H2D memcpy
                     .release_threshold(128 * 1024 * 1024) // Release memory above 128MB back to OS
                     .build()
                 {
