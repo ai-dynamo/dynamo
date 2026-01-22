@@ -127,17 +127,17 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 - **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
 - **Workers** – Set of pre-configured LLM serving engines.
 
-```
+```bash
 # Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
-# Pass the TLS certificate and key paths to use HTTPS instead of HTTP.
-# Pass --store-kv to use the filesystem instead of etcd. The workers and frontend must share a disk.
-python -m dynamo.frontend --http-port 8000 [--tls-cert-path cert.pem] [--tls-key-path key.pem] [--store-kv file]
+# For local dev: --store-kv file avoids etcd (workers and frontend must share a disk)
+python -m dynamo.frontend --http-port 8000 --store-kv file
 
-# Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
-# both for the same model and for multiple models. The frontend node will discover them.
-# Pass --store-kv to use the filesystem instead of etcd. The workers and frontend must share a disk.
-python -m dynamo.sglang --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B [--store-kv file]
+# Start the SGLang engine. You can run several of these for the same or different models.
+# The frontend will discover them automatically.
+python -m dynamo.sglang --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --store-kv file
 ```
+
+> **Note:** vLLM workers enable prefix caching by default, which requires NATS. For dependency-free local development with vLLM, add `--no-enable-prefix-caching`. See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
 
 #### Send a Request
 
@@ -170,10 +170,12 @@ Dynamo uses TCP for inter-component communication. External services are optiona
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
 | **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
-| **Local development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; TCP request plane |
-| **KV-aware routing** | — | ✅ Required | Add NATS for KV event messaging |
+| **Local development** | ❌ Not required | ❌ Not required | Pass `--store-kv file` and `--no-enable-prefix-caching` |
+| **KV-aware routing** | — | ✅ Required | Prefix caching enabled by default requires NATS |
 
-For local development, pass `--store-kv file` to both the frontend and workers. For distributed non-Kubernetes deployments or KV-aware routing:
+For local development without external dependencies, pass `--store-kv file` (avoids etcd) and `--no-enable-prefix-caching` (avoids NATS) to both the frontend and workers. Prefix caching is enabled by default and requires NATS for KV event messaging.
+
+For distributed non-Kubernetes deployments or KV-aware routing:
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
 - [nats](https://nats.io/) needs JetStream enabled: `nats-server -js`.
