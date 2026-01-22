@@ -110,6 +110,12 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         help="Load prediction window size",
     )
     parser.add_argument(
+        "--load-predictor-warmup-trace",
+        type=str,
+        default=None,
+        help="Optional path to a mooncake-style JSONL trace file used to warm up load predictors before observing live traffic",
+    )
+    parser.add_argument(
         "--metric-pulling-prometheus-endpoint",
         type=str,
         default=SLAPlannerDefaults.metric_pulling_prometheus_endpoint,

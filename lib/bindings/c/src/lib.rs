@@ -513,6 +513,7 @@ pub unsafe extern "C" fn dynamo_create_worker_selection_pipeline(
                 Some(use_kv_events),
                 Some(router_replica_sync),
                 None, // track_active_blocks
+                None, // track_output_blocks
                 None, // assume_kv_reuse
                 None, // router_snapshot_threshold
                 None, // router_reset_states
@@ -930,7 +931,13 @@ pub unsafe extern "C" fn dynamo_router_add_request(
         };
 
         kv_router
-            .add_request(request_id_clone.clone(), &tokens, overlap_blocks, worker)
+            .add_request(
+                request_id_clone.clone(),
+                &tokens,
+                overlap_blocks,
+                None,
+                worker,
+            )
             .await;
 
         tracing::debug!(

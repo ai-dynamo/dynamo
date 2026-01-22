@@ -27,6 +27,7 @@ class BaseWorkerHandler(ABC):
         engine: sgl.Engine,
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
+        generate_endpoint=None,
     ) -> None:
         """Initialize base worker handler.
 
@@ -35,10 +36,12 @@ class BaseWorkerHandler(ABC):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher for the worker.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         self.component = component
         self.engine = engine
         self.config = config
+        self.generate_endpoint = generate_endpoint
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
@@ -53,6 +56,117 @@ class BaseWorkerHandler(ABC):
             self.engine.tokenizer_manager.tokenizer
             if not self.skip_tokenizer_init
             else None
+        )
+
+    async def release_memory_occupation(self, body: dict) -> dict:
+        """Release GPU memory occupation and unregister from discovery.
+
+        Args:
+            body: Dict with optional 'tags' key for which memory to release.
+                  Default: ["kv_cache", "weights", "cuda_graph"]
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Pause generation - drain in-flight requests
+        3. Release memory - safe now that no requests are active
+        """
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            tags = ["kv_cache", "weights", "cuda_graph"]
+
+        try:
+            # Step 1: Unregister endpoint from discovery FIRST
+            try:
+                await self.generate_endpoint.unregister_endpoint_instance()
+            except Exception as unreg_err:
+                logging.warning(
+                    f"Failed to unregister endpoint from discovery: {unreg_err}"
+                )
+
+            # Step 2: Pause generation to drain in-flight requests
+            await self.engine.async_pause_generation()
+
+            # Step 3: Release memory now that it's safe
+            await self.engine.async_release_memory_occupation(tags)
+
+            return {
+                "status": "ok",
+                "message": f"Memory released for tags: {tags}",
+            }
+        except Exception as e:
+            logging.error(f"Failed to release memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def resume_memory_occupation(self, body: dict) -> dict:
+        """Resume GPU memory occupation and re-register to discovery.
+
+        Args:
+            body: Dict with optional 'tags' key for which memory to resume.
+                  Default: ["kv_cache", "weights", "cuda_graph"]
+
+        Order of operations:
+        1. Resume memory - restore GPU allocations
+        2. Continue generation - ready to serve requests
+        3. Re-register to discovery - allow frontend to route here
+        """
+        tags = body.get("tags", body.get("tag", None))
+        if tags is None:
+            tags = ["kv_cache", "weights", "cuda_graph"]
+
+        try:
+            # Step 1: Resume memory first - must be ready before accepting requests
+            await self.engine.async_resume_memory_occupation(tags)
+
+            # Step 2: Continue generation
+            await self.engine.async_continue_generation()
+
+            # Step 3: Re-register to discovery so frontend can route to us
+            try:
+                await self.generate_endpoint.register_endpoint_instance()
+            except Exception as reg_err:
+                logging.warning(
+                    f"Failed to re-register endpoint to discovery: {reg_err}"
+                )
+
+            return {
+                "status": "ok",
+                "message": f"Memory resumed for tags: {tags}",
+            }
+        except Exception as e:
+            logging.error(f"Failed to resume memory occupation: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters passed to start_profile.
+        """
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    def register_engine_routes(self, runtime) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", self.start_profile)
+        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route(
+            "release_memory_occupation", self.release_memory_occupation
+        )
+        runtime.register_engine_route(
+            "resume_memory_occupation", self.resume_memory_occupation
         )
 
     @abstractmethod
