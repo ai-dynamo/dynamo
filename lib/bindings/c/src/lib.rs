@@ -376,7 +376,7 @@ use dynamo_runtime::pipeline::RouterMode;
 /// Default timeout for bookkeeping operations (30 seconds)
 const BOOKKEEPING_TIMEOUT_SECS: u64 = 30;
 
-/// C-compatible result of a worker query (single worker ID)
+/// C-compatible result of a worker query (worker ID and dp_rank)
 #[repr(C)]
 #[derive(Debug, Clone, Default)]
 pub struct CWorkerQueryResult {
@@ -384,8 +384,6 @@ pub struct CWorkerQueryResult {
     pub worker_id: u64,
     /// Data parallel rank (0 if not applicable)
     pub dp_rank: u32,
-    /// Number of overlapping blocks (for decode queries)
-    pub overlap_blocks: u32,
 }
 
 /// Result of tokenization (C-compatible)
@@ -749,12 +747,11 @@ pub unsafe extern "C" fn router_handles_query_decode(
     });
 
     match result {
-        Ok((worker, overlap)) => {
+        Ok((worker, _overlap)) => {
             unsafe {
                 *out_result = CWorkerQueryResult {
                     worker_id: worker.worker_id,
                     dp_rank: worker.dp_rank,
-                    overlap_blocks: overlap,
                 }
             };
             QueryRouterResult::Ok
