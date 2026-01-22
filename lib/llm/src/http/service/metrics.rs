@@ -204,6 +204,7 @@ pub struct InflightGuard {
     endpoint: Endpoint,
     request_type: RequestType,
     status: Status,
+    error_type: ErrorType,
     timer: Instant,
 }
 
@@ -240,6 +241,25 @@ pub enum RequestType {
 pub enum Status {
     Success,
     Error,
+}
+
+/// Error type classification for fine-grained observability
+#[derive(PartialEq, Clone)]
+pub enum ErrorType {
+    /// No error (for successful requests)
+    None,
+    /// Client validation error (4xx with "Validation:" prefix)
+    Validation,
+    /// Model or resource not found (404)
+    NotFound,
+    /// Service overloaded, too many requests (503)
+    Overload,
+    /// Request cancelled by client or timeout
+    Cancelled,
+    /// Internal server error (500 and other unexpected errors)
+    Internal,
+    /// Feature not implemented (501)
+    NotImplemented,
 }
 
 /// Track response-specific metrics
@@ -328,7 +348,7 @@ impl Metrics {
                 frontend_metric_name(frontend_service::REQUESTS_TOTAL),
                 "Total number of LLM requests processed",
             ),
-            &["model", "endpoint", "request_type", "status"],
+            &["model", "endpoint", "request_type", "status", "error_type"],
         )
         .unwrap();
 
@@ -572,6 +592,7 @@ impl Metrics {
         endpoint: &Endpoint,
         request_type: &RequestType,
         status: &Status,
+        error_type: &ErrorType,
     ) {
         self.request_counter
             .with_label_values(&[
@@ -579,6 +600,7 @@ impl Metrics {
                 endpoint.as_str(),
                 request_type.as_str(),
                 status.as_str(),
+                error_type.as_str(),
             ])
             .inc()
     }
@@ -800,12 +822,19 @@ impl InflightGuard {
             endpoint,
             request_type,
             status: Status::Error,
+            error_type: ErrorType::Internal,
             timer,
         }
     }
 
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
+        self.error_type = ErrorType::None;
+    }
+
+    pub(crate) fn mark_error(&mut self, error_type: ErrorType) {
+        self.status = Status::Error;
+        self.error_type = error_type;
     }
 }
 
@@ -824,6 +853,7 @@ impl Drop for InflightGuard {
             &self.endpoint,
             &self.request_type,
             &self.status,
+            &self.error_type,
         );
 
         // Record the duration of the request
@@ -872,6 +902,20 @@ impl Status {
         match self {
             Status::Success => frontend_service::status::SUCCESS,
             Status::Error => frontend_service::status::ERROR,
+        }
+    }
+}
+
+impl ErrorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ErrorType::None => frontend_service::error_type::NONE,
+            ErrorType::Validation => frontend_service::error_type::VALIDATION,
+            ErrorType::NotFound => frontend_service::error_type::NOT_FOUND,
+            ErrorType::Overload => frontend_service::error_type::OVERLOAD,
+            ErrorType::Cancelled => frontend_service::error_type::CANCELLED,
+            ErrorType::Internal => frontend_service::error_type::INTERNAL,
+            ErrorType::NotImplemented => frontend_service::error_type::NOT_IMPLEMENTED,
         }
     }
 }
@@ -1602,5 +1646,285 @@ mod tests {
                 .get_sample_count(),
             1
         );
+    }
+
+    #[test]
+    fn test_error_type_as_str() {
+        assert_eq!(ErrorType::None.as_str(), "");
+        assert_eq!(ErrorType::Validation.as_str(), "validation");
+        assert_eq!(ErrorType::NotFound.as_str(), "not_found");
+        assert_eq!(ErrorType::Overload.as_str(), "overload");
+        assert_eq!(ErrorType::Cancelled.as_str(), "cancelled");
+        assert_eq!(ErrorType::Internal.as_str(), "internal");
+        assert_eq!(ErrorType::NotImplemented.as_str(), "not_implemented");
+    }
+
+    #[test]
+    fn test_inflight_guard_marks_success_with_correct_error_type() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            guard.mark_ok();
+        } // guard drops here
+
+        // Verify counter incremented with status=success, error_type=""
+        let metric_families = registry.gather();
+        let counter_family = metric_families
+            .iter()
+            .find(|mf| mf.get_name().ends_with("requests_total"))
+            .expect("requests_total metric should exist");
+
+        let metrics_vec = counter_family.get_metric();
+        let success_metric = metrics_vec
+            .iter()
+            .find(|m| {
+                let labels = m.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.get_name() == "status" && l.get_value() == "success")
+                    && labels
+                        .iter()
+                        .any(|l| l.get_name() == "error_type" && l.get_value() == "")
+            })
+            .expect("Should find success metric with empty error_type");
+
+        assert_eq!(success_metric.get_counter().get_value(), 1.0);
+    }
+
+    #[test]
+    fn test_inflight_guard_marks_validation_error() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            guard.mark_error(ErrorType::Validation);
+        } // guard drops here
+
+        // Verify counter incremented with status=error, error_type=validation
+        let metric_families = registry.gather();
+        let counter_family = metric_families
+            .iter()
+            .find(|mf| mf.get_name().ends_with("requests_total"))
+            .expect("requests_total metric should exist");
+
+        let metrics_vec = counter_family.get_metric();
+        let error_metric = metrics_vec
+            .iter()
+            .find(|m| {
+                let labels = m.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.get_name() == "status" && l.get_value() == "error")
+                    && labels
+                        .iter()
+                        .any(|l| l.get_name() == "error_type" && l.get_value() == "validation")
+            })
+            .expect("Should find error metric with validation error_type");
+
+        assert_eq!(error_metric.get_counter().get_value(), 1.0);
+    }
+
+    #[test]
+    fn test_inflight_guard_defaults_to_internal_error_on_drop() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        {
+            let _guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
+        } // guard drops with default error_type=Internal
+
+        // Verify counter incremented with status=error, error_type=internal
+        let metric_families = registry.gather();
+        let counter_family = metric_families
+            .iter()
+            .find(|mf| mf.get_name().ends_with("requests_total"))
+            .expect("requests_total metric should exist");
+
+        let metrics_vec = counter_family.get_metric();
+        let error_metric = metrics_vec
+            .iter()
+            .find(|m| {
+                let labels = m.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.get_name() == "status" && l.get_value() == "error")
+                    && labels
+                        .iter()
+                        .any(|l| l.get_name() == "error_type" && l.get_value() == "internal")
+            })
+            .expect("Should find error metric with internal error_type by default");
+
+        assert_eq!(error_metric.get_counter().get_value(), 1.0);
+    }
+
+    #[test]
+    fn test_all_error_types_recorded_correctly() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let endpoint = Endpoint::ChatCompletions;
+
+        // Test each error type
+        let error_types = vec![
+            ErrorType::Validation,
+            ErrorType::NotFound,
+            ErrorType::Overload,
+            ErrorType::Cancelled,
+            ErrorType::Internal,
+            ErrorType::NotImplemented,
+        ];
+
+        for error_type in error_types {
+            let mut guard = metrics.clone().create_inflight_guard(model, endpoint, false);
+            guard.mark_error(error_type.clone());
+            drop(guard);
+        }
+
+        // Verify all 6 error types recorded
+        let metric_families = registry.gather();
+        let counter_family = metric_families
+            .iter()
+            .find(|mf| mf.get_name().ends_with("requests_total"))
+            .unwrap();
+
+        let error_metrics: Vec<_> = counter_family
+            .get_metric()
+            .iter()
+            .filter(|m| {
+                m.get_label()
+                    .iter()
+                    .any(|l| l.get_name() == "status" && l.get_value() == "error")
+            })
+            .collect();
+
+        assert_eq!(
+            error_metrics.len(),
+            6,
+            "Should have 6 different error types"
+        );
+
+        // Verify each error type is present
+        let expected_types = vec![
+            "validation",
+            "not_found",
+            "overload",
+            "cancelled",
+            "internal",
+            "not_implemented",
+        ];
+
+        for expected_type in expected_types {
+            let found = error_metrics.iter().any(|m| {
+                m.get_label()
+                    .iter()
+                    .any(|l| l.get_name() == "error_type" && l.get_value() == expected_type)
+            });
+            assert!(
+                found,
+                "Should find error metric with error_type={}",
+                expected_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_multiple_requests_different_error_types() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+
+        // Record 2 validation errors, 3 internal errors, 1 success
+        for _ in 0..2 {
+            let mut guard =
+                metrics
+                    .clone()
+                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            guard.mark_error(ErrorType::Validation);
+            drop(guard);
+        }
+
+        for _ in 0..3 {
+            let mut guard = metrics.clone().create_inflight_guard(model, Endpoint::Completions, false);
+            guard.mark_error(ErrorType::Internal);
+            drop(guard);
+        }
+
+        {
+            let mut guard = metrics.clone().create_inflight_guard(model, Endpoint::Embeddings, false);
+            guard.mark_ok();
+            drop(guard);
+        }
+
+        // Verify counts
+        let metric_families = registry.gather();
+        let counter_family = metric_families
+            .iter()
+            .find(|mf| mf.get_name().ends_with("requests_total"))
+            .unwrap();
+
+        // Check validation errors
+        let validation_metric = counter_family
+            .get_metric()
+            .iter()
+            .find(|m| {
+                let labels = m.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.get_name() == "error_type" && l.get_value() == "validation")
+            })
+            .expect("Should find validation error metric");
+        assert_eq!(validation_metric.get_counter().get_value(), 2.0);
+
+        // Check internal errors
+        let internal_metric = counter_family
+            .get_metric()
+            .iter()
+            .find(|m| {
+                let labels = m.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.get_name() == "error_type" && l.get_value() == "internal")
+            })
+            .expect("Should find internal error metric");
+        assert_eq!(internal_metric.get_counter().get_value(), 3.0);
+
+        // Check success
+        let success_metric = counter_family
+            .get_metric()
+            .iter()
+            .find(|m| {
+                let labels = m.get_label();
+                labels
+                    .iter()
+                    .any(|l| l.get_name() == "status" && l.get_value() == "success")
+            })
+            .expect("Should find success metric");
+        assert_eq!(success_metric.get_counter().get_value(), 1.0);
     }
 }
