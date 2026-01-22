@@ -415,14 +415,11 @@ async fn completions_single(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -564,14 +561,11 @@ async fn completions_batch(
         let single_request_context = Context::with_id(single_request, unique_request_id);
 
         // Generate stream for this prompt
-        let stream = engine
-            .generate(single_request_context)
-            .await
-            .map_err(|e| {
-                let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-                inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-                err_response
-            })?;
+        let stream = engine.generate(single_request_context).await.map_err(|e| {
+            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+            err_response
+        })?;
 
         // Capture context from first stream
         if first_ctx.is_none() {
@@ -708,26 +702,20 @@ async fn embeddings(
     let http_queue_guard = state.metrics_clone().create_http_queue_guard(model);
 
     // todo - error handling should be more robust
-    let engine = state
-        .manager()
-        .get_embeddings_engine(model)
-        .map_err(|_| {
-            let err_response = ErrorMessage::model_not_found();
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let engine = state.manager().get_embeddings_engine(model).map_err(|_| {
+        let err_response = ErrorMessage::model_not_found();
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
-            inflight.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate embeddings");
+        inflight.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -750,7 +738,8 @@ async fn embeddings(
                 request_id,
                 e
             );
-            let err_response = ErrorMessage::internal_server_error("Failed to fold embeddings stream");
+            let err_response =
+                ErrorMessage::internal_server_error("Failed to fold embeddings stream");
             inflight.mark_error(extract_error_type_from_response(&err_response));
             err_response
         })?;
@@ -931,9 +920,10 @@ async fn chat_completions(
     let model = request.inner.model.clone();
 
     // Create inflight_guard early to ensure all errors (including validation) are counted
-    let mut inflight_guard = state
-        .metrics_clone()
-        .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::ChatCompletions, streaming);
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
@@ -997,14 +987,11 @@ async fn chat_completions(
     let annotations = request.annotations();
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -1339,14 +1326,11 @@ async fn responses(
     tracing::trace!("Issuing generate call for chat completions");
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| {
-            let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
-            inflight_guard.mark_error(extract_error_type_from_response(&err_response));
-            err_response
-        })?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let err_response = ErrorMessage::from_anyhow(e, "Failed to generate completions");
+        inflight_guard.mark_error(extract_error_type_from_response(&err_response));
+        err_response
+    })?;
 
     // Process stream to collect metrics and drop http_queue_guard on first token
     let mut http_queue_guard = Some(http_queue_guard);
@@ -1384,7 +1368,8 @@ async fn responses(
             "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
             e
         );
-        let err_response = ErrorMessage::internal_server_error("Failed to convert internal response");
+        let err_response =
+            ErrorMessage::internal_server_error("Failed to convert internal response");
         inflight_guard.mark_error(extract_error_type_from_response(&err_response));
         err_response
     })?;
@@ -2481,10 +2466,8 @@ mod tests {
     #[test]
     fn test_classify_error_for_metrics_validation() {
         // 400 with "Validation:" prefix to validation
-        let error_type = classify_error_for_metrics(
-            StatusCode::BAD_REQUEST,
-            "Validation: Invalid parameter",
-        );
+        let error_type =
+            classify_error_for_metrics(StatusCode::BAD_REQUEST, "Validation: Invalid parameter");
         assert_eq!(error_type, ErrorType::Validation);
 
         // 400 WITHOUT "Validation:" to internal (fallback)

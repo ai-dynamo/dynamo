@@ -210,6 +210,7 @@ pub struct InflightGuard {
 
 /// Requests will be logged by the type of endpoint hit
 /// This will include llamastack in the future
+#[derive(Clone, Copy)]
 pub enum Endpoint {
     /// OAI Completions
     Completions,
@@ -244,7 +245,7 @@ pub enum Status {
 }
 
 /// Error type classification for fine-grained observability
-#[derive(PartialEq, Clone)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum ErrorType {
     /// No error (for successful requests)
     None,
@@ -1668,35 +1669,26 @@ mod tests {
         let model = "test-model";
 
         {
-            let mut guard =
-                metrics
-                    .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            let mut guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                false,
+            );
             guard.mark_ok();
         } // guard drops here
 
         // Verify counter incremented with status=success, error_type=""
-        let metric_families = registry.gather();
-        let counter_family = metric_families
-            .iter()
-            .find(|mf| mf.get_name().ends_with("requests_total"))
-            .expect("requests_total metric should exist");
-
-        let metrics_vec = counter_family.get_metric();
-        let success_metric = metrics_vec
-            .iter()
-            .find(|m| {
-                let labels = m.get_label();
-                labels
-                    .iter()
-                    .any(|l| l.get_name() == "status" && l.get_value() == "success")
-                    && labels
-                        .iter()
-                        .any(|l| l.get_name() == "error_type" && l.get_value() == "")
-            })
-            .expect("Should find success metric with empty error_type");
-
-        assert_eq!(success_metric.get_counter().get_value(), 1.0);
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Success.as_str(),
+                ErrorType::None.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
     }
 
     #[test]
@@ -1708,35 +1700,26 @@ mod tests {
         let model = "test-model";
 
         {
-            let mut guard =
-                metrics
-                    .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            let mut guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                false,
+            );
             guard.mark_error(ErrorType::Validation);
         } // guard drops here
 
         // Verify counter incremented with status=error, error_type=validation
-        let metric_families = registry.gather();
-        let counter_family = metric_families
-            .iter()
-            .find(|mf| mf.get_name().ends_with("requests_total"))
-            .expect("requests_total metric should exist");
-
-        let metrics_vec = counter_family.get_metric();
-        let error_metric = metrics_vec
-            .iter()
-            .find(|m| {
-                let labels = m.get_label();
-                labels
-                    .iter()
-                    .any(|l| l.get_name() == "status" && l.get_value() == "error")
-                    && labels
-                        .iter()
-                        .any(|l| l.get_name() == "error_type" && l.get_value() == "validation")
-            })
-            .expect("Should find error metric with validation error_type");
-
-        assert_eq!(error_metric.get_counter().get_value(), 1.0);
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
     }
 
     #[test]
@@ -1748,35 +1731,26 @@ mod tests {
         let model = "test-model";
 
         {
-            let _guard =
-                metrics
-                    .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            let _guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                false,
+            );
             // Don't call mark_ok() or mark_error() - simulate panic/unhandled error
         } // guard drops with default error_type=Internal
 
         // Verify counter incremented with status=error, error_type=internal
-        let metric_families = registry.gather();
-        let counter_family = metric_families
-            .iter()
-            .find(|mf| mf.get_name().ends_with("requests_total"))
-            .expect("requests_total metric should exist");
-
-        let metrics_vec = counter_family.get_metric();
-        let error_metric = metrics_vec
-            .iter()
-            .find(|m| {
-                let labels = m.get_label();
-                labels
-                    .iter()
-                    .any(|l| l.get_name() == "status" && l.get_value() == "error")
-                    && labels
-                        .iter()
-                        .any(|l| l.get_name() == "error_type" && l.get_value() == "internal")
-            })
-            .expect("Should find error metric with internal error_type by default");
-
-        assert_eq!(error_metric.get_counter().get_value(), 1.0);
+        let counter_value = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Internal.as_str(),
+            ])
+            .get();
+        assert_eq!(counter_value, 1);
     }
 
     #[test]
@@ -1798,55 +1772,28 @@ mod tests {
             ErrorType::NotImplemented,
         ];
 
-        for error_type in error_types {
+        for error_type in &error_types {
             let mut guard = metrics.clone().create_inflight_guard(model, endpoint, false);
             guard.mark_error(error_type.clone());
             drop(guard);
         }
 
-        // Verify all 6 error types recorded
-        let metric_families = registry.gather();
-        let counter_family = metric_families
-            .iter()
-            .find(|mf| mf.get_name().ends_with("requests_total"))
-            .unwrap();
-
-        let error_metrics: Vec<_> = counter_family
-            .get_metric()
-            .iter()
-            .filter(|m| {
-                m.get_label()
-                    .iter()
-                    .any(|l| l.get_name() == "status" && l.get_value() == "error")
-            })
-            .collect();
-
-        assert_eq!(
-            error_metrics.len(),
-            6,
-            "Should have 6 different error types"
-        );
-
-        // Verify each error type is present
-        let expected_types = vec![
-            "validation",
-            "not_found",
-            "overload",
-            "cancelled",
-            "internal",
-            "not_implemented",
-        ];
-
-        for expected_type in expected_types {
-            let found = error_metrics.iter().any(|m| {
-                m.get_label()
-                    .iter()
-                    .any(|l| l.get_name() == "error_type" && l.get_value() == expected_type)
-            });
-            assert!(
-                found,
-                "Should find error metric with error_type={}",
-                expected_type
+        // Verify each error type recorded correctly
+        for error_type in &error_types {
+            let counter_value = metrics
+                .request_counter
+                .with_label_values(&[
+                    model,
+                    endpoint.as_str(),
+                    RequestType::Unary.as_str(),
+                    Status::Error.as_str(),
+                    error_type.as_str(),
+                ])
+                .get();
+            assert_eq!(
+                counter_value, 1,
+                "Should have 1 request for error_type={}",
+                error_type.as_str()
             );
         }
     }
@@ -1861,70 +1808,72 @@ mod tests {
 
         // Record 2 validation errors, 3 internal errors, 1 success
         for _ in 0..2 {
-            let mut guard =
-                metrics
-                    .clone()
-                    .create_inflight_guard(model, Endpoint::ChatCompletions, false);
+            let mut guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::ChatCompletions,
+                false,
+            );
             guard.mark_error(ErrorType::Validation);
             drop(guard);
         }
 
         for _ in 0..3 {
-            let mut guard = metrics.clone().create_inflight_guard(model, Endpoint::Completions, false);
+            let mut guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::Completions,
+                false,
+            );
             guard.mark_error(ErrorType::Internal);
             drop(guard);
         }
 
         {
-            let mut guard = metrics.clone().create_inflight_guard(model, Endpoint::Embeddings, false);
+            let mut guard = metrics.clone().create_inflight_guard(
+                model,
+                Endpoint::Embeddings,
+                false,
+            );
             guard.mark_ok();
             drop(guard);
         }
 
-        // Verify counts
-        let metric_families = registry.gather();
-        let counter_family = metric_families
-            .iter()
-            .find(|mf| mf.get_name().ends_with("requests_total"))
-            .unwrap();
+        // Check validation errors (2 from ChatCompletions)
+        let validation_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::ChatCompletions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Validation.as_str(),
+            ])
+            .get();
+        assert_eq!(validation_count, 2);
 
-        // Check validation errors
-        let validation_metric = counter_family
-            .get_metric()
-            .iter()
-            .find(|m| {
-                let labels = m.get_label();
-                labels
-                    .iter()
-                    .any(|l| l.get_name() == "error_type" && l.get_value() == "validation")
-            })
-            .expect("Should find validation error metric");
-        assert_eq!(validation_metric.get_counter().get_value(), 2.0);
+        // Check internal errors (3 from Completions)
+        let internal_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::Completions.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Error.as_str(),
+                ErrorType::Internal.as_str(),
+            ])
+            .get();
+        assert_eq!(internal_count, 3);
 
-        // Check internal errors
-        let internal_metric = counter_family
-            .get_metric()
-            .iter()
-            .find(|m| {
-                let labels = m.get_label();
-                labels
-                    .iter()
-                    .any(|l| l.get_name() == "error_type" && l.get_value() == "internal")
-            })
-            .expect("Should find internal error metric");
-        assert_eq!(internal_metric.get_counter().get_value(), 3.0);
-
-        // Check success
-        let success_metric = counter_family
-            .get_metric()
-            .iter()
-            .find(|m| {
-                let labels = m.get_label();
-                labels
-                    .iter()
-                    .any(|l| l.get_name() == "status" && l.get_value() == "success")
-            })
-            .expect("Should find success metric");
-        assert_eq!(success_metric.get_counter().get_value(), 1.0);
+        // Check success (1 from Embeddings)
+        let success_count = metrics
+            .request_counter
+            .with_label_values(&[
+                model,
+                Endpoint::Embeddings.as_str(),
+                RequestType::Unary.as_str(),
+                Status::Success.as_str(),
+                ErrorType::None.as_str(),
+            ])
+            .get();
+        assert_eq!(success_count, 1);
     }
 }
