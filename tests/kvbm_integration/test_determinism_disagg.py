@@ -15,7 +15,6 @@ Compared to aggregated mode, disaggregated mode has some known randomness.
 Example reference: https://github.com/vllm-project/vllm/issues/7779#issuecomment-2304967870
 """
 
-import importlib.util
 import logging
 import os
 import signal
@@ -32,6 +31,7 @@ import yaml
 
 from .common import DeterminismTester, ServerType
 from .common import TestDeterminism as BaseTestDeterminism
+from .common import check_module_available
 
 # Test markers to align with repository conventions
 # Todo: enable the rest when kvbm is built in the ci
@@ -507,9 +507,9 @@ def llm_server(request, runtime_services):
     # Put logs in the per-test directory set up by tests/conftest.py
     log_dir = Path(request.node.name)
 
-    if importlib.util.find_spec("vllm") is not None:
+    if check_module_available("vllm"):
         server_type = ServerType.vllm
-    elif importlib.util.find_spec("tensorrt_llm") is not None:
+    elif check_module_available("tensorrt_llm"):
         server_type = ServerType.trtllm
     else:
         pytest.skip("vllm module is not available in the current environment.")

@@ -56,13 +56,15 @@ If `--output-file` is not specified, the output will use the input filename with
 **Filtering:**
 - `--model`: Filter by model (`ChatGPT` or `GPT-4`), None for no filtering
 - `--log-type`: Filter by log type (`Conversation log` or `API log`), None for no filtering
-- `--num-prompt`: Limit number of rows in the final output, None for no filtering
+- `--skip-num-prompt`: Skip the first N rows after filtering (default: 0). Applied **before** `--num-prompt`.
+- `--num-prompt`: Limit number of rows in the final output, None for no filtering (applied **after** `--skip-num-prompt`)
 
 **Timestamp Adjustment:**
 - `--speed-ratio`: Adjust request timing (default: 1.0)
   - Values > 1: Speed up (e.g., 2.0 = 2x faster)
   - Values < 1: Slow down (e.g., 0.5 = 2x slower)
   - Formula: `new_timestamp = old_timestamp / speed_ratio`
+  - After filtering/skip/cap and speed-ratio adjustment, timestamps are shifted so the first kept request starts at `t=0`.
 
 **Hash Generation:**
 - `--block-size`: Block size in mooncake traces (default: 128)

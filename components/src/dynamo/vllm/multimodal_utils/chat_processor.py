@@ -20,17 +20,31 @@ from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_check
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    RequestResponseMetadata,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/32369), fallback to old structure
+try:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+    from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+except ImportError:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+        RequestResponseMetadata,
+    )
+    from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+    from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+    from vllm.entrypoints.openai.serving_models import (
+        BaseModelPath,
+        OpenAIServingModels,
+    )
 
 
 class StubEngineClient:
@@ -192,7 +206,9 @@ class ChatProcessor:
         if request.stream:
             # Handle streaming response
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
@@ -225,7 +241,9 @@ class ChatProcessor:
             # Collect all chunks into a single response
             full_response = None
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
