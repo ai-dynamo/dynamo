@@ -19,6 +19,8 @@
 **/*.plan
 **/*.etcd
 **/.cache/*
+**/__pycache__
+**/*.pyc
 **/*onnx*
 # Engine must be allowed because code contains dynamo_engine.py
 **/*tensorrtllm_engines*
@@ -42,6 +44,7 @@
 container/Dockerfile*
 .venv
 .venv-docs
+
 
 # Python
 __pycache__/
