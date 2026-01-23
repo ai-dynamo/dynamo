@@ -117,6 +117,11 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         trace_header = self._get_trace_header(context) if self.enable_trace else None
 
+        # Extract dp_rank from routing info (set by KV router)
+        # This ensures prefill uses the same DP rank as decode for KV transfer
+        routing = inner_request.get("routing") or {}
+        dp_rank = routing.get("dp_rank")
+
         results = await self.engine.async_generate(
             **input_param,
             sampling_params=sampling_params,
@@ -126,6 +131,7 @@ class PrefillWorkerHandler(BaseWorkerHandler):
             bootstrap_room=bootstrap_room,
             external_trace_header=trace_header,
             rid=trace_id,
+            data_parallel_rank=dp_rank,
         )
 
         task = asyncio.create_task(self._consume_results(results, context))
