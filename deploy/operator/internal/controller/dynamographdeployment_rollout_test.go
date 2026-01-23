@@ -401,3 +401,64 @@ func TestClearRolloutStatus(t *testing.T) {
 	assert.Zero(t, dgd.Status.Rollout.TrafficWeightOld)
 	assert.Zero(t, dgd.Status.Rollout.TrafficWeightNew)
 }
+
+func TestGetWorkerServices(t *testing.T) {
+	tests := []struct {
+		name     string
+		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		expected []string
+	}{
+		{
+			name: "single worker",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			},
+			expected: []string{"worker"},
+		},
+		{
+			name: "prefill and decode",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {ComponentType: consts.ComponentTypePrefill},
+				"decode":  {ComponentType: consts.ComponentTypeDecode},
+			},
+			expected: []string{"prefill", "decode"},
+		},
+		{
+			name: "mixed services - only workers returned",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+				"worker":   {ComponentType: consts.ComponentTypeWorker},
+				"planner":  {ComponentType: consts.ComponentTypePlanner},
+			},
+			expected: []string{"worker"},
+		},
+		{
+			name: "no workers",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+			},
+			expected: []string{},
+		},
+		{
+			name: "all worker types",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker":  {ComponentType: consts.ComponentTypeWorker},
+				"prefill": {ComponentType: consts.ComponentTypePrefill},
+				"decode":  {ComponentType: consts.ComponentTypeDecode},
+			},
+			expected: []string{"worker", "prefill", "decode"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", "default", tt.services)
+			r := createTestReconciler(dgd)
+
+			result := r.getWorkerServices(dgd)
+
+			// Sort both slices for comparison since map iteration order is not guaranteed
+			assert.ElementsMatch(t, tt.expected, result)
+		})
+	}
+}
