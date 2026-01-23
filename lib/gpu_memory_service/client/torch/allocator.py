@@ -45,7 +45,7 @@ def get_or_create_gms_client_memory_manager(
     Returns:
         (gms_client_memory_manager, pool) - pool is None for RO mode.
     """
-    global _gms_client_memory_manager, _mem_pool, _pluggable_alloc
+    global _gms_client_memory_manager, _mem_pool
 
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
