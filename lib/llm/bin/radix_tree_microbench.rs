@@ -263,7 +263,10 @@ fn bench_hash(args: &Args) {
     println!("\n=== Benchmarking COMPUTE_BLOCK_HASH (per-request hot path) ===");
 
     let num_tokens = args.depth * args.block_size as usize;
-    println!("  Token sequence length: {} tokens ({} blocks)", num_tokens, args.depth);
+    println!(
+        "  Token sequence length: {} tokens ({} blocks)",
+        num_tokens, args.depth
+    );
 
     // Generate token sequences to hash
     let token_sequences: Vec<Vec<u32>> = (0..args.iterations)
@@ -401,9 +404,11 @@ fn bench_lookup(args: &Args) {
     // Build tree once for all lookups
     let tree = build_tree(&sequences);
 
-    println!("  Tree built with {} sequences, {} total blocks",
-             sequences.len(),
-             tree.current_size());
+    println!(
+        "  Tree built with {} sequences, {} total blocks",
+        sequences.len(),
+        tree.current_size()
+    );
 
     // Benchmark hit case (lookup existing sequences)
     println!("\n  --- HIT case (existing sequences) ---");
@@ -459,8 +464,9 @@ fn bench_lookup(args: &Args) {
         // Use first half of real sequence, second half is garbage
         let half = args.depth / 2;
         let mut partial_hashes = seq.local_hashes[..half].to_vec();
-        partial_hashes
-            .extend((0..half).map(|j| LocalBlockHash(0xDEAD_0000 | ((i as u64) << 16) | (j as u64))));
+        partial_hashes.extend(
+            (0..half).map(|j| LocalBlockHash(0xDEAD_0000 | ((i as u64) << 16) | (j as u64))),
+        );
 
         let start = Instant::now();
         let _ = tree.find_matches(partial_hashes, false);
@@ -532,8 +538,10 @@ struct DepthResult {
 /// Benchmark store/remove/lookup across a range of depths
 fn bench_sweep(args: &Args) {
     println!("\n=== Depth Sweep Benchmark ===");
-    println!("  Depths: {} to {} ({} points, log-spaced)",
-             args.min_depth, args.max_depth, args.sweep_points);
+    println!(
+        "  Depths: {} to {} ({} points, log-spaced)",
+        args.min_depth, args.max_depth, args.sweep_points
+    );
     println!("  Iterations per depth: {}", args.sweep_iterations);
     println!("  Tree size: {} blocks", args.size);
     println!("  Workers: {}", args.num_workers);
@@ -553,8 +561,13 @@ fn bench_sweep(args: &Args) {
             continue; // Need at least 2 sequences for meaningful benchmark
         }
 
-        print!("[{}/{}] depth={}, sequences={}... ",
-               idx + 1, depths.len(), depth, num_sequences);
+        print!(
+            "[{}/{}] depth={}, sequences={}... ",
+            idx + 1,
+            depths.len(),
+            depth,
+            num_sequences
+        );
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
         // Generate sequences for this depth
@@ -568,12 +581,18 @@ fn bench_sweep(args: &Args) {
         // --- STORE benchmark ---
         // Build tree once with fewer sequences, then store additional ones
         let mut store_durations = Vec::with_capacity(args.sweep_iterations);
-        let pre_count = num_sequences.saturating_sub(args.sweep_iterations).max(num_sequences / 2);
+        let pre_count = num_sequences
+            .saturating_sub(args.sweep_iterations)
+            .max(num_sequences / 2);
         let pre_sequences = &sequences[..pre_count];
         let store_sequences = &sequences[pre_count..];
 
         let mut store_tree = build_tree(pre_sequences);
-        for (i, seq_to_store) in store_sequences.iter().enumerate().take(args.sweep_iterations) {
+        for (i, seq_to_store) in store_sequences
+            .iter()
+            .enumerate()
+            .take(args.sweep_iterations)
+        {
             let event = seq_to_store.to_store_event(i as u64);
 
             let start = Instant::now();
@@ -631,10 +650,12 @@ fn bench_sweep(args: &Args) {
             lookup_p99_ns: lookup_durations[lookup_durations.len() * 99 / 100].as_nanos() as u64,
         };
 
-        println!("store={:.2}us, remove={:.2}us, lookup={:.2}us",
-                 result.store_avg_ns as f64 / 1000.0,
-                 result.remove_avg_ns as f64 / 1000.0,
-                 result.lookup_avg_ns as f64 / 1000.0);
+        println!(
+            "store={:.2}us, remove={:.2}us, lookup={:.2}us",
+            result.store_avg_ns as f64 / 1000.0,
+            result.remove_avg_ns as f64 / 1000.0,
+            result.lookup_avg_ns as f64 / 1000.0
+        );
 
         results.push(result);
     }
@@ -642,33 +663,54 @@ fn bench_sweep(args: &Args) {
     // Print results in requested format
     println!();
     if args.sweep_format == "csv" {
-        println!("depth,store_avg_ns,store_p50_ns,store_p99_ns,remove_avg_ns,remove_p50_ns,remove_p99_ns,lookup_avg_ns,lookup_p50_ns,lookup_p99_ns");
+        println!(
+            "depth,store_avg_ns,store_p50_ns,store_p99_ns,remove_avg_ns,remove_p50_ns,remove_p99_ns,lookup_avg_ns,lookup_p50_ns,lookup_p99_ns"
+        );
         for r in &results {
-            println!("{},{},{},{},{},{},{},{},{},{}",
-                     r.depth,
-                     r.store_avg_ns, r.store_p50_ns, r.store_p99_ns,
-                     r.remove_avg_ns, r.remove_p50_ns, r.remove_p99_ns,
-                     r.lookup_avg_ns, r.lookup_p50_ns, r.lookup_p99_ns);
+            println!(
+                "{},{},{},{},{},{},{},{},{},{}",
+                r.depth,
+                r.store_avg_ns,
+                r.store_p50_ns,
+                r.store_p99_ns,
+                r.remove_avg_ns,
+                r.remove_p50_ns,
+                r.remove_p99_ns,
+                r.lookup_avg_ns,
+                r.lookup_p50_ns,
+                r.lookup_p99_ns
+            );
         }
     } else {
         // Table format
-        println!("{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
-                 "depth", "store_avg", "store_p50", "store_p99",
-                 "remove_avg", "remove_p50", "remove_p99",
-                 "lookup_avg", "lookup_p50", "lookup_p99");
+        println!(
+            "{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
+            "depth",
+            "store_avg",
+            "store_p50",
+            "store_p99",
+            "remove_avg",
+            "remove_p50",
+            "remove_p99",
+            "lookup_avg",
+            "lookup_p50",
+            "lookup_p99"
+        );
         println!("{}", "-".repeat(130));
         for r in &results {
-            println!("{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
-                     r.depth,
-                     format_duration_ns(r.store_avg_ns),
-                     format_duration_ns(r.store_p50_ns),
-                     format_duration_ns(r.store_p99_ns),
-                     format_duration_ns(r.remove_avg_ns),
-                     format_duration_ns(r.remove_p50_ns),
-                     format_duration_ns(r.remove_p99_ns),
-                     format_duration_ns(r.lookup_avg_ns),
-                     format_duration_ns(r.lookup_p50_ns),
-                     format_duration_ns(r.lookup_p99_ns));
+            println!(
+                "{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
+                r.depth,
+                format_duration_ns(r.store_avg_ns),
+                format_duration_ns(r.store_p50_ns),
+                format_duration_ns(r.store_p99_ns),
+                format_duration_ns(r.remove_avg_ns),
+                format_duration_ns(r.remove_p50_ns),
+                format_duration_ns(r.remove_p99_ns),
+                format_duration_ns(r.lookup_avg_ns),
+                format_duration_ns(r.lookup_p50_ns),
+                format_duration_ns(r.lookup_p99_ns)
+            );
         }
     }
 }
@@ -689,17 +731,27 @@ fn bench_sweep_match_length(args: &Args) {
     let num_sequences = args.size / seq_length;
 
     if num_sequences < 1 {
-        eprintln!("Error: size {} / seq_length {} = 0 sequences. Increase --size or decrease sequence length.",
-                  args.size, seq_length);
+        eprintln!(
+            "Error: size {} / seq_length {} = 0 sequences. Increase --size or decrease sequence length.",
+            args.size, seq_length
+        );
         std::process::exit(1);
     }
 
     println!("\n=== Match Length Sweep Benchmark ===");
     println!("  Sequence length: {} blocks (fixed)", seq_length);
-    println!("  Match lengths: {} to {} ({} points, log-spaced)",
-             args.min_depth, args.max_depth.min(seq_length), args.sweep_points);
+    println!(
+        "  Match lengths: {} to {} ({} points, log-spaced)",
+        args.min_depth,
+        args.max_depth.min(seq_length),
+        args.sweep_points
+    );
     println!("  Iterations per match length: {}", args.sweep_iterations);
-    println!("  Tree: {} sequences, {} total blocks", num_sequences, num_sequences * seq_length);
+    println!(
+        "  Tree: {} sequences, {} total blocks",
+        num_sequences,
+        num_sequences * seq_length
+    );
     println!("  Workers: {}", args.num_workers);
     println!();
 
@@ -718,8 +770,12 @@ fn bench_sweep_match_length(args: &Args) {
     let mut results: Vec<MatchLengthResult> = Vec::with_capacity(match_lengths.len());
 
     for (idx, &match_len) in match_lengths.iter().enumerate() {
-        print!("[{}/{}] match_length={}... ",
-               idx + 1, match_lengths.len(), match_len);
+        print!(
+            "[{}/{}] match_length={}... ",
+            idx + 1,
+            match_lengths.len(),
+            match_len
+        );
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
         // Generate lookup queries: first match_len blocks match, rest are garbage
@@ -733,7 +789,9 @@ fn bench_sweep_match_length(args: &Args) {
             // Add garbage blocks to reach full seq_length
             let garbage_len = seq_length - match_len;
             query_hashes.extend(
-                (0..garbage_len).map(|j| LocalBlockHash(0xBAD_C0DE_0000_0000 | ((i as u64) << 16) | (j as u64)))
+                (0..garbage_len).map(|j| {
+                    LocalBlockHash(0xBAD_C0DE_0000_0000 | ((i as u64) << 16) | (j as u64))
+                }),
             );
 
             let start = Instant::now();
@@ -752,8 +810,7 @@ fn bench_sweep_match_length(args: &Args) {
             lookup_p99_ns: lookup_durations[lookup_durations.len() * 99 / 100].as_nanos() as u64,
         };
 
-        println!("lookup={:.2}us",
-                 result.lookup_avg_ns as f64 / 1000.0);
+        println!("lookup={:.2}us", result.lookup_avg_ns as f64 / 1000.0);
 
         results.push(result);
     }
@@ -763,20 +820,26 @@ fn bench_sweep_match_length(args: &Args) {
     if args.sweep_format == "csv" {
         println!("match_length,seq_length,lookup_avg_ns,lookup_p50_ns,lookup_p99_ns");
         for r in &results {
-            println!("{},{},{},{},{}",
-                     r.match_length, r.seq_length,
-                     r.lookup_avg_ns, r.lookup_p50_ns, r.lookup_p99_ns);
+            println!(
+                "{},{},{},{},{}",
+                r.match_length, r.seq_length, r.lookup_avg_ns, r.lookup_p50_ns, r.lookup_p99_ns
+            );
         }
     } else {
-        println!("{:>12} | {:>10} | {:>12} {:>12} {:>12}",
-                 "match_length", "seq_length", "lookup_avg", "lookup_p50", "lookup_p99");
+        println!(
+            "{:>12} | {:>10} | {:>12} {:>12} {:>12}",
+            "match_length", "seq_length", "lookup_avg", "lookup_p50", "lookup_p99"
+        );
         println!("{}", "-".repeat(70));
         for r in &results {
-            println!("{:>12} | {:>10} | {:>12} {:>12} {:>12}",
-                     r.match_length, r.seq_length,
-                     format_duration_ns(r.lookup_avg_ns),
-                     format_duration_ns(r.lookup_p50_ns),
-                     format_duration_ns(r.lookup_p99_ns));
+            println!(
+                "{:>12} | {:>10} | {:>12} {:>12} {:>12}",
+                r.match_length,
+                r.seq_length,
+                format_duration_ns(r.lookup_avg_ns),
+                format_duration_ns(r.lookup_p50_ns),
+                format_duration_ns(r.lookup_p99_ns)
+            );
         }
     }
 }
@@ -801,16 +864,26 @@ fn main() {
     println!("=========================\n");
     println!("Configuration:");
     println!("  Target size: {} (worker, block) pairs", args.size);
-    println!("  Depth: {} blocks/sequence (= {} tokens with block_size={})",
-             args.depth, args.depth * args.block_size as usize, args.block_size);
+    println!(
+        "  Depth: {} blocks/sequence (= {} tokens with block_size={})",
+        args.depth,
+        args.depth * args.block_size as usize,
+        args.block_size
+    );
     println!("  Block size: {} tokens", args.block_size);
     println!("  Workers: {}", args.num_workers);
     println!("  Iterations: {}", args.iterations);
-    println!("  Prefix share ratio: {:.1}%", args.prefix_share_ratio * 100.0);
+    println!(
+        "  Prefix share ratio: {:.1}%",
+        args.prefix_share_ratio * 100.0
+    );
     println!("  Seed: {}", args.seed);
 
     let num_sequences = args.size / args.depth;
-    println!("\n  Derived: {} sequences to reach target size", num_sequences);
+    println!(
+        "\n  Derived: {} sequences to reach target size",
+        num_sequences
+    );
 
     match args.bench.as_str() {
         "hash" => bench_hash(&args),
@@ -831,7 +904,10 @@ fn main() {
             bench_lookup(&args);
         }
         _ => {
-            eprintln!("Unknown benchmark type: {}. Use 'hash', 'store', 'remove', 'lookup', 'sweep', or 'all'", args.bench);
+            eprintln!(
+                "Unknown benchmark type: {}. Use 'hash', 'store', 'remove', 'lookup', 'sweep', or 'all'",
+                args.bench
+            );
             std::process::exit(1);
         }
     }
