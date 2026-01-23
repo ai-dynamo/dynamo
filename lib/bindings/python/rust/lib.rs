@@ -758,12 +758,6 @@ impl Component {
             event_loop: self.event_loop.clone(),
         })
     }
-
-    /// Get a RuntimeMetrics helper for creating Prometheus metrics
-    #[getter]
-    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
-        prometheus_metrics::RuntimeMetrics::from_component(self.inner.clone())
-    }
 }
 
 #[pymethods]
@@ -892,12 +886,6 @@ impl Namespace {
             inner,
             event_loop: self.event_loop.clone(),
         })
-    }
-
-    /// Get a RuntimeMetrics helper for creating Prometheus metrics
-    #[getter]
-    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
-        prometheus_metrics::RuntimeMetrics::from_namespace(self.inner.clone())
     }
 }
 
