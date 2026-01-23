@@ -115,9 +115,9 @@ fn matches_query(instance: &DiscoveryInstance, query: &DiscoveryQuery) -> bool {
             },
             DiscoveryQuery::EventChannels(query),
         ) => {
-            query.namespace.as_ref().map_or(true, |ns| ns == inst_ns)
-                && query.component.as_ref().map_or(true, |c| c == inst_comp)
-                && query.topic.as_ref().map_or(true, |t| t == inst_topic)
+            query.namespace.as_ref().is_none_or(|ns| ns == inst_ns)
+                && query.component.as_ref().is_none_or(|c| c == inst_comp)
+                && query.topic.as_ref().is_none_or(|t| t == inst_topic)
         }
 
         // Cross-type matches return false

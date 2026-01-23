@@ -273,11 +273,11 @@ fn filter_instances(
                     ..
                 } => {
                     // Filter by namespace if specified
-                    query.namespace.as_ref().map_or(true, |qns| qns == ns)
+                    query.namespace.as_ref().is_none_or(|qns| qns == ns)
                         // Filter by component if specified
-                        && query.component.as_ref().map_or(true, |qc| qc == comp)
+                        && query.component.as_ref().is_none_or(|qc| qc == comp)
                         // Filter by topic if specified
-                        && query.topic.as_ref().map_or(true, |qt| qt == t)
+                        && query.topic.as_ref().is_none_or(|qt| qt == t)
                 }
                 _ => false,
             })
