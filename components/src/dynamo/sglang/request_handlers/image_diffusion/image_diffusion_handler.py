@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import os
+import random
 import time
 import uuid
 from typing import Any, AsyncGenerator, Optional
@@ -36,6 +37,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
         fs: Any = None,  # fsspec.AbstractFileSystem for primary storage
+        bucket: Optional[str] = None,
     ):
         """Initialize diffusion worker handler.
 
@@ -45,6 +47,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for diffusion currently).
             fs: Optional fsspec filesystem for primary image storage.
+            bucket: Optional bucket name for cloud storage.
         """
         # Call parent constructor for common setup
         super().__init__(component, config, publisher)
@@ -52,6 +55,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Image diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
+        self.bucket = bucket if bucket else ""
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
 
         logger.info(f"Image diffusion worker handler initialized with fs_url={self.fs_url}")
@@ -94,7 +98,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             #     return
 
             # Default to 50 steps if not provided
-            request.num_inference_steps = request.num_inference_steps or 50
+            request["num_inference_steps"] = request.get("num_inference_steps", 50)
 
             req = CreateImageRequest(**request)
 
@@ -170,7 +174,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             "num_inference_steps": num_inference_steps,
             "save_output": False,  # We handle saving ourselves
             "guidance_scale": guidance_scale,
-            # "seed": seed,
+            "seed": seed if seed else random.randint(0, 1000000),
         }
         result = await asyncio.to_thread(
             self.generator.generate,
@@ -234,12 +238,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         image_filename = f"{image_uuid}.png"
 
         # Per-user storage path
-        storage_dir = f"users/{user_id}/generations/{request_id}"
+        storage_dir = f"{self.bucket}/users/{user_id}/generations/{request_id}"
         storage_path = f"{storage_dir}/{image_filename}"
         full_path = f"{self.fs_url.rstrip('/')}/{storage_path}"
 
         # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.mkdirs, storage_dir, exist_ok=True) # only for local filesystem
         await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
 
         return self._generate_url(full_path, storage_path)

@@ -455,12 +455,14 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
         import fsspec
 
         # Extract protocol from URL (s3://, gs://, az://, file://)
-        protocol = fs_url.split("://")[0] if "://" in fs_url else "file"
+        fs_url_parts = fs_url.split("://")
+        protocol = fs_url_parts[0] if "://" in fs_url else "file"
+        bucket = fs_url_parts[1] if len(fs_url_parts) > 1 else None
 
         # Initialize filesystem, configure fsspec using json configuration file
         #  - json configuration file: ~/.config/fsspec/s3.json
         #  - environment variables i.e. FSSPEC_S3_SECRET
-        fs = fsspec.filesystem(protocol)
+        fs = fsspec.filesystem(protocol, auto_mkdir=True)
         logging.info(f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})")
     except ImportError:
         logging.warning(
@@ -483,7 +485,7 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     # Could add custom metrics for images/sec, steps/sec later
 
     handler = ImageDiffusionWorkerHandler(
-        component, generator, config, publisher=None, fs=fs,
+        component, generator, config, publisher=None, fs=fs, bucket=bucket,
     )
 
     # Create proper health check payload that sends a minimal diffusion request
