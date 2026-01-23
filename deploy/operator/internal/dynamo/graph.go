@@ -252,7 +252,7 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
-		dynamoNamespace := getDynamoNamespace(parentDynamoGraphDeployment, component)
+		dynamoNamespace := parentDynamoGraphDeployment.GetDynamoNamespace()
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
@@ -334,10 +334,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployments[componentName] = deployment
 	}
 	return deployments, nil
-}
-
-func getDynamoNamespace(object metav1.Object, service *v1alpha1.DynamoComponentDeploymentSharedSpec) string {
-	return v1alpha1.ComputeDynamoNamespace(service.GlobalDynamoNamespace, object.GetNamespace(), object.GetName())
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
@@ -1076,7 +1072,10 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 }
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
-	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
+	var dynamoNamespace string
+	if component.DynamoNamespace != nil {
+		dynamoNamespace = *component.DynamoNamespace
+	}
 
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
@@ -1144,9 +1143,9 @@ func GenerateGrovePodCliqueSet(
 
 	discoveryBackend := controllerConfig.GetDiscoveryBackend(dynamoDeployment.Annotations)
 
+	dynamoNamespace := dynamoDeployment.GetDynamoNamespace()
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
-		dynamoNamespace := getDynamoNamespace(dynamoDeployment, component)
 		component.DynamoNamespace = &dynamoNamespace
 		// Determine backend framework using hybrid approach
 		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)

@@ -70,7 +70,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// +kubebuilder:validation:Optional
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
 
-	// GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+	// GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.
+	// DEPRECATED: This field is deprecated and will be removed in a future release.
+	// +optional
 	GlobalDynamoNamespace bool `json:"globalDynamoNamespace,omitempty"`
 
 	// Resources requested and limits for this component, including CPU, memory,
@@ -313,17 +315,16 @@ func (s *DynamoComponentDeployment) GetParentGraphDeploymentNamespace() string {
 
 // GetDynamoNamespace returns the Dynamo namespace for this component.
 func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
-	return ComputeDynamoNamespace(s.Spec.GlobalDynamoNamespace, s.GetNamespace(), s.GetParentGraphDeploymentName())
+	if s.Spec.DynamoNamespace != nil {
+		return *s.Spec.DynamoNamespace
+	}
+	return ""
 }
 
-// ComputeDynamoNamespace is the single source of truth for computing the Dynamo namespace.
-// If globalDynamoNamespace is true, returns "dynamo" (global constant).
-// Otherwise, returns {k8sNamespace}-{dgdName}.
-func ComputeDynamoNamespace(globalDynamoNamespace bool, k8sNamespace, dgdName string) string {
-	if globalDynamoNamespace {
-		return commonconsts.GlobalDynamoNamespace
-	}
-	return fmt.Sprintf("%s-%s", k8sNamespace, dgdName)
+// ComputeGenerationDynamoNamespace returns the Dynamo namespace with generation suffix.
+// Format: {k8sNamespace}-{dgdName}-gen{generation}
+func ComputeGenerationDynamoNamespace(k8sNamespace, dgdName string, generation int64) string {
+	return fmt.Sprintf("%s-%s-gen%d", k8sNamespace, dgdName, generation)
 }
 
 // ModelReference identifies a model served by this component

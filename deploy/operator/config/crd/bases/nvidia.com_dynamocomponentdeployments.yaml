@@ -9816,7 +9816,10 @@ spec:
                   required: []
                   type: object
                 globalDynamoNamespace:
-                  description: GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace
+                  description: |-
+                    GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.
+                    DEPRECATED: This field is deprecated and will be removed in a future release.
+                    Rolling updates are not supported for DGDs using globalDynamoNamespace.
                   type: boolean
                 ingress:
                   description: Ingress config to expose the component outside the cluster (or through a service mesh).
@@ -10407,7 +10410,7 @@ spec:
                   properties:
                     availableReplicas:
                       description: |-
-                        AvailableReplicas is the number of available replicas.
+                        AvailableReplicas is the total number of available replicas (old + new during rollout).
                         For Deployment: replicas ready for >= minReadySeconds.
                         For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.
                         Not available for PodClique or LeaderWorkerSet.
@@ -10424,11 +10427,22 @@ spec:
                         - LeaderWorkerSet
                       type: string
                     componentName:
-                      description: ComponentName is the name of the underlying resource.
+                      description: |-
+                        ComponentName is the name of the primary underlying resource.
+                        DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
+                        During rolling updates, this reflects the new (target) component name.
                       type: string
+                    componentNames:
+                      description: |-
+                        ComponentNames is the list of underlying resource names for this service.
+                        During normal operation, this contains a single name.
+                        During rolling updates, this contains both old and new component names.
+                      items:
+                        type: string
+                      type: array
                     readyReplicas:
                       description: |-
-                        ReadyReplicas is the number of ready replicas.
+                        ReadyReplicas is the total number of ready replicas (old + new during rollout).
                         Populated for PodClique, Deployment, and LeaderWorkerSet.
                         Not available for PodCliqueScalingGroup.
                         When nil, the field is omitted from the API response.
@@ -10437,15 +10451,15 @@ spec:
                       type: integer
                     replicas:
                       description: |-
-                        Replicas is the total number of non-terminated replicas.
+                        Replicas is the total number of non-terminated replicas (old + new during rollout).
                         Required for all component kinds.
                       format: int32
                       minimum: 0
                       type: integer
                     updatedReplicas:
                       description: |-
-                        UpdatedReplicas is the number of replicas at the current/desired revision.
-                        Required for all component kinds.
+                        UpdatedReplicas is the number of replicas at the target revision.
+                        During rolling updates, this only counts replicas in the NEW deployment.
                       format: int32
                       minimum: 0
                       type: integer

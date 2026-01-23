@@ -64,6 +64,11 @@ type DynamoGraphDeploymentSpec struct {
 	// Restart specifies the restart policy for the graph deployment.
 	// +kubebuilder:validation:Optional
 	Restart *Restart `json:"restart,omitempty"`
+
+	// TrafficProxy configures the HAProxy load balancer for rolling updates.
+	// Fields specified here override the platform-wide Helm defaults.
+	// +kubebuilder:validation:Optional
+	TrafficProxy *TrafficProxySpec `json:"trafficProxy,omitempty"`
 }
 
 type Restart struct {
@@ -96,6 +101,32 @@ const (
 	RestartStrategyTypeParallel   RestartStrategyType = "Parallel"
 )
 
+// TrafficProxySpec configures the HAProxy load balancer for rolling updates.
+// Fields specified here override the platform-wide defaults from Helm values.
+type TrafficProxySpec struct {
+	// Replicas is the number of proxy pod replicas.
+	// Overrides the platform default. Recommend 2+ for high availability.
+	// +kubebuilder:validation:Optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// Resources configures the proxy pod resource requirements.
+	// Overrides the platform default.
+	// +kubebuilder:validation:Optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// Tolerations for the proxy pods.
+	// Useful when workers run on tainted nodes (e.g., GPU nodes).
+	// Merged with platform defaults (DGD tolerations take precedence).
+	// +kubebuilder:validation:Optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Affinity rules for the proxy pods.
+	// Useful for co-locating proxy with workers or spreading across zones.
+	// Overrides platform default if specified.
+	// +kubebuilder:validation:Optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+}
+
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.
 type DynamoGraphDeploymentStatus struct {
 	// State is a high-level textual status of the graph deployment lifecycle.
@@ -111,6 +142,10 @@ type DynamoGraphDeploymentStatus struct {
 	// Restart contains the status of the restart of the graph deployment.
 	// +optional
 	Restart *RestartStatus `json:"restart,omitempty"`
+
+	// Rollout tracks the progress of a rolling update.
+	// +optional
+	Rollout *RolloutStatus `json:"rollout,omitempty"`
 }
 
 // RestartStatus contains the status of the restart of the graph deployment.
@@ -132,14 +167,61 @@ const (
 	RestartPhaseRestarting RestartPhase = "Restarting"
 	RestartPhaseCompleted  RestartPhase = "Completed"
 	RestartPhaseFailed     RestartPhase = "Failed"
+	RestartPhaseSuperseded RestartPhase = "Superseded"
 )
+
+// RolloutPhase represents the current phase of a rolling update.
+// +kubebuilder:validation:Enum=Pending;InProgress;Completed;Failed;""
+type RolloutPhase string
+
+const (
+	RolloutPhasePending    RolloutPhase = "Pending"
+	RolloutPhaseInProgress RolloutPhase = "InProgress"
+	RolloutPhaseCompleted  RolloutPhase = "Completed"
+	RolloutPhaseFailed     RolloutPhase = "Failed"
+	RolloutPhaseNone       RolloutPhase = ""
+)
+
+// RolloutStatus tracks the progress of a rolling update.
+type RolloutStatus struct {
+	// Phase indicates the current phase of the rollout.
+	// +optional
+	Phase RolloutPhase `json:"phase,omitempty"`
+
+	// TrafficWeightOld is the percentage of traffic routed to the old deployment (0-100).
+	// This reflects the current HAProxy backend weight configuration.
+	// +optional
+	TrafficWeightOld int32 `json:"trafficWeightOld,omitempty"`
+
+	// TrafficWeightNew is the percentage of traffic routed to the new deployment (0-100).
+	// This reflects the current HAProxy backend weight configuration.
+	// +optional
+	TrafficWeightNew int32 `json:"trafficWeightNew,omitempty"`
+
+	// StartTime is when the rollout began.
+	// +optional
+	StartTime *metav1.Time `json:"startTime,omitempty"`
+
+	// EndTime is when the rollout completed (successfully or failed).
+	// +optional
+	EndTime *metav1.Time `json:"endTime,omitempty"`
+}
 
 // ServiceReplicaStatus contains replica information for a single service.
 type ServiceReplicaStatus struct {
 	// ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet").
 	ComponentKind ComponentKind `json:"componentKind"`
-	// ComponentName is the name of the underlying resource.
+
+	// ComponentName is the name of the primary underlying resource.
+	// DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.
+	// During rolling updates, this reflects the new (target) component name.
 	ComponentName string `json:"componentName"`
+
+	// ComponentNames is the list of underlying resource names for this service.
+	// During normal operation, this contains a single name.
+	// During rolling updates, this contains both old and new component names.
+	// +optional
+	ComponentNames []string `json:"componentNames,omitempty"`
 
 	// Replicas is the total number of non-terminated replicas.
 	// Required for all component kinds.
@@ -235,6 +317,6 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 }
 
 // GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
-func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
-	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
+func (s *DynamoGraphDeployment) GetDynamoNamespace() string {
+	return ComputeGenerationDynamoNamespace(s.Namespace, s.Name, s.Generation)
 }
