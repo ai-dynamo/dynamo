@@ -145,39 +145,29 @@ impl WorkerSchedulerClient {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct WorkerSchedulerClientSlot {
     operations: Vec<uuid::Uuid>,
     completed: Arc<AtomicU64>,
-    /// Expected number of immediate (onboard) operations for this slot.
-    /// SHARED with scheduler via Arc so race condition corrections are visible to worker.
-    expected_immediate_ops: Arc<AtomicU64>,
-}
-
-impl Default for WorkerSchedulerClientSlot {
-    fn default() -> Self {
-        Self {
-            operations: Vec::new(),
-            completed: Arc::new(AtomicU64::new(0)),
-            expected_immediate_ops: Arc::new(AtomicU64::new(0)),
-        }
-    }
 }
 
 impl WorkerSchedulerClientSlot {
-    fn new(expected_immediate_ops: u64) -> Self {
+    fn new() -> Self {
         Self {
             operations: Vec::new(),
             completed: Arc::new(AtomicU64::new(0)),
-            expected_immediate_ops: Arc::new(AtomicU64::new(expected_immediate_ops)),
         }
     }
 
-    fn make_scheduler_slot_request(&self, request_id: String) -> SchedulerCreateSlotDetails {
+    fn make_scheduler_slot_request(
+        &self,
+        request_id: String,
+        expected_immediate_ops: u64,
+    ) -> SchedulerCreateSlotDetails {
         SchedulerCreateSlotDetails {
             request_id,
             completed: self.completed.clone(),
-            expected_immediate_ops: self.expected_immediate_ops.clone(),
+            expected_immediate_ops,
         }
     }
 
@@ -195,9 +185,9 @@ impl WorkerSchedulerClient {
         request_id: String,
         expected_immediate_ops: u64,
     ) -> Result<(), SchedulerError> {
-        // create a request slot with expected immediate ops count
-        let slot = WorkerSchedulerClientSlot::new(expected_immediate_ops);
-        let request = slot.make_scheduler_slot_request(request_id.clone());
+        // create a request slot
+        let slot = WorkerSchedulerClientSlot::new();
+        let request = slot.make_scheduler_slot_request(request_id.clone(), expected_immediate_ops);
 
         // insert the slot into the local worker slots map
         self.slots.insert(request_id.clone(), slot);
@@ -421,21 +411,23 @@ impl Scheduler {
         // Use `get` instead of `remove` to keep the buffered results available for all workers.
         // The buffered results will be cleared when the request is removed (finished).
 
-        let slot = SchedulerSlot::new(req);
-
         // Check for buffered ImmediateTransferResults that arrived before the slot was created
-        if let Some(unprocessed_results) = self.unprocessed_immediate_results.get(&request_id) {
-            let num_buffered = unprocessed_results.len() as u64;
-            let current_expected = slot.expected_immediate_ops.load(Ordering::Relaxed);
+        let num_buffered = self
+            .unprocessed_immediate_results
+            .get(&request_id)
+            .map(|results| results.len() as u64)
+            .unwrap_or(0);
 
-            // If we have buffered results, we know there should be at least that many
-            // immediate operations. Correct if needed (shared Arc visible to worker).
-            if num_buffered > current_expected {
-                slot.expected_immediate_ops
-                    .store(num_buffered, Ordering::Relaxed);
-            }
+        // Use the max of buffered count and expected count
+        let expected_immediate_ops = std::cmp::max(num_buffered, req.expected_immediate_ops);
 
-            // Apply buffered count to this worker's slot
+        let slot = SchedulerSlot {
+            completed: req.completed,
+            expected_immediate_ops,
+        };
+
+        // Apply buffered count to this worker's slot
+        if num_buffered > 0 {
             slot.completed.fetch_add(num_buffered, Ordering::Relaxed);
         }
 
@@ -696,15 +688,13 @@ pub struct SchedulerCreateSlotDetails {
     pub request_id: String,
     pub completed: Arc<AtomicU64>,
     /// Expected number of immediate (onboard) operations for this slot.
-    /// SHARED with worker via Arc so race condition corrections are visible to worker.
-    pub expected_immediate_ops: Arc<AtomicU64>,
+    pub expected_immediate_ops: u64,
 }
 
 pub struct SchedulerSlot {
     completed: Arc<AtomicU64>,
     /// Expected number of immediate operations.
-    /// SHARED with worker via Arc - can be updated by scheduler when race condition is detected.
-    expected_immediate_ops: Arc<AtomicU64>,
+    expected_immediate_ops: u64,
 }
 
 impl SchedulerSlot {
