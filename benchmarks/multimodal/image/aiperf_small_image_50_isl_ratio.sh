@@ -30,7 +30,12 @@ done
 # Create a JSONL file with 30 identical small image URLs
 # NOTE: any kind of caching can significantly affect the benchmark results,
 # should make sure what you are doing.
-echo '{"images": ["http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg"]}' \
+# ~ 11 tokens
+DUMMY_PROMPT="This is a prompt to describe the image content briefly."
+for i in {1..1500}; do
+    DUMMY_PROMPT+=" This is a prompt to describe the image content briefly."
+done
+echo '{"texts": ["'"$DUMMY_PROMPT"'"], "images": ["http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg"]}' \
     > data_small.jsonl
 echo "This benchmark uses duplicate image urls, so any kind of caching can significantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
 
@@ -62,7 +67,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 aiperf profile -m $MODEL_NAME --endpoint-type chat \
-    --synthetic-input-tokens-mean 15000 --synthetic-input-tokens-stddev 0 \
     --streaming --request-count 100 --warmup-request-count 5 \
     --concurrency $CONCURRENCY --osl 1 \
     --input-file data_small.jsonl \

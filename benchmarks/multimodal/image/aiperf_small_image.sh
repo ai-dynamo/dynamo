@@ -5,6 +5,7 @@
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CONCURRENCY=1
 
+# 640 * 424 pixels image
 python local_media_server.py \
     --image test.jpg:http://images.cocodataset.org/test2017/000000155781.jpg &
 IMG_SERVER_PID=$!
