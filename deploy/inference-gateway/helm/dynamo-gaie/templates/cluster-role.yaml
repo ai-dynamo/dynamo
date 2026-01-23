@@ -21,10 +21,6 @@ rules:
 - apiGroups: ["inference.networking.k8s.io"]
   resources: ["inferencepools"]
   verbs: ["get", "watch", "list"]
-# Gateway API inference resources (experimental - not yet promoted to stable)
-- apiGroups: ["inference.networking.x-k8s.io"]
-  resources: ["inferenceobjectives", "inferencemodelrewrites"]
-  verbs: ["get", "watch", "list"]
 # Core resources for pod discovery
 - apiGroups: [""]
   resources: ["pods"]
