@@ -18,7 +18,10 @@ from gpu_memory_service import (
 )
 
 # Re-export extensions (built separately)
-from gpu_memory_service.client.torch.extensions import _allocator_ext
+try:
+    from gpu_memory_service.client.torch.extensions import _allocator_ext
+except (ImportError, OSError):
+    _allocator_ext = None
 
 # Re-export module utilities
 from gpu_memory_service.client.torch.module import (
