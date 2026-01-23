@@ -498,7 +498,8 @@ func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 }
 
 // finalizeRollingUpdate cleans up after a completed rolling update.
-// This deletes old DCDs from the old namespace and updates the active worker hash.
+// This deletes old DCDs from the old namespace, removes -new/-old suffixed DCDs,
+// and updates the active worker hash.
 func (r *DynamoGraphDeploymentReconciler) finalizeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
@@ -522,11 +523,10 @@ func (r *DynamoGraphDeploymentReconciler) finalizeRollingUpdate(
 
 	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHash)
 
-	// Delete old DCDs from the old namespace
+	// Delete old DCDs from the old namespace (old workers and old frontend)
+	// With hash-based naming, this cleans up all resources with the old namespace label
 	if err := r.deleteOldDCDs(ctx, dgd, oldNamespace); err != nil {
 		logger.Error(err, "Failed to delete old DCDs", "oldNamespace", oldNamespace)
-		// Don't fail the whole finalization, just log the error
-		// The old resources will be orphaned but won't affect the new deployment
 		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
 			"Failed to delete some old resources from namespace %s: %v", oldNamespace, err)
 	}
@@ -691,16 +691,17 @@ func (r *DynamoGraphDeploymentReconciler) buildProxyConfig(
 
 	if r.isRollingUpdateInProgress(dgd) && dgd.Status.Rollout != nil {
 		// During rollout, configure both backends with current weights
-		oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
-		newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
+		// Use hash-based naming for stable service names
+		oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)[:8]
+		newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
 
 		oldBackend = &dynamo.BackendConfig{
-			ServiceName: r.getFrontendServiceNameWithHash(dgd, oldWorkerHash),
+			ServiceName: frontendServiceName + "-" + oldWorkerHash, // e.g., dgd-Frontend-abc12345
 			ServicePort: consts.DynamoServicePort,
 			Weight:      dgd.Status.Rollout.TrafficWeightOld,
 		}
 		newBackend = &dynamo.BackendConfig{
-			ServiceName: r.getFrontendServiceNameWithHash(dgd, newWorkerHash),
+			ServiceName: frontendServiceName + "-" + newWorkerHash, // e.g., dgd-Frontend-def67890
 			ServicePort: consts.DynamoServicePort,
 			Weight:      dgd.Status.Rollout.TrafficWeightNew,
 		}
@@ -756,14 +757,4 @@ func (r *DynamoGraphDeploymentReconciler) getFrontendServiceName(
 	}
 	// Fallback to default frontend naming
 	return fmt.Sprintf("%s-frontend", dgd.Name)
-}
-
-// getFrontendServiceNameWithHash returns the frontend service name for a specific worker hash.
-// During rolling updates, frontends are also versioned by the worker hash.
-func (r *DynamoGraphDeploymentReconciler) getFrontendServiceNameWithHash(
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	workerHash string,
-) string {
-	baseName := r.getFrontendServiceName(dgd)
-	return fmt.Sprintf("%s-%s", baseName, workerHash[:8])
 }
