@@ -539,7 +539,7 @@ impl
                 // This allows set_phase(Decode) below to proceed only after prefill routing is done
                 self.spawn_prefill_task(prefill_context, Some(worker_id), prefill_phase_permit);
 
-                Ok((None, Some(worker_id), Some(bootstrap_info)))
+                Ok((None, Some(worker_id), Some(dp_rank), Some(bootstrap_info)))
             } else {
                 // Original prefill path: wait for prefill to complete
                 tracing::debug!("Using original prefill path");
@@ -553,7 +553,7 @@ impl
 
                 self.call_prefill(prefill_context)
                     .await
-                    .map(|(result, worker_id)| (Some(result), worker_id, None))
+                    .map(|(result, worker_id)| (Some(result), worker_id, None, None))
             }
         }
         .instrument(tracing::info_span!("prefill_routing"))
@@ -570,7 +570,7 @@ impl
 
         // Handle prefill result
         match prefill_result {
-            Ok((maybe_prefill_result, _prefill_worker_id, bootstrap_info)) => {
+            Ok((maybe_prefill_result, _prefill_worker_id, prefill_dp_rank, bootstrap_info)) => {
                 tracing::debug!("Prefill completed, proceeding to decode");
 
                 // Set phase to Decode for the decode request.
@@ -594,6 +594,13 @@ impl
                 // Inject bootstrap_info for decode worker
                 if let Some(info) = bootstrap_info {
                     decode_req.bootstrap_info = Some(info);
+                }
+
+                // Set dp_rank on decode request to match prefill's DP rank.
+                // This ensures decode routes to the same DP rank that prefill used,
+                // which is required for KV transfer to work correctly.
+                if let Some(dp_rank) = prefill_dp_rank {
+                    decode_req.routing_mut().dp_rank = Some(dp_rank);
                 }
 
                 // Set router_config_override for decode: overlap_score_weight = 0
