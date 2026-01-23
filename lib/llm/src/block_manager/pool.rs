@@ -2,7 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod managed;
+pub mod pin;
+
 pub use managed::ManagedBlockPool;
+pub use pin::{PinGuard, PinRegistry};
 
 use anyhow::Result;
 use derive_builder::Builder;

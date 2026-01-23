@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use super::utils::RemoteTransferRequest;
 
 use futures::future::try_join_all;
 use nixl_sys::NixlDescriptor;
@@ -16,12 +17,19 @@ use crate::block_manager::{
         Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
         data::local::LocalBlockData,
         locality,
-        transfer::{TransferContext, WriteTo, WriteToStrategy},
+        transfer::{
+            TransferContext, WriteTo, WriteToStrategy,
+            checksum::compute_checksum,
+            remote::RemoteTransferPipeline,
+        },
     },
+    config::RemoteTransferContext,
     connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
+    distributed::vllm::g4_checksum_enabled,
     offload::MAX_TRANSFER_BATCH_SIZE,
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
 };
+use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -65,6 +73,7 @@ impl ConnectorTransferBatcher {
                     to_pool: *request.to_pool(),
                     blocks: batch.to_vec(),
                     connector_req: None,
+                    sequence_hashes: None,
                 };
                 handler.execute_transfer_direct(batch_request)
             })
@@ -84,6 +93,7 @@ impl ConnectorTransferBatcher {
 }
 
 /// A handler for all block transfers. Wraps a group of [`BlockTransferPoolManager`]s.
+/// Also handles remote storage transfers (G4 object storage, remote disk) when configured.
 #[derive(Clone)]
 pub struct BlockTransferHandler {
     device: Option<LocalBlockDataList<DeviceStorage>>,
@@ -92,7 +102,8 @@ pub struct BlockTransferHandler {
     context: Arc<TransferContext>,
     scheduler_client: Option<TransferSchedulerClient>,
     batcher: ConnectorTransferBatcher,
-    // add worker-connector scheduler client here
+    remote_context: Option<Arc<RemoteTransferContext>>,
+    cancel_token: CancellationToken,
 }
 
 impl BlockTransferHandler {
@@ -102,7 +113,8 @@ impl BlockTransferHandler {
         disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
         scheduler_client: Option<TransferSchedulerClient>,
-        // add worker-connector scheduler client here
+        remote_context: Option<Arc<RemoteTransferContext>>,
+        cancel_token: CancellationToken,
     ) -> Result<Self> {
         Ok(Self {
             device: Self::get_local_data(device_blocks),
@@ -111,6 +123,8 @@ impl BlockTransferHandler {
             context,
             scheduler_client,
             batcher: ConnectorTransferBatcher::new(),
+            remote_context,
+            cancel_token,
         })
     }
 
@@ -209,6 +223,190 @@ impl BlockTransferHandler {
         notify.await?;
         Ok(())
     }
+
+    /// Execute a remote transfer (G4 object storage or remote disk).
+    ///
+    /// Handles both onboard (remote -> host -> device) and offload (device -> host -> remote)
+    /// transfers, with optional checksum logging when G4 validation is enabled.
+    pub async fn execute_remote_transfer(&self, request: RemoteTransferRequest) -> Result<()> {
+        let remote_ctx = self.remote_context.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Remote transfer context not configured")
+        })?;
+
+        let host_blocks = self.host.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("Host blocks required for remote transfers")
+        })?;
+
+        let pipeline = request.pipeline.to_pipeline();
+        let num_blocks = pipeline.num_blocks();
+        let direction = pipeline.direction();
+        let is_onboard = direction.is_onboard();
+
+        tracing::debug!(
+            target: "kvbm-g4",
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            num_blocks,
+            direction = ?direction,
+            "executing remote transfer"
+        );
+
+        // Get bounce buffer block IDs (host blocks used as staging)
+        let bounce_ids = pipeline.bounce_block_ids().ok_or_else(|| {
+            anyhow::anyhow!("Remote transfer requires bounce buffer block IDs")
+        })?;
+
+        // Get the host blocks for this transfer
+        let bounce_blocks: Vec<LocalBlockData<PinnedStorage>> = bounce_ids
+            .iter()
+            .map(|&idx| host_blocks[idx].clone())
+            .collect();
+
+        // For offload: compute checksums before writing to remote
+        if !is_onboard && g4_checksum_enabled() {
+            self.log_checksums_for_offload(&bounce_blocks, &pipeline, &request.request_id);
+        }
+
+        // Execute the remote <-> host transfer
+        pipeline
+            .execute(&bounce_blocks, remote_ctx.as_ref(), &self.cancel_token)
+            .await
+            .map_err(|e| anyhow::anyhow!("Remote transfer failed: {}", e))?;
+
+        // For onboard: compute checksums after reading from remote
+        if is_onboard && g4_checksum_enabled() {
+            self.log_checksums_for_onboard(&bounce_blocks, &pipeline, &request.request_id);
+        }
+
+        // If this is a full pipeline with device blocks, execute host <-> device transfer
+        if let Some(device_ids) = pipeline.device_block_ids() {
+            if !device_ids.is_empty() {
+                let block_pairs: Vec<(usize, usize)> = if is_onboard {
+                    // Onboard: host -> device
+                    bounce_ids.iter().copied().zip(device_ids.iter().copied()).collect()
+                } else {
+                    // Offload: device -> host (already done before remote transfer)
+                    // This case is typically handled separately
+                    vec![]
+                };
+
+                if !block_pairs.is_empty() {
+                    let local_request = BlockTransferRequest {
+                        from_pool: if is_onboard { Host } else { Device },
+                        to_pool: if is_onboard { Device } else { Host },
+                        blocks: block_pairs,
+                        connector_req: None,
+                        sequence_hashes: None,
+                    };
+                    self.execute_transfer(local_request).await?;
+                }
+            }
+        }
+
+        tracing::debug!(
+            target: "kvbm-g4",
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            num_blocks,
+            "remote transfer completed"
+        );
+
+        Ok(())
+    }
+
+    /// Log checksums for blocks being offloaded to remote storage.
+    fn log_checksums_for_offload(
+        &self,
+        bounce_blocks: &[LocalBlockData<PinnedStorage>],
+        pipeline: &RemoteTransferPipeline,
+        request_id: &str,
+    ) {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        let descriptors = pipeline.descriptors();
+        for (block, desc) in bounce_blocks.iter().zip(descriptors.iter()) {
+            let remote_key = format!("{}/{}", desc.key().location(), desc.key().key_str());
+            let seq_hash = desc.sequence_hash().unwrap_or(0);
+
+            // Get block view and compute checksum from raw pointer
+            match block.local_block_view() {
+                Ok(view) => {
+                    let checksum = unsafe {
+                        let ptr = view.as_ptr();
+                        let size = view.size();
+                        let slice = std::slice::from_raw_parts(ptr, size);
+                        compute_checksum(slice)
+                    };
+
+                    tracing::info!(
+                        target: "kvbm-g4",
+                        request_id,
+                        block_idx = seq_hash,
+                        remote_key,
+                        checksum,
+                        phase = "pre-offload",
+                        "checksum computed before remote write"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "kvbm-g4",
+                        request_id,
+                        block_idx = seq_hash,
+                        error = %e,
+                        "failed to get block view for checksum"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Log checksums for blocks being onboarded from remote storage.
+    fn log_checksums_for_onboard(
+        &self,
+        bounce_blocks: &[LocalBlockData<PinnedStorage>],
+        pipeline: &RemoteTransferPipeline,
+        request_id: &str,
+    ) {
+        use crate::block_manager::block::data::BlockDataViews;
+
+        let descriptors = pipeline.descriptors();
+        for (block, desc) in bounce_blocks.iter().zip(descriptors.iter()) {
+            let remote_key = format!("{}/{}", desc.key().location(), desc.key().key_str());
+            let seq_hash = desc.sequence_hash().unwrap_or(0);
+
+            // Get block view and compute checksum from raw pointer
+            match block.local_block_view() {
+                Ok(view) => {
+                    let checksum = unsafe {
+                        let ptr = view.as_ptr();
+                        let size = view.size();
+                        let slice = std::slice::from_raw_parts(ptr, size);
+                        compute_checksum(slice)
+                    };
+
+                    tracing::info!(
+                        target: "kvbm-g4",
+                        request_id,
+                        block_idx = seq_hash,
+                        remote_key,
+                        checksum,
+                        phase = "post-onboard",
+                        "checksum computed after remote read"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "kvbm-g4",
+                        request_id,
+                        block_idx = seq_hash,
+                        error = %e,
+                        "failed to get block view for checksum"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -220,40 +418,80 @@ impl Handler for BlockTransferHandler {
             ));
         }
 
-        let mut request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
-
-        let result = if let Some(req) = request.connector_req.take() {
-            let operation_id = req.uuid;
+        // Try to parse as RemoteTransferRequest first, then fall back to BlockTransferRequest
+        let result = if let Ok(remote_request) = serde_json::from_slice::<RemoteTransferRequest>(&message.data[0]) {
+            // Handle remote transfer (G4 object storage)
+            let operation_id = remote_request.operation_id;
 
             tracing::debug!(
-                request_id = %req.request_id,
+                target: "kvbm-g4",
+                request_id = %remote_request.request_id,
                 operation_id = %operation_id,
-                "scheduling transfer"
+                num_blocks = remote_request.num_blocks(),
+                is_onboard = remote_request.is_onboard(),
+                "handling remote transfer request"
             );
 
-            let client = self
-                .scheduler_client
-                .as_ref()
-                .expect("scheduler client is required")
-                .clone();
+            if let Some(connector_req) = remote_request.connector_req.clone() {
+                let client = self
+                    .scheduler_client
+                    .as_ref()
+                    .expect("scheduler client is required")
+                    .clone();
 
-            let handle = client.schedule_transfer(req).await?;
+                let handle = client.schedule_transfer(connector_req).await?;
+                assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
 
-            // we don't support cancellation yet
-            assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
-
-            match self.execute_transfer(request).await {
-                Ok(_) => {
-                    handle.mark_complete(Ok(())).await;
-                    Ok(())
+                match self.execute_remote_transfer(remote_request).await {
+                    Ok(_) => {
+                        handle.mark_complete(Ok(())).await;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
+                        Err(e)
+                    }
                 }
-                Err(e) => {
-                    handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
-                    Err(e)
-                }
+            } else {
+                self.execute_remote_transfer(remote_request).await
             }
         } else {
-            self.execute_transfer(request).await
+            // Handle local block transfer
+            let mut request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
+
+            if let Some(req) = request.connector_req.take() {
+                let operation_id = req.uuid;
+
+                tracing::debug!(
+                    request_id = %req.request_id,
+                    operation_id = %operation_id,
+                    "scheduling transfer"
+                );
+
+                let client = self
+                    .scheduler_client
+                    .as_ref()
+                    .expect("scheduler client is required")
+                    .clone();
+
+                let handle = client.schedule_transfer(req).await?;
+
+                // we don't support cancellation yet
+                assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
+
+                match self.execute_transfer(request).await {
+                    Ok(_) => {
+                        handle.mark_complete(Ok(())).await;
+                        Ok(())
+                    }
+                    Err(e) => {
+                        handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
+                        Err(e)
+                    }
+                }
+            } else {
+                self.execute_transfer(request).await
+            }
         };
 
         // we always ack regardless of if we error or not

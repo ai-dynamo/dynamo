@@ -15,6 +15,7 @@ members = [
     "lib/parsers",
     "lib/bench",
     "lib/bindings/c",
+    "lib/bindings/kvbm",
     "lib/bindings/python/codegen",
     "lib/config",
 ]

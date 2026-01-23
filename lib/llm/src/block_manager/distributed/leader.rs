@@ -1,12 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use super::registry::{NoMetadata, PositionalKey, Registry};
+use super::remote::PositionalRemoteHandle;
 use super::*;
+use crate::block_manager::block::transfer::remote::RemoteKey;
 
 use utils::*;
 use zmq::*;
 
 use derive_builder::Builder;
+use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -37,6 +42,11 @@ fn compute_num_blocks(
 
 #[derive(Builder, Clone, Debug)]
 pub struct KvbmLeaderConfig {
+    /// The worker rank (0-indexed).
+    /// Used as worker_id in positional registry keys.
+    #[builder(default = "0")]
+    pub rank: usize,
+
     /// The world size.
     #[builder(default = "1")]
     world_size: usize,
@@ -112,6 +122,11 @@ pub struct KvbmLeader {
     state: Arc<KvbmLeaderState>,
     zmq_leader: Arc<OnceCell<ZmqActiveMessageLeader>>,
     config: KvbmLeaderConfig,
+    /// Handle for remote registry operations (e.g., G4 object storage).
+    /// Uses channels to avoid blocking Tokio worker threads.
+    remote_handle: RwLock<Option<PositionalRemoteHandle>>,
+    /// Tracks request IDs with failed G4 transfers for explicit failure detection.
+    failed_g4_requests: RwLock<HashSet<String>>,
 }
 
 impl KvbmLeader {
@@ -122,12 +137,141 @@ impl KvbmLeader {
             state: Arc::new(KvbmLeaderState::default()),
             zmq_leader: Arc::new(tokio::sync::OnceCell::new()),
             config,
+            remote_handle: RwLock::new(None),
+            failed_g4_requests: RwLock::new(HashSet::new()),
         };
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
         leader.spawn_zmq_task(leader_sockets, cancel_token);
 
         Ok(leader)
+    }
+
+    /// Set the remote registry by spawning a RemoteHandle task.
+    ///
+    /// The registry should be created externally and passed in.
+    /// This spawns a background task that handles registry operations via channels,
+    /// avoiding blocking of Tokio worker threads.
+    ///
+    /// Returns `true` if set successfully, `false` if already set.
+    pub fn set_remote_registry(
+        &self,
+        registry: Arc<dyn Registry<PositionalKey, RemoteKey, NoMetadata> + Send + Sync>,
+    ) -> bool {
+        let mut guard = self.remote_handle.write();
+        if guard.is_some() {
+            tracing::warn!("Remote registry already set");
+            return false;
+        }
+
+        let handle = PositionalRemoteHandle::spawn(registry);
+        *guard = Some(handle);
+        tracing::info!("Remote registry enabled via RemoteHandle");
+        true
+    }
+
+    /// Get the remote handle if available.
+    pub fn remote_handle(&self) -> Option<PositionalRemoteHandle> {
+        self.remote_handle.read().clone()
+    }
+
+    /// Check if remote registry is enabled.
+    pub fn remote_registry_enabled(&self) -> bool {
+        self.remote_handle.read().is_some()
+    }
+
+    /// Get the worker ID used for registry operations.
+    pub fn worker_id(&self) -> u64 {
+        self.config.rank as u64
+    }
+
+    /// Get the world size (number of TP ranks).
+    ///
+    pub fn world_size(&self) -> usize {
+        self.config.world_size
+    }
+
+    /// Get the remote storage configuration based on environment variables.
+    ///
+    /// Returns `Some(config)` if remote storage is configured, `None` otherwise.
+    /// This mirrors the logic in `create_remote_context` in worker.rs.
+    ///
+    /// Environment variables:
+    /// - `DYN_KVBM_REMOTE_STORAGE_TYPE`: "object", "disk", or "auto" (default: "auto")
+    /// - `DYN_KVBM_OBJECT_BUCKET` or `AWS_DEFAULT_BUCKET`: Bucket name for object storage
+    /// - `DYN_KVBM_REMOTE_DISK_PATH`: Base path for disk storage
+    /// - `DYN_KVBM_REMOTE_DISK_USE_GDS`: Enable GPU Direct Storage for disk (default: true)
+    pub fn remote_storage_config(
+        &self,
+    ) -> Option<crate::block_manager::config::RemoteStorageConfig> {
+        use crate::block_manager::config::RemoteStorageConfig;
+
+        let worker_id = self.config.rank;
+        let storage_type = std::env::var("DYN_KVBM_REMOTE_STORAGE_TYPE")
+            .unwrap_or_else(|_| "auto".to_string())
+            .to_lowercase();
+
+        // Get object storage config
+        let bucket = std::env::var("DYN_KVBM_OBJECT_BUCKET")
+            .or_else(|_| std::env::var("AWS_DEFAULT_BUCKET"))
+            .ok()
+            .map(|b| b.replace("{worker_id}", &worker_id.to_string()));
+
+        let object_endpoint = std::env::var("DYN_KVBM_OBJECT_ENDPOINT")
+            .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
+            .or_else(|_| std::env::var("AWS_ENDPOINT_OVERRIDE"))
+            .ok();
+
+        let object_region = std::env::var("DYN_KVBM_OBJECT_REGION")
+            .or_else(|_| std::env::var("AWS_REGION"))
+            .ok();
+
+        // Get disk storage config
+        let disk_path = std::env::var("DYN_KVBM_REMOTE_DISK_PATH")
+            .ok()
+            .map(|p| p.replace("{worker_id}", &worker_id.to_string()));
+
+        let disk_use_gds = std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(true);
+
+        match storage_type.as_str() {
+            "disk" => disk_path.map(|path| RemoteStorageConfig::Disk {
+                base_path: path,
+                use_gds: disk_use_gds,
+            }),
+            "object" => Some(RemoteStorageConfig::Object {
+                default_bucket: bucket,
+                endpoint: object_endpoint,
+                region: object_region,
+            }),
+            _ => match (&bucket, &disk_path) {
+                (Some(_), Some(_)) | (Some(_), None) => Some(RemoteStorageConfig::Object {
+                    default_bucket: bucket,
+                    endpoint: object_endpoint,
+                    region: object_region,
+                }),
+                (None, Some(path)) => Some(RemoteStorageConfig::Disk {
+                    base_path: path.clone(),
+                    use_gds: disk_use_gds,
+                }),
+                (None, None) => None,
+            },
+        }
+    }
+
+    /// Send a remote transfer request to the workers.
+    /// Used for both G4 onboard (object -> device) and offload (device -> object).
+    pub async fn remote_transfer_request(
+        &self,
+        request: RemoteTransferRequest,
+    ) -> anyhow::Result<oneshot::Receiver<()>> {
+        let zmq = self
+            .zmq_leader
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("ZMQ leader not ready"))?;
+        let data = vec![serde_json::to_vec(&request)?];
+        zmq.broadcast(ZMQ_REMOTE_TRANSFER_MESSAGE, data).await
     }
 
     fn spawn_zmq_task(
@@ -225,5 +369,20 @@ impl KvbmLeader {
             _ = notified => true,
             _ = sleep(Duration::from_secs(self.config.leader_init_timeout_secs)) => false,
         }
+    }
+
+    /// Mark a request as having a failed G4 transfer.
+    pub fn mark_g4_failed(&self, request_id: &str) {
+        self.failed_g4_requests.write().insert(request_id.to_string());
+    }
+
+    /// Check if a request has a failed G4 transfer.
+    pub fn has_g4_failed(&self, request_id: &str) -> bool {
+        self.failed_g4_requests.read().contains(request_id)
+    }
+
+    /// Clear the G4 failure flag for a request (called after recovery).
+    pub fn clear_g4_failed(&self, request_id: &str) {
+        self.failed_g4_requests.write().remove(request_id);
     }
 }

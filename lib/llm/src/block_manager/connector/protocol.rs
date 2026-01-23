@@ -97,6 +97,11 @@ pub struct LeaderTransferRequest {
     pub uuid: uuid::Uuid,
     pub requirement: Option<SchedulerRequirement>,
     pub request_type: RequestType,
+    /// If true, this operation is chained after another (e.g., H2O after D2H).
+    /// Chained operations do NOT increment the completion counter since they
+    /// share tracking with the parent operation.
+    #[serde(default)]
+    pub chained: bool,
 }
 
 pub enum TransferToSchedulerMessage {
@@ -149,6 +154,11 @@ pub struct WorkerTransferRequest {
     pub uuid: uuid::Uuid,
     pub transfer_type: TransferType,
     pub request_type: RequestType,
+
+    /// Block IDs for this transfer (for error tracking)
+    /// Uses serde(default) for backward compatibility - old messages without field will deserialize with empty vec.
+    #[serde(default)]
+    pub block_ids: Vec<usize>,
 }
 
 /// Sent by Worker to Scheduler.
@@ -222,11 +232,15 @@ pub struct ImmediateTransferResult {
     pub request_id: String,
     pub uuid: uuid::Uuid,
     pub status: anyhow::Result<()>,
+    /// If true, this result is from a chained operation (e.g., H2O after D2H).
+    /// Chained operations do NOT increment the completion counter.
+    pub chained: bool,
 }
 
 pub struct ImmediateTransferCompletionHandle {
     request_id: String,
     uuid: uuid::Uuid,
+    chained: bool,
     completion_tx: Mutex<Option<tokio::sync::mpsc::Sender<TransferToSchedulerMessage>>>,
 }
 
@@ -234,11 +248,13 @@ impl ImmediateTransferCompletionHandle {
     pub(crate) fn new(
         request_id: String,
         uuid: uuid::Uuid,
+        chained: bool,
         completion_tx: tokio::sync::mpsc::Sender<TransferToSchedulerMessage>,
     ) -> Self {
         Self {
             request_id,
             uuid,
+            chained,
             completion_tx: Mutex::new(Some(completion_tx)),
         }
     }
@@ -263,6 +279,7 @@ impl TransferCompletionHandle for ImmediateTransferCompletionHandle {
                         request_id: self.request_id.clone(),
                         uuid: self.uuid,
                         status: result,
+                        chained: self.chained,
                     },
                 ))
                 .await
