@@ -176,10 +176,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<context::Context>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<ModelInput>()?;
-    m.add_class::<llm::kv::ForwardPassMetrics>()?;
-    m.add_class::<llm::kv::WorkerStats>()?;
-    m.add_class::<llm::kv::KvStats>()?;
-    m.add_class::<llm::kv::SpecDecodeStats>()?;
     m.add_class::<llm::kv::KvPushRouter>()?;
     m.add_class::<llm::kv::KvPushRouterStream>()?;
     m.add_class::<RouterMode>()?;
@@ -758,12 +754,6 @@ impl Component {
             event_loop: self.event_loop.clone(),
         })
     }
-
-    /// Get a RuntimeMetrics helper for creating Prometheus metrics
-    #[getter]
-    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
-        prometheus_metrics::RuntimeMetrics::from_component(self.inner.clone())
-    }
 }
 
 #[pymethods]
@@ -892,12 +882,6 @@ impl Namespace {
             inner,
             event_loop: self.event_loop.clone(),
         })
-    }
-
-    /// Get a RuntimeMetrics helper for creating Prometheus metrics
-    #[getter]
-    fn metrics(&self) -> prometheus_metrics::RuntimeMetrics {
-        prometheus_metrics::RuntimeMetrics::from_namespace(self.inner.clone())
     }
 }
 

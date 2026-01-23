@@ -106,10 +106,23 @@ class Config:
 def _preprocess_for_encode_config(
     obj: Config,
 ) -> dict:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return obj.__dict__
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
+    """Parse a Dynamo endpoint string into its components.
+
+    Args:
+        endpoint: Endpoint string in format 'namespace.component.endpoint'
+            or 'dyn://namespace.component.endpoint'.
+
+    Returns:
+        Tuple of (namespace, component, endpoint_name).
+
+    Raises:
+        ValueError: If endpoint format is invalid.
+    """
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
@@ -122,6 +135,11 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
 
 
 def cmd_line_args():
+    """Parse command-line arguments for the TensorRT-LLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = argparse.ArgumentParser(
         description="TensorRT-LLM server integrated with Dynamo LLM."
     )
@@ -306,7 +324,7 @@ def cmd_line_args():
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",

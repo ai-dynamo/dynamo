@@ -27,7 +27,7 @@ dynamo-config = { workspace = true }
 
 anyhow = { workspace = true }
 cudarc = { workspace = true }
-nixl-sys = { version = "0.8" }
+nixl-sys = { version = "0.9" }
 serde = { workspace = true}
 thiserror = { workspace = true }
 tracing = { workspace = true }
