@@ -174,6 +174,26 @@ const (
 	AnnotationDynParentDGDName    = "nvidia.com/dyn-parent-dgd-name"
 	AnnotationDynParentDGDNS      = "nvidia.com/dyn-parent-dgd-namespace"
 	AnnotationDynDiscoveryBackend = "nvidia.com/dyn-discovery-backend"
+	// HAProxy traffic proxy constants
+	HAProxyHTTPPort        = 8000
+	HAProxyHTTPPortName    = "http"
+	HAProxyStatsPort       = 8404
+	HAProxyStatsPortName   = "stats"
+	HAProxyRuntimePort     = 9999
+	HAProxyRuntimePortName = "runtime"
+
+	HAProxyConfigMapKey    = "haproxy.cfg"
+	HAProxyContainerName   = "haproxy"
+	HAProxyConfigMountPath = "/usr/local/etc/haproxy"
+	HAProxySocketPath      = "/var/run/haproxy/haproxy.sock"
+	HAProxySocketMountPath = "/var/run/haproxy"
+
+	// HAProxy labels and annotations
+	KubeLabelTrafficProxy          = "nvidia.com/traffic-proxy"
+	KubeLabelTrafficProxyComponent = "nvidia.com/traffic-proxy-component"
+
+	// Traffic proxy component types
+	TrafficProxyComponentProxy = "proxy"
 )
 
 type MultinodeDeploymentType string

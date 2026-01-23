@@ -20,8 +20,6 @@
 package v1alpha1
 
 import (
-	"fmt"
-
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -340,12 +338,6 @@ func (s *DynamoComponentDeployment) GetDynamoNamespace() string {
 		return *s.Spec.DynamoNamespace
 	}
 	return ""
-}
-
-// ComputeGenerationDynamoNamespace returns the Dynamo namespace with generation suffix.
-// Format: {k8sNamespace}-{dgdName}-gen{generation}
-func ComputeGenerationDynamoNamespace(k8sNamespace, dgdName string, generation int64) string {
-	return fmt.Sprintf("%s-%s-gen%d", k8sNamespace, dgdName, generation)
 }
 
 // ModelReference identifies a model served by this component

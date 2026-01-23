@@ -252,6 +252,7 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
+
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		dynamoNamespace := GetDynamoNamespace(parentDynamoGraphDeployment, component)
 		deployment := &v1alpha1.DynamoComponentDeployment{}
