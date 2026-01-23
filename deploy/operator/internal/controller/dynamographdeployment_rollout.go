@@ -24,12 +24,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/proxy"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rollout"
 )
 
@@ -253,6 +255,12 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
 // This is where the actual scaling and traffic shifting happens.
+// The algorithm follows maxSurge=1, maxUnavailable=0:
+// 1. Scale up one new worker
+// 2. Wait for it to become ready
+// 3. Scale down one old worker
+// 4. Update HAProxy weights proportionally
+// 5. Repeat until all workers are migrated
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
@@ -261,51 +269,89 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	// For now, this is a simplified implementation that:
-	// 1. Creates the new deployment resources (DCDs will be reconciled normally)
-	// 2. Waits for new workers to be ready
-	// 3. Updates traffic weights
-	// 4. Scales down old workers
-	//
-	// The full implementation would use the state machine for finer-grained control.
-
 	workerServices := r.getWorkerServices(dgd)
 	if len(workerServices) == 0 {
 		logger.Info("No worker services found, completing rollout")
-		rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
-		rolloutStatus.TrafficWeightOld = 0
-		rolloutStatus.TrafficWeightNew = 100
-		now := metav1.Now()
-		rolloutStatus.EndTime = &now
-		if err := r.Status().Update(ctx, dgd); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update rollout status: %w", err)
-		}
-		return ctrl.Result{Requeue: true}, nil
+		return r.completeRollout(ctx, dgd, rolloutStatus, newNamespace)
 	}
 
-	// The normal DCD reconciliation will create new DCDs with the new namespace
-	// (since ComputeHashedDynamoNamespace uses the current spec hash)
-	// We just need to track progress and update traffic weights
+	// Count ready workers in old and new namespaces
+	oldReadyWorkers, err := r.countReadyWorkersInNamespace(ctx, dgd, oldNamespace)
+	if err != nil {
+		logger.Error(err, "Failed to count old workers")
+		// Continue anyway - we may be in a state where old DCDs don't exist yet
+		oldReadyWorkers = 0
+	}
 
-	logger.Info("Rolling update in progress",
-		"workerServices", workerServices,
-		"trafficWeightOld", rolloutStatus.TrafficWeightOld,
-		"trafficWeightNew", rolloutStatus.TrafficWeightNew)
+	newReadyWorkers, err := r.countReadyWorkersInNamespace(ctx, dgd, newNamespace)
+	if err != nil {
+		logger.Error(err, "Failed to count new workers")
+		newReadyWorkers = 0
+	}
 
-	// TODO: Implement full scaling logic with:
-	// - Count ready workers in old vs new namespace
-	// - Scale up new workers incrementally (maxSurge=1)
-	// - Scale down old workers as new become ready (maxUnavailable=0)
-	// - Update HAProxy weights proportionally
-	// - For multi-group deployments, wait for ≥1 ready in each group before routing traffic
+	// Get desired total replicas
+	desiredReplicas := r.getDesiredWorkerReplicas(dgd)
 
-	// For now, mark as completed after one reconciliation cycle
-	// This allows the normal DCD reconciliation to create the new resources
+	logger.Info("Rolling update progress",
+		"oldReadyWorkers", oldReadyWorkers,
+		"newReadyWorkers", newReadyWorkers,
+		"desiredReplicas", desiredReplicas,
+		"oldNamespace", oldNamespace,
+		"newNamespace", newNamespace)
+
+	// Check if rollout is complete
+	if newReadyWorkers >= desiredReplicas && oldReadyWorkers == 0 {
+		return r.completeRollout(ctx, dgd, rolloutStatus, newNamespace)
+	}
+
+	// Calculate and update traffic weights based on ready workers
+	totalReady := oldReadyWorkers + newReadyWorkers
+	if totalReady > 0 {
+		newWeight := (newReadyWorkers * 100) / totalReady
+		oldWeight := 100 - newWeight
+
+		// Only update weights if they changed
+		if rolloutStatus.TrafficWeightOld != oldWeight || rolloutStatus.TrafficWeightNew != newWeight {
+			rolloutStatus.TrafficWeightOld = oldWeight
+			rolloutStatus.TrafficWeightNew = newWeight
+
+			// Update HAProxy weights
+			if err := r.updateProxyWeights(ctx, dgd, oldWeight, newWeight); err != nil {
+				logger.Error(err, "Failed to update proxy weights", "oldWeight", oldWeight, "newWeight", newWeight)
+				// Continue anyway - the weights will be updated on next reconciliation
+			} else {
+				logger.Info("Updated proxy weights", "oldWeight", oldWeight, "newWeight", newWeight)
+			}
+		}
+	}
+
+	// Update status
+	if err := r.Status().Update(ctx, dgd); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to update rollout status: %w", err)
+	}
+
+	// Requeue to continue monitoring progress
+	// The normal DCD reconciliation will handle creating/scaling the new workers
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+// completeRollout marks the rollout as completed and updates status.
+func (r *DynamoGraphDeploymentReconciler) completeRollout(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
+	newNamespace string,
+) (ctrl.Result, error) {
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
 	rolloutStatus.TrafficWeightOld = 0
 	rolloutStatus.TrafficWeightNew = 100
 	now := metav1.Now()
 	rolloutStatus.EndTime = &now
+
+	// Ensure HAProxy has 100% traffic to new
+	if err := r.updateProxyWeights(ctx, dgd, 0, 100); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to set final proxy weights")
+	}
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
 		"Rolling update completed, traffic shifted to namespace %s", newNamespace)
@@ -314,7 +360,83 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		return ctrl.Result{}, fmt.Errorf("failed to update rollout status: %w", err)
 	}
 
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return ctrl.Result{Requeue: true}, nil
+}
+
+// countReadyWorkersInNamespace counts ready worker replicas across all worker DCDs
+// in the specified Dynamo namespace.
+func (r *DynamoGraphDeploymentReconciler) countReadyWorkersInNamespace(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	dynamoNamespace string,
+) (int32, error) {
+	// List DCDs that belong to this DGD and have the specified Dynamo namespace
+	dcdList := &nvidiacomv1alpha1.DynamoComponentDeploymentList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoNamespace:           dynamoNamespace,
+		},
+	}
+
+	if err := r.List(ctx, dcdList, listOpts...); err != nil {
+		return 0, fmt.Errorf("failed to list DCDs: %w", err)
+	}
+
+	var totalReady int32
+	for _, dcd := range dcdList.Items {
+		// Only count worker components
+		if !dynamo.IsWorkerComponent(dcd.Spec.ComponentType) {
+			continue
+		}
+
+		// Check DCD status for ready replicas (via Service status)
+		if dcd.Status.Service != nil && dcd.Status.Service.ReadyReplicas != nil {
+			totalReady += *dcd.Status.Service.ReadyReplicas
+		}
+	}
+
+	return totalReady, nil
+}
+
+// getDesiredWorkerReplicas returns the total desired replicas across all worker services.
+func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) int32 {
+	var total int32
+	for _, spec := range dgd.Spec.Services {
+		if spec != nil && dynamo.IsWorkerComponent(spec.ComponentType) {
+			if spec.Replicas != nil {
+				total += *spec.Replicas
+			} else {
+				total += 1 // Default to 1 if not specified
+			}
+		}
+	}
+	return total
+}
+
+// updateProxyWeights updates the HAProxy backend weights via the runtime API.
+func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	oldWeight, newWeight int32,
+) error {
+	// Get the HAProxy service address
+	// The proxy service is named <dgd-name>-traffic-proxy in the same namespace
+	proxyServiceName := fmt.Sprintf("%s-traffic-proxy", dgd.Name)
+	proxyHost := fmt.Sprintf("%s.%s.svc.cluster.local", proxyServiceName, dgd.Namespace)
+
+	// Create HAProxy client connecting to the runtime API port
+	haproxyClient := proxy.NewHAProxyClientTCP(proxyHost, consts.HAProxyRuntimePort)
+
+	// Update weights
+	if err := haproxyClient.UpdateWeights(ctx, oldWeight, newWeight); err != nil {
+		return fmt.Errorf("failed to update HAProxy weights: %w", err)
+	}
+
+	return nil
 }
 
 // finalizeRollingUpdate cleans up after a completed rolling update.

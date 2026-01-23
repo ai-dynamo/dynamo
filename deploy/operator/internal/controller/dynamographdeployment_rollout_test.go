@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -400,6 +401,77 @@ func TestClearRolloutStatus(t *testing.T) {
 	assert.Equal(t, nvidiacomv1alpha1.RolloutPhaseNone, dgd.Status.Rollout.Phase)
 	assert.Zero(t, dgd.Status.Rollout.TrafficWeightOld)
 	assert.Zero(t, dgd.Status.Rollout.TrafficWeightNew)
+}
+
+func TestGetDesiredWorkerReplicas(t *testing.T) {
+	tests := []struct {
+		name     string
+		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		expected int32
+	}{
+		{
+			name: "single worker with replicas",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+				},
+			},
+			expected: 3,
+		},
+		{
+			name: "single worker without replicas defaults to 1",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+				},
+			},
+			expected: 1,
+		},
+		{
+			name: "multiple workers",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"prefill": {
+					ComponentType: consts.ComponentTypePrefill,
+					Replicas:      ptr.To(int32(2)),
+				},
+				"decode": {
+					ComponentType: consts.ComponentTypeDecode,
+					Replicas:      ptr.To(int32(4)),
+				},
+			},
+			expected: 6,
+		},
+		{
+			name: "workers and frontend - only counts workers",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {
+					ComponentType: consts.ComponentTypeFrontend,
+					Replicas:      ptr.To(int32(2)),
+				},
+				"worker": {
+					ComponentType: consts.ComponentTypeWorker,
+					Replicas:      ptr.To(int32(3)),
+				},
+			},
+			expected: 3,
+		},
+		{
+			name:     "no workers",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{},
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", "default", tt.services)
+			r := createTestReconciler(dgd)
+
+			result := r.getDesiredWorkerReplicas(dgd)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }
 
 func TestGetWorkerServices(t *testing.T) {
