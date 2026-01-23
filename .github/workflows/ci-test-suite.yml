@@ -123,8 +123,6 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
@@ -188,15 +186,116 @@ jobs:
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+
+  # CUDA 13 builds (vllm and sglang only, both architectures)
+  build-cuda13-amd64:
+    name: Build ${{ matrix.framework }} CUDA13 (amd64)
+    runs-on: cpu-amd-m5-4xlarge
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
           azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
           azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build CUDA 13 Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/amd64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: '13.0'
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
+      - name: Tag and Push CUDA 13 Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-amd64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-amd64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+
+  build-cuda13-arm64:
+    name: Build ${{ matrix.framework }} CUDA13 (arm64)
+    runs-on: cpu-arm-r8g-4xlarge
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [vllm, sglang]
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to Container Registries
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Build CUDA 13 Runtime Image
+        id: build_runtime
+        uses: ./.github/actions/docker-build
+        with:
+          framework: ${{ matrix.framework }}
+          target: runtime
+          platform: linux/arm64
+          base_image_tag: ''
+          runtime_image_tag: ''
+          cuda_version: '13.0'
+          ci_token: ${{ secrets.CI_TOKEN }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
+      - name: Tag and Push CUDA 13 Runtime Images
+        uses: ./.github/actions/docker-tag-push
+        with:
+          local_image: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
+          push_tags: |
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64
+            ${{ env.REGISTRY_IMAGE }}:${{ env.IMAGE_PREFIX }}-${{ matrix.framework }}-cuda13-arm64-run-${{ github.run_id }}
+          aws_push: 'true'
+          azure_push: 'true'
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
 
 ############################## TEST JOBS ##############################
 
   unit-tests:
     name: ${{ matrix.framework }}-${{ matrix.arch.arch }}-unit
     needs: [build-amd64, build-arm64]
-    if: always()
+    if: always() && inputs.skip_tests != true
     runs-on: ${{ matrix.arch.runner }}
     timeout-minutes: 45
     strategy:
@@ -919,7 +1018,7 @@ jobs:
     name: Results Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-amd64, build-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
+    needs: [build-amd64, build-arm64, build-cuda13-amd64, build-cuda13-arm64, unit-tests, integration-tests, e2e-single-gpu-tests, e2e-multi-gpu-tests, fault-tolerance-tests]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

@@ -78,6 +78,7 @@ core:
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/gpu_memory_service/**'
   - '*.toml'
   - '*.lock'
   - '*.py'

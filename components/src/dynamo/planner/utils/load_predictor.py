@@ -17,11 +17,14 @@ import logging
 import math
 import warnings
 from abc import ABC, abstractmethod
+from argparse import Namespace
 from datetime import datetime, timedelta
 from enum import Enum
 
+import numpy as np
 import pandas as pd
 import pmdarima
+from filterpy.kalman import KalmanFilter
 from prophet import Prophet
 
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -34,6 +37,19 @@ warnings.filterwarnings(
     category=FutureWarning,
     message=".*force_all_finite.*",
 )
+
+# Silence very chatty Prophet/cmdstanpy logs (we keep planner logs at INFO).
+for _name in (
+    "prophet",
+    "prophet.forecaster",
+    "prophet.models",
+    "cmdstanpy",
+    "cmdstanpy.model",
+):
+    _l = logging.getLogger(_name)
+    _l.addHandler(logging.NullHandler())
+    _l.propagate = False
+    _l.setLevel(logging.WARNING)
 
 
 class BasePredictor(ABC):
@@ -83,7 +99,7 @@ class ConstantPredictor(BasePredictor):
     Assume load is constant and predict the next load to be the same as most recent load
     """
 
-    def __init__(self, **kwargs):
+    def __init__(self, _args: Namespace):
         super().__init__(minimum_data_points=1)
 
     def predict_next(self):
@@ -96,16 +112,19 @@ class ARIMAPredictor(BasePredictor):
         RAW = "raw"
         LOG1P = "log1p"
 
-    def __init__(self, window_size=100, minimum_data_points=5):
-        super().__init__(minimum_data_points=minimum_data_points)
-        self.window_size = window_size  # How many past points to use
+    def __init__(self, args: Namespace):
+        super().__init__(minimum_data_points=5)
         self.model = None
         # Keep raw values so we can fit in raw space first, then fallback to log1p space.
         self._raw_buffer: list[float] = []
         # Pending raw points to incrementally update the fitted model with.
         self._pending_raw_updates: list[float] = []
-        # Current modeling space
-        self._mode: ARIMAPredictor.Mode = ARIMAPredictor.Mode.RAW
+        # Shared log1p knob across predictors. Back-compat: `--arima-mode=log1p`.
+        use_log1p = bool(getattr(args, "load_predictor_log1p", False))
+        self._requested_mode = (
+            ARIMAPredictor.Mode.LOG1P if use_log1p else ARIMAPredictor.Mode.RAW
+        )
+        self._mode: ARIMAPredictor.Mode = self._requested_mode
 
     def get_last_value(self):
         """Return last value in original scale."""
@@ -123,14 +142,9 @@ class ARIMAPredictor(BasePredictor):
             raw = max(0.0, float(self.data_buffer[-1]))
             self._raw_buffer.append(raw)
             self._pending_raw_updates.append(raw)
-            # If we are in log1p mode, keep data_buffer in model space.
+            # Keep `data_buffer` in the model space.
             if self._mode == ARIMAPredictor.Mode.LOG1P:
                 self.data_buffer[-1] = math.log1p(raw)
-        # Keep only the last window_size points
-        if len(self.data_buffer) > self.window_size:
-            self.data_buffer = self.data_buffer[-self.window_size :]
-        if len(self._raw_buffer) > self.window_size:
-            self._raw_buffer = self._raw_buffer[-self.window_size :]
 
     def predict_next(self):
         """Predict the next value(s)"""
@@ -145,8 +159,11 @@ class ARIMAPredictor(BasePredictor):
         try:
             # Fit auto ARIMA model once, then only do incremental updates.
             if self.model is None:
-                # Always try raw space first
-                self._mode = ARIMAPredictor.Mode.RAW
+                # First fit: honor requested mode
+                self._mode = self._requested_mode
+                if self._mode == ARIMAPredictor.Mode.LOG1P:
+                    # Ensure model buffer is in log-space
+                    self.data_buffer = [math.log1p(v) for v in self._raw_buffer]
                 self.model = pmdarima.auto_arima(
                     self.data_buffer,
                     suppress_warnings=True,
@@ -163,11 +180,15 @@ class ARIMAPredictor(BasePredictor):
                     f"ARIMA selected order={order} seasonal_order={seasonal_order} aic={aic}"
                 )
 
-                # If raw collapses to (0,d,0), fallback to log1p(y)
+                # If user requested raw and it collapses to (0,d,0), fallback to log1p(y)
                 try:
                     if order is not None and len(order) == 3:
                         p, _, q = order
-                        if p == 0 and q == 0:
+                        if (
+                            p == 0
+                            and q == 0
+                            and self._requested_mode == ARIMAPredictor.Mode.RAW
+                        ):
                             # Build log buffer/model in locals and only swap on success
                             log_buffer = [math.log1p(v) for v in self._raw_buffer]
                             log_model = pmdarima.auto_arima(
@@ -227,11 +248,18 @@ class ARIMAPredictor(BasePredictor):
 
 # Time-series forecasting model from Meta
 class ProphetPredictor(BasePredictor):
-    def __init__(self, window_size=100, step_size=3600, minimum_data_points=5):
-        super().__init__(minimum_data_points=minimum_data_points)
-        self.window_size = window_size
+    def __init__(self, args: Namespace):
+        super().__init__(minimum_data_points=5)
+        self._use_log1p = bool(getattr(args, "load_predictor_log1p", False))
+        # Window size is only used by Prophet (to bound refit cost).
+        self.window_size = getattr(
+            args,
+            "prophet_window_size",
+            getattr(args, "load_prediction_window_size", 50),
+        )
         self.curr_step = 0
-        self.step_size = step_size
+        # Use adjustment_interval as step size (seconds per observation)
+        self.step_size = getattr(args, "adjustment_interval", 3600)
         self.start_date = datetime(2024, 1, 1)  # Base date for generating timestamps
         self.data_buffer = []  # Override to store dicts instead of values
         self._seen_nonzero_since_idle_reset = False
@@ -239,7 +267,7 @@ class ProphetPredictor(BasePredictor):
     def add_data_point(self, value):
         """Add new data point to the buffer"""
         # Use proper datetime for Prophet
-        timestamp = self.start_date + timedelta(seconds=self.curr_step)
+        timestamp = self.start_date + timedelta(seconds=self.curr_step * self.step_size)
         value = 0 if math.isnan(value) else value
 
         if value == 0 and not self._seen_nonzero_since_idle_reset:
@@ -249,6 +277,8 @@ class ProphetPredictor(BasePredictor):
         if value != 0:
             self._seen_nonzero_since_idle_reset = True
 
+        if self._use_log1p:
+            value = math.log1p(max(0.0, value))
         self.data_buffer.append({"ds": timestamp, "y": value})
         self.curr_step += 1
 
@@ -260,7 +290,8 @@ class ProphetPredictor(BasePredictor):
         """Get the last value from the buffer"""
         if not self.data_buffer:
             return 0
-        return self.data_buffer[-1]["y"]
+        y = float(self.data_buffer[-1]["y"])
+        return max(0.0, math.expm1(y)) if self._use_log1p else y
 
     def predict_next(self):
         """Predict the next value"""
@@ -282,11 +313,93 @@ class ProphetPredictor(BasePredictor):
 
         # Make prediction
         forecast = model.predict(future_df)
-        return forecast["yhat"].iloc[0]
+        yhat = float(forecast["yhat"].iloc[0])
+        return max(0.0, math.expm1(yhat)) if self._use_log1p else yhat
+
+
+class KalmanPredictor(BasePredictor):
+    """
+    Simple 1D Kalman predictor for online "observe 1 -> predict 1".
+
+    Uses a local linear trend model:
+      x_t = x_{t-1} + v_{t-1} + w
+      v_t = v_{t-1} + u
+
+    This tends to be a better match than ARIMA for low-latency smoothing + short-horizon
+    forecasting in bursty systems.
+    """
+
+    def __init__(self, args: Namespace):
+        super().__init__(minimum_data_points=getattr(args, "kalman_min_points", 5))
+        # Shared log1p knob across predictors. Back-compat: `--kalman-log1p`.
+        self._use_log1p = bool(getattr(args, "load_predictor_log1p", False)) or bool(
+            getattr(args, "kalman_log1p", False)
+        )
+        q_level = getattr(args, "kalman_q_level", 1.0)
+        q_trend = getattr(args, "kalman_q_trend", 0.1)
+        r = getattr(args, "kalman_r", 10.0)
+        self._kf = KalmanFilter(dim_x=2, dim_z=1)
+        # State: [level, trend]
+        self._kf.x = np.array([[0.0], [0.0]], dtype=float)
+        self._kf.F = np.array([[1.0, 1.0], [0.0, 1.0]], dtype=float)
+        self._kf.H = np.array([[1.0, 0.0]], dtype=float)
+        self._kf.P *= 1000.0
+        self._kf.R = np.array([[max(1e-9, float(r))]], dtype=float)
+        self._kf.Q = np.array(
+            [
+                [max(1e-12, float(q_level)), 0.0],
+                [0.0, max(1e-12, float(q_trend))],
+            ],
+            dtype=float,
+        )
+        self._initialized = False
+        # Gate repeated predict_next() calls: cache the one-step forecast so we
+        # don't advance the filter multiple times per interval.
+        self._has_cached_pred = False
+        self._cached_pred: float = 0.0
+
+    def add_data_point(self, value):
+        prev_len = len(self.data_buffer)
+        super().add_data_point(value)
+        if len(self.data_buffer) == prev_len:
+            return
+        z_raw = float(self.data_buffer[-1])
+        z = math.log1p(max(0.0, z_raw)) if self._use_log1p else z_raw
+        # immediately update the filter with new data point
+        if not self._initialized:
+            self._kf.x = np.array([[z], [0.0]], dtype=float)
+            self._initialized = True
+        else:
+            # If we already predicted this step, don't predict again.
+            if not self._has_cached_pred:
+                self._kf.predict()
+            self._kf.update(np.array([[z]], dtype=float))
+        # Consumed this step; clear cached forecast for next interval.
+        self._has_cached_pred = False
+
+    def predict_next(self):
+        if not self._initialized:
+            return self.get_last_value()
+        if self._has_cached_pred:
+            return (
+                max(0.0, math.expm1(self._cached_pred))
+                if self._use_log1p
+                else self._cached_pred
+            )
+        # one-step ahead prediction: predict then return predicted level
+        self._kf.predict()
+        self._cached_pred = float(self._kf.x[0][0])
+        self._has_cached_pred = True
+        return (
+            max(0.0, math.expm1(self._cached_pred))
+            if self._use_log1p
+            else self._cached_pred
+        )
 
 
 LOAD_PREDICTORS = {
     "constant": ConstantPredictor,
     "arima": ARIMAPredictor,
+    "kalman": KalmanPredictor,
     "prophet": ProphetPredictor,
 }
