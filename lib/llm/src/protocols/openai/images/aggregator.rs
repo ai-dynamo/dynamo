@@ -14,6 +14,13 @@ pub struct DeltaAggregator {
     error: Option<String>,
 }
 
+impl Default for DeltaAggregator {
+    /// Provides a default implementation for `DeltaAggregator` by calling [`DeltaAggregator::new`].
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DeltaAggregator {
     pub fn new() -> Self {
         DeltaAggregator {
