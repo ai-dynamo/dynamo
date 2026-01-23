@@ -76,18 +76,18 @@ In the cache.yaml in the different [recipes](https://github.com/ai-dynamo/dynamo
 ```bash
 kubectl get storageclass
 
-NAME                           PROVISIONER                 RECLAIMPOLICY   
-azureblob-csi                  blob.csi.azure.com          Delete         
-azurefile                      file.csi.azure.com          Delete                                           
-azurefile-csi                  file.csi.azure.com          Delete                                           
-azurefile-csi-premium          file.csi.azure.com          Delete                                           
-azurefile-premium              file.csi.azure.com          Delete                                           
-default                        disk.csi.azure.com          Delete                                
-managed                        disk.csi.azure.com          Delete                                
-managed-csi                    disk.csi.azure.com          Delete                                
-managed-csi-premium            disk.csi.azure.com          Delete                                
-managed-premium                disk.csi.azure.com          Delete                                
-sc.azurelustre.csi.azure.com   azurelustre.csi.azure.com   Retain  
+NAME                           PROVISIONER                 RECLAIMPOLICY
+azureblob-csi                  blob.csi.azure.com          Delete
+azurefile                      file.csi.azure.com          Delete
+azurefile-csi                  file.csi.azure.com          Delete
+azurefile-csi-premium          file.csi.azure.com          Delete
+azurefile-premium              file.csi.azure.com          Delete
+default                        disk.csi.azure.com          Delete
+managed                        disk.csi.azure.com          Delete
+managed-csi                    disk.csi.azure.com          Delete
+managed-csi-premium            disk.csi.azure.com          Delete
+managed-premium                disk.csi.azure.com          Delete
+sc.azurelustre.csi.azure.com   azurelustre.csi.azure.com   Retain
 
 ```
 The recommendation for storage options for the Dynamo caches are:
