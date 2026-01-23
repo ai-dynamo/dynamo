@@ -141,10 +141,7 @@ impl WorkerAddress {
     /// # Errors
     ///
     /// Returns an error if the internal bytes cannot be decoded as a valid MessagePack map.
-    pub fn get_entry(
-        &self,
-        key: impl AsRef<str>,
-    ) -> Result<Option<Bytes>, WorkerAddressError> {
+    pub fn get_entry(&self, key: impl AsRef<str>) -> Result<Option<Bytes>, WorkerAddressError> {
         let map = decode_to_map(self.as_bytes())?;
         Ok(map.get(key.as_ref()).cloned())
     }
@@ -335,10 +332,8 @@ mod tests {
 
     #[test]
     fn test_get_entry() {
-        let address = make_test_address(&[
-            ("endpoint", b"tcp://127.0.0.1:5555"),
-            ("protocol", b"tcp"),
-        ]);
+        let address =
+            make_test_address(&[("endpoint", b"tcp://127.0.0.1:5555"), ("protocol", b"tcp")]);
 
         // Get existing entry
         assert_eq!(

@@ -67,6 +67,7 @@ notify = { version = "8", optional = true }
 [dev-dependencies]
 tokio = { version = "1.43", features = ["full", "test-util"] }
 clap = { version = "4", features = ["derive"] }
+rmp-serde = "1.1"
 tempfile = "3"
 testcontainers = "0.25"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

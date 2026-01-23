@@ -195,6 +195,7 @@ impl TcpListener {
             warn!("Failed to set TCP_NODELAY on {}: {}", peer_addr, e);
         }
 
+        #[allow(deprecated)] // Intentional: linger ensures clean socket shutdown
         if let Err(e) = stream.set_linger(Some(Duration::from_secs(1))) {
             warn!("Failed to set linger on {}: {}", peer_addr, e);
         }

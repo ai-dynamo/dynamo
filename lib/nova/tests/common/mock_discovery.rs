@@ -148,14 +148,14 @@ impl PeerDiscovery for MockDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn create_test_address() -> WorkerAddress {
-        // Create a simple test address using the builder
-        let mut builder = WorkerAddress::builder();
-        builder
-            .add_entry("tcp", bytes::Bytes::from_static(b"tcp://127.0.0.1:12345"))
-            .unwrap();
-        builder.build().unwrap()
+        // Create a simple test address using MessagePack encoding
+        let mut map: HashMap<String, Vec<u8>> = HashMap::new();
+        map.insert("tcp".to_string(), b"tcp://127.0.0.1:12345".to_vec());
+        let encoded = rmp_serde::to_vec(&map).unwrap();
+        WorkerAddress::from_encoded(encoded)
     }
 
     #[tokio::test]

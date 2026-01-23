@@ -545,15 +545,11 @@ impl PeerDiscovery for FilesystemPeerDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
+    use crate::test_fixtures::{make_test_address, make_test_address_with_endpoint};
 
     fn create_test_peer_info() -> (InstanceId, WorkerAddress) {
         let instance_id = InstanceId::new_v4();
-        let mut builder = WorkerAddress::builder();
-        builder
-            .add_entry("endpoint", Bytes::from_static(b"test-address"))
-            .unwrap();
-        let worker_address = builder.build().unwrap();
+        let worker_address = make_test_address_with_endpoint(b"test-address");
         (instance_id, worker_address)
     }
 
@@ -642,17 +638,8 @@ mod tests {
         let instance_id = InstanceId::new_v4();
 
         // Create two different addresses
-        let mut builder1 = WorkerAddress::builder();
-        builder1
-            .add_entry("endpoint", Bytes::from_static(b"address1"))
-            .unwrap();
-        let address1 = builder1.build().unwrap();
-
-        let mut builder2 = WorkerAddress::builder();
-        builder2
-            .add_entry("endpoint", Bytes::from_static(b"address2"))
-            .unwrap();
-        let address2 = builder2.build().unwrap();
+        let address1 = make_test_address_with_endpoint(b"address1");
+        let address2 = make_test_address_with_endpoint(b"address2");
 
         // Register first time - should succeed
         discovery

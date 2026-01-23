@@ -4,21 +4,30 @@
 //! Test fixtures and helpers for discovery tests.
 //!
 //! This module provides common test utilities for constructing WorkerAddress
-//! instances using the builder pattern.
+//! instances for testing purposes.
 
-use bytes::Bytes;
+use std::collections::HashMap;
 
 use crate::peer::WorkerAddress;
+
+/// Create a WorkerAddress from a map of entries.
+///
+/// This encodes the entries using MessagePack format, matching the format
+/// used by nova-backend's WorkerAddressBuilder.
+fn make_address_from_entries(entries: &[(&str, &[u8])]) -> WorkerAddress {
+    let map: HashMap<String, Vec<u8>> = entries
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_vec()))
+        .collect();
+    let encoded = rmp_serde::to_vec(&map).expect("Failed to encode test address");
+    WorkerAddress::from_encoded(encoded)
+}
 
 /// Create a simple test address with a default TCP endpoint.
 ///
 /// This is the most common test address used throughout the discovery tests.
 pub fn make_test_address() -> WorkerAddress {
-    let mut builder = WorkerAddress::builder();
-    builder
-        .add_entry("endpoint", Bytes::from_static(b"tcp://127.0.0.1:5555"))
-        .unwrap();
-    builder.build().unwrap()
+    make_address_from_entries(&[("endpoint", b"tcp://127.0.0.1:5555")])
 }
 
 /// Create a test address with a custom endpoint.
@@ -31,11 +40,7 @@ pub fn make_test_address() -> WorkerAddress {
 /// let address = make_test_address_with_endpoint(b"tcp://127.0.0.1:8080");
 /// ```
 pub fn make_test_address_with_endpoint(endpoint: &[u8]) -> WorkerAddress {
-    let mut builder = WorkerAddress::builder();
-    builder
-        .add_entry("endpoint", Bytes::copy_from_slice(endpoint))
-        .unwrap();
-    builder.build().unwrap()
+    make_address_from_entries(&[("endpoint", endpoint)])
 }
 
 /// Create a test address with a custom port.
@@ -58,7 +63,7 @@ pub fn make_test_address_with_port(port: u16) -> WorkerAddress {
 
 /// Create a test address with multiple transports.
 ///
-/// This demonstrates the multi-transport capabilities of the new WorkerAddress.
+/// This demonstrates the multi-transport capabilities of WorkerAddress.
 ///
 /// # Example
 /// ```ignore
@@ -69,12 +74,8 @@ pub fn make_test_address_with_port(port: u16) -> WorkerAddress {
 /// ```
 #[allow(dead_code)]
 pub fn make_multiaddr_test_address() -> WorkerAddress {
-    let mut builder = WorkerAddress::builder();
-    builder
-        .add_entry("tcp", Bytes::from_static(b"tcp://127.0.0.1:5555"))
-        .unwrap();
-    builder
-        .add_entry("rdma", Bytes::from_static(b"rdma://10.0.0.1:6666"))
-        .unwrap();
-    builder.build().unwrap()
+    make_address_from_entries(&[
+        ("tcp", b"tcp://127.0.0.1:5555"),
+        ("rdma", b"rdma://10.0.0.1:6666"),
+    ])
 }
