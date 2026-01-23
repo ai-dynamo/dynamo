@@ -14,6 +14,8 @@
 # limitations under the License.
 
 {{- if .Values.httpRoute.enabled }}
+{{- /* Default gatewayNamespace to the release namespace if not specified */ -}}
+{{- $gatewayNs := default .Release.Namespace .Values.httpRoute.gatewayNamespace }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -24,9 +26,10 @@ spec:
   - group: gateway.networking.k8s.io
     kind: Gateway
     name: {{ .Values.httpRoute.gatewayName }}
+    namespace: {{ $gatewayNs }}
   rules:
   - backendRefs:
-    - group: inference.networking.x-k8s.io
+    - group: inference.networking.k8s.io
       kind: InferencePool
       name: {{ .Values.model.shortName }}-pool
       namespace: {{ .Release.Namespace }}

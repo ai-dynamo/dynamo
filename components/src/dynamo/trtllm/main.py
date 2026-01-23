@@ -352,7 +352,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.dump_config_to, {"engine_args": engine_args, "dynamo_args": config}
     )
 
-    async with get_llm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args, config.disaggregation_mode) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         # should ideally call get_engine_runtime_config
