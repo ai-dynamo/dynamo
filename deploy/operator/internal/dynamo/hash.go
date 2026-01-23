@@ -63,7 +63,7 @@ func ComputeWorkerSpecHash(dgd *v1alpha1.DynamoGraphDeployment) string {
 	// Collect worker specs in sorted order for deterministic hashing
 	var workerNames []string
 	for name, spec := range dgd.Spec.Services {
-		if spec != nil && isWorkerComponent(spec.ComponentType) {
+		if spec != nil && IsWorkerComponent(spec.ComponentType) {
 			workerNames = append(workerNames, name)
 		}
 	}
@@ -128,5 +128,12 @@ func sortEnvVars(envs []corev1.EnvVar) []corev1.EnvVar {
 // Frontend-only changes keep the same namespace, allowing in-place updates.
 func ComputeHashedDynamoNamespace(dgd *v1alpha1.DynamoGraphDeployment) string {
 	workerSpecHash := ComputeWorkerSpecHash(dgd)
-	return dgd.Namespace + "-" + dgd.Name + "-" + workerSpecHash
+	return ComputeHashedDynamoNamespaceWithHash(dgd, workerSpecHash)
+}
+
+// ComputeHashedDynamoNamespaceWithHash returns the Dynamo namespace for a specific hash.
+// This is useful during rolling updates when we need to compute the old namespace
+// from the stored active worker hash.
+func ComputeHashedDynamoNamespaceWithHash(dgd *v1alpha1.DynamoGraphDeployment, hash string) string {
+	return dgd.Namespace + "-" + dgd.Name + "-" + hash
 }

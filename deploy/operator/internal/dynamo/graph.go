@@ -810,8 +810,8 @@ func MultinodeDeployerFactory(multinodeDeploymentType commonconsts.MultinodeDepl
 	}
 }
 
-// isWorkerComponent checks if a component is a worker that needs backend framework detection
-func isWorkerComponent(componentType string) bool {
+// IsWorkerComponent checks if a component is a worker that needs backend framework detection
+func IsWorkerComponent(componentType string) bool {
 	return componentType == commonconsts.ComponentTypeWorker ||
 		componentType == commonconsts.ComponentTypePrefill ||
 		componentType == commonconsts.ComponentTypeDecode
@@ -1341,7 +1341,7 @@ func determineBackendFramework(
 	explicitBackendFramework string,
 ) (BackendFramework, error) {
 	// Check if this is a worker component - if not, use noop backend
-	if !isWorkerComponent(componentType) {
+	if !IsWorkerComponent(componentType) {
 		return BackendFrameworkNoop, nil
 	}
 
