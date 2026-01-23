@@ -129,16 +129,6 @@ class Namespace:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
-
 class Component:
     """
     A component is a collection of endpoints
@@ -152,15 +142,6 @@ class Component:
         """
         ...
 
-    @property
-    def metrics(self) -> PyRuntimeMetrics:
-        """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
-
-        Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
-        """
-        ...
 
 class Endpoint:
     """
@@ -198,10 +179,10 @@ class Endpoint:
     @property
     def metrics(self) -> PyRuntimeMetrics:
         """
-        Get a PyRuntimeMetrics helper for creating Prometheus metrics.
+        Get a PyRuntimeMetrics helper for registering Prometheus metrics callbacks.
 
         Returns:
-            A PyRuntimeMetrics object that provides create_* methods for different metric types
+            A PyRuntimeMetrics object for callback registration
         """
         ...
 
