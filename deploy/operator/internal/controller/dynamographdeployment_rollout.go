@@ -707,8 +707,10 @@ func (r *DynamoGraphDeploymentReconciler) buildProxyConfig(
 		}
 	} else {
 		// Normal operation - single backend at 100%
+		// Include hash suffix since DCD names now always include the worker hash
+		currentHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
 		oldBackend = &dynamo.BackendConfig{
-			ServiceName: frontendServiceName,
+			ServiceName: frontendServiceName + "-" + currentHash,
 			ServicePort: consts.DynamoServicePort,
 			Weight:      100,
 		}
