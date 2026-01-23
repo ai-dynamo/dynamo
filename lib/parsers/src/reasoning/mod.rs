@@ -27,6 +27,7 @@ fn get_reasoning_parser_map() -> &'static HashMap<&'static str, ReasoningParserT
         map.insert("step3", ReasoningParserType::Step3);
         map.insert("mistral", ReasoningParserType::Mistral);
         map.insert("granite", ReasoningParserType::Granite);
+        map.insert("longcat", ReasoningParserType::LongCat);
         map.insert("nemotron_nano", ReasoningParserType::NemotronDeci); // nemotron nano is <think>...</think>
         map
     })
@@ -92,6 +93,7 @@ pub enum ReasoningParserType {
     Kimi,
     Mistral,
     Granite,
+    LongCat,
 }
 
 #[derive(std::fmt::Debug)]
@@ -173,6 +175,14 @@ impl ReasoningParserType {
             ReasoningParserType::Granite => ReasoningParserWrapper {
                 parser: Box::new(GraniteReasoningParser::new()),
             },
+            ReasoningParserType::LongCat => ReasoningParserWrapper {
+                parser: Box::new(BasicReasoningParser::new(
+                    "<longcat_think>".into(),
+                    "</longcat_think>".into(),
+                    false,
+                    true,
+                )),
+            },
         }
     }
 
@@ -214,10 +224,54 @@ mod tests {
             "step3",
             "mistral",
             "granite",
+            "longcat",
             "nemotron_nano",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
         }
+    }
+
+    #[test]
+    fn test_longcat_reasoning_parser() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("longcat");
+
+        // Test with thinking content
+        let input =
+            "<longcat_think>Let me analyze this step by step...</longcat_think>The answer is 42.";
+        let result = parser.detect_and_parse_reasoning(input, &[]);
+
+        assert_eq!(result.reasoning_text, "Let me analyze this step by step...");
+        assert_eq!(result.normal_text, "The answer is 42.");
+    }
+
+    #[test]
+    fn test_longcat_reasoning_parser_no_thinking() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("longcat");
+
+        // Test without thinking content
+        let input = "This is a direct response without reasoning.";
+        let result = parser.detect_and_parse_reasoning(input, &[]);
+
+        assert_eq!(result.reasoning_text, "");
+        assert_eq!(
+            result.normal_text,
+            "This is a direct response without reasoning."
+        );
+    }
+
+    #[test]
+    fn test_longcat_reasoning_parser_only_thinking() {
+        let mut parser = ReasoningParserType::get_reasoning_parser_from_name("longcat");
+
+        // Test with only thinking content (no normal response yet)
+        let input = "<longcat_think>I'm still thinking about this problem...</longcat_think>";
+        let result = parser.detect_and_parse_reasoning(input, &[]);
+
+        assert_eq!(
+            result.reasoning_text,
+            "I'm still thinking about this problem..."
+        );
+        assert_eq!(result.normal_text, "");
     }
 }
