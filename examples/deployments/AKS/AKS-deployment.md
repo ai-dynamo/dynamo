@@ -61,13 +61,15 @@ Follow the [Deploy Model/Workflow](../../../docs/kubernetes/installation_guide.m
 ## AKS Storage options for Model Caching and Runtime Data
 
 For implementing tiered storage you can take advantage of the different storage options available in Azure such as:
-| Storage Option | Performance |	Best For |
-|----------------|-------------|-------------|
-|Local CSI (Ephemeral Disk)	| Very high | Fast model caching, warm restarts |
-|[Azure Managed Lustre](https://learn.microsoft.com/en-us/azure/azure-managed-lustre/use-csi-driver-kubernetes) |	Extremely high | Large multi-node models, shared cache |
-|[Azure Disk (Managed Disk)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-disk#create-azure-disk-pvs-using-built-in-storage-classes) | High |	Persistent single-writer model cache |
-|[Azure Files](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-files#use-a-persistent-volume-for-storage) |	Medium | Shared small/medium models |
-|[Azure Blob (via Fuse or init)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-blob#create-a-pvc-using-built-in-storage-class) | Low–Medium	| Cold model storage, bootstrap downloads |
+
+| Storage Option | Performance | Best For |
+|----------------|-------------|----------|
+| Local CSI (Ephemeral Disk) | Very high | Fast model caching, warm restarts |
+| [Azure Managed Lustre](https://learn.microsoft.com/en-us/azure/azure-managed-lustre/use-csi-driver-kubernetes) | Extremely high | Large multi-node models, shared cache |
+| [Azure Disk (Managed Disk)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-disk#create-azure-disk-pvs-using-built-in-storage-classes) | High | Persistent single-writer model cache |
+| [Azure Files](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-files#use-a-persistent-volume-for-storage) | Medium | Shared small/medium models |
+| [Azure Blob (via Fuse or init)](https://learn.microsoft.com/en-us/azure/aks/azure-csi-driver-volume-provisioning?tabs=dynamic-volume-blob%2Cnfs%2Ckubernetes-secret%2Cnfs-3%2Cgeneral%2Cgeneral2%2Cdynamic-volume-disk%2Cgeneral-disk%2Cdynamic-volume-files%2Cgeneral-files%2Cgeneral-files2%2Cdynamic-volume-files-mid%2Coptimize%2Csmb-share&pivots=csi-blob#create-a-pvc-using-built-in-storage-class) | Low–Medium | Cold model storage, bootstrap downloads |
+
 
 In the cache.yaml in the different [recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes), you can set the storageClassName to a predefined storage option that are available in your AKS cluster:
 
@@ -126,7 +128,7 @@ spec:
   resources:
     requests:
       storage: 50Gi
-  storageClassName: "managed-csi"
+  storageClassName: "azurefile-csi"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -138,7 +140,7 @@ spec:
   resources:
     requests:
       storage: 50Gi
-  storageClassName: "managed-csi-premium"
+  storageClassName: "local-ephemeral"
 ```
 ## Clean Up Resources
 
