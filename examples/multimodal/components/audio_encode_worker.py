@@ -17,7 +17,6 @@ import argparse
 import asyncio
 import logging
 import os
-import signal
 import sys
 from typing import AsyncIterator, Tuple
 
@@ -243,20 +242,8 @@ async def graceful_shutdown(runtime):
     logging.info("DistributedRuntime shutdown complete")
 
 
-@dynamo_worker()
+@dynamo_worker(register_shutdown=True)
 async def worker(runtime: DistributedRuntime):
-    # Runtime setup
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers set up for graceful shutdown")
-
     # worker setup
     args, config = VllmEncodeWorker.parse_args()
     await init(runtime, args, config)

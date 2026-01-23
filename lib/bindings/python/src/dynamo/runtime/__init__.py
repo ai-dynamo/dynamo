@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import signal
 from functools import wraps
 from typing import Any, AsyncGenerator, Callable, Type, Union
 
@@ -19,7 +20,26 @@ from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import Namespace as Namespace
 
 
-def dynamo_worker(enable_nats: bool = True):
+def _shutdown_handler(runtime):
+    print("Shutdown signal received, cancelling runtime...")
+    runtime.shutdown()
+    print("Runtime shutdown complete.")
+
+
+def _signal_handler(runtime):
+    asyncio.create_task(_shutdown_handler(runtime))
+
+
+def _register_shutdown_signals(runtime: DistributedRuntime):
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, lambda: _signal_handler(runtime))
+
+
+def dynamo_worker(
+    register_shutdown: bool = False,
+    enable_nats: bool = True
+) -> Callable:
     """
     Decorator that creates a DistributedRuntime and passes it to the worker function.
 
@@ -28,14 +48,15 @@ def dynamo_worker(enable_nats: bool = True):
                     If request_plane is "nats", NATS is always enabled.
                     Pass False (via --no-kv-events flag) to disable NATS initialization.
     """
-
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
             request_plane = os.environ.get("DYN_REQUEST_PLANE", "tcp")
             store_kv = os.environ.get("DYN_STORE_KV", "etcd")
-            runtime = DistributedRuntime(loop, store_kv, request_plane, enable_nats)
+            runtime = DistributedRuntime(loop, kv_store, request_plane, enable_nats)
+            if register_shutdown:
+                _register_shutdown_signals(runtime)
 
             await func(runtime, *args, **kwargs)
 
