@@ -1615,11 +1615,7 @@ async fn images(
     let response = NvImagesResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
-            tracing::error!(
-                "Failed to fold images stream for {}: {:?}",
-                request_id,
-                e
-            );
+            tracing::error!("Failed to fold images stream for {}: {:?}", request_id, e);
             ErrorMessage::internal_server_error("Failed to fold images stream")
         })?;
 
