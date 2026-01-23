@@ -101,20 +101,58 @@ def _create_load_model_patch(original_load_model):
 
 
 def _create_init_device_patch(original_init_device):
-    """Create the patched init_device function."""
+    """Create the patched init_device function.
+
+    The challenge is that:
+    1. We need CUDA device set before establishing GMS connection
+    2. We need GMS connection established before MemorySnapshot check
+    3. original_init_device does both: sets CUDA device, then checks memory
+
+    Solution: Replicate vLLM's device setup logic, establish GMS connection,
+    then call original init_device.
+    """
 
     def patched_init_device(self):
+        from vllm.platforms import current_platform
+
         from dynamo.vllm.gpu_memory_service_adapters.memory_ops import (
             establish_early_gms_connection,
         )
 
-        # Call original init_device FIRST to set up CUDA device
-        result = original_init_device(self)
+        # Step 1: Compute device index using vLLM's exact logic from init_device
+        # This replicates the DP adjustment logic for local_rank
+        local_rank = self.local_rank
+        if (
+            self.parallel_config.data_parallel_size > 1
+            and self.parallel_config.data_parallel_size_local > 0
+            and self.parallel_config.distributed_executor_backend
+            not in ["ray", "external_launcher"]
+            and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+            and self.vllm_config.parallel_config.nnodes_within_dp == 1
+        ):
+            dp_local_rank = self.parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = self.parallel_config.data_parallel_rank
+            tp_pp_world_size = (
+                self.parallel_config.pipeline_parallel_size
+                * self.parallel_config.tensor_parallel_size
+            )
+            local_rank += dp_local_rank * tp_pp_world_size
 
-        # THEN establish GMS connection (now CUDA device is properly set)
+        # Step 2: Set CUDA device using vLLM's platform abstraction
+        device = torch.device(f"cuda:{local_rank}")
+        current_platform.set_device(device)
+        logger.debug(
+            "[GMS Patch] Pre-set CUDA device %d before GMS connection", local_rank
+        )
+
+        # Step 3: Establish GMS connection (now CUDA device is set)
+        # This registers the manager so MemorySnapshot patch can query committed bytes
         establish_early_gms_connection()
 
-        return result
+        # Step 4: Call original init_device (will set device again, then check memory)
+        # The MemorySnapshot.measure patch will now correctly adjust free_memory
+        return original_init_device(self)
 
     return patched_init_device
 
