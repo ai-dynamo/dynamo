@@ -533,6 +533,33 @@ impl BlockMetadata for BasicMetadata {
         self.update_priority(priority)
     }
 }
+
+#[cfg(test)]
+mod basic_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_metadata_with_priority() {
+        let metadata = BasicMetadata::default();
+        let updated = metadata.with_priority(75);
+
+        assert_eq!(updated.offload_priority(), Some(75));
+    }
+
+    #[test]
+    fn test_basic_metadata_with_priority_preserves_ticks() {
+        let mut metadata = BasicMetadata::default();
+        metadata.on_acquired(100);
+        metadata.on_returned(200);
+
+        let updated = metadata.with_priority(50);
+
+        assert_eq!(updated.priority(), 50);
+        assert_eq!(updated.acquired_tick(), 100);
+        assert_eq!(updated.returned_tick(), 200);
+    }
+}
+
 /// Collection that holds shared storage and layout
 #[derive(Debug)]
 pub struct Blocks<L: BlockLayout, M: BlockMetadata> {
