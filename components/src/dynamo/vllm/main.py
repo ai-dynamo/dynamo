@@ -471,9 +471,7 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         return
 
     # Register prefill model with ModelType.Prefill
-    model_input = (
-        ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-    )
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
     await register_vllm_model(
         model_input,
         ModelType.Prefill,
@@ -600,13 +598,9 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # Parse endpoint types from --dyn-endpoint-types flag
     model_type = parse_endpoint_types(config.dyn_endpoint_types)
-    logger.info(
-        f"Registering model with endpoint types: {config.dyn_endpoint_types}"
-    )
+    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
 
-    model_input = (
-        ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-    )
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
 
     # Warn if custom template provided but chat endpoint not enabled
     if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
