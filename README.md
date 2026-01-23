@@ -152,7 +152,7 @@ python3 -m dynamo.frontend --http-port 8000 --store-kv file
 python3 -m dynamo.sglang --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --store-kv file
 ```
 
-> **Note:** vLLM workers enable prefix caching by default, which requires NATS. For dependency-free local development with vLLM, add `--no-enable-prefix-caching`. See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
+> **Note:** vLLM workers publish KV cache events by default, which requires NATS. For dependency-free local development with vLLM, add `--kv-events-config '{"enable_kv_cache_events": false}'`. This keeps local prefix caching enabled while disabling event publishing. See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
 
 #### Send a Request
 
@@ -229,10 +229,10 @@ Dynamo uses TCP for inter-component communication. External services are optiona
 | Deployment | etcd | NATS | Notes |
 |------------|------|------|-------|
 | **Kubernetes** | ❌ Not required | ❌ Not required | K8s-native discovery; TCP request plane |
-| **Local development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; vLLM also needs `--no-enable-prefix-caching` |
-| **KV-aware routing** | — | ✅ Required | Prefix caching enabled by default requires NATS |
+| **Local Development** | ❌ Not required | ❌ Not required | Pass `--store-kv file`; vLLM also needs `--kv-events-config '{"enable_kv_cache_events": false}'` |
+| **KV-Aware Routing** | — | ✅ Required | Prefix caching enabled by default requires NATS |
 
-For local development without external dependencies, pass `--store-kv file` (avoids etcd) to both the frontend and workers. vLLM users should also pass `--no-enable-prefix-caching` (avoids NATS); SGLang and TRT-LLM don't require this flag.
+For local development without external dependencies, pass `--store-kv file` (avoids etcd) to both the frontend and workers. vLLM users should also pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable KV event publishing (avoids NATS) while keeping local prefix caching enabled; SGLang and TRT-LLM don't require this flag.
 
 For distributed non-Kubernetes deployments or KV-aware routing:
 
