@@ -63,62 +63,6 @@ impl EventTransportKind {
         })
     }
 
-    /// Get the default codec for this transport kind.
-    /// NATS defaults to JSON, ZMQ defaults to MsgPack.
-    pub fn default_codec(&self) -> EventCodecKind {
-        match self {
-            Self::Nats => EventCodecKind::Json,
-            Self::Zmq => EventCodecKind::Msgpack,
-        }
-    }
-}
-
-/// Codec kind for event plane serialization.
-///
-/// This enum represents the serialization format for event envelopes and payloads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EventCodecKind {
-    /// JSON codec - human-readable, good for debugging
-    Json,
-    /// MessagePack codec - compact binary format
-    Msgpack,
-}
-
-impl EventCodecKind {
-    /// Parse from environment variable `DYN_EVENT_PLANE_CODEC`.
-    /// Returns None if not set, allowing transport to select default.
-    /// Returns error for invalid values.
-    pub fn from_env() -> Result<Option<Self>> {
-        match std::env::var(crate::config::environment_names::event_plane::DYN_EVENT_PLANE_CODEC)
-            .as_deref()
-        {
-            Err(_) => Ok(None), // Not set
-            Ok("") => Ok(None), // Empty
-            Ok("json") => Ok(Some(Self::Json)),
-            Ok("msgpack") => Ok(Some(Self::Msgpack)),
-            Ok(other) => anyhow::bail!(
-                "Invalid DYN_EVENT_PLANE_CODEC value '{}'. Valid values: 'json', 'msgpack'",
-                other
-            ),
-        }
-    }
-
-    /// Parse from environment variable with transport-specific default.
-    /// Logs a warning if an invalid value is encountered.
-    pub fn from_env_or_transport_default(transport: EventTransportKind) -> Self {
-        Self::from_env()
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    "{}, defaulting to {:?} for {:?}",
-                    e,
-                    transport.default_codec(),
-                    transport
-                );
-                None
-            })
-            .unwrap_or_else(|| transport.default_codec())
-    }
 }
 
 /// Transport configuration for event plane channels.
