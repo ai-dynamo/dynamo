@@ -130,6 +130,7 @@ impl MediaLoader {
                         mdc_decoder.with_runtime(media_io_kwargs.and_then(|k| k.image.as_ref()));
                     decoder.decode_async(data).await?
                 }
+                #[allow(unused_variables)]
                 ChatCompletionRequestUserMessageContentPart::VideoUrl(video_part) => {
                     #[cfg(not(feature = "media-ffmpeg"))]
                     anyhow::bail!(
