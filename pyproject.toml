@@ -190,6 +190,12 @@ filterwarnings = [
     "ignore:.*Benchmarks are automatically disabled.*:pytest_benchmark.logger.PytestBenchmarkWarning",
 
     ################################################################################################
+    # vLLM
+    ################################################################################################
+    # vLLM deprecation warning for AnyTokenizer moved to vllm.tokenizers.TokenizerLike (will be removed in v0.14)
+    "ignore:.*has been moved to.*vllm.tokenizers.TokenizerLike.*:DeprecationWarning",
+
+    ################################################################################################
     # TRT-LLM
     ################################################################################################
     # torchao sometimes emits SyntaxWarning from docstrings (e.g. invalid escape sequences) at import
