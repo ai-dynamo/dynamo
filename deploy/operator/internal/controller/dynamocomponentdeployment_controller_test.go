@@ -720,7 +720,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								ComponentType:    string(commonconsts.ComponentTypeWorker),
 								SubComponentType: "test-sub-component",
 								ServiceName:      "test-lws-deploy-service",
-								DynamoNamespace:  &[]string{"default"}[0],
+								DynamoNamespace:  &[]string{"default-test-lws-deploy"}[0],
 								Multinode: &v1alpha1.MultinodeSpec{
 									NodeCount: 2,
 								},
