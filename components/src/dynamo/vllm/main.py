@@ -119,6 +119,9 @@ async def worker():
     ):
         await init_multimodal_worker(runtime, config)
         logger.debug("init_multimodal_worker completed")
+    elif config.omni_worker:
+        await init_omni(runtime, config)
+        logger.debug("init_omni completed")
     elif config.is_prefill_worker:
         await init_prefill(runtime, config)
         logger.debug("init_prefill completed")
@@ -990,6 +993,45 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
         raise
     finally:
         handler.cleanup()
+
+
+async def init_omni(runtime: DistributedRuntime, config: Config):
+    """
+    Initialize Omni worker for multi-modal generation (text-to-image, text-to-audio, etc.).
+    Uses vLLM-Omni's AsyncOmni for aggregated mode with all pipeline stages co-located.
+    """
+    from dynamo.vllm.omni_handler import OmniHandler
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    # Initialize OmniHandler with AsyncOmni
+    handler = OmniHandler(config)
+
+    logger.info(f"Omni worker initialized for model: {config.model}")
+
+    # Register as chat endpoint (reusing existing infrastructure)
+    # Note: ModelInput.Text because we pass raw text, not token_ids
+    await register_llm(
+        ModelInput.Text,
+        ModelType.Chat,
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    logger.info("Starting to serve Omni worker endpoint...")
+
+    try:
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", config.served_model_name or config.model)],
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve Omni endpoint: {e}")
+        raise
 
 
 def main():
