@@ -1039,11 +1039,15 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 ) *dynamo.RolloutContext {
 	logger := log.FromContext(ctx)
 
-	// Compute namespaces
-	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
-	newNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, newWorkerHash)
-	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
-	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHash)
+	// Compute namespaces and hashes
+	newWorkerHashFull := dynamo.ComputeWorkerSpecHash(dgd)
+	newNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, newWorkerHashFull)
+	oldWorkerHashFull := r.getCurrentActiveWorkerHash(dgd)
+	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHashFull)
+
+	// Use first 8 chars of hash for DCD naming (short but unique enough)
+	newWorkerHash := newWorkerHashFull[:8]
+	oldWorkerHash := oldWorkerHashFull[:8]
 
 	// Pre-calculate old and new worker replicas based on new worker readiness
 	oldWorkerReplicas := make(map[string]int32)
@@ -1060,8 +1064,8 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 			desiredReplicas = *spec.Replicas
 		}
 
-		// Query new DCD to get ready replicas
-		newDCDName := dynamo.GetDynamoComponentName(dgd, serviceName) + "-new"
+		// Query new DCD to get ready replicas (using hash-based naming)
+		newDCDName := dynamo.GetDynamoComponentName(dgd, serviceName) + "-" + newWorkerHash
 		newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
 		err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD)
 
@@ -1099,6 +1103,8 @@ func (r *DynamoGraphDeploymentReconciler) buildRolloutContext(
 		InProgress:         true,
 		OldDynamoNamespace: oldNamespace,
 		NewDynamoNamespace: newNamespace,
+		OldWorkerHash:      oldWorkerHash,
+		NewWorkerHash:      newWorkerHash,
 		OldWorkerReplicas:  oldWorkerReplicas,
 		NewWorkerReplicas:  newWorkerReplicas,
 	}

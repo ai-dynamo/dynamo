@@ -258,6 +258,10 @@ type RolloutContext struct {
 	OldDynamoNamespace string
 	// NewDynamoNamespace is the dynamo namespace for the new (target) deployment
 	NewDynamoNamespace string
+	// OldWorkerHash is the short hash (8 chars) for the old worker spec, used for DCD naming
+	OldWorkerHash string
+	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
+	NewWorkerHash string
 	// OldWorkerReplicas maps service name to the desired replica count for old workers.
 	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
 	OldWorkerReplicas map[string]int32
@@ -297,10 +301,10 @@ func GenerateDynamoComponentsDeployments(
 			return nil, err
 		}
 
-		// During rolling update, suffix the DCD name to differentiate from old
+		// During rolling update, use hash-based suffix for stable naming
 		// and override replicas for worker components to gradually scale up
 		if rolloutCtx != nil && rolloutCtx.InProgress {
-			dcd.Name = dcd.Name + "-new"
+			dcd.Name = dcd.Name + "-" + rolloutCtx.NewWorkerHash
 
 			// Override replicas for worker components with pre-calculated new worker replicas
 			if IsWorkerComponent(component.ComponentType) {
@@ -313,11 +317,13 @@ func GenerateDynamoComponentsDeployments(
 		deployments[componentName] = dcd
 	}
 
-	// During rolling update, also generate DCDs for old namespace (workers only)
+	// During rolling update, also generate DCDs for old namespace
+	// This includes workers (with scaled replicas) and frontend (to maintain traffic routing)
 	if rolloutCtx != nil && rolloutCtx.InProgress {
 		for componentName, component := range parentDGD.Spec.Services {
-			// Only generate old DCDs for worker components
-			if !IsWorkerComponent(component.ComponentType) {
+			// Skip non-worker and non-frontend components for old namespace
+			// (e.g., planner, router don't need old versions)
+			if !IsWorkerComponent(component.ComponentType) && component.ComponentType != commonconsts.ComponentTypeFrontend {
 				continue
 			}
 
@@ -326,13 +332,15 @@ func GenerateDynamoComponentsDeployments(
 				return nil, err
 			}
 
-			// Override replicas with pre-calculated old worker replicas
-			if replicas, ok := rolloutCtx.OldWorkerReplicas[componentName]; ok {
-				dcd.Spec.Replicas = &replicas
+			// Override replicas with pre-calculated old worker replicas (only for workers)
+			if IsWorkerComponent(component.ComponentType) {
+				if replicas, ok := rolloutCtx.OldWorkerReplicas[componentName]; ok {
+					dcd.Spec.Replicas = &replicas
+				}
 			}
 
-			// Suffix the DCD name to differentiate from new
-			dcd.Name = dcd.Name + "-old"
+			// Use hash-based suffix for stable naming
+			dcd.Name = dcd.Name + "-" + rolloutCtx.OldWorkerHash
 
 			// Use a different key to avoid overwriting the new DCD
 			deployments[componentName+"-old"] = dcd
