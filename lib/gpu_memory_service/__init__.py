@@ -42,6 +42,4 @@ __all__ = [
     # GMS client memory manager
     "get_or_create_gms_client_memory_manager",
     "get_gms_client_memory_manager",
-    # CLI
-    "cli",
 ]
