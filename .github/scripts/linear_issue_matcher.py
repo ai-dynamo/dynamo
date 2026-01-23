@@ -934,28 +934,23 @@ def find_related_issues(
 
 
 def format_comment(pr: PRContext, matches: list[MatchResult]) -> str:
-    """Format the PR comment with matched issues and linking instructions."""
+    """Format the PR comment with matched issues and linking instructions.
+
+    Note: Only issue IDs are displayed as hyperlinks. Titles, descriptions, and
+    reasoning are intentionally omitted to avoid exposing internal information
+    in public GitHub comments.
+    """
     if not matches:
         return ""
 
-    # Build the table
-    rows = []
+    # Build the list of issue links (IDs only, no titles or descriptions)
+    issue_links = []
     for match in matches[:5]:
         conf_pct = f"{match.confidence:.0%}"
         issue_link = f"[{match.issue.identifier}]({match.issue.url})"
-        title = (
-            match.issue.title[:50] + "..."
-            if len(match.issue.title) > 50
-            else match.issue.title
-        )
-        reason = (
-            match.reasoning[:60] + "..."
-            if len(match.reasoning) > 60
-            else match.reasoning
-        )
-        rows.append(f"| {issue_link} | {title} | {conf_pct} | {reason} |")
+        issue_links.append(f"- {issue_link} ({conf_pct} confidence)")
 
-    table = "\n".join(rows)
+    issues_list = "\n".join(issue_links)
     top_issue = matches[0].issue.identifier
 
     comment = f"""<details>
@@ -963,9 +958,7 @@ def format_comment(pr: PRContext, matches: list[MatchResult]) -> str:
 
 ### Suggested Matches
 
-| Issue | Title | Confidence | Reason |
-|-------|-------|------------|--------|
-{table}
+{issues_list}
 
 ---
 
