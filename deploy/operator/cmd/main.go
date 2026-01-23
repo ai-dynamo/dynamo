@@ -150,6 +150,8 @@ func main() {
 	var operatorVersion string
 	var discoveryBackend string
 	var enableWebhooks bool
+	var trafficProxyImage string
+	var trafficProxyReplicas int
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -203,6 +205,10 @@ func main() {
 		"Version of the operator (used in lease holder identity)")
 	flag.StringVar(&discoveryBackend, "discovery-backend", "kubernetes",
 		"Discovery backend to use: 'kubernetes' (default, uses Kubernetes API) or 'etcd' (uses ETCD)")
+	flag.StringVar(&trafficProxyImage, "traffic-proxy-image", "",
+		"HAProxy image for traffic proxy used in rolling updates (e.g., haproxy:2.9-alpine)")
+	flag.IntVar(&trafficProxyReplicas, "traffic-proxy-replicas", 2,
+		"Number of traffic proxy replicas for rolling updates")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -271,6 +277,10 @@ func main() {
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
 		},
 		DiscoveryBackend: discoveryBackend,
+		TrafficProxy: commonController.TrafficProxyConfig{
+			Image:    trafficProxyImage,
+			Replicas: int32(trafficProxyReplicas),
+		},
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
