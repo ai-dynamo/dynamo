@@ -17,6 +17,7 @@ aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75
 av==15.0.0
 fastapi==0.120.1
+filterpy==1.4.5
 ftfy==6.3.1
 genai-perf==0.0.15
 grpcio-tools<=1.76.0  # May have platform-specific builds

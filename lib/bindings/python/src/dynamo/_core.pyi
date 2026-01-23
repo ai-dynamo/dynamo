@@ -205,6 +205,26 @@ class Endpoint:
         """
         ...
 
+    async def unregister_endpoint_instance(self) -> None:
+        """
+        Unregister this endpoint instance from discovery.
+
+        This removes the endpoint from the instances bucket, preventing the router
+        from sending requests to this worker. Use this when a worker is sleeping
+        and should not receive any requests.
+        """
+        ...
+
+    async def register_endpoint_instance(self) -> None:
+        """
+        Re-register this endpoint instance to discovery.
+
+        This adds the endpoint back to the instances bucket, allowing the router
+        to send requests to this worker again. Use this when a worker wakes up
+        and should start receiving requests.
+        """
+        ...
+
 
 class Client:
     """
@@ -466,16 +486,12 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_endpoint(self, component: Component, metrics_labels: Optional[List[Tuple[str, str]]] = None) -> None:
+    def create_endpoint(self, component: Component) -> None:
         """
         Only service created through this method will interact with KV router of the same component.
 
         Args:
             component: The component to create the endpoint for
-            metrics_labels: [DEPRECATED] This parameter is no longer used and will be removed in a future version
-
-        .. deprecated::
-            The metrics_labels parameter is deprecated and has no effect.
         """
 
     def publish(
@@ -516,33 +532,6 @@ class ModelRuntimeConfig:
 
     def get_engine_specific(self, key: str) -> Any | None:
         """Get an engine-specific runtime configuration value"""
-        ...
-
-class OAIChatPreprocessor:
-    """
-    A preprocessor for OpenAI chat completions
-    """
-
-    ...
-
-    async def start(self) -> None:
-        """
-        Start the preprocessor
-        """
-        ...
-
-class Backend:
-    """
-    LLM Backend engine manages resources and concurrency for executing inference
-    requests in LLM engines (trtllm, vllm, sglang etc)
-    """
-
-    ...
-
-    async def start(self, handler: RequestHandler) -> None:
-        """
-        Start the backend engine and requests to the downstream LLM engine
-        """
         ...
 
 class OverlapScores:
@@ -1106,6 +1095,7 @@ class KvRouterConfig:
         use_kv_events: bool = True,
         router_replica_sync: bool = False,
         router_track_active_blocks: bool = True,
+        router_track_output_blocks: bool = False,
         router_assume_kv_reuse: bool = True,
         router_snapshot_threshold: Optional[int] = 1000000,
         router_reset_states: bool = False,
@@ -1122,6 +1112,9 @@ class KvRouterConfig:
             use_kv_events: Whether to use KV events from workers (default: True)
             router_replica_sync: Enable replica synchronization (default: False)
             router_track_active_blocks: Track active blocks for load balancing (default: True)
+            router_track_output_blocks: Track output blocks during generation (default: False).
+                When enabled, the router adds placeholder blocks as tokens are generated
+                and applies fractional decay based on progress toward expected_output_tokens.
             router_assume_kv_reuse: Assume KV cache reuse when tracking active blocks (default: True).
                 When True, computes actual block hashes. When False, generates random hashes.
             router_snapshot_threshold: Number of messages before snapshot (default: 1000000)
@@ -1540,34 +1533,6 @@ class KvPushRouter:
         """
         ...
 
-    async def best_worker_id(
-        self,
-        token_ids: List[int],
-        router_config_override: Optional[JsonLike] = None,
-        request_id: Optional[str] = None,
-    ) -> Tuple[int, int]:
-        """
-        [DEPRECATED] Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks).
-
-        Find the best matching worker for the given tokens.
-
-        Args:
-            token_ids: List of token IDs to find matches for
-            router_config_override: Optional router configuration override
-            request_id: Optional request ID. If provided, router states will be updated
-                       to track this request (active blocks, lifecycle events). If not
-                       provided, this is a query-only operation that doesn't affect state.
-
-        Returns:
-            A tuple of (worker_id, overlap_blocks) where:
-                - worker_id: The ID of the best matching worker
-                - overlap_blocks: The number of overlapping blocks found
-
-        .. deprecated::
-            Use :meth:`best_worker` instead which also returns dp_rank.
-        """
-        ...
-
     async def get_potential_loads(
         self,
         token_ids: List[int],
@@ -1687,13 +1652,11 @@ class VirtualConnectorClient:
         ...
 
 __all__ = [
-    "Backend",
     "Client",
     "Component",
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",
-    "OAIChatPreprocessor",
     "PythonAsyncEngine",
     "prometheus_names",
 ]

@@ -99,7 +99,7 @@ impl KvScheduler {
         workers_with_configs: Arc<RuntimeConfigsWithNotify>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
-        router_uuid: String,
+        router_id: u64,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -116,7 +116,7 @@ impl KvScheduler {
             block_size as usize,
             initial_workers,
             replica_sync,
-            router_uuid,
+            router_id,
         ));
 
         // Spawn background task to sync slots with DashMap when notified of changes.
@@ -234,6 +234,7 @@ impl KvScheduler {
                                 request.token_seq,
                                 request.isl_tokens,
                                 selection.overlap_blocks,
+                                None, // expected_output_tokens not available in scheduler loop
                                 selection.worker,
                             )
                             .await
@@ -304,10 +305,18 @@ impl KvScheduler {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.slots
-            .add_request(request_id, token_sequence, isl, overlap, worker)
+            .add_request(
+                request_id,
+                token_sequence,
+                isl,
+                overlap,
+                expected_output_tokens,
+                worker,
+            )
             .await
     }
 
@@ -319,6 +328,16 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
+    }
+
+    pub async fn add_output_block(
+        &self,
+        request_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        self.slots
+            .add_output_block(&request_id.to_string(), decay_fraction)
+            .await
     }
 
     pub async fn get_potential_loads(

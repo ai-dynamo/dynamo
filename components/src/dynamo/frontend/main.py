@@ -212,6 +212,13 @@ def parse_args():
         help="KV Router: When tracking active blocks, do not assume KV cache reuse (generate random hashes instead of computing actual block hashes). Useful when KV cache reuse is not expected. By default, KV cache reuse is assumed.",
     )
     parser.add_argument(
+        "--track-output-blocks",
+        action="store_true",
+        dest="router_track_output_blocks",
+        default=False,
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens. By default, output blocks are not tracked.",
+    )
+    parser.add_argument(
         "--enforce-disagg",
         action="store_true",
         default=False,
@@ -354,6 +361,7 @@ async def async_main():
             use_kv_events=flags.use_kv_events,
             router_replica_sync=flags.router_replica_sync,
             router_track_active_blocks=flags.router_track_active_blocks,
+            router_track_output_blocks=flags.router_track_output_blocks,
             router_assume_kv_reuse=flags.router_assume_kv_reuse,
             router_snapshot_threshold=flags.router_snapshot_threshold,
             router_reset_states=flags.router_reset_states,

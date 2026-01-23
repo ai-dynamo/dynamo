@@ -34,7 +34,7 @@ from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
-    ProcessorHandler,
+    PreprocessedHandler,
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
@@ -447,6 +447,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register sleep/wake engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake", handler.wake)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         model_input = (
@@ -566,6 +571,11 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register sleep/wake engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake", handler.wake)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         # Parse endpoint types from --dyn-endpoint-types flag
         model_type = parse_endpoint_types(config.dyn_endpoint_types)
@@ -676,13 +686,17 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         .client()
     )
 
-    # Get prompt template from args (must be passed via environment or command line)
-    mm_prompt_template = config.mm_prompt_template
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
 
-    handler = ProcessorHandler(
+    handler = PreprocessedHandler(
         config.engine_args,
         encode_worker_client,
-        mm_prompt_template,
+        pd_worker_client,
     )
 
     logger.info("Waiting for Encoder Worker Instances ...")
@@ -690,7 +704,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,
         ModelType.Chat,
         generate_endpoint,
         config.model,
@@ -857,9 +871,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
     await encoder_client.wait_for_instances()
     await pd_client.wait_for_instances()
 
-    # Register the endpoint as entrypoint to a model (same as regular processor)
+    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
         config.model,

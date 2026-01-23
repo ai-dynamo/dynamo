@@ -232,6 +232,9 @@ pub async fn recover_from_worker(
         WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
             anyhow::bail!("Invalid range: end_id ({end_id}) < start_id ({start_id})");
         }
+        WorkerKvQueryResponse::Error(message) => {
+            anyhow::bail!("Worker {worker_id} query failed: {message}");
+        }
     };
 
     let events_count = events.len();
@@ -651,7 +654,7 @@ pub async fn start_kv_router_background(
 
                     let router_instance_id = id.instance_id();
 
-                    // The consumer UUID is the instance_id in hex format
+                    // The consumer ID is the instance_id as a string
                     let consumer_to_delete = router_instance_id.to_string();
 
                     tracing::info!(
