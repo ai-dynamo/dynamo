@@ -1132,54 +1132,14 @@ pub fn add_query_instance_id(
     set_kv_annotation(request, "query_instance_id".to_string(), "")
 }
 
-/// Prepare request for GAIE Stage 2 by setting `enable_local_updates: false`.
-///
-/// Worker IDs are passed via HTTP headers by the EPP (plugin.go), not in the request body.
-/// The EPP sets these headers based on the worker IDs returned from Stage 1:
-/// - `x-worker-instance-id`: decode worker ID (or aggregated worker ID)
-/// - `x-prefill-instance-id`: prefill worker ID (only for disaggregated mode)
-///
-/// The frontend's `apply_header_routing_overrides` function reads these headers
-/// and applies them to the routing configuration.
-///
-/// This function only sets `enable_local_updates: false` since the external caller (EPP/GAIE)
-/// handles bookkeeping via C FFI functions.
-pub fn set_worker_ids_for_stage2(
-    request: &mut NvCreateChatCompletionRequest,
-    _decode_worker_id: Option<i64>,
-    _prefill_worker_id: Option<i64>,
-) -> &mut NvCreateChatCompletionRequest {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-
-    // Disable local updates - external caller handles bookkeeping via C FFI
-    nvext.enable_local_updates = Some(false);
-
-    request
-}
-
-/// Set token_data directly on the NvExt field for GAIE Stage 2
-pub fn set_token_data_for_stage2<'a>(
-    request: &'a mut NvCreateChatCompletionRequest,
-    tokens: &[u32],
-) -> &'a mut NvCreateChatCompletionRequest {
-    let nvext = request.nvext.get_or_insert_with(|| {
-        NvExt::builder()
-            .build()
-            .expect("NvExt builder should not fail")
-    });
-
-    nvext.token_data = Some(tokens.to_vec());
-    tracing::debug!(
-        token_count = tokens.len(),
-        "GAIE Stage 2: Setting token_data"
-    );
-
-    request
-}
+// Note: set_worker_ids_for_stage2 and set_token_data_for_stage2 have been removed.
+// The EPP now handles routing configuration via HTTP headers:
+// - `x-worker-instance-id`: decode worker ID
+// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
+// - `x-enable-local-updates`: set to "false" to disable router bookkeeping
+//
+// Body modifications are NOT sent to the inference engine (only headers are forwarded),
+// so these functions were ineffective.
 
 /// Ensure `nvext` exists and return a mutable slice of annotations.
 fn ensure_annotations(request: &mut NvCreateChatCompletionRequest) -> &mut Vec<String> {
@@ -1205,34 +1165,34 @@ fn set_kv_annotation(
     request
 }
 
-/// Wrapper function that queries worker selection and prepares the request for GAIE Stage 2
+/// Wrapper function that queries worker selection for GAIE Stage 1
 ///
 /// This function performs the complete GAIE Stage 1 flow:
 /// 1. Clones the original request and adds "query_instance_id:" (empty) annotation
 /// 2. Calls engine.generate() with the modified request
 /// 3. Extracts worker_id info and tokens from the response stream
-/// 4. Prepares the request for Stage 2:
-///    - Sets `enable_local_updates: false` in nvext
-///    - Sets token_data in nvext
-/// 5. Returns WorkerSelectionResult and the modified request
+/// 4. Returns WorkerSelectionResult and the original request
 ///
-/// Note: Worker IDs for routing are returned in WorkerSelectionResult and should be
-/// set as HTTP headers by the caller (EPP). The EPP sets:
+/// Note: The EPP (caller) is responsible for setting HTTP headers for Stage 2:
 /// - `x-worker-instance-id`: decode worker ID
 /// - `x-prefill-instance-id`: prefill worker ID (disaggregated mode only)
+/// - `x-enable-local-updates`: "false" to disable router bookkeeping
+///
+/// Body modifications are NOT forwarded to the inference engine, so this function
+/// does not modify the request body.
 ///
 /// # Parameters
 /// - `engine`: The worker selection pipeline engine
 /// - `original_request`: The original OpenAI request to process
 ///
 /// # Returns
-/// A tuple containing (WorkerSelectionResult, modified_request)
+/// A tuple containing (WorkerSelectionResult, original_request)
 pub async fn query_worker_selection_and_annotate(
     engine: &ServiceEngine<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
     >,
-    mut original_request: NvCreateChatCompletionRequest,
+    original_request: NvCreateChatCompletionRequest,
 ) -> anyhow::Result<(WorkerSelectionResult, NvCreateChatCompletionRequest)> {
     // GAIE Stage 1: Query for worker selection
     let mut query_request = original_request.clone();
@@ -1241,16 +1201,9 @@ pub async fn query_worker_selection_and_annotate(
     let response_stream = engine.generate(single_in).await?;
     let result = extract_worker_selection_from_stream(response_stream).await?;
 
-    // Prepare request for GAIE Stage 2:
-    // - Set enable_local_updates: false (worker IDs are set via HTTP headers by EPP)
-    set_worker_ids_for_stage2(
-        &mut original_request,
-        result.decode_worker_id,
-        result.prefill_worker_id,
-    );
-    // do not send token_data into stage 2 till GIE proposes a solution.
-    // set_token_data_for_stage2(&mut original_request, &result.tokens);
-
+    // Return the original request unchanged.
+    // The EPP sets routing headers (worker IDs, enable_local_updates) which the
+    // Dynamo frontend reads via apply_header_routing_overrides().
     Ok((result, original_request))
 }
 
