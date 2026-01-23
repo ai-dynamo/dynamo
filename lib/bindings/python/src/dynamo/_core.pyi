@@ -464,19 +464,6 @@ class ModelRuntimeConfig:
         """Get an engine-specific runtime configuration value"""
         ...
 
-class OAIChatPreprocessor:
-    """
-    A preprocessor for OpenAI chat completions
-    """
-
-    ...
-
-    async def start(self) -> None:
-        """
-        Start the preprocessor
-        """
-        ...
-
 class OverlapScores:
     """
     A collection of prefix matching scores of workers for a given token ids.
@@ -1600,7 +1587,6 @@ __all__ = [
     "Context",
     "KserveGrpcService",
     "ModelDeploymentCard",
-    "OAIChatPreprocessor",
     "PythonAsyncEngine",
     "prometheus_names",
 ]

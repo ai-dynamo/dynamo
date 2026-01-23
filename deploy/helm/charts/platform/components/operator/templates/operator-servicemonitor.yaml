@@ -12,20 +12,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- if and .Values.metricsService.enabled (not .Values.namespaceRestriction.enabled) }}
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+{{- if and .Values.metricsService.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
 metadata:
-  name: {{ include "dynamo-operator.fullname" . }}-metrics-reader
+  name: {{ include "dynamo-operator.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/component: kube-rbac-proxy
-    app.kubernetes.io/created-by: dynamo-operator
-    app.kubernetes.io/part-of: dynamo-operator
-  {{- include "dynamo-operator.labels" . | nindent 4 }}
-rules:
-- nonResourceURLs:
-  - /metrics
-  verbs:
-  - get
+    release: prometheus
+    {{- include "dynamo-operator.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+      {{- include "dynamo-operator.selectorLabels" . | nindent 6 }}
+  endpoints:
+  - port: https
+    scheme: https
+    path: /metrics
+    interval: 15s
+    tlsConfig:
+      insecureSkipVerify: true
 {{- end }}

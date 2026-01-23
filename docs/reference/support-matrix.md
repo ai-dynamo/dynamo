@@ -56,7 +56,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | :----------------- | :---------- | :------------------------------------ | :----------- |
 | ai-dynamo          | 0.8.0       | >=2.28                                |              |
 | ai-dynamo-runtime  | 0.8.0       | >=2.28 (Python 3.12 has known issues) |              |
-| NIXL               | 0.8.0       | >=2.27                                | >=11.8       |
+| NIXL               | 0.9.0       | >=2.27                                | >=11.8       |
 
 ### Build Dependency
 
@@ -67,7 +67,7 @@ The following table shows the dependency versions included with each Dynamo rele
 | SGLang         | 0.5.7          | 0.5.6.post2 | 0.5.3.post4| 0.5.3.post4      | 0.5.3.post4|
 | TensorRT-LLM   | 1.2.0rc6.post1 | 1.2.0rc6.post1 | 1.2.0rc3   | 1.2.0rc3         | 1.2.0rc2   |
 | vLLM           | 0.13.0         | 0.12.0     | 0.11.0     | 0.11.0           | 0.11.0     |
-| NIXL           | 0.8.0          | 0.8.0      | 0.8.0      | 0.8.0            | 0.8.0      |
+| NIXL           | 0.9.0          | 0.8.0      | 0.8.0      | 0.8.0            | 0.8.0      |
 
 > [!Note]
 > **main (ToT)** reflects the current development branch.
@@ -123,4 +123,4 @@ The following table shows the dependency versions included with each Dynamo rele
   - [dynamo-parsers](https://crates.io/crates/dynamo-parsers/)
   - [dynamo-llm](https://crates.io/crates/dynamo-llm/)
 
-Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the instructions in the [Quick Start Guide](https://github.com/ai-dynamo/dynamo/blob/main/README.md#installation).
+Once you've confirmed that your platform and architecture are compatible, you can install **Dynamo** by following the [Local Quick Start](https://github.com/ai-dynamo/dynamo/blob/main/README.md#local-quick-start) in the README.

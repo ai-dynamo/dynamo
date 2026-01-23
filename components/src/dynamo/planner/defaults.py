@@ -63,12 +63,21 @@ class SLAPlannerDefaults(BasePlannerDefaults):
         "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090",
     )
     profile_results_dir = "profiling_results"
+
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens
     ttft = 500.0  # in milliseconds
     itl = 50.0  # in milliseconds
-    load_predictor = "arima"  # ["constant", "arima", "prophet"]
-    load_prediction_window_size = 50  # predict load using how many recent load samples
+
+    # for load predictor
+    load_predictor = "arima"  # ["constant", "arima", "kalman", "prophet"]
+    prophet_window_size = 50
+    load_predictor_log1p = False
+    kalman_q_level = 1.0
+    kalman_q_trend = 0.1
+    kalman_r = 10.0
+    kalman_min_points = 5
+
     no_correction = False  # disable correction factor, might be useful under some conditions like long cold start time
 
 
