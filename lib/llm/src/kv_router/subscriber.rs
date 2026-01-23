@@ -232,6 +232,9 @@ pub async fn recover_from_worker(
         WorkerKvQueryResponse::InvalidRange { start_id, end_id } => {
             anyhow::bail!("Invalid range: end_id ({end_id}) < start_id ({start_id})");
         }
+        WorkerKvQueryResponse::Error(message) => {
+            anyhow::bail!("Worker {worker_id} query failed: {message}");
+        }
     };
 
     let events_count = events.len();
@@ -564,9 +567,11 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let DiscoveryEvent::Removed(worker_id) = discovery_event else {
+                    let DiscoveryEvent::Removed(id) = discovery_event else {
                         continue;
                     };
+
+                    let worker_id = id.instance_id();
 
                     tracing::warn!(
                         "DISCOVERY: Generate endpoint instance removed, removing worker {worker_id}"
@@ -642,12 +647,14 @@ pub async fn start_kv_router_background(
                         continue;
                     };
 
-                    let DiscoveryEvent::Removed(router_instance_id) = router_event else {
+                    let DiscoveryEvent::Removed(id) = router_event else {
                         // We only care about removals for cleaning up consumers
                         continue;
                     };
 
-                    // The consumer UUID is the instance_id in hex format
+                    let router_instance_id = id.instance_id();
+
+                    // The consumer ID is the instance_id as a string
                     let consumer_to_delete = router_instance_id.to_string();
 
                     tracing::info!(
@@ -708,7 +715,8 @@ async fn handle_worker_discovery(
                 }
             }
         }
-        DiscoveryEvent::Removed(worker_id) => {
+        DiscoveryEvent::Removed(id) => {
+            let worker_id = id.instance_id();
             tracing::warn!("DISCOVERY: Worker {worker_id} removed, removing from router indexer");
 
             if let Err(e) = remove_worker_tx.send(worker_id).await {

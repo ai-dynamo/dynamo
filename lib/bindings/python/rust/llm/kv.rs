@@ -11,10 +11,6 @@ use tokio_stream::StreamExt;
 use super::*;
 use crate::Component;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
-use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
-use llm_rs::kv_router::protocols::KvStats as RsKvStats;
-use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
-use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
 use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::traits::events::EventSubscriber;
@@ -75,34 +71,15 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component, metrics_labels = None))]
-    #[allow(unused_variables)]
+    #[pyo3(signature = (component))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        metrics_labels: Option<Vec<(String, String)>>, // TODO: fully remove this
     ) -> PyResult<Bound<'p, PyAny>> {
-        // Emit deprecation warning if metrics_labels is provided
-        if metrics_labels.is_some() {
-            let warnings = py.import("warnings")?;
-            warnings.call_method1(
-                "warn",
-                (
-                    "The 'metrics_labels' parameter is deprecated and no longer used. It will be removed in a future version.",
-                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
-                ),
-            )?;
-        }
-
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Register Prometheus metrics first
-            rs_publisher
-                .register_prometheus_metrics(&rs_component)
-                .map_err(to_pyerr)?;
-
             rs_publisher
                 .create_endpoint(rs_component)
                 .await
@@ -111,11 +88,15 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (metrics))]
-    fn publish(&self, _py: Python, metrics: &ForwardPassMetrics) -> PyResult<()> {
-        // Create and publish the complete metrics
+    /// Publish worker metrics for load monitoring.
+    ///
+    /// # Arguments
+    /// * `dp_rank` - Data parallel rank of the worker (None defaults to 0)
+    /// * `active_decode_blocks` - Number of active KV cache blocks
+    #[pyo3(signature = (dp_rank, active_decode_blocks))]
+    fn publish(&self, dp_rank: Option<u32>, active_decode_blocks: u64) -> PyResult<()> {
         self.inner
-            .publish(metrics.0.clone().into())
+            .publish(dp_rank, active_decode_blocks)
             .map_err(to_pyerr)
     }
 }
@@ -983,98 +964,6 @@ impl KvRecorder {
     }
 }
 
-#[pyclass]
-#[repr(transparent)]
-pub struct ForwardPassMetrics(pub RsForwardPassMetrics);
-
-#[pyclass]
-#[repr(transparent)]
-pub struct WorkerStats(pub RsWorkerStats);
-
-#[pyclass]
-#[repr(transparent)]
-pub struct KvStats(pub RsKvStats);
-
-#[pyclass]
-#[repr(transparent)]
-pub struct SpecDecodeStats(pub RsSpecDecodeStats);
-
-#[pymethods]
-impl ForwardPassMetrics {
-    #[new]
-    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
-    fn new(
-        worker_stats: &WorkerStats,
-        kv_stats: &KvStats,
-        spec_decode_stats: Option<&SpecDecodeStats>,
-    ) -> Self {
-        Self(RsForwardPassMetrics {
-            worker_stats: worker_stats.0.clone(),
-            kv_stats: kv_stats.0.clone(),
-            spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
-        })
-    }
-}
-
-#[pymethods]
-impl WorkerStats {
-    #[new]
-    #[pyo3(signature = (request_active_slots, request_total_slots, num_requests_waiting, data_parallel_rank=None))]
-    fn new(
-        request_active_slots: u64,
-        request_total_slots: u64,
-        num_requests_waiting: u64,
-        data_parallel_rank: Option<DpRank>,
-    ) -> Self {
-        Self(RsWorkerStats {
-            data_parallel_rank,
-            request_active_slots,
-            request_total_slots,
-            num_requests_waiting,
-        })
-    }
-}
-
-#[pymethods]
-impl KvStats {
-    #[new]
-    #[pyo3(signature = (kv_active_blocks, kv_total_blocks, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate))]
-    fn new(
-        kv_active_blocks: u64,
-        kv_total_blocks: u64,
-        gpu_cache_usage_perc: f32,
-        gpu_prefix_cache_hit_rate: f32,
-    ) -> Self {
-        Self(RsKvStats {
-            kv_active_blocks,
-            kv_total_blocks,
-            gpu_cache_usage_perc,
-            gpu_prefix_cache_hit_rate,
-        })
-    }
-}
-
-#[pymethods]
-impl SpecDecodeStats {
-    #[new]
-    #[pyo3(signature = (num_spec_tokens, num_drafts, num_draft_tokens, num_accepted_tokens, num_accepted_tokens_per_pos))]
-    fn new(
-        num_spec_tokens: Option<u32>,
-        num_drafts: Option<u32>,
-        num_draft_tokens: Option<u32>,
-        num_accepted_tokens: Option<u32>,
-        num_accepted_tokens_per_pos: Option<Vec<u32>>,
-    ) -> Self {
-        Self(RsSpecDecodeStats {
-            num_spec_tokens,
-            num_drafts,
-            num_draft_tokens,
-            num_accepted_tokens,
-            num_accepted_tokens_per_pos,
-        })
-    }
-}
-
 /// Helper function to create a KV router from an endpoint using the ModelManager
 /// to ensure proper etcd registration
 async fn create_kv_router_from_endpoint(
@@ -1354,52 +1243,6 @@ impl KvPushRouter {
                 .map_err(to_pyerr)?;
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
-        })
-    }
-
-    /// Deprecated: Use `best_worker()` instead which returns (worker_id, dp_rank, overlap_blocks)
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
-    fn best_worker_id<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
-        request_id: Option<String>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        // Issue deprecation warning
-        let warnings = py.import("warnings")?;
-        warnings.call_method1(
-            "warn",
-            (
-                "best_worker_id() is deprecated. Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks)",
-                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
-            ),
-        )?;
-
-        let router_config_override = if let Some(obj) = router_config_override {
-            let override_config: llm_rs::kv_router::RouterConfigOverride =
-                depythonize(obj.bind(py)).map_err(to_pyerr)?;
-            Some(override_config)
-        } else {
-            None
-        };
-
-        let chooser = self.inner.chooser.clone();
-        let update_states = request_id.is_some();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
-                    request_id.as_deref(),
-                    &token_ids,
-                    router_config_override.as_ref(),
-                    update_states,
-                )
-                .await
-                .map_err(to_pyerr)?;
-
-            // Return only worker_id and overlap_blocks for backward compatibility
-            Ok((best_worker.worker_id, overlap_blocks))
         })
     }
 

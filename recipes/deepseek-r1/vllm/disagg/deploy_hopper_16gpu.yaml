@@ -7,12 +7,14 @@ metadata:
   name: vllm-dsr1
 spec:
   backendFramework: vllm
+  envs:
+    - name: HF_HOME
+      value: /model-cache
   pvcs:
     - name: model-cache
       create: false
   services:
     Frontend:
-      dynamoNamespace: vllm-dsr1
       componentType: frontend
       replicas: 1
       extraPodSpec:
@@ -24,10 +26,10 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
     decode:
-      dynamoNamespace: vllm-dsr1
       componentType: worker
+      subComponentType: decode
       replicas: 1
       multinode:
         nodeCount: 2
@@ -50,13 +52,11 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
               value: "1"
-            - name: VLLM_ALL2ALL_BACKEND
-              value: deepep_low_latency
             - name: VLLM_MOE_DP_CHUNK_SIZE
               value: "384"
             - name: VLLM_SKIP_P2P_CHECK
@@ -65,8 +65,6 @@ spec:
               value: "1"
             - name: NVIDIA_GDRCOPY
               value: enabled
-            - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
-              value: "uniform_random"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
@@ -75,13 +73,13 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model /model-cache/deepseek-r1 \
+                --model deepseek-ai/DeepSeek-R1 \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
+                --all2all-backend deepep_low_latency \
                 --data-parallel-hybrid-lb \
                 --tensor-parallel-size 1 \
                 --data-parallel-size 16 \
                 --enable-expert-parallel \
-                --no-enable-prefix-caching \
                 --max-model-len 16384 \
                 --enable-dbo \
                 --dbo-decode-token-threshold 32 \
@@ -91,8 +89,8 @@ spec:
                 --max-num-seqs 512 \
                 --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
     prefill:
-      dynamoNamespace: vllm-dsr1
       componentType: worker
+      subComponentType: prefill
       replicas: 1
       multinode:
         nodeCount: 2
@@ -115,23 +113,17 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
               value: "1"
-            - name: VLLM_ALL2ALL_BACKEND
-              value: deepep_high_throughput
-            - name: VLLM_MOE_DP_CHUNK_SIZE
-              value: "384"
             - name: VLLM_SKIP_P2P_CHECK
               value: "1"
             - name: VLLM_RANDOMIZE_DP_DUMMY_INPUTS
               value: "1"
             - name: NVIDIA_GDRCOPY
               value: enabled
-            - name: VLLM_MOE_ROUTING_SIMULATION_STRATEGY
-              value: "uniform_random"
             - name: GLOO_SOCKET_IFNAME
               value: eth0
           command:
@@ -140,20 +132,18 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model /model-cache/deepseek-r1 \
+                --model deepseek-ai/DeepSeek-R1 \
                 --is-prefill-worker \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
+                --all2all-backend deepep_high_throughput \
                 --data-parallel-hybrid-lb \
                 --tensor-parallel-size 1 \
                 --data-parallel-size 16 \
                 --enable-expert-parallel \
-                --no-enable-prefix-caching \
                 --max-model-len 16384 \
                 --enable-dbo \
                 --dbo-decode-token-threshold 32 \
                 --async-scheduling \
                 --enable-eplb \
                 --eplb-config '{"window_size":"1000","step_interval":"3000","num_redundant_experts":"32","log_balancedness":"False"}' \
-                --max-num-seqs 512 \
-                --compilation_config '{"pass_config":{"enable_fusion":true,"enable_attn_fusion":true,"enable_noop":true},"custom_ops":["+rms_norm"],"cudagraph_mode":"FULL_DECODE_ONLY"}'
-
+                --max-num-seqs 512

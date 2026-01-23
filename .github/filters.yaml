@@ -46,6 +46,7 @@ ignore:
   - '.github/scripts/**'
   - '.github/ISSUE_TEMPLATE/**'
   - '.github/pull_request_template.md'
+  - '.github/labeler.yml'
   - '.github/release.yml'
   - '.github/copy-pr-bot.yaml'
   - '.github/dco.yml'
@@ -56,6 +57,7 @@ ignore:
   - 'container/Dockerfile.local_dev'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
+  - 'container/dev/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -76,6 +78,7 @@ core:
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/gpu_memory_service/**'
   - '*.toml'
   - '*.lock'
   - '*.py'

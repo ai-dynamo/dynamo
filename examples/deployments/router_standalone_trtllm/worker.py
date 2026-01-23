@@ -3,6 +3,9 @@
 
 import os
 
+if "PYTHONHASHSEED" not in os.environ:
+    os.environ["PYTHONHASHSEED"] = "0"
+
 # Fix protobuf version conflict with etcd3
 os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
 

@@ -780,6 +780,123 @@ func Test_GetDynamoComponentDeploymentsGlobalNamespace(t *testing.T) {
 	}
 }
 
+// TestGenerateComponentContext tests the generateComponentContext function
+// to ensure it correctly computes the DynamoNamespace from authoritative sources
+// (k8s namespace + DGD name), ignoring any deprecated dynamoNamespace field.
+func TestGenerateComponentContext(t *testing.T) {
+	tests := []struct {
+		name                       string
+		component                  *v1alpha1.DynamoComponentDeploymentSharedSpec
+		parentGraphDeploymentName  string
+		namespace                  string
+		numberOfNodes              int32
+		discoveryBackend           string
+		expectedDynamoNamespace    string
+		expectedComponentType      string
+		expectedParentDGDName      string
+		expectedParentDGDNamespace string
+	}{
+		{
+			name: "namespace-scoped operator: computes correct dynamo namespace",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypePlanner,
+				// Deprecated field set to incorrect value - should be ignored
+				DynamoNamespace: ptr.To("old-incorrect-value"),
+			},
+			parentGraphDeploymentName:  "my-deployment",
+			namespace:                  "my-namespace",
+			numberOfNodes:              1,
+			discoveryBackend:           "kubernetes",
+			expectedDynamoNamespace:    "my-namespace-my-deployment",
+			expectedComponentType:      commonconsts.ComponentTypePlanner,
+			expectedParentDGDName:      "my-deployment",
+			expectedParentDGDNamespace: "my-namespace",
+		},
+		{
+			name: "deprecated dynamoNamespace field is ignored",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+				// This is the bug case: profiler sets dynamoNamespace to just DGD name
+				DynamoNamespace: ptr.To("vllm-disagg"),
+			},
+			parentGraphDeploymentName:  "vllm-disagg",
+			namespace:                  "djangoz",
+			numberOfNodes:              1,
+			discoveryBackend:           "kubernetes",
+			expectedDynamoNamespace:    "djangoz-vllm-disagg", // Should be k8s-namespace + DGD name
+			expectedComponentType:      commonconsts.ComponentTypeFrontend,
+			expectedParentDGDName:      "vllm-disagg",
+			expectedParentDGDNamespace: "djangoz",
+		},
+		{
+			name: "GlobalDynamoNamespace takes precedence",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:         commonconsts.ComponentTypeWorker,
+				GlobalDynamoNamespace: true,
+				// Even with deprecated field set, GlobalDynamoNamespace should win
+				DynamoNamespace: ptr.To("should-be-ignored"),
+			},
+			parentGraphDeploymentName:  "shared-frontend",
+			namespace:                  "production",
+			numberOfNodes:              2,
+			discoveryBackend:           "etcd",
+			expectedDynamoNamespace:    commonconsts.GlobalDynamoNamespace, // "dynamo"
+			expectedComponentType:      commonconsts.ComponentTypeWorker,
+			expectedParentDGDName:      "shared-frontend",
+			expectedParentDGDNamespace: "production",
+		},
+		{
+			name: "nil dynamoNamespace field still computes correctly",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType:   commonconsts.ComponentTypePlanner,
+				DynamoNamespace: nil, // Not set at all
+			},
+			parentGraphDeploymentName:  "test-dgd",
+			namespace:                  "default",
+			numberOfNodes:              1,
+			discoveryBackend:           "kubernetes",
+			expectedDynamoNamespace:    "default-test-dgd",
+			expectedComponentType:      commonconsts.ComponentTypePlanner,
+			expectedParentDGDName:      "test-dgd",
+			expectedParentDGDNamespace: "default",
+		},
+		{
+			name: "different namespace and DGD name combinations",
+			component: &v1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: commonconsts.ComponentTypeFrontend,
+			},
+			parentGraphDeploymentName:  "llama-70b-prod",
+			namespace:                  "ml-inference",
+			numberOfNodes:              4,
+			discoveryBackend:           "nats",
+			expectedDynamoNamespace:    "ml-inference-llama-70b-prod",
+			expectedComponentType:      commonconsts.ComponentTypeFrontend,
+			expectedParentDGDName:      "llama-70b-prod",
+			expectedParentDGDNamespace: "ml-inference",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := generateComponentContext(
+				tt.component,
+				tt.parentGraphDeploymentName,
+				tt.namespace,
+				tt.numberOfNodes,
+				tt.discoveryBackend,
+			)
+
+			assert.Equal(t, tt.expectedDynamoNamespace, ctx.DynamoNamespace,
+				"DynamoNamespace should be computed from k8s namespace + DGD name")
+			assert.Equal(t, tt.expectedComponentType, ctx.ComponentType)
+			assert.Equal(t, tt.expectedParentDGDName, ctx.ParentGraphDeploymentName)
+			assert.Equal(t, tt.expectedParentDGDNamespace, ctx.ParentGraphDeploymentNamespace)
+			assert.Equal(t, tt.numberOfNodes, ctx.numberOfNodes)
+			assert.Equal(t, tt.discoveryBackend, ctx.DiscoveryBackend)
+		})
+	}
+}
+
 func Test_updateDynDeploymentConfig(t *testing.T) {
 	type args struct {
 		dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment
@@ -5139,7 +5256,7 @@ func TestGenerateBasePodSpec_Worker(t *testing.T) {
 							{Name: commonconsts.DynamoComponentEnvVar, Value: "worker"},
 							{Name: commonconsts.DynamoDiscoveryBackendEnvVar, Value: "kubernetes"},
 							{Name: "DYN_HEALTH_CHECK_ENABLED", Value: "false"},
-							{Name: commonconsts.DynamoNamespaceEnvVar, Value: ""},
+							{Name: commonconsts.DynamoNamespaceEnvVar, Value: "default-test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAME", Value: "test-deployment"},
 							{Name: "DYN_PARENT_DGD_K8S_NAMESPACE", Value: "default"},
 							{Name: "DYN_SYSTEM_ENABLED", Value: "true"},
