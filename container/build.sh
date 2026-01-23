@@ -156,6 +156,10 @@ PUSH=""
 # or can be explicitly enabled via --enable-kvbm flag
 ENABLE_KVBM=false
 
+# GPU Memory Service - default disabled, enabled automatically for VLLM/SGLANG
+# or can be explicitly enabled via --enable-gpu-memory-service flag
+ENABLE_GPU_MEMORY_SERVICE=false
+
 # sccache configuration for S3
 USE_SCCACHE=""
 SCCACHE_BUCKET=""
@@ -342,6 +346,9 @@ get_options() {
             ;;
         --enable-kvbm)
             ENABLE_KVBM=true
+            ;;
+        --enable-gpu-memory-service)
+            ENABLE_GPU_MEMORY_SERVICE=true
             ;;
         --enable-media-nixl)
             ENABLE_MEDIA_NIXL=true
@@ -539,6 +546,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-gpu-memory-service Enables GPU Memory Service support]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
@@ -829,6 +837,20 @@ fi
 if [[ ${ENABLE_KVBM} == "true" ]]; then
     echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
+fi
+
+# ENABLE_GPU_MEMORY_SERVICE: Used in Dockerfiles for gpu_memory_service wheel.
+#                            Declared but not currently used in Dockerfile.trtllm.
+# Force GPU Memory Service to be enabled for VLLM and SGLANG frameworks
+if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+    echo "Forcing enable_gpu_memory_service to true in ${FRAMEWORK} image build"
+    ENABLE_GPU_MEMORY_SERVICE=true
+fi
+# For other frameworks, ENABLE_GPU_MEMORY_SERVICE defaults to false unless --enable-gpu-memory-service flag was provided
+
+if [[ ${ENABLE_GPU_MEMORY_SERVICE} == "true" ]]; then
+    echo "Enabling GPU Memory Service in the dynamo image"
+    BUILD_ARGS+=" --build-arg ENABLE_GPU_MEMORY_SERVICE=${ENABLE_GPU_MEMORY_SERVICE} "
 fi
 
 # ENABLE_MEDIA_NIXL: Enable media processing with NIXL support

@@ -41,6 +41,7 @@ ARG BASE_IMAGE_TAG
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
@@ -481,6 +482,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        source ${VIRTUAL_ENV}/bin/activate && \
+        uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
+    fi
+
 ########################################################
 ########## Framework Development Image ################
 ########################################################
@@ -605,6 +613,7 @@ COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbin
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
     ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
     ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
@@ -744,11 +753,20 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$GMS_WHEEL"; \
+    fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -823,6 +841,7 @@ RUN cd /usr/local/lib && \
     ldconfig
 
 USER dynamo
+
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
