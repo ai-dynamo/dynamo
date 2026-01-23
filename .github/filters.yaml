@@ -121,6 +121,16 @@ trtllm:
   - 'container/build_trtllm_wheel.sh'
 
 frontend:
-  - *core
+  - *ci
+  - '.cargo/config.toml'
+  - 'lib/**'
+  - '*.toml'
+  - '*.lock'
+  - 'container/build.sh'
+  - 'container/Dockerfile'
+  - 'container/deps/*'
+  - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
-  - '.github/workflows/build-frontend-image.yaml'
