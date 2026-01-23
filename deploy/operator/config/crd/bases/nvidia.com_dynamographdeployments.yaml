@@ -10775,7 +10775,6 @@ spec:
                         description: |-
                           GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.
                           DEPRECATED: This field is deprecated and will be removed in a future release.
-                          Rolling updates are not supported for DGDs using globalDynamoNamespace.
                         type: boolean
                       ingress:
                         description: Ingress config to expose the component outside the cluster (or through a service mesh).
@@ -12419,7 +12418,7 @@ spec:
                     properties:
                       availableReplicas:
                         description: |-
-                          AvailableReplicas is the total number of available replicas (old + new during rollout).
+                          AvailableReplicas is the number of available replicas.
                           For Deployment: replicas ready for >= minReadySeconds.
                           For PodCliqueScalingGroup: replicas where all constituent PodCliques have >= MinAvailable ready pods.
                           Not available for PodClique or LeaderWorkerSet.
@@ -12451,7 +12450,7 @@ spec:
                         type: array
                       readyReplicas:
                         description: |-
-                          ReadyReplicas is the total number of ready replicas (old + new during rollout).
+                          ReadyReplicas is the number of ready replicas.
                           Populated for PodClique, Deployment, and LeaderWorkerSet.
                           Not available for PodCliqueScalingGroup.
                           When nil, the field is omitted from the API response.
@@ -12460,15 +12459,15 @@ spec:
                         type: integer
                       replicas:
                         description: |-
-                          Replicas is the total number of non-terminated replicas (old + new during rollout).
+                          Replicas is the total number of non-terminated replicas.
                           Required for all component kinds.
                         format: int32
                         minimum: 0
                         type: integer
                       updatedReplicas:
                         description: |-
-                          UpdatedReplicas is the number of replicas at the target revision.
-                          During rolling updates, this only counts replicas in the NEW deployment.
+                          UpdatedReplicas is the number of replicas at the current/desired revision.
+                          Required for all component kinds.
                         format: int32
                         minimum: 0
                         type: integer

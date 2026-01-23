@@ -333,7 +333,7 @@ _Appears in:_
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
 | `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
-| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.<br />DEPRECATED: This field is deprecated and will be removed in a future release. |  | Optional: \{\} <br /> |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
@@ -373,7 +373,7 @@ _Appears in:_
 | `componentType` _string_ | ComponentType indicates the role of this component (for example, "main"). |  |  |
 | `subComponentType` _string_ | SubComponentType indicates the sub-role of this component (for example, "prefill"). |  |  |
 | `dynamoNamespace` _string_ | DynamoNamespace is deprecated and will be removed in a future version.<br />The DGD Kubernetes namespace and DynamoGraphDeployment name are used to construct the Dynamo namespace for each component |  | Optional: \{\} <br /> |
-| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates that the Component will be placed in the global Dynamo namespace |  |  |
+| `globalDynamoNamespace` _boolean_ | GlobalDynamoNamespace indicates whether to use the global "dynamo" namespace.<br />DEPRECATED: This field is deprecated and will be removed in a future release. |  | Optional: \{\} <br /> |
 | `resources` _[Resources](#resources)_ | Resources requested and limits for this component, including CPU, memory,<br />GPUs/devices, and any runtime-specific resources. |  |  |
 | `autoscaling` _[Autoscaling](#autoscaling)_ | Deprecated: This field is deprecated and ignored. Use DynamoGraphDeploymentScalingAdapter<br />with HPA, KEDA, or Planner for autoscaling instead. See docs/pages/kubernetes/autoscaling.md<br />for migration guidance. This field will be removed in a future API version. |  |  |
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs defines additional environment variables to inject into the component containers. |  |  |
@@ -586,6 +586,7 @@ _Appears in:_
 | `envs` _[EnvVar](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#envvar-v1-core) array_ | Envs are environment variables applied to all services in the deployment unless<br />overridden by service-specific configuration. |  | Optional: \{\} <br /> |
 | `backendFramework` _string_ | BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm"). |  | Enum: [sglang vllm trtllm] <br /> |
 | `restart` _[Restart](#restart)_ | Restart specifies the restart policy for the graph deployment. |  | Optional: \{\} <br /> |
+| `trafficProxy` _[TrafficProxySpec](#trafficproxyspec)_ | TrafficProxy configures the HAProxy load balancer for rolling updates.<br />Fields specified here override the platform-wide Helm defaults. |  | Optional: \{\} <br /> |
 
 
 #### DynamoGraphDeploymentStatus
@@ -606,6 +607,7 @@ _Appears in:_
 | `services` _object (keys:string, values:[ServiceReplicaStatus](#servicereplicastatus))_ | Services contains per-service replica status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
 | `restart` _[RestartStatus](#restartstatus)_ | Restart contains the status of the restart of the graph deployment. |  | Optional: \{\} <br /> |
 | `checkpoints` _object (keys:string, values:[ServiceCheckpointStatus](#servicecheckpointstatus))_ | Checkpoints contains per-service checkpoint status information.<br />The map key is the service name from spec.services. |  | Optional: \{\} <br /> |
+| `rollout` _[RolloutStatus](#rolloutstatus)_ | Rollout tracks the progress of a rolling update. |  | Optional: \{\} <br /> |
 
 
 #### DynamoModel
@@ -949,6 +951,7 @@ _Appears in:_
 | `Restarting` |  |
 | `Completed` |  |
 | `Failed` |  |
+| `Superseded` |  |
 
 
 #### RestartStatus
@@ -1001,6 +1004,47 @@ _Appears in:_
 | --- | --- |
 | `Sequential` |  |
 | `Parallel` |  |
+
+
+#### RolloutPhase
+
+_Underlying type:_ _string_
+
+RolloutPhase represents the current phase of a rolling update.
+
+_Validation:_
+- Enum: [Pending InProgress Completed Failed ]
+
+_Appears in:_
+- [RolloutStatus](#rolloutstatus)
+
+| Field | Description |
+| --- | --- |
+| `Pending` |  |
+| `InProgress` |  |
+| `Completed` |  |
+| `Failed` |  |
+| `` |  |
+
+
+#### RolloutStatus
+
+
+
+RolloutStatus tracks the progress of a rolling update.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentStatus](#dynamographdeploymentstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `phase` _[RolloutPhase](#rolloutphase)_ | Phase indicates the current phase of the rollout. |  | Enum: [Pending InProgress Completed Failed ] <br />Optional: \{\} <br /> |
+| `trafficWeightOld` _integer_ | TrafficWeightOld is the percentage of traffic routed to the old deployment (0-100).<br />This reflects the current HAProxy backend weight configuration. |  | Optional: \{\} <br /> |
+| `trafficWeightNew` _integer_ | TrafficWeightNew is the percentage of traffic routed to the new deployment (0-100).<br />This reflects the current HAProxy backend weight configuration. |  | Optional: \{\} <br /> |
+| `startTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | StartTime is when the rollout began. |  | Optional: \{\} <br /> |
+| `endTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#time-v1-meta)_ | EndTime is when the rollout completed (successfully or failed). |  | Optional: \{\} <br /> |
 
 
 #### ScalingAdapter
@@ -1074,7 +1118,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `componentKind` _[ComponentKind](#componentkind)_ | ComponentKind is the underlying resource kind (e.g., "PodClique", "PodCliqueScalingGroup", "Deployment", "LeaderWorkerSet"). |  | Enum: [PodClique PodCliqueScalingGroup Deployment LeaderWorkerSet] <br /> |
-| `componentName` _string_ | ComponentName is the name of the underlying resource. |  |  |
+| `componentName` _string_ | ComponentName is the name of the primary underlying resource.<br />DEPRECATED: Use ComponentNames instead. This field will be removed in a future release.<br />During rolling updates, this reflects the new (target) component name. |  |  |
+| `componentNames` _string array_ | ComponentNames is the list of underlying resource names for this service.<br />During normal operation, this contains a single name.<br />During rolling updates, this contains both old and new component names. |  | Optional: \{\} <br /> |
 | `replicas` _integer_ | Replicas is the total number of non-terminated replicas.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `updatedReplicas` _integer_ | UpdatedReplicas is the number of replicas at the current/desired revision.<br />Required for all component kinds. |  | Minimum: 0 <br /> |
 | `readyReplicas` _integer_ | ReadyReplicas is the number of ready replicas.<br />Populated for PodClique, Deployment, and LeaderWorkerSet.<br />Not available for PodCliqueScalingGroup.<br />When nil, the field is omitted from the API response. |  | Minimum: 0 <br />Optional: \{\} <br /> |
@@ -1097,6 +1142,26 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `disabled` _boolean_ |  |  |  |
 | `size` _[Quantity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#quantity-resource-api)_ |  |  |  |
+
+
+#### TrafficProxySpec
+
+
+
+TrafficProxySpec configures the HAProxy load balancer for rolling updates.
+Fields specified here override the platform-wide defaults from Helm values.
+
+
+
+_Appears in:_
+- [DynamoGraphDeploymentSpec](#dynamographdeploymentspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `replicas` _integer_ | Replicas is the number of proxy pod replicas.<br />Overrides the platform default. Recommend 2+ for high availability. |  | Optional: \{\} <br /> |
+| `resources` _[ResourceRequirements](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#resourcerequirements-v1-core)_ | Resources configures the proxy pod resource requirements.<br />Overrides the platform default. |  | Optional: \{\} <br /> |
+| `tolerations` _[Toleration](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#toleration-v1-core) array_ | Tolerations for the proxy pods.<br />Useful when workers run on tainted nodes (e.g., GPU nodes).<br />Merged with platform defaults (DGD tolerations take precedence). |  | Optional: \{\} <br /> |
+| `affinity` _[Affinity](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#affinity-v1-core)_ | Affinity rules for the proxy pods.<br />Useful for co-locating proxy with workers or spreading across zones.<br />Overrides platform default if specified. |  | Optional: \{\} <br /> |
 
 
 #### VolumeMount
