@@ -305,12 +305,8 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
 
     generate_endpoint = component.endpoint(dynamo_args.endpoint)
 
-    # Handle non-leader nodes (multi-node parallelism)
-    if server_args.node_rank >= 1:
-        await _handle_non_leader_node(engine, generate_endpoint)
-        return
-
-    # Setup metrics publisher
+    # Setup metrics and KV events for ALL nodes (including non-leader)
+    # Non-leader nodes need KV event publishing for their local DP ranks
     publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
         engine, config, component, generate_endpoint
     )
@@ -318,6 +314,12 @@ async def init_diffusion(runtime: DistributedRuntime, config: Config):
     # Register Prometheus metrics callback if enabled
     if engine.server_args.enable_metrics:
         setup_prometheus_registry(engine, generate_endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    # Non-leader nodes run schedulers and publish KV events, but don't serve requests
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, publisher, metrics_task)
+        return
 
     # Readiness gate: requests wait until model is registered
     ready_event = asyncio.Event()
