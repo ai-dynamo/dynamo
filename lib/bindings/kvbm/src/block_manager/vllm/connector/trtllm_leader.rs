@@ -311,6 +311,11 @@ impl Leader for KvConnectorLeader {
         //
         // This is kind of a nice abstraction as it keeps the events simplier; however, we now create the request-slot
         // once for onboarding (this loop), then again for prefill/decode (new_requests loop).
+        //
+        // TODO(krish): Consider a more deterministic way to count immediate ops.
+        // Currently we count by filtering pending_ops at runtime. A higher-level approach
+        // (e.g., tracking count when onboard_blocks is called, or deriving from architecture
+        // config) might be more robust against potential timing-related issues.
         for request_id in onboarding_slots.iter() {
             let shared_slot = self.slot_manager().get_slot(request_id)?;
             let mut slot = shared_slot

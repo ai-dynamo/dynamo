@@ -404,30 +404,33 @@ impl Scheduler {
         let request_id = req.request_id.clone();
 
         // In TP>1, multiple workers send CreateSlot for the same request_id.
-        // Each worker has its OWN completed Arc. ImmediateTransferResults arrive
-        // and get buffered before ANY worker's slot is created.
+        // ImmediateTransferResults can arrive before ANY worker's slot is created.
         //
         // We need to apply the buffered count to EVERY worker's slot, not just the first one.
         // Use `get` instead of `remove` to keep the buffered results available for all workers.
         // The buffered results will be cleared when the request is removed (finished).
 
-        // Check for buffered ImmediateTransferResults that arrived before the slot was created
-        let num_buffered = self
-            .unprocessed_immediate_results
-            .get(&request_id)
-            .map(|results| results.len() as u64)
-            .unwrap_or(0);
-
-        // Use the max of buffered count and expected count
-        let expected_immediate_ops = std::cmp::max(num_buffered, req.expected_immediate_ops);
-
         let slot = SchedulerSlot {
             completed: req.completed,
-            expected_immediate_ops,
         };
 
-        // Apply buffered count to this worker's slot
-        if num_buffered > 0 {
+        // Check for buffered ImmediateTransferResults that arrived before the slot was created.
+        // Apply buffered count to this worker's slot.
+        if let Some(buffered_results) = self.unprocessed_immediate_results.get(&request_id) {
+            let num_buffered = buffered_results.len() as u64;
+
+            // Sanity check: buffered results should never exceed expected count.
+            // If this happens, there's a mismatch between leader's count and actual results.
+            debug_assert!(
+                num_buffered <= req.expected_immediate_ops,
+                "buffered results ({}) exceed expected immediate ops ({})",
+                num_buffered,
+                req.expected_immediate_ops
+            );
+
+            // Use num_buffered (not expected_immediate_ops) because we only mark operations
+            // as complete that have actually completed. Remaining results will arrive later
+            // via handle_immediate_result() and increment the counter then.
             slot.completed.fetch_add(num_buffered, Ordering::Relaxed);
         }
 
@@ -693,17 +696,6 @@ pub struct SchedulerCreateSlotDetails {
 
 pub struct SchedulerSlot {
     completed: Arc<AtomicU64>,
-    /// Expected number of immediate operations.
-    expected_immediate_ops: u64,
-}
-
-impl SchedulerSlot {
-    fn new(req: SchedulerCreateSlotDetails) -> Self {
-        Self {
-            completed: req.completed,
-            expected_immediate_ops: req.expected_immediate_ops,
-        }
-    }
 }
 
 pub trait TaskScheduler {
