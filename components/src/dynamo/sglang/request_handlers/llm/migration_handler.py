@@ -112,6 +112,25 @@ class MigrationHandler(BaseWorkerHandler):
             tokens_seen=tokens_seen,
         )
 
+        result_state = result.get("result")
+        if result_state is None:
+            raise ValueError(f"migrate_request: result is None for rid={rid}")
+        elif result_state == "not_found":
+            yield {
+                "result": "not_found",
+            }
+            return
+        elif result_state == "error":
+            yield {
+                "result": "error",
+                "error": result.get("error"),
+            }
+            return
+        elif result_state != "migrate":
+            raise ValueError(
+                f"migrate_request: unexpected result state: {result_state} for rid={rid}, result={result}"
+            )
+
         # Extract results from scheduler response
         # NOTE: src_dp_rank is encoded in bootstrap_room (room % dp_size == src_dp_rank)
         # so we don't need to pass it explicitly - the receiver derives it.
@@ -135,6 +154,7 @@ class MigrationHandler(BaseWorkerHandler):
         )
 
         yield {
+            "result": "migrate",
             "rid": rid,
             "bootstrap_info": bootstrap_info,
             "pending_outputs": pending_outputs,

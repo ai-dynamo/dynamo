@@ -208,6 +208,8 @@ pub mod frontend_service {
 
         /// Migration failure reasons
         pub mod failure_reason {
+            pub const NOT_FOUND: &str = "not_found";
+
             /// No next tier available for migration
             pub const NO_NEXT_TIER: &str = "no_next_tier";
 

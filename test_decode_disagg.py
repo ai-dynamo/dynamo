@@ -62,6 +62,8 @@ def get_common_args(num_gpus: int, model_path: Path) -> list[str]:
         "--page-size",
         "16",
         "--disable-cuda-graph",
+        "--stream-interval",
+        "200",
     ]
 
 
@@ -291,7 +293,7 @@ def wait_for_health(num_workers: int, timeout: float = 600.0):
             resp = httpx.get(HEALTH_URL, timeout=2.0)
             data = resp.json()
             instances = data.get("instances", [])
-            count = len(instances)
+            count = len(set([a["instance_id"] for a in instances]))
 
             if count >= num_workers:
                 print(f"✅ All {num_workers} workers are ready!")

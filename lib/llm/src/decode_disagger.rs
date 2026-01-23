@@ -483,24 +483,53 @@ impl MigrationContext {
                 ));
             };
 
+            let (bootstrap_info, pending_outputs) = match response {
+                MigrationResponse::Migrate {
+                    rid: _,
+                    bootstrap_info,
+                    pending_outputs,
+                } => (bootstrap_info, pending_outputs),
+                MigrationResponse::NotFound => {
+                    tracing::warn!(
+                        request_id = request_id,
+                        "Migration: not found on source worker, likely more "
+                    );
+                    return Ok(self);
+                }
+                MigrationResponse::Error { error } => {
+                    tracing::warn!(
+                        request_id = request_id,
+                        error = error.as_deref(),
+                        "Migration failed: source worker returned error"
+                    );
+                    self.metrics.inc_tier_migration_failure(
+                        &self.model_name,
+                        failure_reason::MIGRATE_ENDPOINT_FAILED,
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Migration failed: {}",
+                        error.unwrap_or_else(|| "unknown error".to_string())
+                    ));
+                }
+            };
+
             tracing::info!(
-                bootstrap_room = response.bootstrap_info.bootstrap_room,
+                bootstrap_room = bootstrap_info.bootstrap_room,
                 tokens_seen = tokens_seen,
-                pending_outputs_count = response.pending_outputs.len(),
+                pending_outputs_count = pending_outputs.len(),
                 request_id = request_id,
                 "Migration response received",
             );
 
             // Build the full token_ids for the migrated request by extending with pending outputs
             let mut migrated_token_ids = running_request.token_ids.clone();
-            for output in &response.pending_outputs {
+            for output in &pending_outputs {
                 migrated_token_ids.extend(output.token_ids.iter().copied());
             }
 
             // Use the pending_outputs from the response - these are the actual LLMEngineOutput
             // chunks that the frontend hasn't seen yet, preserving API behavior
-            let pending_chunks: Vec<Annotated<LLMEngineOutput>> = response
-                .pending_outputs
+            let pending_chunks: Vec<Annotated<LLMEngineOutput>> = pending_outputs
                 .into_iter()
                 .map(Annotated::from_data)
                 .collect();
@@ -554,7 +583,7 @@ impl MigrationContext {
             // DP rank on decode2, breaking load balancing.
 
             let mut new_context = Context::with_id(migrated_request, request_id.to_string());
-            new_context.bootstrap_info = Some(response.bootstrap_info);
+            new_context.bootstrap_info = Some(bootstrap_info);
 
             parent_ctx.link_child(new_context.context());
             let routed_out = match new_tier.router.generate_routed(new_context).await {

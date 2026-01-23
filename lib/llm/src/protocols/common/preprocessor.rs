@@ -215,33 +215,46 @@ pub struct MigrationRequest {
 }
 
 /// Response from the migrate endpoint with connection details
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct MigrationResponse {
-    /// Request ID that was migrated
-    pub rid: String,
-    /// Bootstrap info for the destination worker to receive KV cache
-    pub bootstrap_info: BootstrapInfo,
-    /// Output chunks that the frontend hasn't seen yet (based on `tokens_seen` in request).
-    /// These should be yielded to the client to maintain API behavior consistency.
-    /// After yielding these, frontend will have: tokens_seen + tokens from pending_outputs
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_outputs: Vec<super::llm_backend::LLMEngineOutput>,
-    // NOTE: src_dp_rank is encoded in bootstrap_room (room % dp_size == src_dp_rank)
-    // so we don't need to pass it explicitly - the receiver derives it.
-    /// Error message if migration failed
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum MigrationResponse {
+    /// Request was not found on the source worker.
+    NotFound,
+    /// Migration failed on the source worker.
+    Error {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Migration initiated successfully; includes bootstrap info and any pending outputs.
+    ///
+    /// NOTE: src_dp_rank is encoded in bootstrap_room (room % dp_size == src_dp_rank)
+    /// so we don't need to pass it explicitly - the receiver derives it.
+    Migrate {
+        /// Request ID that was migrated
+        rid: String,
+        /// Bootstrap info for the destination worker to receive KV cache
+        bootstrap_info: BootstrapInfo,
+        /// Output chunks that the frontend hasn't seen yet (based on `tokens_seen` in request).
+        /// These should be yielded to the client to maintain API behavior consistency.
+        /// After yielding these, frontend will have: tokens_seen + tokens from pending_outputs
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_outputs: Vec<super::llm_backend::LLMEngineOutput>,
+    },
 }
 
 impl MaybeError for MigrationResponse {
     fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        MigrationResponse {
+        MigrationResponse::Error {
             error: Some(format!("{:?}", err)),
-            ..Default::default()
         }
     }
 
     fn err(&self) -> Option<anyhow::Error> {
-        self.error.as_ref().map(|e| anyhow::Error::msg(e.clone()))
+        match self {
+            MigrationResponse::Error { error } => Some(anyhow::Error::msg(
+                error.clone().unwrap_or_else(|| "unknown migration error".to_string()),
+            )),
+            _ => None,
+        }
     }
 }
