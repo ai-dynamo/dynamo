@@ -209,13 +209,9 @@ pub struct RadixTree {
     /// This will only contain root blocks
     root: SharedRadixBlock,
 
-    /// Global lookup table from block hash to block.
-    /// Allows O(1) lookup into the radix tree at any point.
-    lookup: HashMap<ExternalSequenceBlockHash, SharedRadixBlock>,
-
-    /// Reverse index: maps each worker to the set of block hashes they have.
-    /// Used for efficient per-worker tree size queries and worker removal.
-    worker_blocks: HashMap<WorkerWithDpRank, HashSet<ExternalSequenceBlockHash>>,
+    /// Per-worker lookup table for O(1) block access.
+    /// Maps worker -> (block_hash -> block).
+    lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
 
     /// The time buffer the radix tree should check when considering frequence of block accesses
     expiration_duration: Option<Duration>,
@@ -238,11 +234,10 @@ impl Drop for RadixTree {
             stack.extend(root.children.drain().map(|(_, v)| v));
         }
 
-        // Remove all lookup references
-        stack.extend(self.lookup.drain().map(|(_, v)| v));
-
-        // Clear worker_blocks (just hashes, no Rc refs)
-        self.worker_blocks.clear();
+        // Remove all lookup references (they may include blocks not reachable from root)
+        for (_, worker_blocks) in self.lookup.drain() {
+            stack.extend(worker_blocks.into_values());
+        }
 
         // Iteratively free any uniquely-owned blocks without recursion
         while let Some(block) = stack.pop() {
@@ -271,7 +266,6 @@ impl RadixTree {
         Self {
             root: Rc::new(RefCell::new(RadixBlock::new())),
             lookup: HashMap::new(),
-            worker_blocks: HashMap::new(),
             expiration_duration,
         }
     }
@@ -342,9 +336,9 @@ impl RadixTree {
         // Populate tree sizes for all workers that have scores
         for worker in scores.scores.keys() {
             let tree_size = self
-                .worker_blocks
+                .lookup
                 .get(worker)
-                .expect("worker in scores must exist in worker_blocks")
+                .expect("worker in scores must exist in lookup table")
                 .len();
             scores.tree_sizes.insert(*worker, tree_size);
         }
@@ -366,11 +360,13 @@ impl RadixTree {
 
         tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
 
+        let worker_lookup = self.lookup.entry(worker).or_default();
+
         match op {
             KvCacheEventData::Stored(op) => {
-                // find the parent block - use global lookup since hash is same for all workers
+                // find the parent block from this worker's lookup
                 let mut current = match op.parent_hash {
-                    Some(parent) => match self.lookup.get(&parent) {
+                    Some(parent) => match worker_lookup.get(&parent) {
                         Some(current) => current.clone(),
                         None => {
                             tracing::warn!(
@@ -387,8 +383,6 @@ impl RadixTree {
                     None => self.root.clone(),
                 };
 
-                let worker_block_set = self.worker_blocks.entry(worker).or_default();
-
                 for block_data in op.blocks {
                     let mut parent_mut = current.borrow_mut();
                     let child = match parent_mut.children.get(&block_data.tokens_hash) {
@@ -404,9 +398,8 @@ impl RadixTree {
                             block.clone()
                         }
                         None => {
-                            // create new block or reuse existing from global lookup
-                            let new_block = self
-                                .lookup
+                            // create new block or reuse existing from worker's lookup
+                            let new_block = worker_lookup
                                 .get(&block_data.block_hash)
                                 .cloned()
                                 .unwrap_or_else(|| {
@@ -446,11 +439,8 @@ impl RadixTree {
                         child_mut.workers.insert(worker);
                     }
 
-                    // add the block to global lookup
-                    self.lookup.insert(block_data.block_hash, child.clone());
-
-                    // track this block for the worker
-                    worker_block_set.insert(block_data.block_hash);
+                    // add the block to the worker's lookup table
+                    worker_lookup.insert(block_data.block_hash, child.clone());
 
                     // drop child so we can shift current to this block
                     drop(parent_mut);
@@ -462,8 +452,8 @@ impl RadixTree {
             KvCacheEventData::Removed(remove) => {
                 let mut kv_cache_err: Option<KvCacheEventError> = None;
                 for block_hash in remove.block_hashes {
-                    // lookup block in global table
-                    let entry = match self.lookup.get(&block_hash) {
+                    // lookup block in worker's table
+                    let entry = match worker_lookup.get(&block_hash) {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
@@ -485,18 +475,12 @@ impl RadixTree {
 
                     let mut guard = entry.borrow_mut();
                     guard.workers.remove(&worker);
-
-                    // remove from worker's block set
-                    if let Some(worker_block_set) = self.worker_blocks.get_mut(&worker) {
-                        worker_block_set.remove(&block_hash);
-                    }
-
                     if guard.workers.is_empty() {
-                        // if no workers are using this block, clear children and remove from lookup
+                        // if no workers are using this block, that is true for all children
                         guard.children.clear();
-                        drop(guard);
-                        self.lookup.remove(&block_hash);
                     }
+                    // remove the block from the worker's lookup table
+                    worker_lookup.remove(&block_hash);
                 }
                 kv_cache_err.map_or(Ok(()), Err)
             }
@@ -508,33 +492,30 @@ impl RadixTree {
     }
 
     /// Helper function to remove or clear blocks for a worker.
-    /// If `keep_worker` is true, the worker remains in worker_blocks with empty set.
-    /// If `keep_worker` is false, the worker is completely removed from worker_blocks.
+    /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
+    /// If `keep_worker` is false, the worker is completely removed from lookup.
     fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
         // Collect all WorkerWithDpRank keys that match this worker_id
         let workers: Vec<WorkerWithDpRank> = self
-            .worker_blocks
+            .lookup
             .keys()
             .filter(|w| w.worker_id == worker_id)
             .copied()
             .collect();
 
         for worker in workers {
-            if let Some((worker_key, block_hashes)) = self.worker_blocks.remove_entry(&worker) {
-                for block_hash in block_hashes {
-                    if let Some(block) = self.lookup.get(&block_hash) {
-                        block.borrow_mut().workers.remove(&worker);
-                        // If no workers are using this block, clear children and remove from lookup
-                        if block.borrow().workers.is_empty() {
-                            block.borrow_mut().children.clear();
-                            self.lookup.remove(&block_hash);
-                        }
+            if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
+                for (_, block) in blocks {
+                    block.borrow_mut().workers.remove(&worker);
+                    // If no workers are using this block, that is true for all children
+                    if block.borrow().workers.is_empty() {
+                        block.borrow_mut().children.clear();
                     }
                 }
 
                 if keep_worker {
-                    // Re-insert worker with empty block set to keep it tracked
-                    self.worker_blocks.insert(worker_key, HashSet::new());
+                    // Re-insert worker with empty blocks map to keep it tracked
+                    self.lookup.insert(worker_key, HashMap::new());
                 }
             }
         }
@@ -551,8 +532,7 @@ impl RadixTree {
     /// Get all worker IDs currently tracked in the radix tree.
     /// Returns unique worker_ids (ignoring dp_rank differences).
     pub fn get_workers(&self) -> Vec<WorkerId> {
-        let mut worker_ids: Vec<WorkerId> =
-            self.worker_blocks.keys().map(|w| w.worker_id).collect();
+        let mut worker_ids: Vec<WorkerId> = self.lookup.keys().map(|w| w.worker_id).collect();
         worker_ids.sort_unstable();
         worker_ids.dedup();
         worker_ids
@@ -564,7 +544,7 @@ impl RadixTree {
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
         tracing::debug!(
             "Dumping radix tree as events (contains information about {:?} workers)",
-            self.worker_blocks.len()
+            self.lookup.len()
         );
 
         let mut events = Vec::new();
@@ -622,7 +602,7 @@ impl RadixTree {
     /// Returns the total number of (worker, block) pairs tracked.
     /// A block shared by N workers counts N times.
     pub fn current_size(&self) -> usize {
-        self.worker_blocks.values().map(|s| s.len()).sum()
+        self.lookup.values().map(|m| m.len()).sum()
     }
 }
 
@@ -2141,9 +2121,9 @@ mod tests {
             &3
         );
 
-        assert_eq!(trie.worker_blocks.len(), 1);
+        assert_eq!(trie.lookup.len(), 1);
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .len(),
@@ -2196,16 +2176,16 @@ mod tests {
             &1
         );
 
-        assert_eq!(trie.worker_blocks.len(), 2);
+        assert_eq!(trie.lookup.len(), 2);
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .len(),
             3
         );
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .len(),
@@ -2238,16 +2218,16 @@ mod tests {
 
         trie.apply_event(create_remove_event(worker_2, 2, vec![5]))
             .unwrap();
-        assert_eq!(trie.worker_blocks.len(), 2);
+        assert_eq!(trie.lookup.len(), 2);
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .len(),
             3
         );
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .len(),
@@ -2281,16 +2261,16 @@ mod tests {
         trie.apply_event(create_remove_event(worker_2, 3, vec![4]))
             .unwrap();
 
-        assert_eq!(trie.worker_blocks.len(), 2);
+        assert_eq!(trie.lookup.len(), 2);
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .len(),
             3
         );
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .len(),
@@ -2348,16 +2328,16 @@ mod tests {
             &2
         );
 
-        assert_eq!(trie.worker_blocks.len(), 2);
+        assert_eq!(trie.lookup.len(), 2);
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .len(),
             3
         );
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_2))
                 .unwrap()
                 .len(),
@@ -2390,6 +2370,8 @@ mod tests {
         // Block 200 is shared by both workers
         assert_eq!(
             trie.lookup
+                .get(&WorkerWithDpRank::from_worker_id(worker_1))
+                .unwrap()
                 .get(&ExternalSequenceBlockHash(200))
                 .unwrap()
                 .borrow()
@@ -2505,7 +2487,7 @@ mod tests {
         trie.clear_all_blocks(worker_0);
         assert!(
             !trie
-                .worker_blocks
+                .lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
 
@@ -2525,11 +2507,11 @@ mod tests {
         trie.clear_all_blocks(worker_0);
 
         assert!(
-            trie.worker_blocks
+            trie.lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         assert!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .unwrap()
                 .is_empty()
@@ -2561,22 +2543,22 @@ mod tests {
         trie.clear_all_blocks(worker_0);
         trie.clear_all_blocks(worker_0);
         assert!(
-            trie.worker_blocks
+            trie.lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
 
         // Test clearing all workers
         trie.clear_all_blocks(worker_0);
         trie.clear_all_blocks(worker_1);
-        assert!(!trie.worker_blocks.is_empty());
+        assert!(!trie.lookup.is_empty());
         assert!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .unwrap()
                 .is_empty()
         );
         assert!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
                 .unwrap()
                 .is_empty()
@@ -2591,7 +2573,7 @@ mod tests {
         trie.clear_all_blocks(worker_0);
         assert!(
             !trie
-                .worker_blocks
+                .lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
@@ -2602,17 +2584,17 @@ mod tests {
         let worker_fake = 2;
         assert!(
             !trie
-                .worker_blocks
+                .lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
         );
         trie.clear_all_blocks(worker_fake);
         assert!(
             !trie
-                .worker_blocks
+                .lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
         );
         assert!(
-            trie.worker_blocks
+            trie.lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
         );
         let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
@@ -3154,9 +3136,9 @@ mod tests {
         trie.apply_event(create_store_event(worker_2, 0, vec![1, 4, 5], None))
             .unwrap();
 
-        // Verify worker_0 has 3 blocks in worker_blocks
+        // Verify worker_0 has 3 blocks in lookup
         assert_eq!(
-            trie.worker_blocks
+            trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_0))
                 .unwrap()
                 .len(),
@@ -3164,7 +3146,12 @@ mod tests {
         );
 
         // Verify that blocks have the correct workers
-        let block_1 = trie.lookup.get(&ExternalSequenceBlockHash(100)).unwrap();
+        let block_1 = trie
+            .lookup
+            .get(&WorkerWithDpRank::from_worker_id(worker_0))
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(100))
+            .unwrap();
         assert_eq!(block_1.borrow().workers.len(), 3); // worker_0, worker_1, and worker_2 (all have hash 1)
         assert!(
             block_1
@@ -3188,16 +3175,21 @@ mod tests {
         // Remove worker_0
         trie.remove_worker(worker_0);
 
-        // Verify worker_0 is completely removed from worker_blocks
+        // Verify worker_0 is completely removed from lookup table
         assert!(
             !trie
-                .worker_blocks
+                .lookup
                 .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
         );
-        assert_eq!(trie.worker_blocks.len(), 2);
+        assert_eq!(trie.lookup.len(), 2);
 
         // Verify that worker_0's hash is removed from the workers set
-        let block_1 = trie.lookup.get(&ExternalSequenceBlockHash(100)).unwrap();
+        let block_1 = trie
+            .lookup
+            .get(&WorkerWithDpRank::from_worker_id(worker_1))
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(100))
+            .unwrap();
         assert_eq!(block_1.borrow().workers.len(), 2); // worker_1 and worker_2 remain
         assert!(
             !block_1
@@ -3220,7 +3212,12 @@ mod tests {
 
         // Verify that blocks with no remaining workers have their children cleared
         // This tests the optimization where empty blocks clear their children
-        let block_2 = trie.lookup.get(&ExternalSequenceBlockHash(200)).unwrap();
+        let block_2 = trie
+            .lookup
+            .get(&WorkerWithDpRank::from_worker_id(worker_1))
+            .unwrap()
+            .get(&ExternalSequenceBlockHash(200))
+            .unwrap();
         assert_eq!(block_2.borrow().workers.len(), 1); // only worker_1
         assert!(
             block_2
