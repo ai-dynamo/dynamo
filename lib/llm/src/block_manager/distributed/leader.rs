@@ -373,7 +373,9 @@ impl KvbmLeader {
 
     /// Mark a request as having a failed G4 transfer.
     pub fn mark_g4_failed(&self, request_id: &str) {
-        self.failed_g4_requests.write().insert(request_id.to_string());
+        self.failed_g4_requests
+            .write()
+            .insert(request_id.to_string());
     }
 
     /// Check if a request has a failed G4 transfer.

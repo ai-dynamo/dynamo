@@ -143,14 +143,14 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
                 );
 
                 // Clone default params and add custom overrides using the new Params API
-                let mut params = default_params.clone().map_err(|e| {
-                    anyhow::anyhow!("Failed to clone OBJ default params: {}", e)
-                })?;
+                let mut params = default_params
+                    .clone()
+                    .map_err(|e| anyhow::anyhow!("Failed to clone OBJ default params: {}", e))?;
 
                 // Set bucket name
-                params.set("bucket", &templated_bucket).map_err(|e| {
-                    anyhow::anyhow!("Failed to set bucket param: {}", e)
-                })?;
+                params
+                    .set("bucket", &templated_bucket)
+                    .map_err(|e| anyhow::anyhow!("Failed to set bucket param: {}", e))?;
 
                 // Add endpoint override if configured
                 if let Ok(endpoint) = std::env::var("DYN_KVBM_OBJECT_ENDPOINT") {
