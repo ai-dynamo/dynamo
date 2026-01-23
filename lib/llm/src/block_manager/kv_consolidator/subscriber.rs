@@ -149,7 +149,9 @@ enum VllmRawEvent {
         #[serde(default)]
         medium: Option<String>,
         #[serde(default)]
-        lora_name: Option<String>, // Added in vLLM 0.14.0
+        #[allow(dead_code)]
+        // Reserved for future use, needed for vLLM 0.14.0 deserialization
+        lora_name: Option<String>,
     },
     #[serde(rename = "BlockRemoved")]
     BlockRemoved {
