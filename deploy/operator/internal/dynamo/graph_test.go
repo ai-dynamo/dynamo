@@ -93,7 +93,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service1",
+						Name:      "test-dynamographdeployment-service1-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service1",
@@ -126,7 +126,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service2",
+						Name:      "test-dynamographdeployment-service2-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service2",
@@ -200,7 +200,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service1",
+						Name:      "test-dynamographdeployment-service1-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service1",
@@ -232,7 +232,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service2",
+						Name:      "test-dynamographdeployment-service2-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service2",
@@ -310,7 +310,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service1",
+						Name:      "test-dynamographdeployment-service1-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service1",
@@ -346,7 +346,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service2",
+						Name:      "test-dynamographdeployment-service2-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service2",
@@ -426,7 +426,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service1",
+						Name:      "test-dynamographdeployment-service1-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service1",
@@ -470,7 +470,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service2",
+						Name:      "test-dynamographdeployment-service2-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service2",
@@ -563,7 +563,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service1",
+						Name:      "test-dynamographdeployment-service1-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service1",
@@ -608,7 +608,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				},
 				"service2": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service2",
+						Name:      "test-dynamographdeployment-service2-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service2",
@@ -682,7 +682,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      "test-dynamographdeployment-service1",
+						Name:      "test-dynamographdeployment-service1-44136fa3",
 						Namespace: "default",
 						Labels: map[string]string{
 							commonconsts.KubeLabelDynamoComponent:           "service1",
