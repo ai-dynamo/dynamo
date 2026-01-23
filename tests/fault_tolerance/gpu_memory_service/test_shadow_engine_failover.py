@@ -321,7 +321,7 @@ class VLLMWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
             "gpu_memory_service",
             "--enable-sleep-mode",
             "--gpu-memory-utilization",
-            "0.9",
+            "0.8",
             "--model-loader-extra-config",
             extra_config_str,
         ]
@@ -941,8 +941,8 @@ def test_gpu_memory_service_shadow_engine_failover(
                 logger.warning(f"Error removing socket file {socket_path}: {e}")
 
 
-@pytest.mark.timeout(300)  # 5 minutes
-@pytest.mark.gpu_1  # Can run with single GPU
+@pytest.mark.timeout(600)  # 10 minutes for TP=2
+@pytest.mark.gpu_2  # May need 2 GPUs for TP=2
 @pytest.mark.parametrize(
     "backend",
     [
@@ -995,23 +995,28 @@ def test_gpu_memory_service_basic_sleep_wake(
         bootstrap_port = allocate_port(8998)
         extra_ports = [sglang_port, bootstrap_port]
 
-    # Socket path template - for single GPU just use device 0
+    # Socket path template - {device} gets substituted per GPU
     socket_path_template = "/tmp/gpu_memory_service_{device}.sock"
-    socket_path = socket_path_template.format(device=0)
+    tp = GPU_MEMORY_SERVICE_TP
 
+    # Start GPU Memory Service for each device
+    gpu_mem_services = []
     try:
-        # Start GPU Memory Service
-        logger.info("Starting GPU Memory Service")
-        with GPUMemoryServiceProcess(
-            request,
-            device=0,
-            socket_path=socket_path,
-        ):
-            logger.info("GPU Memory Service started")
+        logger.info(f"Starting GPU Memory Service for {tp} device(s)")
+        for device in range(tp):
+            socket_path = socket_path_template.format(device=device)
+            gpu_mem_service = GPUMemoryServiceProcess(
+                request,
+                device=device,
+                socket_path=socket_path,
+            )
+            gpu_mem_service.__enter__()
+            gpu_mem_services.append(gpu_mem_service)
+            logger.info(f"GPU Memory Service for device {device} started")
 
-            # Start frontend (serves OpenAI-compatible API)
-            logger.info("Starting frontend")
-            with DynamoFrontendProcess(request, frontend_port=frontend_port):
+        # Start frontend (serves OpenAI-compatible API)
+        logger.info("Starting frontend")
+        with DynamoFrontendProcess(request, frontend_port=frontend_port):
                 logger.info(f"Frontend started on port {frontend_port}")
 
                 # Create ports dict for the factory function
@@ -1040,7 +1045,7 @@ def test_gpu_memory_service_basic_sleep_wake(
                     system_port=system_port,
                     ports=ports,
                     is_primary=False,
-                    tp=1,
+                    tp=GPU_MEMORY_SERVICE_TP,
                 )
                 with engine:
                     logger.info("Engine started")
@@ -1137,12 +1142,24 @@ def test_gpu_memory_service_basic_sleep_wake(
                     logger.info(f"All basic sleep/wake tests passed ({backend.value})!")
 
     finally:
+        # Cleanup: Stop all GPU Memory Service instances
+        for gpu_mem_service in reversed(gpu_mem_services):
+            try:
+                gpu_mem_service.__exit__(None, None, None)
+            except Exception as e:
+                logger.warning(f"Error stopping GPU Memory Service: {e}")
+
+        # Cleanup ports
         deallocate_port(system_port)
         deallocate_port(frontend_port)
         for port in extra_ports:
             deallocate_port(port)
-        if os.path.exists(socket_path):
-            try:
-                os.unlink(socket_path)
-            except Exception:
-                pass
+
+        # Cleanup socket files
+        for device in range(tp):
+            socket_path = socket_path_template.format(device=device)
+            if os.path.exists(socket_path):
+                try:
+                    os.unlink(socket_path)
+                except Exception:
+                    pass
