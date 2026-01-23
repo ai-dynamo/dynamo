@@ -92,16 +92,16 @@ sc.azurelustre.csi.azure.com   azurelustre.csi.azure.com   Retain
 ```
 The recommendation for storage options for the Dynamo caches are:
 
-Model Cache storing raw model artifacts, configuration files, tokenizers etc.  
-Persistence: Required to avoid repeated downloads and reduce cold-start latency.  
+Model Cache storing raw model artifacts, configuration files, tokenizers etc.<br>
+Persistence: Required to avoid repeated downloads and reduce cold-start latency.<br>
 Recommended storage: Azure Managed Lustre (shared, high throughput) or Azure Disk (single-replica, persistent).
 
-Compilation Cache stores backend-specific compiled artifacts (e.g., TensorRT engines).  
-Persistence: Optional  
-Recommended storage: Local CSI (fast, node-local) or Azure Disk (persistent when GPU configuration is fixed).  
+Compilation Cache stores backend-specific compiled artifacts (e.g., TensorRT engines).<br>
+Persistence: Optional<br>
+Recommended storage: Local CSI (fast, node-local) or Azure Disk (persistent when GPU configuration is fixed).
 
-Performance Cache stores runtime tuning and profiling data.  
-Persistence: Not required  
+Performance Cache stores runtime tuning and profiling data.<br>
+Persistence: Not required<br>
 Recommended storage: Local CSI (or other ephemeral storage).
 
 cache.yaml example:
