@@ -526,7 +526,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
-    factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
 
     handler = DecodeWorkerHandler(
