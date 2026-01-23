@@ -71,7 +71,7 @@ trtllm_tests = "dynamo.trtllm.tests.conftest"
 sglang_tests = "dynamo.sglang.tests.conftest"
 
 [project.entry-points."vllm.general_plugins"]
-gpu_memory_service = "dynamo.vllm.gpu_memory_service_adapters:vllm_plugin_init"
+gpu_memory_service = "gpu_memory_service.client.vllm_integration:vllm_plugin_init"
 
 [dependency-groups]
 docs = [

@@ -1,4 +1,7 @@
-"""vLLM adapter for GPU Memory Service (Allocation Server + embedded metadata store).
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""vLLM integration for GPU Memory Service.
 
 This package provides GPU Memory Service integration for vLLM, enabling:
 - VA-stable weight sharing across processes
@@ -21,12 +24,12 @@ from __future__ import annotations
 
 import logging
 
-from dynamo.vllm.gpu_memory_service_adapters.config import GMS_ENABLED
-from dynamo.vllm.gpu_memory_service_adapters.model_loader import (
+from gpu_memory_service.client.vllm_integration.config import GMS_ENABLED
+from gpu_memory_service.client.vllm_integration.model_loader import (
     get_imported_weights_bytes,
     register_gpu_memory_service_loader,
 )
-from dynamo.vllm.gpu_memory_service_adapters.patches import (
+from gpu_memory_service.client.vllm_integration.patches import (
     apply_all_patches,
     patch_sleep_wake,
     patch_worker_for_gms,

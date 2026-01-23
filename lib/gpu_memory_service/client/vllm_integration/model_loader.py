@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """vLLM model loader for GPU Memory Service integration.
 
 This module registers a vLLM `load_format` that loads model weights into
@@ -36,8 +39,8 @@ from typing import Optional
 
 import torch
 
-from dynamo.gpu_memory_service import get_or_create_gms_client_memory_manager
-from dynamo.vllm.gpu_memory_service_adapters.config import (
+from gpu_memory_service import get_or_create_gms_client_memory_manager
+from gpu_memory_service.client.vllm_integration.config import (
     get_local_rank,
     resolve_socket_path,
     strip_gms_extra_config,
@@ -113,8 +116,8 @@ def _load_model_read_mode(
     """
     global _gpu_memory_service_imported_weights_bytes
 
-    from dynamo.gpu_memory_service import materialize_module_from_gms
-    from dynamo.vllm.gpu_memory_service_adapters.patches import patch_sleep_wake
+    from gpu_memory_service.client.torch.module import materialize_module_from_gms
+    from gpu_memory_service.client.vllm_integration.patches import patch_sleep_wake
 
     try:
         model = _create_meta_model(vllm_config, model_config)
@@ -174,8 +177,8 @@ def _load_model_write_mode(
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
-    from dynamo.gpu_memory_service import register_module_tensors
-    from dynamo.vllm.gpu_memory_service_adapters.patches import patch_sleep_wake
+    from gpu_memory_service.client.torch.module import register_module_tensors
+    from gpu_memory_service.client.vllm_integration.patches import patch_sleep_wake
 
     # Start fresh (weights model load is authoritative)
     gms_client_memory_manager.clear_all()

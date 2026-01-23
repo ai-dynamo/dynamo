@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Monkey-patching logic for GPU Memory Service vLLM integration.
 
 This module consolidates all monkey-patches in one place:
@@ -19,8 +22,8 @@ from typing import List, Optional
 
 import torch
 
-from dynamo.vllm.gpu_memory_service_adapters.config import GMS_ENABLED
-from dynamo.vllm.gpu_memory_service_adapters.utils import get_vllm_worker_class
+from gpu_memory_service.client.vllm_integration.config import GMS_ENABLED
+from gpu_memory_service.client.vllm_integration.utils import get_vllm_worker_class
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ def patch_empty_cache() -> None:
     if _empty_cache_patched:
         return
 
-    from dynamo.vllm.gpu_memory_service_adapters.memory_ops import safe_empty_cache
+    from gpu_memory_service.client.vllm_integration.memory_ops import safe_empty_cache
 
     torch.cuda.empty_cache = safe_empty_cache
     _empty_cache_patched = True
@@ -72,7 +75,7 @@ def _create_load_model_patch(original_load_model):
         logger.debug("[GMS Patch] original load_model returned")
 
         try:
-            from dynamo.vllm.gpu_memory_service_adapters.model_loader import (
+            from gpu_memory_service.client.vllm_integration.model_loader import (
                 get_imported_weights_bytes,
             )
 
@@ -115,7 +118,7 @@ def _create_init_device_patch(original_init_device):
     def patched_init_device(self):
         from vllm.platforms import current_platform
 
-        from dynamo.vllm.gpu_memory_service_adapters.memory_ops import (
+        from gpu_memory_service.client.vllm_integration.memory_ops import (
             establish_early_gms_connection,
         )
 
@@ -180,7 +183,7 @@ def _patch_memory_snapshot() -> None:
     def patched_measure(self):
         original_measure(self)
 
-        from dynamo.vllm.gpu_memory_service_adapters.memory_ops import (
+        from gpu_memory_service.client.vllm_integration.memory_ops import (
             get_gms_committed_bytes,
         )
 
@@ -227,7 +230,7 @@ def _create_sleep_patch():
     """Create the patched sleep function."""
 
     def patched_sleep(self, level: int = 1):
-        from dynamo.vllm.gpu_memory_service_adapters.memory_ops import worker_sleep_impl
+        from gpu_memory_service.client.vllm_integration.memory_ops import worker_sleep_impl
 
         worker_sleep_impl(level)
 
@@ -238,7 +241,7 @@ def _create_wake_up_patch():
     """Create the patched wake_up function."""
 
     def patched_wake_up(self, tags: Optional[List[str]] = None):
-        from dynamo.vllm.gpu_memory_service_adapters.memory_ops import (
+        from gpu_memory_service.client.vllm_integration.memory_ops import (
             reinit_fp8_kv_scales,
             worker_wake_impl,
         )

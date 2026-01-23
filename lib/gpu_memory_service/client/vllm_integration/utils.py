@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared utilities for GPU Memory Service vLLM integration."""
 
 from __future__ import annotations
@@ -6,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING, Optional, Type
 
 if TYPE_CHECKING:
-    from dynamo.gpu_memory_service import GMSClientMemoryManager
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,7 @@ def get_gms_memory_manager() -> Optional["GMSClientMemoryManager"]:
     Returns:
         GMSClientMemoryManager instance if registered, None otherwise.
     """
-    from dynamo.gpu_memory_service import get_gms_client_memory_manager
+    from gpu_memory_service import get_gms_client_memory_manager
     return get_gms_client_memory_manager()
 
 

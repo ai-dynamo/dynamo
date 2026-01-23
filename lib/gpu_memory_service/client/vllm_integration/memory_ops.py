@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """GPU Memory Service memory operations for vLLM integration.
 
 This module contains the implementation logic for:
@@ -15,7 +18,7 @@ from typing import TYPE_CHECKING, Optional, List
 
 import torch
 
-from dynamo.vllm.gpu_memory_service_adapters.utils import get_gms_memory_manager
+from gpu_memory_service.client.vllm_integration.utils import get_gms_memory_manager
 
 if TYPE_CHECKING:
     pass
@@ -37,7 +40,7 @@ def safe_empty_cache() -> None:
     torch.cuda.empty_cache() causes segfaults because the native caching allocator
     tries to release blocks that were allocated through VMM APIs.
     """
-    from dynamo.vllm.gpu_memory_service_adapters.utils import has_vmm_allocations
+    from gpu_memory_service.client.vllm_integration.utils import has_vmm_allocations
 
     if has_vmm_allocations():
         logger.debug(
@@ -268,7 +271,7 @@ def establish_early_gms_connection() -> bool:
             get_or_create_gms_client_memory_manager
         )
 
-        from dynamo.vllm.gpu_memory_service_adapters.config import resolve_socket_path
+        from gpu_memory_service.client.vllm_integration.config import resolve_socket_path
 
         socket_path = resolve_socket_path()
         device = torch.cuda.current_device() if torch.cuda.is_available() else 0
