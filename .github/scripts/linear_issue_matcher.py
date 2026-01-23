@@ -999,6 +999,71 @@ If one of these issues is correct, here's how to connect them:
     return comment
 
 
+def log_match_analytics(
+    pr: PRContext,
+    matches: list[MatchResult],
+    posted: bool,
+    analytics_url: Optional[str] = None,
+) -> None:
+    """
+    Log match analytics for offline analysis and algorithm tuning.
+
+    Logs structured JSON to workflow output. If MATCH_ANALYTICS_URL is set,
+    also POSTs to that private endpoint for persistent storage.
+
+    Data logged (no sensitive issue content):
+    - PR metadata (number, author, branch)
+    - Match data (issue IDs, scores, signals)
+    - Outcome (comment posted or not)
+    """
+    from datetime import datetime, timezone
+
+    analytics = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "pr": {
+            "number": pr.number,
+            "author": pr.author,
+            "branch": pr.branch,
+            "files_count": len(pr.files_changed),
+        },
+        "matches": [
+            {
+                "issue_id": m.issue.identifier,
+                "confidence": round(m.confidence, 3),
+                "screening_score": round(m.screening_score, 3),
+                "issue_state": m.issue.state,
+                "issue_priority": m.issue.priority,
+                "issue_team": m.issue.identifier.split("-")[0],
+            }
+            for m in matches
+        ],
+        "outcome": {
+            "match_count": len(matches),
+            "comment_posted": posted,
+            "top_confidence": round(matches[0].confidence, 3) if matches else 0,
+        },
+    }
+
+    # Log to workflow output (searchable in GitHub Actions logs)
+    logger.info(f"MATCH_ANALYTICS: {json.dumps(analytics)}")
+
+    # If private analytics endpoint is configured, POST the data
+    if analytics_url:
+        try:
+            response = requests.post(
+                analytics_url,
+                json=analytics,
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            if response.ok:
+                logger.info("Analytics posted to private endpoint")
+            else:
+                logger.warning(f"Analytics POST failed: {response.status_code}")
+        except requests.RequestException as e:
+            logger.warning(f"Analytics POST error: {e}")
+
+
 def post_pr_comment(
     repo: str, pr_number: int, comment_body: str, github_token: str
 ) -> bool:
@@ -1116,6 +1181,9 @@ def main():
 
     logger.info(f"Found {len(matches)} match(es) above threshold")
 
+    # Get optional private analytics endpoint
+    analytics_url = os.environ.get("MATCH_ANALYTICS_URL")
+
     # Post comment (or show preview in dry-run mode)
     comment = format_comment(pr, matches)
     if comment:
@@ -1128,8 +1196,14 @@ def main():
             print(
                 f"::notice::Dry run - would post comment with {len(matches)} match(es)"
             )
+            # Log analytics even in dry-run mode
+            log_match_analytics(pr, matches, posted=False, analytics_url=analytics_url)
         else:
             success = post_pr_comment(github_repo, pr.number, comment, github_token)
+            # Log analytics after posting attempt
+            log_match_analytics(
+                pr, matches, posted=success, analytics_url=analytics_url
+            )
             if success:
                 print(f"::notice::Posted comment with {len(matches)} related issue(s)")
             else:
