@@ -6,7 +6,7 @@
 //! Measures latency and throughput of:
 //! - store_block: Adding blocks to the tree
 //! - remove_block: Removing blocks from the tree
-//! - lookup_input: Finding prefix matches (find_matches)
+//! - find_matches: Finding prefix matches in the tree
 //!
 //! Size is defined as total (worker, block) pairs in the tree.
 //! Depth is the number of blocks per sequence (depth = (isl + osl) / block_size).
@@ -52,7 +52,7 @@ struct Args {
     #[arg(long, default_value = "42")]
     seed: u64,
 
-    /// Run only specific benchmark (hash, store, remove, lookup, sweep, or all)
+    /// Run only specific benchmark (hash, store, remove, find_matches, sweep, or all)
     #[arg(long, default_value = "all")]
     bench: String,
 
@@ -86,7 +86,7 @@ struct Args {
 
     /// Sweep match length instead of sequence length.
     /// When set, tree sequences are fixed at max_depth length,
-    /// and depth controls how many blocks of the lookup query match.
+    /// and depth controls how many blocks of the find_matches query match.
     #[arg(long)]
     sweep_match_length: bool,
 
@@ -389,9 +389,9 @@ fn bench_remove(args: &Args) {
     stats.print("REMOVE_BLOCK", args.depth);
 }
 
-/// Benchmark lookup_input (find_matches) operation
-fn bench_lookup(args: &Args) {
-    println!("\n=== Benchmarking LOOKUP_INPUT (find_matches) ===");
+/// Benchmark find_matches operation
+fn bench_find_matches(args: &Args) {
+    println!("\n=== Benchmarking FIND_MATCHES ===");
 
     let num_sequences = args.size / args.depth;
     let sequences = generate_sequences(
@@ -401,7 +401,7 @@ fn bench_lookup(args: &Args) {
         args.prefix_share_ratio,
     );
 
-    // Build tree once for all lookups
+    // Build tree once for all find_matches calls
     let tree = build_tree(&sequences);
 
     println!(
@@ -429,9 +429,9 @@ fn bench_lookup(args: &Args) {
     }
 
     let hit_stats = LatencyStats::from_durations(hit_durations);
-    hit_stats.print("LOOKUP_INPUT (HIT)", args.depth);
+    hit_stats.print("FIND_MATCHES (HIT)", args.depth);
 
-    // Benchmark miss case (lookup non-existing sequences)
+    // Benchmark miss case (find_matches on non-existing sequences)
     println!("\n  --- MISS case (non-existing sequences) ---");
     let mut miss_durations = Vec::with_capacity(args.iterations);
 
@@ -453,7 +453,7 @@ fn bench_lookup(args: &Args) {
     }
 
     let miss_stats = LatencyStats::from_durations(miss_durations);
-    miss_stats.print("LOOKUP_INPUT (MISS)", args.depth);
+    miss_stats.print("FIND_MATCHES (MISS)", args.depth);
 
     // Benchmark partial match case
     println!("\n  --- PARTIAL case (prefix match only) ---");
@@ -480,7 +480,7 @@ fn bench_lookup(args: &Args) {
     }
 
     let partial_stats = LatencyStats::from_durations(partial_durations);
-    partial_stats.print("LOOKUP_INPUT (PARTIAL)", args.depth);
+    partial_stats.print("FIND_MATCHES (PARTIAL)", args.depth);
 
     // Benchmark with early_exit=true
     println!("\n  --- EARLY_EXIT case ---");
@@ -497,7 +497,7 @@ fn bench_lookup(args: &Args) {
     }
 
     let early_exit_stats = LatencyStats::from_durations(early_exit_durations);
-    early_exit_stats.print("LOOKUP_INPUT (EARLY_EXIT)", args.depth);
+    early_exit_stats.print("FIND_MATCHES (EARLY_EXIT)", args.depth);
 }
 
 /// Generate logarithmically spaced depth values
@@ -530,9 +530,9 @@ struct DepthResult {
     remove_avg_ns: u64,
     remove_p50_ns: u64,
     remove_p99_ns: u64,
-    lookup_avg_ns: u64,
-    lookup_p50_ns: u64,
-    lookup_p99_ns: u64,
+    find_matches_avg_ns: u64,
+    find_matches_p50_ns: u64,
+    find_matches_p99_ns: u64,
 }
 
 /// Benchmark store/remove/lookup across a range of depths
@@ -617,25 +617,26 @@ fn bench_sweep(args: &Args) {
             let _ = remove_tree.apply_event(store_event);
         }
 
-        // --- LOOKUP benchmark ---
+        // --- FIND_MATCHES benchmark ---
         let tree = build_tree(&sequences);
-        let mut lookup_durations = Vec::with_capacity(args.sweep_iterations);
+        let mut find_matches_durations = Vec::with_capacity(args.sweep_iterations);
         for i in 0..args.sweep_iterations {
             let seq = &sequences[i % sequences.len()];
 
             let start = Instant::now();
             let _ = tree.find_matches(seq.local_hashes.clone(), false);
-            lookup_durations.push(start.elapsed());
+            find_matches_durations.push(start.elapsed());
         }
 
         // Compute stats
         store_durations.sort();
         remove_durations.sort();
-        lookup_durations.sort();
+        find_matches_durations.sort();
 
         let store_avg = store_durations.iter().sum::<Duration>() / store_durations.len() as u32;
         let remove_avg = remove_durations.iter().sum::<Duration>() / remove_durations.len() as u32;
-        let lookup_avg = lookup_durations.iter().sum::<Duration>() / lookup_durations.len() as u32;
+        let find_matches_avg =
+            find_matches_durations.iter().sum::<Duration>() / find_matches_durations.len() as u32;
 
         let result = DepthResult {
             depth,
@@ -645,16 +646,18 @@ fn bench_sweep(args: &Args) {
             remove_avg_ns: remove_avg.as_nanos() as u64,
             remove_p50_ns: remove_durations[remove_durations.len() / 2].as_nanos() as u64,
             remove_p99_ns: remove_durations[remove_durations.len() * 99 / 100].as_nanos() as u64,
-            lookup_avg_ns: lookup_avg.as_nanos() as u64,
-            lookup_p50_ns: lookup_durations[lookup_durations.len() / 2].as_nanos() as u64,
-            lookup_p99_ns: lookup_durations[lookup_durations.len() * 99 / 100].as_nanos() as u64,
+            find_matches_avg_ns: find_matches_avg.as_nanos() as u64,
+            find_matches_p50_ns: find_matches_durations[find_matches_durations.len() / 2].as_nanos()
+                as u64,
+            find_matches_p99_ns: find_matches_durations[find_matches_durations.len() * 99 / 100]
+                .as_nanos() as u64,
         };
 
         println!(
-            "store={:.2}us, remove={:.2}us, lookup={:.2}us",
+            "store={:.2}us, remove={:.2}us, find_matches={:.2}us",
             result.store_avg_ns as f64 / 1000.0,
             result.remove_avg_ns as f64 / 1000.0,
-            result.lookup_avg_ns as f64 / 1000.0
+            result.find_matches_avg_ns as f64 / 1000.0
         );
 
         results.push(result);
@@ -664,7 +667,7 @@ fn bench_sweep(args: &Args) {
     println!();
     if args.sweep_format == "csv" {
         println!(
-            "depth,store_avg_ns,store_p50_ns,store_p99_ns,remove_avg_ns,remove_p50_ns,remove_p99_ns,lookup_avg_ns,lookup_p50_ns,lookup_p99_ns"
+            "depth,store_avg_ns,store_p50_ns,store_p99_ns,remove_avg_ns,remove_p50_ns,remove_p99_ns,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns"
         );
         for r in &results {
             println!(
@@ -676,9 +679,9 @@ fn bench_sweep(args: &Args) {
                 r.remove_avg_ns,
                 r.remove_p50_ns,
                 r.remove_p99_ns,
-                r.lookup_avg_ns,
-                r.lookup_p50_ns,
-                r.lookup_p99_ns
+                r.find_matches_avg_ns,
+                r.find_matches_p50_ns,
+                r.find_matches_p99_ns
             );
         }
     } else {
@@ -692,9 +695,9 @@ fn bench_sweep(args: &Args) {
             "remove_avg",
             "remove_p50",
             "remove_p99",
-            "lookup_avg",
-            "lookup_p50",
-            "lookup_p99"
+            "fm_avg",
+            "fm_p50",
+            "fm_p99"
         );
         println!("{}", "-".repeat(130));
         for r in &results {
@@ -707,25 +710,25 @@ fn bench_sweep(args: &Args) {
                 format_duration_ns(r.remove_avg_ns),
                 format_duration_ns(r.remove_p50_ns),
                 format_duration_ns(r.remove_p99_ns),
-                format_duration_ns(r.lookup_avg_ns),
-                format_duration_ns(r.lookup_p50_ns),
-                format_duration_ns(r.lookup_p99_ns)
+                format_duration_ns(r.find_matches_avg_ns),
+                format_duration_ns(r.find_matches_p50_ns),
+                format_duration_ns(r.find_matches_p99_ns)
             );
         }
     }
 }
 
-/// Results for a single match-length point (lookup only)
+/// Results for a single match-length point (find_matches only)
 #[derive(Debug)]
 struct MatchLengthResult {
     match_length: usize,
     seq_length: usize,
-    lookup_avg_ns: u64,
-    lookup_p50_ns: u64,
-    lookup_p99_ns: u64,
+    find_matches_avg_ns: u64,
+    find_matches_p50_ns: u64,
+    find_matches_p99_ns: u64,
 }
 
-/// Benchmark lookup with varying match lengths (fixed tree structure)
+/// Benchmark find_matches with varying match lengths (fixed tree structure)
 fn bench_sweep_match_length(args: &Args) {
     let seq_length = args.seq_length.unwrap_or(args.max_depth);
     let num_sequences = args.size / seq_length;
@@ -778,8 +781,8 @@ fn bench_sweep_match_length(args: &Args) {
         );
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-        // Generate lookup queries: first match_len blocks match, rest are garbage
-        let mut lookup_durations = Vec::with_capacity(args.sweep_iterations);
+        // Generate find_matches queries: first match_len blocks match, rest are garbage
+        let mut find_matches_durations = Vec::with_capacity(args.sweep_iterations);
 
         for i in 0..args.sweep_iterations {
             let seq = &sequences[i % sequences.len()];
@@ -796,21 +799,27 @@ fn bench_sweep_match_length(args: &Args) {
 
             let start = Instant::now();
             let _ = tree.find_matches(query_hashes, false);
-            lookup_durations.push(start.elapsed());
+            find_matches_durations.push(start.elapsed());
         }
 
-        lookup_durations.sort();
-        let lookup_avg = lookup_durations.iter().sum::<Duration>() / lookup_durations.len() as u32;
+        find_matches_durations.sort();
+        let find_matches_avg =
+            find_matches_durations.iter().sum::<Duration>() / find_matches_durations.len() as u32;
 
         let result = MatchLengthResult {
             match_length: match_len,
             seq_length,
-            lookup_avg_ns: lookup_avg.as_nanos() as u64,
-            lookup_p50_ns: lookup_durations[lookup_durations.len() / 2].as_nanos() as u64,
-            lookup_p99_ns: lookup_durations[lookup_durations.len() * 99 / 100].as_nanos() as u64,
+            find_matches_avg_ns: find_matches_avg.as_nanos() as u64,
+            find_matches_p50_ns: find_matches_durations[find_matches_durations.len() / 2].as_nanos()
+                as u64,
+            find_matches_p99_ns: find_matches_durations[find_matches_durations.len() * 99 / 100]
+                .as_nanos() as u64,
         };
 
-        println!("lookup={:.2}us", result.lookup_avg_ns as f64 / 1000.0);
+        println!(
+            "find_matches={:.2}us",
+            result.find_matches_avg_ns as f64 / 1000.0
+        );
 
         results.push(result);
     }
@@ -818,17 +827,21 @@ fn bench_sweep_match_length(args: &Args) {
     // Print results
     println!();
     if args.sweep_format == "csv" {
-        println!("match_length,seq_length,lookup_avg_ns,lookup_p50_ns,lookup_p99_ns");
+        println!("match_length,seq_length,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns");
         for r in &results {
             println!(
                 "{},{},{},{},{}",
-                r.match_length, r.seq_length, r.lookup_avg_ns, r.lookup_p50_ns, r.lookup_p99_ns
+                r.match_length,
+                r.seq_length,
+                r.find_matches_avg_ns,
+                r.find_matches_p50_ns,
+                r.find_matches_p99_ns
             );
         }
     } else {
         println!(
             "{:>12} | {:>10} | {:>12} {:>12} {:>12}",
-            "match_length", "seq_length", "lookup_avg", "lookup_p50", "lookup_p99"
+            "match_length", "seq_length", "fm_avg", "fm_p50", "fm_p99"
         );
         println!("{}", "-".repeat(70));
         for r in &results {
@@ -836,9 +849,9 @@ fn bench_sweep_match_length(args: &Args) {
                 "{:>12} | {:>10} | {:>12} {:>12} {:>12}",
                 r.match_length,
                 r.seq_length,
-                format_duration_ns(r.lookup_avg_ns),
-                format_duration_ns(r.lookup_p50_ns),
-                format_duration_ns(r.lookup_p99_ns)
+                format_duration_ns(r.find_matches_avg_ns),
+                format_duration_ns(r.find_matches_p50_ns),
+                format_duration_ns(r.find_matches_p99_ns)
             );
         }
     }
@@ -889,7 +902,7 @@ fn main() {
         "hash" => bench_hash(&args),
         "store" => bench_store(&args),
         "remove" => bench_remove(&args),
-        "lookup" => bench_lookup(&args),
+        "find_matches" => bench_find_matches(&args),
         "sweep" => {
             if args.sweep_match_length {
                 bench_sweep_match_length(&args);
@@ -901,11 +914,11 @@ fn main() {
             bench_hash(&args);
             bench_store(&args);
             bench_remove(&args);
-            bench_lookup(&args);
+            bench_find_matches(&args);
         }
         _ => {
             eprintln!(
-                "Unknown benchmark type: {}. Use 'hash', 'store', 'remove', 'lookup', 'sweep', or 'all'",
+                "Unknown benchmark type: {}. Use 'hash', 'store', 'remove', 'find_matches', 'sweep', or 'all'",
                 args.bench
             );
             std::process::exit(1);
