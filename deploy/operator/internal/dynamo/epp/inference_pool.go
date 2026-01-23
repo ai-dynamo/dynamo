@@ -50,10 +50,10 @@ func GenerateInferencePool(
 		consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 	})
 
-	// Set spec fields
-	spec := map[string]interface{}{
-		"targetPorts": []map[string]interface{}{
-			{
+	// Set spec fields - build spec directly in pool.Object to avoid deep copy issues
+	pool.Object["spec"] = map[string]interface{}{
+		"targetPorts": []interface{}{
+			map[string]interface{}{
 				"number": int64(8000), // Frontend port
 			},
 		},
@@ -71,10 +71,6 @@ func GenerateInferencePool(
 				"number": int64(9002),
 			},
 		},
-	}
-
-	if err := unstructured.SetNestedMap(pool.Object, spec, "spec"); err != nil {
-		return nil, fmt.Errorf("failed to set InferencePool spec: %w", err)
 	}
 
 	return pool, nil
