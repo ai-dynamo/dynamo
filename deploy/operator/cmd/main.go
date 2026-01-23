@@ -146,6 +146,7 @@ func main() {
 	var mpiRunSecretNamespace string
 	var plannerClusterRoleName string
 	var dgdrProfilingClusterRoleName string
+	var eppClusterRoleName string
 	var namespaceScopeLeaseDuration time.Duration
 	var namespaceScopeLeaseRenewInterval time.Duration
 	var operatorVersion string
@@ -196,6 +197,8 @@ func main() {
 		"Name of the ClusterRole for planner (cluster-wide mode only)")
 	flag.StringVar(&dgdrProfilingClusterRoleName, "dgdr-profiling-cluster-role-name", "",
 		"Name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)")
+	flag.StringVar(&eppClusterRoleName, "epp-cluster-role-name", "",
+		"Name of the ClusterRole for EPP (cluster-wide mode only)")
 	flag.DurationVar(&namespaceScopeLeaseDuration, "namespace-scope-lease-duration", 30*time.Second,
 		"Duration of namespace scope marker lease before expiration (namespace-restricted mode only)")
 	flag.DurationVar(&namespaceScopeLeaseRenewInterval, "namespace-scope-lease-renew-interval", 10*time.Second,
@@ -270,6 +273,7 @@ func main() {
 		RBAC: commonController.RBACConfig{
 			PlannerClusterRoleName:       plannerClusterRoleName,
 			DGDRProfilingClusterRoleName: dgdrProfilingClusterRoleName,
+			EPPClusterRoleName:           eppClusterRoleName,
 		},
 		DiscoveryBackend: discoveryBackend,
 	}
@@ -647,7 +651,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler()
+		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr.GetClient())
 		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
 			os.Exit(1)

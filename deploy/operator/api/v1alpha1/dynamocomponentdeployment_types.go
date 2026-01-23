@@ -25,6 +25,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 )
 
 const (
@@ -124,6 +125,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	// the service using the Scale subresource. When disabled, replicas can be modified directly.
 	// +optional
 	ScalingAdapter *ScalingAdapter `json:"scalingAdapter,omitempty"`
+
+	// EPPConfig defines EPP-specific configuration options for Endpoint Picker Plugin components.
+	// Only applicable when ComponentType is "epp".
+	// +optional
+	EPPConfig *EPPConfig `json:"eppConfig,omitempty"`
 }
 
 type MultinodeSpec struct {
@@ -344,4 +350,44 @@ type ModelReference struct {
 	// Revision is the model revision/version (optional)
 	// +optional
 	Revision string `json:"revision,omitempty"`
+}
+
+// EPPConfig contains configuration for EPP (Endpoint Picker Plugin) components.
+// EPP is responsible for intelligent endpoint selection and KV-aware routing.
+type EPPConfig struct {
+	// ConfigMapRef references a user-provided ConfigMap containing EPP configuration.
+	// The ConfigMap should contain EndpointPickerConfig YAML.
+	// Mutually exclusive with Config.
+	// +optional
+	ConfigMapRef *corev1.ConfigMapKeySelector `json:"configMapRef,omitempty"`
+
+	// Config allows specifying EPP EndpointPickerConfig directly as a structured object.
+	// The operator will marshal this to YAML and create a ConfigMap automatically.
+	// Mutually exclusive with ConfigMapRef.
+	// One of ConfigMapRef or Config must be specified (no default configuration).
+	// Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension
+	// +optional
+	// +kubebuilder:validation:Type=object
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
+
+	// PoolName is the name of the InferencePool to create and watch.
+	// Defaults to {dgd-name}-pool if not specified.
+	// +optional
+	PoolName *string `json:"poolName,omitempty"`
+
+	// PoolNamespace is the namespace of the InferencePool to create and watch.
+	// Defaults to the DGD namespace if not specified.
+	// +optional
+	PoolNamespace *string `json:"poolNamespace,omitempty"`
+
+	// KVBlockSize for Dynamo KV-aware routing.
+	// +optional
+	// +kubebuilder:default="16"
+	KVBlockSize *string `json:"kvBlockSize,omitempty"`
+
+	// UseEtcd when true, EPP uses ETCD for discovery instead of Kubernetes.
+	// When false (default), uses Kubernetes-based discovery.
+	// +optional
+	UseEtcd *bool `json:"useEtcd,omitempty"`
 }

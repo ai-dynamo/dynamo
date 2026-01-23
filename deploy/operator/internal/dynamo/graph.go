@@ -1085,6 +1085,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		ParentGraphDeploymentNamespace: namespace,
 		DiscoveryBackend:               discoveryBackend,
 		DynamoNamespace:                dynamoNamespace,
+		EPPConfig:                      component.EPPConfig,
 	}
 	return componentContext
 }

@@ -154,7 +154,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	// Validate the DynamoComponentDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoComponentDeploymentValidator(dynamoComponentDeployment)
-		if _, validationErr := validator.Validate(); validationErr != nil {
+		if _, validationErr := validator.Validate(ctx); validationErr != nil {
 			logs.Error(validationErr, "DynamoComponentDeployment validation failed, refusing to reconcile")
 
 			// Set validation error condition

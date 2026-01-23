@@ -92,6 +92,8 @@ type RBACConfig struct {
 	PlannerClusterRoleName string
 	// DGDRProfilingClusterRoleName is the name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)
 	DGDRProfilingClusterRoleName string
+	// EPPClusterRoleName is the name of the ClusterRole for EPP (cluster-wide mode only)
+	EPPClusterRoleName string
 }
 
 type IngressConfig struct {

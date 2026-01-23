@@ -27,6 +27,7 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -40,11 +41,15 @@ const (
 
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
-type DynamoGraphDeploymentHandler struct{}
+type DynamoGraphDeploymentHandler struct {
+	client client.Client
+}
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-func NewDynamoGraphDeploymentHandler() *DynamoGraphDeploymentHandler {
-	return &DynamoGraphDeploymentHandler{}
+func NewDynamoGraphDeploymentHandler(client client.Client) *DynamoGraphDeploymentHandler {
+	return &DynamoGraphDeploymentHandler{
+		client: client,
+	}
 }
 
 // ValidateCreate validates a DynamoGraphDeployment create request.
@@ -58,9 +63,9 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
-	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentValidator(deployment)
-	return validator.Validate()
+	// Create validator with client for CRD feature detection and perform validation
+	validator := NewDynamoGraphDeploymentValidatorWithClient(deployment, h.client)
+	return validator.Validate(ctx)
 }
 
 // ValidateUpdate validates a DynamoGraphDeployment update request.
@@ -85,11 +90,11 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return nil, err
 	}
 
-	// Create validator and perform validation
-	validator := NewDynamoGraphDeploymentValidator(newDeployment)
+	// Create validator with client for CRD feature detection and perform validation
+	validator := NewDynamoGraphDeploymentValidatorWithClient(newDeployment, h.client)
 
 	// Validate stateless rules
-	warnings, err := validator.Validate()
+	warnings, err := validator.Validate(ctx)
 	if err != nil {
 		return warnings, err
 	}

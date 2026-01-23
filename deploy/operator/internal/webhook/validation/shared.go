@@ -18,9 +18,15 @@
 package validation
 
 import (
+	"context"
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -29,8 +35,9 @@ import (
 // to provide consistent validation logic for shared spec fields.
 type SharedSpecValidator struct {
 	spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-	fieldPath           string // e.g., "spec" for DCD, "spec.services[foo]" for DGD
-	calculatedNamespace string // The namespace that will be used: {k8s_namespace}-{dgd_name}
+	fieldPath           string        // e.g., "spec" for DCD, "spec.services[foo]" for DGD
+	calculatedNamespace string        // The namespace that will be used: {k8s_namespace}-{dgd_name}
+	client              client.Client // Optional: for feature detection (e.g., CRD availability)
 }
 
 // NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
@@ -43,12 +50,25 @@ func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
+		client:              nil,
+	}
+}
+
+// NewSharedSpecValidatorWithClient creates a validator with a Kubernetes client for feature detection.
+// This allows the validator to check for CRD availability (e.g., InferencePool) when validating EPP components.
+func NewSharedSpecValidatorWithClient(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, client client.Client) *SharedSpecValidator {
+	return &SharedSpecValidator{
+		spec:                spec,
+		fieldPath:           fieldPath,
+		calculatedNamespace: calculatedNamespace,
+		client:              client,
 	}
 }
 
 // Validate performs validation on the shared spec fields.
+// Context is required for any operations that may need to query the cluster (e.g., CRD checks).
 // Returns warnings (e.g., deprecation notices) and error if validation fails.
-func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
+func (v *SharedSpecValidator) Validate(ctx context.Context) (admission.Warnings, error) {
 	// Collect warnings (e.g., deprecation notices)
 	var warnings admission.Warnings
 
@@ -93,6 +113,11 @@ func (v *SharedSpecValidator) Validate() (admission.Warnings, error) {
 			v.fieldPath))
 	}
 
+	// Validate EPP-specific constraints
+	if err := v.validateEPPConfig(ctx); err != nil {
+		return nil, err
+	}
+
 	return warnings, nil
 }
 
@@ -129,5 +154,74 @@ func (v *SharedSpecValidator) validateSharedMemory() error {
 	if !v.spec.SharedMemory.Disabled && v.spec.SharedMemory.Size.IsZero() {
 		return fmt.Errorf("%s.sharedMemory.size is required when disabled is false", v.fieldPath)
 	}
+	return nil
+}
+
+// validateEPPConfig validates EPP-specific configuration constraints.
+func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
+	// Only validate if this is an EPP component
+	if v.spec.ComponentType != "epp" {
+		return nil
+	}
+
+	// Check if InferencePool CRD is available in the cluster (if client is provided)
+	if v.client != nil {
+		if err := v.checkInferencePoolCRDAvailability(ctx); err != nil {
+			return fmt.Errorf("%s: cannot deploy EPP component: %w", v.fieldPath, err)
+		}
+	}
+
+	// EPP must be single-node (cannot be multinode)
+	if v.spec.IsMultinode() {
+		return fmt.Errorf("%s: EPP component cannot be multinode (multinode field must be nil or nodeCount must be 1)", v.fieldPath)
+	}
+
+	// EPP should have exactly 1 replica (optional constraint - can be relaxed if needed)
+	if v.spec.Replicas != nil && *v.spec.Replicas != 1 {
+		return fmt.Errorf("%s: EPP component must have exactly 1 replica (found %d replicas)", v.fieldPath, *v.spec.Replicas)
+	}
+
+	// Validate EPPConfig if provided
+	if v.spec.EPPConfig != nil {
+		// Either ConfigMapRef or Config must be specified (no default)
+		if v.spec.EPPConfig.ConfigMapRef == nil && v.spec.EPPConfig.Config == nil {
+			return fmt.Errorf("%s.eppConfig: either configMapRef or config must be specified (no default configuration provided)", v.fieldPath)
+		}
+
+		// ConfigMapRef and Config are mutually exclusive
+		if v.spec.EPPConfig.ConfigMapRef != nil && v.spec.EPPConfig.Config != nil {
+			return fmt.Errorf("%s.eppConfig: configMapRef and config are mutually exclusive, only one can be specified", v.fieldPath)
+		}
+
+		// If ConfigMapRef is provided, validate it
+		if v.spec.EPPConfig.ConfigMapRef != nil {
+			if v.spec.EPPConfig.ConfigMapRef.Name == "" {
+				return fmt.Errorf("%s.eppConfig.configMapRef.name is required", v.fieldPath)
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkInferencePoolCRDAvailability checks if the InferencePool CRD is installed in the cluster.
+// Returns an error if the CRD is not available, which prevents EPP deployment.
+func (v *SharedSpecValidator) checkInferencePoolCRDAvailability(ctx context.Context) error {
+	crdName := fmt.Sprintf("%ss.%s", "inferencepool", epp.InferencePoolGroup)
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+
+	err := v.client.Get(ctx, types.NamespacedName{Name: crdName}, crd)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf(
+				"InferencePool CRD (%s) is not installed in the cluster. "+
+					"EPP requires the Gateway API Inference Extension to be installed. "+
+					"Please install the InferencePool CRD before deploying EPP components",
+				crdName)
+		}
+		// Other errors (e.g., permission issues) - return as-is
+		return fmt.Errorf("failed to check InferencePool CRD availability: %w", err)
+	}
+
 	return nil
 }

@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
@@ -51,6 +52,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -94,6 +96,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=grove.io,resources=podcliques/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=grove.io,resources=podcliquescalinggroups/scale,verbs=get;update;patch
 // +kubebuilder:rbac:groups=scheduling.run.ai,resources=queues,verbs=get;list
+// +kubebuilder:rbac:groups=inference.networking.k8s.io,resources=inferencepools,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -169,7 +172,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
-		if _, validationErr := validator.Validate(); validationErr != nil {
+		if _, validationErr := validator.Validate(ctx); validationErr != nil {
 			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
 
 			// Set validation error state and reason (defer will update status)
@@ -239,6 +242,22 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 			logger.Error(err, "Failed to ensure planner RBAC")
 			return ReconcileResult{}, fmt.Errorf("failed to ensure planner RBAC: %w", err)
 		}
+
+		// Ensure EPP RBAC exists in cluster-wide mode if EPP service is present
+		if hasEPPService(dynamoDeployment) {
+			if r.Config.RBAC.EPPClusterRoleName == "" {
+				return ReconcileResult{}, fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
+			}
+			if err := r.RBACManager.EnsureServiceAccountWithRBAC(
+				ctx,
+				dynamoDeployment.Namespace,
+				consts.EPPServiceAccountName,
+				r.Config.RBAC.EPPClusterRoleName,
+			); err != nil {
+				logger.Error(err, "Failed to ensure EPP RBAC")
+				return ReconcileResult{}, fmt.Errorf("failed to ensure EPP RBAC: %w", err)
+			}
+		}
 	}
 
 	// Reconcile top-level PVCs first
@@ -260,6 +279,13 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 	if err != nil {
 		logger.Error(err, "Failed to reconcile K8s discovery resources")
 		return ReconcileResult{}, fmt.Errorf("failed to reconcile K8s discovery resources: %w", err)
+	}
+
+	// Reconcile EPP resources (ConfigMaps, Services, InferencePools) if EPP service exists
+	err = r.reconcileEPPResources(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "Failed to reconcile EPP resources")
+		return ReconcileResult{}, fmt.Errorf("failed to reconcile EPP resources: %w", err)
 	}
 
 	// Determine if any service is multinode
@@ -1162,6 +1188,86 @@ func (r *DynamoGraphDeploymentReconciler) reconcileScalingAdapters(ctx context.C
 // Service names are lowercased to comply with Kubernetes DNS subdomain naming requirements
 func generateAdapterName(dgdName, serviceName string) string {
 	return fmt.Sprintf("%s-%s", dgdName, strings.ToLower(serviceName))
+}
+
+// hasEPPService checks if the DGD has an EPP service defined
+func hasEPPService(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
+	for _, component := range dgd.Spec.Services {
+		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
+			return true
+		}
+	}
+	return false
+}
+
+// getEPPService returns the EPP service name and spec if present
+func getEPPService(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (string, *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, bool) {
+	for serviceName, component := range dgd.Spec.Services {
+		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
+			return serviceName, component, true
+		}
+	}
+	return "", nil, false
+}
+
+// reconcileEPPResources reconciles all EPP-related resources (ConfigMaps, Services, InferencePools)
+func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
+	logger := log.FromContext(ctx)
+
+	serviceName, eppService, hasEPP := getEPPService(dgd)
+	if !hasEPP {
+		logger.V(1).Info("No EPP service defined, skipping EPP resource reconciliation")
+		return nil
+	}
+
+	logger.Info("Reconciling EPP resources", "serviceName", serviceName)
+
+	// 1. Reconcile EPP ConfigMap (if needed - not needed when ConfigMapRef is used)
+	if eppService.EPPConfig == nil || eppService.EPPConfig.ConfigMapRef == nil {
+		configMap, err := epp.GenerateConfigMap(ctx, dgd, serviceName, eppService.EPPConfig)
+		if err != nil {
+			logger.Error(err, "Failed to generate EPP ConfigMap")
+			return fmt.Errorf("failed to generate EPP ConfigMap: %w", err)
+		}
+
+		if configMap != nil {
+			_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+				return configMap, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "Failed to sync EPP ConfigMap")
+				return fmt.Errorf("failed to sync EPP ConfigMap: %w", err)
+			}
+		}
+	}
+
+	// 2. Reconcile EPP Service
+	eppSvc := epp.GenerateService(dgd, serviceName)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return eppSvc, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to sync EPP Service")
+		return fmt.Errorf("failed to sync EPP Service: %w", err)
+	}
+
+	// 3. Reconcile InferencePool
+	inferencePool, err := epp.GenerateInferencePool(dgd, serviceName, eppService.EPPConfig)
+	if err != nil {
+		logger.Error(err, "Failed to generate EPP InferencePool")
+		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)
+	}
+
+	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*unstructured.Unstructured, bool, error) {
+		return inferencePool, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to sync EPP InferencePool")
+		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
+	}
+
+	logger.Info("Successfully reconciled EPP resources")
+	return nil
 }
 
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {

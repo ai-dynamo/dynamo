@@ -67,8 +67,11 @@ const (
 	ComponentTypeWorker       = "worker"
 	ComponentTypePrefill      = "prefill"
 	ComponentTypeDecode       = "decode"
+	ComponentTypeEPP          = "epp"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
+	EPPServiceAccountName     = "epp-serviceaccount"
+	EPPClusterRoleName        = "epp-cluster-role"
 
 	DefaultIngressSuffix = "local"
 
