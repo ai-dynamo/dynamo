@@ -662,6 +662,8 @@ RUN apt-get update && \
         g++ \
         # prometheus dependencies
         ca-certificates \
+        # opencv-python-headless (vLLM dependency) requires libxcb for some functions
+        libxcb1 \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
     rm -rf /var/lib/apt/lists/*
