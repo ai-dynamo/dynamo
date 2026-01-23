@@ -69,6 +69,7 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -119,6 +120,8 @@ func init() {
 	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
 
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
+
+	utilruntime.Must(gaiev1.Install(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
