@@ -108,7 +108,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "type": str,
         "choices": ["etcd", "file", "mem"],
         "default": os.environ.get("DYN_STORE_KV", "etcd"),
-        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     },
     "request-plane": {
         "flags": ["--request-plane"],
@@ -196,6 +196,7 @@ class Config:
 def _preprocess_for_encode_config(
     config: Config,
 ) -> Dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
