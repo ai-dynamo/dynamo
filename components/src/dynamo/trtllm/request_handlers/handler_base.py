@@ -67,6 +67,7 @@ class RequestHandlerConfig:
     ] = None  # DistributedRuntime reference for graceful shutdown
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
     kv_block_size: int = 32
+    shutdown_event: Optional[asyncio.Event] = None
 
 
 class HandlerBase:
@@ -88,6 +89,7 @@ class HandlerBase:
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
+        self.shutdown_event = config.shutdown_event
 
     def check_error(self, result: dict):
         """
@@ -656,6 +658,16 @@ class HandlerBase:
             # Use the context manager to handle cancellation monitoring
             async with self._cancellation_monitor(generation_result, context):
                 async for res in generation_result:
+                    # Check if shutdown has been triggered
+                    if self.shutdown_event and self.shutdown_event.is_set():
+                        logging.info(
+                            f"Shutdown event detected, aborting request {request_id}"
+                        )
+                        generation_result.abort()
+                        raise GeneratorExit(
+                            "Decode engine was shut down during token generation"
+                        )
+
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
                     if self.first_generation and self.publisher:
