@@ -764,8 +764,10 @@ mod tests {
         scheduler.step().await;
         assert_eq!(scheduler.unprocessed_immediate_results.len(), 1);
 
-        // the request is completed
-        worker_client.create_slot("test".to_string()).unwrap();
+        // the request is completed - create slot with expected_immediate_ops=1
+        worker_client
+            .create_slot_with_immediate_ops("test".to_string(), 1)
+            .unwrap();
 
         assert!(!scheduler.slots.contains_key("test"));
         scheduler.step().await;
