@@ -1,17 +1,32 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+mod remote;
 mod transfer;
 mod utils;
+pub mod vllm;
 mod zmq;
 
 mod leader;
+pub mod notifications;
+pub mod registry;
 mod worker;
+
+pub use notifications::{
+    CompletionChecker, NixlNotificationSender, NixlStatusChecker, RegisterTransferNotification,
+    TransferCompleteNotification, spawn_notification_handler,
+};
+pub use remote::{
+    CanOffloadResult, PositionalRemoteHandle, RemoteHandle, RemoteHashOperations,
+    RemoteHashOperationsSync, RemoteOperation,
+};
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
+    RemoteTransferRequest, SerializableRemoteBlockDescriptor, SerializableRemoteTransferPipeline,
+    SerializableStorageType, SerializableTransferDirection, ZMQ_REMOTE_TRANSFER_MESSAGE,
 };
 pub use worker::{KvbmWorker, KvbmWorkerConfig};
 pub use zmq::Handler;

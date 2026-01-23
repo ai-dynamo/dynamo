@@ -203,3 +203,7 @@ class KvConnectorWorker:
         # finished_ids = [id for id in finished_req_ids]
         # return set(sending_ids), set(receiving_ids)
         return self._connector.get_finished(finished_req_ids)
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Get block IDs that failed to load and clear the set."""
+        return self._connector.get_block_ids_with_load_errors()

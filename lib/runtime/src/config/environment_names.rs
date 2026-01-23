@@ -230,6 +230,56 @@ pub mod kvbm {
         pub const DYN_KVBM_TRANSFER_BATCH_SIZE: &str = "DYN_KVBM_TRANSFER_BATCH_SIZE";
     }
 
+    /// Remote storage (G4) configuration
+    ///
+    /// These environment variables control the remote storage tier (G4)
+    /// which supports both object storage (S3/MinIO) and disk storage
+    /// (shared filesystems, NVMe-oF, etc.)
+    pub mod remote_storage {
+        /// Remote storage type: "object", "disk", or "auto" (default: "auto")
+        ///
+        /// - "object": Use object storage (S3/MinIO)
+        /// - "disk": Use shared disk storage (NFS, Lustre, etc.)
+        /// - "auto": Auto-detect based on which env vars are set
+        ///   - If only DYN_KVBM_OBJECT_BUCKET is set -> object
+        ///   - If only DYN_KVBM_REMOTE_DISK_PATH is set -> disk
+        ///   - If both are set -> object (default)
+        pub const DYN_KVBM_REMOTE_STORAGE_TYPE: &str = "DYN_KVBM_REMOTE_STORAGE_TYPE";
+
+        /// Base path for remote disk storage
+        ///
+        /// When set, enables disk-based G4 transfers.
+        /// Supports `{worker_id}` template for per-worker paths.
+        /// Example: "/mnt/shared-nvme/kvcache-{worker_id}"
+        pub const DYN_KVBM_REMOTE_DISK_PATH: &str = "DYN_KVBM_REMOTE_DISK_PATH";
+
+        /// Enable GDS_MT backend for remote disk transfers
+        ///
+        /// When enabled, uses the GDS_MT NIXL backend for DRAM <-> File transfers.
+        /// Set to "1" or "true" to enable, "0" or "false" to disable.
+        /// Default: true
+        pub const DYN_KVBM_REMOTE_DISK_USE_GDS: &str = "DYN_KVBM_REMOTE_DISK_USE_GDS";
+
+        /// Timeout in seconds for G4 (remote storage) transfers.
+        pub const DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS: &str = "DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS";
+
+        /// Enable checksum validation for G4 (remote storage) transfers.
+        ///
+        /// When enabled, computes blake3 checksums on writes and verifies on reads.
+        /// This adds overhead but helps detect data corruption.
+        /// Set to "1" or "true" to enable.
+        /// Default: false
+        pub const DYN_KVBM_G4_CHECKSUM_VALIDATION: &str = "DYN_KVBM_G4_CHECKSUM_VALIDATION";
+
+        /// Maximum concurrent H2O (host-to-object) transfers for backpressure control.
+        ///
+        /// Limits how many H2O transfers can be pending at once to prevent host memory
+        /// exhaustion when object storage is slow. If the limit is reached, new H2O
+        /// transfers are skipped and blocks are evicted from host normally.
+        /// Default: 8
+        pub const DYN_KVBM_MAX_CONCURRENT_H2O: &str = "DYN_KVBM_MAX_CONCURRENT_H2O";
+    }
+
     /// KVBM leader (distributed mode) configuration
     pub mod leader {
         /// Timeout in seconds for KVBM leader and worker initialization
@@ -405,6 +455,9 @@ mod tests {
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_HOST,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_PUB_PORT,
             kvbm::leader::DYN_KVBM_LEADER_ZMQ_ACK_PORT,
+            kvbm::remote_storage::DYN_KVBM_REMOTE_STORAGE_TYPE,
+            kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_PATH,
+            kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_USE_GDS,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,

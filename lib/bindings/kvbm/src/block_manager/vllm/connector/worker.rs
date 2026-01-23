@@ -6,7 +6,7 @@ use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use super::*;
@@ -48,6 +48,9 @@ pub trait Worker: Send + Sync {
         &mut self,
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>);
+
+    /// Get block IDs that failed to load and clear the set
+    fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32>;
 }
 
 pub struct KvConnectorWorker {
@@ -73,6 +76,17 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    /// Map request_id to (uuid → block_ids) for error tracking (Load operations only)
+    request_to_blocks: HashMap<String, HashMap<uuid::Uuid, Vec<usize>>>,
+
+    /// Block IDs that failed to load.
+    /// Uses u32 since vLLM block IDs are 32-bit. Protocol uses usize for flexibility,
+    /// but actual block counts won't exceed u32::MAX in practice.
+    failed_block_ids: HashSet<u32>,
+
+    /// Pending failure notifications not yet processed (request_id → failed UUIDs)
+    pending_failures: HashMap<String, HashSet<uuid::Uuid>>,
 }
 
 impl KvConnectorWorker {
@@ -111,6 +125,9 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            request_to_blocks: HashMap::new(),
+            failed_block_ids: HashSet::new(),
+            pending_failures: HashMap::new(),
         })
     }
 }
@@ -274,6 +291,16 @@ impl Worker for KvConnectorWorker {
         // immediately enqueue the onboarding operations
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
+            let uuid = operation.uuid;
+
+            // Store block_ids per operation UUID for error tracking
+            if !operation.block_ids.is_empty() {
+                self.request_to_blocks
+                    .entry(request_id.clone())
+                    .or_default()
+                    .insert(uuid, operation.block_ids.clone());
+            }
+
             self.connector.enqueue_request(operation);
             self.maybe_finished_onboarding.insert(request_id);
         }
@@ -412,6 +439,7 @@ impl Worker for KvConnectorWorker {
         // note: when storing is finished we also remove the request from the engine state
         for request_id in &is_finished_offloading {
             self.maybe_finished_offloading.remove(request_id);
+            // Note: Store operations don't track failures or block_ids - no cleanup needed
 
             // currently chomping the error as the engine is closed and we are shutting down
             if self.connector.has_slot(request_id) {
@@ -424,11 +452,40 @@ impl Worker for KvConnectorWorker {
             }
         }
 
+        // Drain failure notifications from channel and merge into pending_failures (non-blocking)
+        for (request_id, failed_uuids) in self.connector.drain_failures() {
+            self.pending_failures
+                .entry(request_id)
+                .or_default()
+                .extend(failed_uuids);
+        }
+
         // visit each request slot in the maybe finished set to see if it is finished
         for request_id in self.maybe_finished_onboarding.iter() {
             if self.connector.has_slot(request_id) {
                 if self.connector.is_complete(request_id) {
                     tracing::debug!(request_id, "request slot is finished");
+
+                    // Check for failures for this request
+                    if let Some(failed_uuids) = self.pending_failures.get(request_id) {
+                        // Get block_ids for failed operations
+                        if let Some(uuid_to_blocks) = self.request_to_blocks.get(request_id) {
+                            for failed_uuid in failed_uuids {
+                                if let Some(block_ids) = uuid_to_blocks.get(failed_uuid) {
+                                    for &block_id in block_ids {
+                                        self.failed_block_ids.insert(block_id as u32);
+                                    }
+                                    tracing::warn!(
+                                        request_id = %request_id,
+                                        operation_id = %failed_uuid,
+                                        num_failed_blocks = block_ids.len(),
+                                        "Recorded failed block IDs for load operation"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     is_finished_onboarding.insert(request_id.clone());
                 } else {
                     tracing::debug!(request_id, "request slot is not finished");
@@ -443,12 +500,44 @@ impl Worker for KvConnectorWorker {
         // remove the finished requests from the maybe finished set
         for request_id in &is_finished_onboarding {
             self.maybe_finished_onboarding.remove(request_id);
+            // Cleanup UUID → block_ids mapping and pending failures
+            self.request_to_blocks.remove(request_id);
+            self.pending_failures.remove(request_id);
             if self.connector.has_slot(request_id) {
                 self.connector.remove_slot(request_id);
             }
         }
 
         (is_finished_offloading, is_finished_onboarding)
+    }
+
+    fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
+        // Drain any failures that arrived since last check
+        for (request_id, failed_uuids) in self.connector.drain_failures() {
+            self.pending_failures
+                .entry(request_id)
+                .or_default()
+                .extend(failed_uuids);
+        }
+
+        // Process failures for completed onboarding requests
+        for request_id in self.maybe_finished_onboarding.iter() {
+            if self.connector.has_slot(request_id) && self.connector.is_complete(request_id) {
+                if let Some(failed_uuids) = self.pending_failures.get(request_id) {
+                    if let Some(uuid_to_blocks) = self.request_to_blocks.get(request_id) {
+                        for failed_uuid in failed_uuids {
+                            if let Some(block_ids) = uuid_to_blocks.get(failed_uuid) {
+                                for &block_id in block_ids {
+                                    self.failed_block_ids.insert(block_id as u32);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::mem::take(&mut self.failed_block_ids)
     }
 }
 
@@ -532,6 +621,11 @@ impl PyKvConnectorWorker {
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>) {
         self.connector_worker.get_finished(finished_requests)
+    }
+
+    /// Get block IDs that failed to load and clear the set
+    pub fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
+        self.connector_worker.get_block_ids_with_load_errors()
     }
 }
 

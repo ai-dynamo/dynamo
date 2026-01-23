@@ -51,6 +51,7 @@ impl TransferSchedulerClient {
                 let handle = ImmediateTransferCompletionHandle::new(
                     request.request_id,
                     request.uuid,
+                    request.chained,
                     scheduler_tx.clone(),
                 );
                 Ok(Box::new(handle))
@@ -83,6 +84,8 @@ impl TransferSchedulerClient {
 pub struct WorkerSchedulerClient {
     slots: HashMap<String, WorkerSchedulerClientSlot>,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    /// Receiver for failure notifications from the scheduler
+    failure_rx: mpsc::UnboundedReceiver<(String, uuid::Uuid)>,
     iteration: u64,
     iteration_complete: bool,
     layers_complete: u32,
@@ -91,11 +94,13 @@ pub struct WorkerSchedulerClient {
 impl WorkerSchedulerClient {
     pub fn new(
         scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+        failure_rx: mpsc::UnboundedReceiver<(String, uuid::Uuid)>,
         _cancel_token: CancellationToken,
     ) -> Self {
         Self {
             slots: HashMap::new(),
             scheduler_tx,
+            failure_rx,
             iteration: 0,
             iteration_complete: true,
             layers_complete: 0,
@@ -160,7 +165,8 @@ impl WorkerSchedulerClientSlot {
     }
 
     pub fn is_complete(&self) -> bool {
-        self.completed.load(Ordering::Relaxed) == self.operations.len() as u64
+        // Use Acquire to synchronize with Release in handle_immediate_result
+        self.completed.load(Ordering::Acquire) == self.operations.len() as u64
     }
 }
 
@@ -222,7 +228,10 @@ impl WorkerSchedulerClient {
 
     pub fn is_complete(&self, request_id: &str) -> bool {
         match self.slots.get(request_id) {
-            Some(slot) => slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64,
+            // Use Acquire ordering to synchronize with the Release in handle_immediate_result.
+            // This ensures any failure notifications sent before the counter increment are
+            // visible when we subsequently drain_failures().
+            Some(slot) => slot.completed.load(Ordering::Acquire) == slot.operations.len() as u64,
             None => {
                 tracing::debug!(request_id, "slot not found - likely aborted");
                 true
@@ -240,6 +249,16 @@ impl WorkerSchedulerClient {
     pub fn record_operation(&mut self, request_id: &str, uuid: uuid::Uuid) {
         let slot = self.slots.get_mut(request_id).expect("slot does not exist");
         slot.operations.push(uuid);
+    }
+
+    /// Drain all pending failure notifications from the scheduler (non-blocking).
+    /// Returns failures grouped by request_id.
+    pub fn drain_failures(&mut self) -> HashMap<String, HashSet<uuid::Uuid>> {
+        let mut failures: HashMap<String, HashSet<uuid::Uuid>> = HashMap::new();
+        while let Ok((request_id, uuid)) = self.failure_rx.try_recv() {
+            failures.entry(request_id).or_default().insert(uuid);
+        }
+        failures
     }
 }
 
@@ -292,6 +311,10 @@ pub struct Scheduler {
 
     // Messages from the transfer client arrive on this channel
     transfer_rx: mpsc::Receiver<TransferToSchedulerMessage>,
+
+    /// Sender for failure notifications to the worker (non-blocking)
+    failure_tx: mpsc::UnboundedSender<(String, uuid::Uuid)>,
+
     iteration: u64,
     layers_complete: u32,
     iteration_complete: bool,
@@ -303,7 +326,8 @@ impl Scheduler {
     ) -> (Self, WorkerSchedulerClient, TransferSchedulerClient) {
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (transfer_tx, transfer_rx) = mpsc::channel(128);
-        let worker_client = WorkerSchedulerClient::new(scheduler_tx, cancel_token);
+        let (failure_tx, failure_rx) = mpsc::unbounded_channel();
+        let worker_client = WorkerSchedulerClient::new(scheduler_tx, failure_rx, cancel_token);
         let transfer_client = TransferSchedulerClient::new(transfer_tx);
         (
             Scheduler {
@@ -313,6 +337,7 @@ impl Scheduler {
                 enqueued_requests: HashMap::new(),
                 worker_rx: scheduler_rx,
                 transfer_rx,
+                failure_tx,
                 iteration: 0,
                 layers_complete: 0,
                 iteration_complete: true,
@@ -467,11 +492,36 @@ impl Scheduler {
         );
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid, chained = %result.chained))]
     fn handle_immediate_result(&mut self, result: ImmediateTransferResult) {
+        // Send failure notification to worker (non-blocking)
+        if result.status.is_err() {
+            tracing::warn!(
+                request_id = %result.request_id,
+                operation_id = %result.uuid,
+                error = ?result.status,
+                "Immediate transfer failed"
+            );
+            // Fire-and-forget: if receiver is dropped, we don't care
+            let _ = self
+                .failure_tx
+                .send((result.request_id.clone(), result.uuid));
+        }
+
+        // Chained operations (e.g., H2O after D2H) do NOT increment the counter.
+        // They share tracking with the parent operation that was enqueued to the worker.
+        if result.chained {
+            tracing::debug!("chained operation completed; skipping counter increment");
+            return;
+        }
+
         match self.slots.get_mut(&result.request_id) {
             Some(slot) => {
-                slot.completed.fetch_add(1, Ordering::Relaxed);
+                // Use Release ordering to ensure the failure channel message (if any) is
+                // visible to the worker before it observes the completion counter increment.
+                // The worker uses Acquire when checking is_complete(), establishing a
+                // happens-before relationship that guarantees failure visibility.
+                slot.completed.fetch_add(1, Ordering::Release);
                 tracing::debug!(
                     "matched slot; incrementing completed counter to {}",
                     slot.completed.load(Ordering::Relaxed)
@@ -713,6 +763,7 @@ mod tests {
             uuid: operation_id,
             requirement: None,
             request_type: RequestType::Immediate,
+            chained: false,
         };
 
         let handle = transfer_client
@@ -783,6 +834,7 @@ mod tests {
             uuid: operation_id,
             requirement: None,
             request_type: RequestType::Immediate,
+            chained: false,
         };
 
         let handle = transfer_client
@@ -807,6 +859,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Load,
             request_type: RequestType::Immediate,
+            block_ids: vec![],
         };
 
         // immediate requests are not passed to the scheduler, but the completion will be automatically
@@ -865,6 +918,7 @@ mod tests {
             uuid: operation_id,
             requirement: None,
             request_type: RequestType::Scheduled,
+            chained: false,
         };
 
         // transfer arrives first
@@ -892,6 +946,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Store,
             request_type: RequestType::Scheduled,
+            block_ids: vec![],
         };
 
         // worker arrives last
@@ -948,6 +1003,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Store,
             request_type: RequestType::Scheduled,
+            block_ids: vec![],
         };
 
         // worker arrives first
@@ -970,6 +1026,7 @@ mod tests {
             uuid: operation_id,
             requirement: None,
             request_type: RequestType::Scheduled,
+            chained: false,
         };
 
         // transfer arrives last
@@ -1022,6 +1079,7 @@ mod tests {
             uuid: operation_id,
             requirement: None,
             request_type: RequestType::Scheduled,
+            chained: false,
         };
 
         // allows us to pause the transfer task after the scheduler decision is made
