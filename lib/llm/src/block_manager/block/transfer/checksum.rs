@@ -86,10 +86,10 @@ mod tests {
     fn test_compute_checksum() {
         let data = b"hello world";
         let checksum = compute_checksum(data);
-        
+
         // blake3 produces 64-char hex string
         assert_eq!(checksum.len(), 64);
-        
+
         // Same data should produce same checksum
         assert_eq!(checksum, compute_checksum(data));
     }
@@ -98,7 +98,7 @@ mod tests {
     fn test_verify_checksum() {
         let data = b"test data";
         let checksum = compute_checksum(data);
-        
+
         assert!(verify_checksum(data, &checksum));
         assert!(!verify_checksum(b"different data", &checksum));
     }
@@ -107,16 +107,16 @@ mod tests {
     fn test_checksum_builder() {
         let data1 = b"hello ";
         let data2 = b"world";
-        
+
         // Build incrementally
         let mut builder = ChecksumBuilder::new();
         builder.update(data1);
         builder.update(data2);
         let incremental = builder.finalize();
-        
+
         // Compare to full computation
         let full = compute_checksum(b"hello world");
-        
+
         assert_eq!(incremental, full);
     }
 
@@ -125,8 +125,7 @@ mod tests {
         let data = vec![1u8, 2, 3, 4, 5];
         let checksum1 = compute_checksum(&data);
         let checksum2 = unsafe { compute_checksum_raw(data.as_ptr(), data.len()) };
-        
+
         assert_eq!(checksum1, checksum2);
     }
 }
-

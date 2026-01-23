@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
 use super::utils::RemoteTransferRequest;
+use super::*;
 
 use futures::future::try_join_all;
 use nixl_sys::NixlDescriptor;
@@ -18,8 +18,7 @@ use crate::block_manager::{
         data::local::LocalBlockData,
         locality,
         transfer::{
-            TransferContext, WriteTo, WriteToStrategy,
-            checksum::compute_checksum,
+            TransferContext, WriteTo, WriteToStrategy, checksum::compute_checksum,
             remote::RemoteTransferPipeline,
         },
     },
@@ -229,13 +228,15 @@ impl BlockTransferHandler {
     /// Handles both onboard (remote -> host -> device) and offload (device -> host -> remote)
     /// transfers, with optional checksum logging when G4 validation is enabled.
     pub async fn execute_remote_transfer(&self, request: RemoteTransferRequest) -> Result<()> {
-        let remote_ctx = self.remote_context.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Remote transfer context not configured")
-        })?;
+        let remote_ctx = self
+            .remote_context
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Remote transfer context not configured"))?;
 
-        let host_blocks = self.host.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("Host blocks required for remote transfers")
-        })?;
+        let host_blocks = self
+            .host
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Host blocks required for remote transfers"))?;
 
         let pipeline = request.pipeline.to_pipeline();
         let num_blocks = pipeline.num_blocks();
@@ -252,9 +253,9 @@ impl BlockTransferHandler {
         );
 
         // Get bounce buffer block IDs (host blocks used as staging)
-        let bounce_ids = pipeline.bounce_block_ids().ok_or_else(|| {
-            anyhow::anyhow!("Remote transfer requires bounce buffer block IDs")
-        })?;
+        let bounce_ids = pipeline
+            .bounce_block_ids()
+            .ok_or_else(|| anyhow::anyhow!("Remote transfer requires bounce buffer block IDs"))?;
 
         // Get the host blocks for this transfer
         let bounce_blocks: Vec<LocalBlockData<PinnedStorage>> = bounce_ids
@@ -283,7 +284,11 @@ impl BlockTransferHandler {
             if !device_ids.is_empty() {
                 let block_pairs: Vec<(usize, usize)> = if is_onboard {
                     // Onboard: host -> device
-                    bounce_ids.iter().copied().zip(device_ids.iter().copied()).collect()
+                    bounce_ids
+                        .iter()
+                        .copied()
+                        .zip(device_ids.iter().copied())
+                        .collect()
                 } else {
                     // Offload: device -> host (already done before remote transfer)
                     // This case is typically handled separately
@@ -419,7 +424,9 @@ impl Handler for BlockTransferHandler {
         }
 
         // Try to parse as RemoteTransferRequest first, then fall back to BlockTransferRequest
-        let result = if let Ok(remote_request) = serde_json::from_slice::<RemoteTransferRequest>(&message.data[0]) {
+        let result = if let Ok(remote_request) =
+            serde_json::from_slice::<RemoteTransferRequest>(&message.data[0])
+        {
             // Handle remote transfer (G4 object storage)
             let operation_id = remote_request.operation_id;
 

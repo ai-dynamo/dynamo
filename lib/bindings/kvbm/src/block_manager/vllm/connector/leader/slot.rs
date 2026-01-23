@@ -806,8 +806,12 @@ impl Slot for VllmConnectorSlot {
                 "Reporting cache stats"
             );
 
-            self.cache_stats
-                .record(host_blocks, disk_blocks, object_blocks, self.total_blocks_queried);
+            self.cache_stats.record(
+                host_blocks,
+                disk_blocks,
+                object_blocks,
+                self.total_blocks_queried,
+            );
         }
 
         // Check if there are any pending operations
@@ -2180,7 +2184,13 @@ async fn process_remote_transfer_request(
             // Register with remote registry after successful offload (all TP ranks)
             if !req.is_onboard {
                 if let Some(handle) = leader.remote_handle() {
-                    vllm_int::register_tp(&handle, &hashes_with_positions, &storage_config, leader.world_size()).await;
+                    vllm_int::register_tp(
+                        &handle,
+                        &hashes_with_positions,
+                        &storage_config,
+                        leader.world_size(),
+                    )
+                    .await;
                 }
             }
 

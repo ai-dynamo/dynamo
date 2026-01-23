@@ -140,8 +140,6 @@ class DynamoConnector(KVConnectorBase_V1):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         return self._worker.get_finished(finished_req_ids)
 
-    # --- Missing KVConnectorBase_V1 methods for production readiness ---
-
     @override
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Return block IDs that failed to load asynchronously."""

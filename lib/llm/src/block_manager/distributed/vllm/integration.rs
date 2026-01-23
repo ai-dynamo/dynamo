@@ -89,7 +89,11 @@ pub fn match_prefix_tp_blocking(
     let mut all_results: Vec<Vec<SequenceHash>> = Vec::with_capacity(world_size);
     for worker_id in 0..world_size {
         let matched = handle.lookup_hashes_blocking(hashes, worker_id as u64);
-        tracing::trace!(worker_id, matched = matched.len(), "match_prefix_tp_blocking");
+        tracing::trace!(
+            worker_id,
+            matched = matched.len(),
+            "match_prefix_tp_blocking"
+        );
         all_results.push(matched);
     }
 
@@ -121,7 +125,11 @@ pub async fn register_tp(
         return;
     }
 
-    tracing::debug!(entries = hashes_with_positions.len(), world_size, "register_tp");
+    tracing::debug!(
+        entries = hashes_with_positions.len(),
+        world_size,
+        "register_tp"
+    );
 
     for worker_id in 0..world_size {
         let entries = build_entries(hashes_with_positions, storage_config, worker_id);
@@ -289,7 +297,12 @@ pub async fn filter_for_offload(
     );
 
     // Use the pure filtering logic
-    filter_offload_hashes(sequence_hashes, &can_offload_hashes, &already_stored, host_block_ids)
+    filter_offload_hashes(
+        sequence_hashes,
+        &can_offload_hashes,
+        &already_stored,
+        host_block_ids,
+    )
 }
 
 /// Create a remote transfer pipeline for onboard or offload.
@@ -327,7 +340,13 @@ pub fn create_transfer_pipeline(
     device_block_ids: Vec<usize>,
 ) -> RemoteTransferPipeline {
     let descriptors = create_descriptors(hashes, storage_config, block_size);
-    create_pipeline(descriptors, is_onboard, is_h2o, bounce_block_ids, device_block_ids)
+    create_pipeline(
+        descriptors,
+        is_onboard,
+        is_h2o,
+        bounce_block_ids,
+        device_block_ids,
+    )
 }
 
 /// Parameters for G4 onboard operation.
@@ -387,7 +406,7 @@ pub fn onboard_from_g4(
 
 // Re-export core checksum functions from the shared module
 pub use crate::block_manager::block::transfer::checksum::{
-    compute_checksum, compute_checksum_raw, verify_checksum, BlockChecksum, ChecksumBuilder,
+    BlockChecksum, ChecksumBuilder, compute_checksum, compute_checksum_raw, verify_checksum,
 };
 
 /// G4 transfer checksum record for validation.
@@ -494,7 +513,11 @@ impl std::fmt::Display for G4ChecksumError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             G4ChecksumError::CountMismatch { actual, expected } => {
-                write!(f, "Block count mismatch: got {}, expected {}", actual, expected)
+                write!(
+                    f,
+                    "Block count mismatch: got {}, expected {}",
+                    actual, expected
+                )
             }
             G4ChecksumError::Mismatch {
                 block_index,
@@ -548,21 +571,14 @@ mod tests {
 
     #[test]
     fn test_find_common_prefix_all_match() {
-        let results: Vec<Vec<SequenceHash>> = vec![
-            vec![1, 2, 3, 4],
-            vec![1, 2, 3, 4],
-            vec![1, 2, 3, 4],
-        ];
+        let results: Vec<Vec<SequenceHash>> =
+            vec![vec![1, 2, 3, 4], vec![1, 2, 3, 4], vec![1, 2, 3, 4]];
         assert_eq!(find_common_prefix(&results), vec![1u64, 2, 3, 4]);
     }
 
     #[test]
     fn test_find_common_prefix_partial() {
-        let results: Vec<Vec<SequenceHash>> = vec![
-            vec![1, 2, 3, 4],
-            vec![1, 2, 3],
-            vec![1, 2],
-        ];
+        let results: Vec<Vec<SequenceHash>> = vec![vec![1, 2, 3, 4], vec![1, 2, 3], vec![1, 2]];
         assert_eq!(find_common_prefix(&results), vec![1u64, 2]);
     }
 
@@ -599,10 +615,7 @@ mod tests {
         assert!(result.is_some());
 
         let (hashes_with_pos, host_ids) = result.unwrap();
-        assert_eq!(
-            hashes_with_pos,
-            vec![(1, 0), (2, 1), (3, 2), (4, 3)]
-        );
+        assert_eq!(hashes_with_pos, vec![(1, 0), (2, 1), (3, 2), (4, 3)]);
         assert!(host_ids.is_none());
     }
 
@@ -627,7 +640,8 @@ mod tests {
         let already_stored: Vec<SequenceHash> = vec![2, 4];
         let host_ids: Vec<usize> = vec![10, 20, 30, 40];
 
-        let result = filter_offload_hashes(&sequence, &can_offload, &already_stored, Some(&host_ids));
+        let result =
+            filter_offload_hashes(&sequence, &can_offload, &already_stored, Some(&host_ids));
         assert!(result.is_some());
 
         let (_, filtered_host_ids) = result.unwrap();
@@ -662,4 +676,3 @@ mod tests {
         assert!(!should_trigger_h2o(true, false, 0, 8));
     }
 }
-
