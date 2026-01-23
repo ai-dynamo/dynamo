@@ -7,6 +7,9 @@ metadata:
   name: vllm-dsr1
 spec:
   backendFramework: vllm
+  envs:
+    - name: HF_HOME
+      value: /model-cache
   pvcs:
     - name: model-cache
       create: false
@@ -23,7 +26,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 1800
             failureThreshold: 60
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
     decode:
       componentType: worker
       subComponentType: decode
@@ -49,7 +52,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
@@ -70,7 +73,7 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model /model-cache/deepseek-r1 \
+                --model deepseek-ai/DeepSeek-R1 \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
                 --all2all-backend deepep_low_latency \
                 --data-parallel-hybrid-lb \
@@ -110,7 +113,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 600
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/dynamo
           env:
             - name: VLLM_USE_DEEP_GEMM
@@ -129,7 +132,7 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model /model-cache/deepseek-r1 \
+                --model deepseek-ai/DeepSeek-R1 \
                 --is-prefill-worker \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
                 --all2all-backend deepep_high_throughput \
