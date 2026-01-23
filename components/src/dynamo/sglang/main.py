@@ -28,8 +28,9 @@ from dynamo.sglang.register import (
 )
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
-    ImageDiffusionWorkerHandler,
+    DiffusionWorkerHandler,
     EmbeddingWorkerHandler,
+    ImageDiffusionWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
     MultimodalProcessorHandler,
@@ -433,15 +434,11 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
 
     # Initialize DiffGenerator (not sgl.Engine)
     from sglang.multimodal_gen import DiffGenerator
-    import torch
 
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    generator = DiffGenerator.from_pretrained(
-        model_path=server_args.model_path
-    )
-
+    generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
 
     # Initialize fsspec filesystems for image storage
     fs = None
@@ -457,13 +454,14 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
         # Extract protocol from URL (s3://, gs://, az://, file://)
         fs_url_parts = fs_url.split("://")
         protocol = fs_url_parts[0] if "://" in fs_url else "file"
-        bucket = fs_url_parts[1] if len(fs_url_parts) > 1 else None
 
         # Initialize filesystem, configure fsspec using json configuration file
         #  - json configuration file: ~/.config/fsspec/s3.json
         #  - environment variables i.e. FSSPEC_S3_SECRET
         fs = fsspec.filesystem(protocol, auto_mkdir=True)
-        logging.info(f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})")
+        logging.info(
+            f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})"
+        )
     except ImportError:
         logging.warning(
             "fsspec not available. Filesystem uploads will fail. "
@@ -485,7 +483,11 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     # Could add custom metrics for images/sec, steps/sec later
 
     handler = ImageDiffusionWorkerHandler(
-        component, generator, config, publisher=None, fs=fs, bucket=bucket,
+        component,
+        generator,
+        config,
+        publisher=None,
+        fs=fs,
     )
 
     # Create proper health check payload that sends a minimal diffusion request

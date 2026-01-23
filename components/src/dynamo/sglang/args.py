@@ -529,10 +529,13 @@ async def parse_args(args: list[str]) -> Config:
     image_diffusion_worker = getattr(parsed_args, "image_diffusion_worker", False)
 
     if image_diffusion_worker:
-        logging.info(f"Image diffusion worker detected with model: {model_path}, creating minimal ServerArgs stub")
+        logging.info(
+            f"Image diffusion worker detected with model: {model_path}, creating minimal ServerArgs stub"
+        )
         # Create a minimal ServerArgs-like object that bypasses model config loading
         # Image diffusion workers don't actually use ServerArgs - they use DiffGenerator
         import types
+
         server_args = types.SimpleNamespace()
         # Copy over any attrs that might be needed, but avoid triggering __post_init__
         server_args.model_path = model_path
@@ -544,7 +547,9 @@ async def parse_args(args: list[str]) -> Config:
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
         server_args.dllm_algorithm = False
-        logging.info(f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}")
+        logging.info(
+            f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}"
+        )
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
 
