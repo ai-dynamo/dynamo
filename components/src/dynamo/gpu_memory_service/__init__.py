@@ -4,7 +4,7 @@
 """GPU Memory Service component for Dynamo.
 
 This module provides the Dynamo component wrapper around the gpu_memory_service package.
-The core functionality is in the gpu_memory package; this module provides:
+The core functionality is in the gpu_memory_service package; this module provides:
 - CLI entry point (python -m dynamo.gpu_memory_service)
 - Re-exports for backwards compatibility
 """
