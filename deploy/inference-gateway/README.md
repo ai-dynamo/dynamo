@@ -22,8 +22,8 @@ Currently, these setups are only supported with the kGateway based Inference Gat
   - [1. Install Dynamo Platform](#1-install-dynamo-platform)
   - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
   - [3. Deploy Your Model](#3-deploy-your-model)
-  - [4. Build EPP image](#4-build-epp-image)
-  - [5. Install Dynamo GAIE helm chart](#5-install-dynamo-gaie-helm-chart)
+  - [4. Build EPP image (Optional)](#4-build-epp-image-optional)
+  - [5. Deploy](#5-deploy)
   - [6. Verify Installation](#6-verify-installation)
   - [7. Usage](#7-usage)
   - [8. Deleting the installation](#8-deleting-the-installation)
@@ -49,6 +49,7 @@ First, deploy an inference gateway service. In this example, we'll install `kgat
 
 ```bash
 cd deploy/inference-gateway
+export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
 ./scripts/install_gaie_crd_kgateway.sh
 ```
 **Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
@@ -64,7 +65,7 @@ kubectl get gateway inference-gateway
 ```
 
 
-### 3. Deploy Your Model ###
+### 3. Setup secrets ###
 
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 Make sure to enable kv-routing by adding the env var in the FrontEnd.
@@ -109,7 +110,7 @@ Create a model configuration file similar to the vllm_agg_qwen.yaml for your mod
 This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
-### 4. Build EPP image
+### 4. Build EPP image (Optional)
 
 You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
 
@@ -137,14 +138,44 @@ make info # Check image tag
 | `make all` | Build Dynamo lib + Docker image + load locally |
 | `make all-push` | Build Dynamo lib + Docker image + push to registry |
 
-### 5. Install Dynamo GAIE helm chart ###
+### 5. Deploy
 
-The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
+We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
+you could deploy it as a standalone pod
 
-Deploy the Inference Gateway resources to your Kubernetes cluster by running the command below.
+#### 5.a. Deploy as a DGD component
 
 ```bash
-cd deploy/inference-gateway/
+kubectl apply -f operator-managed/examples/agg.yaml -n ${NAMESPACE}
+kubectl apply -f operator-managed/examples/http-route.yaml -n ${NAMESPACE}
+```
+
+Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
+If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
+
+
+#### 5.b. Deploy as a standalone pod
+
+##### 5.b.1 Deploy Your Model ###
+
+Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+
+Sample commands to deploy model:
+
+```bash
+cd <dynamo-source-root>
+cd examples/backends/vllm/deploy
+kubectl apply -f agg.yaml -n my-model
+```
+
+Take a note of or change the DYNAMO_IMAGE in the model deployment file.
+
+Do not forget docker registry secret if needed.
+
+##### 5.b.2 Install Dynamo GIE helm chart ###
+
+```bash
+cd deploy/inference-gateway/standalone
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
@@ -179,10 +210,10 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 - Set `DYNAMO_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
 - By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-dynamo-epp.yaml] if you prefer to route in the round-robin fashion.
 - If using kv-routing:
-  - Overwrite the `DYNAMO_KV_BLOCK_SIZE` in your [values-dynamo-epp.yaml](./values-dynamo-epp.yaml) to match your model's block size.The `DYNAMO_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
+  - Overwrite the `DYN_KV_BLOCK_SIZE` in your [values-dynamo-epp.yaml](./values-dynamo-epp.yaml) to match your model's block size.The `DYN_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
   - Set `DYNAMO_OVERLAP_SCORE_WEIGHT` to weigh how heavily the score uses token overlap (predicted KV cache hits) versus other factors (load, historical hit rate). Higher weight biases toward reusing workers with similar cached prefixes.
   - Set `DYNAMO_ROUTER_TEMPERATURE` to soften or sharpen the selection curve when combining scores. Low temperature makes the router pick the top candidate deterministically; higher temperature lets lower-scoring workers through more often (exploration).
-  - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable KV event tracking while using kv-routing
+  - Set `DYNAMO_USE_KV_EVENTS=false` if you want to disable the workers sending KV events while using kv-routing
   - See the [KV cache routing design](../../docs/router/kv_cache_routing.md) for details.
 
 
@@ -238,8 +269,7 @@ ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is no
 minikube tunnel # start the tunnel
 
 # in second terminal where you want to send inference requests
-GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}')
-echo $GATEWAY_URL
+GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}') & echo $GATEWAY_URL
 ```
 
 b. use port-forward to expose the gateway to the host
