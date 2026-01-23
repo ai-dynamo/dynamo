@@ -95,20 +95,42 @@ class DynamoSglangPublisher:
         # This hardcoded value causes dynamo_component_kvstats_total_blocks to be incorrect.
         self.num_gpu_block = 1024
 
-        # ZMQ setup for receiving scheduler metrics
-        self._ctx = zmq.asyncio.Context()  # type: ignore
-        self._sock = get_zmq_socket(
-            self._ctx,
-            zmq.PULL,
-            self.engine.port_args.metrics_ipc_name,
-            True,  # type: ignore
-        )
-
         self._running = True
         self.kv_publishers: List[ZmqKvEventPublisher] = []
 
+        # ZMQ setup for receiving scheduler metrics (leader node only)
+        # Non-leader nodes don't receive scheduler metrics via this socket - they only
+        # need KV event publishing which is set up separately in init_kv_event_publish()
+        node_rank = getattr(self.server_args, "node_rank", 0) or 0
+        if node_rank == 0:
+            self._ctx = zmq.asyncio.Context()  # type: ignore
+            self._sock = get_zmq_socket(
+                self._ctx,
+                zmq.PULL,
+                self.engine.port_args.metrics_ipc_name,
+                True,  # type: ignore
+            )
+        else:
+            self._ctx = None
+            self._sock = None
+            logging.info(
+                f"Non-leader node (node_rank={node_rank}): skipping scheduler metrics "
+                "ZMQ socket setup. KV event publishing will still be configured."
+            )
+
     async def run(self) -> None:
-        """Continuously receive scheduler metrics from ZMQ socket and publish them."""
+        """Continuously receive scheduler metrics from ZMQ socket and publish them.
+
+        On non-leader nodes (node_rank >= 1), this is a no-op since they don't have
+        a scheduler metrics socket. They only publish KV events via init_kv_event_publish().
+        """
+        if self._sock is None:
+            # Non-leader node: no scheduler metrics to receive
+            # Just wait until stopped (KV events are handled by separate publishers)
+            while self._running:
+                await asyncio.sleep(1)
+            return
+
         while self._running:
             try:
                 kv_metrics = await self._sock.recv_pyobj()  # type: ignore
