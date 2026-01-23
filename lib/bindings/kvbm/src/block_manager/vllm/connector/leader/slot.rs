@@ -520,7 +520,24 @@ impl Slot for VllmConnectorSlot {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
-        if !tokens.is_empty() {
+        if num_computed_tokens < self.current_position {
+            tracing::debug!(
+                "num_computed_tokens={} < current_position={}, onboarding during prefilling phase - skipping",
+                num_computed_tokens,
+                self.current_position
+            );
+            return Ok(());
+        }
+
+        if num_computed_tokens < self.sequence.total_tokens() {
+            // No need to apply new tokens, since they were applied when creating the slot
+            tracing::debug!(
+                "num_computed_tokens ({}) < sequence.total_tokens ({}), skipping token extension (already applied during prefilling)",
+                num_computed_tokens,
+                self.sequence.total_tokens()
+            );
+            self.state = SlotState::Prefilling;
+        } else if !tokens.is_empty() {
             tracing::debug!(
                 "appending {} newly decoded tokens to sequence",
                 tokens.len()
