@@ -16,5 +16,3 @@ mod lock;
 
 pub use client::{S3Config, S3ObjectBlockClient};
 pub use lock::S3LockManager;
-
-

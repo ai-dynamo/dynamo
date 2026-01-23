@@ -13,8 +13,8 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 
 use super::S3ObjectBlockClient;
-use crate::v2::distributed::object::{LockFileContent, ObjectLockManager};
 use crate::SequenceHash;
+use crate::v2::distributed::object::{LockFileContent, ObjectLockManager};
 
 /// S3-based implementation of [`ObjectLockManager`].
 ///
@@ -218,5 +218,3 @@ impl ObjectLockManager for S3LockManager {
         })
     }
 }
-
-

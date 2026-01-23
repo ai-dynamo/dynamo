@@ -42,15 +42,3 @@ pub trait SchedulerConnectorState: Send + Sync + 'static {
     /// Convert to mutable Any for downcasting to concrete type.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
-
-
-
-
-
-
-
-
-
-
-
-

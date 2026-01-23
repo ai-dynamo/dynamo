@@ -22,8 +22,8 @@ pub use mutable::MutableBlock;
 
 pub(crate) mod state;
 pub(crate) use registered::{DuplicateBlock, PrimaryBlock};
-pub use registry::BlockRegistry;
 pub(crate) use registry::BlockRegistrationHandle;
+pub use registry::BlockRegistry;
 
 pub trait BlockMetadata: Clone + Send + Sync + 'static {}
 impl<T: Clone + Send + Sync + 'static> BlockMetadata for T {}

@@ -1783,11 +1783,8 @@ pub(crate) mod tests {
 
         // Register mutable block with Allow policy
         // register_mutable_block takes Reset state blocks directly
-        let registered2 = handle.register_mutable_block(
-            mutable,
-            BlockDuplicationPolicy::Allow,
-            &inactive_pool,
-        );
+        let registered2 =
+            handle.register_mutable_block(mutable, BlockDuplicationPolicy::Allow, &inactive_pool);
 
         // try_get_block should succeed
         let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());
@@ -1836,11 +1833,8 @@ pub(crate) mod tests {
 
         // Register with Reject policy
         // register_mutable_block takes Reset state blocks directly
-        let registered2 = handle.register_mutable_block(
-            mutable,
-            BlockDuplicationPolicy::Reject,
-            &inactive_pool,
-        );
+        let registered2 =
+            handle.register_mutable_block(mutable, BlockDuplicationPolicy::Reject, &inactive_pool);
 
         // try_get_block should succeed
         let after_result = handle.try_get_block::<TestMetadata>(inactive_pool.return_fn());

@@ -514,10 +514,8 @@ pub(crate) fn try_execute_operational_kernel(
     }
 
     // Allocate device memory for pointer tables from the pool
-    let block_ptrs_device_raw = pool.alloc_async(
-        block_ptrs_host.len() * std::mem::size_of::<usize>(),
-        stream,
-    )?;
+    let block_ptrs_device_raw =
+        pool.alloc_async(block_ptrs_host.len() * std::mem::size_of::<usize>(), stream)?;
     let op_ptrs_device_raw = pool.alloc_async(
         operational_ptrs_host.len() * std::mem::size_of::<usize>(),
         stream,

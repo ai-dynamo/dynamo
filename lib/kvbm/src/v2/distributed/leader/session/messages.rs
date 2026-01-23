@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::v2::{BlockId, G2, InstanceId, SequenceHash, physical::manager::LayoutHandle};
 use crate::v2::logical::blocks::ImmutableBlock;
+use crate::v2::{BlockId, G2, InstanceId, SequenceHash, physical::manager::LayoutHandle};
 
 use super::SessionId;
 
@@ -138,7 +138,6 @@ pub enum OnboardMessage {
         #[serde(skip)]
         blocks: Arc<Vec<ImmutableBlock<G2>>>,
     },
-
     // TODO: Add heartbeat/TTL mechanism for handling unresponsive initiators
     // Heartbeat {
     //     requester: InstanceId,

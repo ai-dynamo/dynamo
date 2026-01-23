@@ -9,13 +9,13 @@
 //! - Populating prefix cache with known sequences
 //! - Integration tests for prefix caching behavior
 
+use crate::G1;
+use crate::v2::SequenceHash;
 use crate::v2::integrations::common::Request;
 use crate::v2::integrations::scheduler::{
     KVCacheManager, RequestStatus, Scheduler, SchedulerConfig,
 };
 use crate::v2::logical::blocks::BlockRegistry;
-use crate::v2::SequenceHash;
-use crate::G1;
 
 use super::managers;
 use super::token_blocks;
@@ -43,10 +43,12 @@ pub fn create_test_scheduler(
     enable_prefix_caching: bool,
 ) -> (Scheduler, BlockRegistry) {
     let registry = managers::create_test_registry();
-    let block_manager = managers::create_test_manager::<G1>(block_count, block_size, registry.clone());
+    let block_manager =
+        managers::create_test_manager::<G1>(block_count, block_size, registry.clone());
 
-    let kv_cache = KVCacheManager::with_prefix_caching(block_manager, block_size, enable_prefix_caching)
-        .expect("Should create KVCacheManager");
+    let kv_cache =
+        KVCacheManager::with_prefix_caching(block_manager, block_size, enable_prefix_caching)
+            .expect("Should create KVCacheManager");
 
     let config = SchedulerConfig::builder()
         .max_num_batched_tokens(8192)
@@ -138,11 +140,8 @@ pub fn populate_prefix_cache(
 
     // Get sequence hashes before finishing
     let num_complete_blocks = tokens.len() / block_size;
-    let token_sequence = token_blocks::create_token_sequence(
-        num_complete_blocks,
-        block_size,
-        tokens[0],
-    );
+    let token_sequence =
+        token_blocks::create_token_sequence(num_complete_blocks, block_size, tokens[0]);
     let hashes = token_blocks::generate_sequence_hashes(&token_sequence);
 
     // Finish the request to release blocks to inactive pool
@@ -150,7 +149,6 @@ pub fn populate_prefix_cache(
 
     hashes
 }
-
 
 // ============================================================================
 // Integration Tests
@@ -217,14 +215,14 @@ mod tests {
         // Setup: 100 blocks, block_size=16, prefix_caching=true
         let block_size = 16;
         let registry = managers::create_test_registry();
-        let block_manager =
-            managers::create_test_manager::<G1>(100, block_size, registry.clone());
+        let block_manager = managers::create_test_manager::<G1>(100, block_size, registry.clone());
 
         // Pre-populate the cache with 4 blocks of tokens (0..64)
         // This simulates a previous request that completed and released its blocks
         let token_sequence = token_blocks::create_token_sequence(4, block_size, 0);
-        let seq_hashes = managers::populate_manager_with_blocks(&block_manager, token_sequence.blocks())
-            .expect("Should populate");
+        let seq_hashes =
+            managers::populate_manager_with_blocks(&block_manager, token_sequence.blocks())
+                .expect("Should populate");
         assert_eq!(seq_hashes.len(), 4);
 
         // Verify blocks are in the pool and can be matched
@@ -300,8 +298,7 @@ mod tests {
         // Setup with prefix caching
         let block_size = 16;
         let registry = managers::create_test_registry();
-        let block_manager =
-            managers::create_test_manager::<G1>(100, block_size, registry.clone());
+        let block_manager = managers::create_test_manager::<G1>(100, block_size, registry.clone());
 
         // Pre-populate the cache with 3 blocks of tokens (0..48)
         let token_sequence = token_blocks::create_token_sequence(3, block_size, 0);
@@ -344,8 +341,7 @@ mod tests {
         // Setup with prefix caching
         let block_size = 16;
         let registry = managers::create_test_registry();
-        let block_manager =
-            managers::create_test_manager::<G1>(100, block_size, registry.clone());
+        let block_manager = managers::create_test_manager::<G1>(100, block_size, registry.clone());
 
         // Pre-populate the cache with 3 blocks of tokens (0..48)
         let token_sequence = token_blocks::create_token_sequence(3, block_size, 0);
@@ -387,7 +383,11 @@ mod tests {
 
         // Total blocks allocated should be 5 (3 cached + 2 new)
         let block_ids = &output.scheduled_new_reqs[0].block_ids;
-        assert_eq!(block_ids.len(), 5, "Should have 5 total blocks (3 cached + 2 new)");
+        assert_eq!(
+            block_ids.len(),
+            5,
+            "Should have 5 total blocks (3 cached + 2 new)"
+        );
     }
 
     #[test]
@@ -444,7 +444,11 @@ mod tests {
         // 1. R2 is scheduled and R1 may be preempted (if preemption is implemented)
         // 2. R2 stays in waiting queue due to insufficient blocks
         // This test verifies the scheduler handles this gracefully
-        let total_scheduled = output2.scheduled_new_reqs.len() + output2.scheduled_cached_reqs.len();
-        assert!(total_scheduled >= 0, "Scheduler should not crash with limited blocks");
+        let total_scheduled =
+            output2.scheduled_new_reqs.len() + output2.scheduled_cached_reqs.len();
+        assert!(
+            total_scheduled >= 0,
+            "Scheduler should not crash with limited blocks"
+        );
     }
 }

@@ -18,11 +18,11 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::ActiveMessageClient;
+use crate::am::WorkerId;
 use crate::am::{
     InstanceId,
     common::{ActiveMessage, MessageMetadata},
 };
-use crate::am::WorkerId;
 
 /// Fire-and-forget builder.
 pub struct AmSendBuilder {

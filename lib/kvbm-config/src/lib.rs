@@ -145,10 +145,7 @@ impl KvbmConfig {
                     .map(|k| format!("cache.disk.{}", k.as_str().to_lowercase()).into()),
             )
             // Cache parallelism mode: KVBM_CACHE_PARALLELISM=tensor_parallel|replicated_data
-            .merge(
-                Env::prefixed("KVBM_CACHE_PARALLELISM")
-                    .map(|_| "cache.parallelism".into()),
-            )
+            .merge(Env::prefixed("KVBM_CACHE_PARALLELISM").map(|_| "cache.parallelism".into()))
     }
 
     /// Load configuration from default figment (env and files).

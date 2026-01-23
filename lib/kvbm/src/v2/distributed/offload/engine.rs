@@ -590,15 +590,14 @@ async fn chain_router_task(
             blocks.iter().map(|block| block.downgrade()).collect();
 
         // Extract sequence hashes and block IDs for remote G4 offload before dropping
-        let remote_g4_data: Option<(Vec<SequenceHash>, Vec<BlockId>)> =
-            if remote_g4_tx.is_some() {
-                Some((
-                    blocks.iter().map(|b| b.sequence_hash()).collect(),
-                    blocks.iter().map(|b| b.block_id()).collect(),
-                ))
-            } else {
-                None
-            };
+        let remote_g4_data: Option<(Vec<SequenceHash>, Vec<BlockId>)> = if remote_g4_tx.is_some() {
+            Some((
+                blocks.iter().map(|b| b.sequence_hash()).collect(),
+                blocks.iter().map(|b| b.block_id()).collect(),
+            ))
+        } else {
+            None
+        };
 
         // Drop strong references - blocks can now be evicted if needed
         drop(blocks);

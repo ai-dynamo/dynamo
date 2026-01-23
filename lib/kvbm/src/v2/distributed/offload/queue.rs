@@ -376,8 +376,8 @@ mod tests {
     /// Test that cancelled items are dropped (not leaked) during sweep.
     #[test]
     fn test_sweep_drops_items() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         struct DropCounter {
             counter: Arc<AtomicUsize>,
@@ -393,9 +393,24 @@ mod tests {
         let queue: CancellableQueue<DropCounter> = CancellableQueue::new();
         let id = TransferId::new();
 
-        queue.push(id, DropCounter { counter: drop_count.clone() });
-        queue.push(id, DropCounter { counter: drop_count.clone() });
-        queue.push(id, DropCounter { counter: drop_count.clone() });
+        queue.push(
+            id,
+            DropCounter {
+                counter: drop_count.clone(),
+            },
+        );
+        queue.push(
+            id,
+            DropCounter {
+                counter: drop_count.clone(),
+            },
+        );
+        queue.push(
+            id,
+            DropCounter {
+                counter: drop_count.clone(),
+            },
+        );
 
         assert_eq!(drop_count.load(Ordering::SeqCst), 0);
 

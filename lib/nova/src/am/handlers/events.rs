@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::am::{InstanceId, WorkerId};
 use anyhow::{Result, anyhow, bail};
 use bytes::Bytes;
 use dashmap::DashMap;
-use crate::am::{InstanceId, WorkerId};
 use dynamo_nova_discovery::peer::{DiscoveryQueryError, PeerDiscoveryManager};
 use futures::future::Either;
 use lru::LruCache;

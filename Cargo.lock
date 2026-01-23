@@ -3542,6 +3542,7 @@ dependencies = [
  "notify 8.2.0",
  "parking_lot",
  "reqwest 0.12.28",
+ "rmp-serde",
  "serde",
  "serde_json",
  "tempfile",

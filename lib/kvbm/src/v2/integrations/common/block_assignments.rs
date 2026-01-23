@@ -491,7 +491,9 @@ mod tests {
     }
 
     fn make_hashes(count: usize) -> Vec<MockHashSource> {
-        (0..count).map(|i| MockHashSource(make_test_hash(i))).collect()
+        (0..count)
+            .map(|i| MockHashSource(make_test_hash(i)))
+            .collect()
     }
 
     #[test]

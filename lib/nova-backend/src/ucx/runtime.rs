@@ -6,10 +6,10 @@
 use std::rc::Rc;
 use std::time::Instant;
 
+use crate::InstanceId;
 use anyhow::{Context, Result, anyhow};
 use async_ucx::ucp::{Context as UcxContext, Endpoint, Worker, WorkerAddress as UcpWorkerAddress};
 use bytes::Bytes;
-use crate::InstanceId;
 use hashbrown::HashMap;
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};

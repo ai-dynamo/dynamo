@@ -10,11 +10,11 @@
 //! - All messages use publish() for fire-and-forget semantics
 //! - Health checks use request() to detect no responders
 
+use crate::InstanceId;
 use anyhow::{Context, Result};
 use base64::Engine;
 use bytes::Bytes;
 use dashmap::DashMap;
-use crate::InstanceId;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
