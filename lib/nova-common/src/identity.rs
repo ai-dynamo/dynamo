@@ -94,9 +94,13 @@ impl AsRef<Uuid> for InstanceId {
 
 /// Deterministic 64-bit worker identifier derived from InstanceId.
 ///
+/// WorkerId enables embedding instance identity into fixed-size handles that can be
+/// passed with value semantics. A `u128` is the largest integer that can be passed
+/// by value, making it ideal for handles that encode both routing and event information.
+///
 /// WorkerId is used in:
-/// - [`crate::event::EventHandle`]: Embedded in the u128 event handle (64 bits)
-/// - [`crate::event::EventRoutingTable`]: Maps worker_id → instance_id for event routing
+/// - `EventHandle` (dynamo-nova): Uses 64 bits for WorkerId + 64 bits for event details
+/// - `EventRoutingTable` (dynamo-nova): Maps worker_id → instance_id for event routing
 /// - Discovery systems: Lookup key for peer information
 ///
 /// WorkerId is **always derived** from InstanceId using xxh3_64 hash.

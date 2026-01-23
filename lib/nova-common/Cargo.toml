@@ -20,5 +20,5 @@ thiserror = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }
 xxhash-rust = { workspace = true }
 
-rmp-serde = "1.1"
-serde_bytes = "0.11"
+rmp-serde = { workspace = true }
+serde_bytes = { workspace = true }
