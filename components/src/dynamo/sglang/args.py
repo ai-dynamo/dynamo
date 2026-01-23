@@ -169,6 +169,7 @@ class DynamoArgs:
 
     # diffusion language model options (derived from server_args.dllm_algorithm)
     diffusion_worker: bool = False
+
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
@@ -578,9 +579,6 @@ async def parse_args(args: list[str]) -> Config:
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
-    # Auto-detect diffusion worker mode if dllm_algorithm
-    diffusion_worker = server_args.dllm_algorithm is not None
-
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -597,7 +595,7 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
-        diffusion_worker=diffusion_worker,
+        diffusion_worker=getattr(server_args, "dllm_algorithm") is not None, # Auto-detect diffusion worker mode if dllm_algorithm
         image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
         model_path=getattr(parsed_args, "model_path", None),
