@@ -118,6 +118,9 @@ const (
 
 	// Traffic proxy component types
 	TrafficProxyComponentProxy = "proxy"
+
+	// Rolling update annotations
+	AnnotationActiveWorkerHash = "nvidia.com/active-worker-hash"
 )
 
 type MultinodeDeploymentType string
