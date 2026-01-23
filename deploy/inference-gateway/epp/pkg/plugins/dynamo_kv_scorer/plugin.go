@@ -108,7 +108,6 @@ import (
 
 	log "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/backend"
-	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/datalayer"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/plugins"
 	rc "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/requestcontrol"
 	"sigs.k8s.io/gateway-api-inference-extension/pkg/epp/scheduling/framework"
@@ -454,7 +453,7 @@ func (k *KVAwareScorer) ResponseStreaming(
 	ctx context.Context,
 	request *schedtypes.LLMRequest,
 	response *rc.Response,
-	targetPod *datalayer.EndpointMetadata,
+	targetPod *backend.Pod,
 ) {
 	if request == nil || request.RequestId == "" {
 		return
