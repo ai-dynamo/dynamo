@@ -5,7 +5,11 @@ use super::*;
 
 use async_trait::async_trait;
 use transfer::*;
-use utils::*;
+use utils::{
+    LeaderMetadata, RemoteTransferRequest, WorkerMetadata, ZMQ_LEADER_METADATA_MESSAGE,
+    ZMQ_PING_MESSAGE, ZMQ_REMOTE_TRANSFER_MESSAGE, ZMQ_TRANSFER_BLOCKS_MESSAGE,
+    ZMQ_WORKER_METADATA_MESSAGE,
+};
 use zmq::*;
 
 use crate::block_manager::{
@@ -14,6 +18,7 @@ use crate::block_manager::{
         Block, layout_to_blocks, locality,
         transfer::{PoolConfig, TransferContext},
     },
+    config::RemoteTransferContext,
     connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
     offload::{MAX_CONCURRENT_TRANSFERS, MAX_TRANSFER_BATCH_SIZE},
@@ -92,17 +97,100 @@ pub fn load_and_validate_tensors(
 
 fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
+
+    // Add GDS_MT backend if requested (for GPU Direct Storage)
     if use_gds {
-        let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
-        agent.create_backend("GDS_MT", &gds_params)?;
+        match agent.get_plugin_params("GDS_MT") {
+            Ok((_, gds_params)) => {
+                agent.create_backend("GDS_MT", &gds_params)?;
+                tracing::info!(
+                    worker_id = worker_id,
+                    "Created GDS_MT backend for multi-threaded file I/O"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    worker_id = worker_id,
+                    error = %e,
+                    "GDS_MT plugin not available, falling back to POSIX only"
+                );
+            }
+        }
     }
+
+    // Add POSIX backend (always required)
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;
     agent.create_backend("POSIX", &posix_params)?;
+    tracing::debug!(
+        worker_id = worker_id,
+        use_gds = use_gds,
+        "Created NIXL agent with POSIX backend"
+    );
+
+    // Add OBJ backend if bucket is configured via DYN_KVBM_OBJECT_BUCKET
+    if let Ok(bucket_template) = std::env::var("DYN_KVBM_OBJECT_BUCKET") {
+        // Apply worker_id templating to bucket name
+        // This allows per-worker buckets like "kvcache-worker-{worker_id}" -> "kvcache-worker-0"
+        let templated_bucket = bucket_template.replace("{worker_id}", &worker_id.to_string());
+
+        match agent.get_plugin_params("OBJ") {
+            Ok((_, default_params)) => {
+                // Log default params for debugging (helps verify correct param names)
+                tracing::debug!(
+                    worker_id = worker_id,
+                    default_params = ?(&default_params).into_iter().collect::<Vec<_>>(),
+                    "OBJ plugin default params"
+                );
+
+                // Clone default params and add custom overrides using the new Params API
+                let mut params = default_params.clone().map_err(|e| {
+                    anyhow::anyhow!("Failed to clone OBJ default params: {}", e)
+                })?;
+
+                // Set bucket name
+                params.set("bucket", &templated_bucket).map_err(|e| {
+                    anyhow::anyhow!("Failed to set bucket param: {}", e)
+                })?;
+
+                // Add endpoint override if configured
+                if let Ok(endpoint) = std::env::var("DYN_KVBM_OBJECT_ENDPOINT") {
+                    params.set("endpoint_override", &endpoint).map_err(|e| {
+                        anyhow::anyhow!("Failed to set endpoint_override param: {}", e)
+                    })?;
+                    tracing::debug!(
+                        worker_id = worker_id,
+                        endpoint_override = %endpoint,
+                        "Configuring OBJ backend with custom endpoint"
+                    );
+                }
+
+                match agent.create_backend("OBJ", &params) {
+                    Ok(_) => {
+                        tracing::info!(
+                            worker_id = worker_id,
+                            bucket = %templated_bucket,
+                            "Created OBJ backend for object storage"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            worker_id = worker_id,
+                            error = %e,
+                            "Failed to create OBJ backend"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(worker_id = worker_id, error = %e, "OBJ plugin not available");
+            }
+        }
+    }
 
     Ok(agent)
 }
 
-// Helper: perform allocation and build transfer handler (factored from previous code)
+#[allow(clippy::too_many_arguments)]
 async fn perform_allocation_and_build_handler(
     device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
     mut layout_builder: LayoutConfigBuilder,
@@ -111,8 +199,19 @@ async fn perform_allocation_and_build_handler(
     worker_id: usize,
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
+    cancel_token: CancellationToken,
 ) -> anyhow::Result<BlockTransferHandler> {
-    let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+    // Determine if GDS_MT backend should be enabled:
+    // - For local disk cache (G3): enabled if disk blocks are configured
+    // - For remote disk storage (G4): enabled if DYN_KVBM_REMOTE_DISK_PATH is set
+    //   and DYN_KVBM_REMOTE_DISK_USE_GDS is true (default: true)
+    let use_gds_for_local_disk = leader_meta.num_disk_blocks > 0;
+    let use_gds_for_remote_disk = std::env::var("DYN_KVBM_REMOTE_DISK_PATH").is_ok()
+        && std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
+            .map(|v| v == "1" || v.to_lowercase() == "true")
+            .unwrap_or(true);
+
+    let agent = build_agent(worker_id, use_gds_for_local_disk || use_gds_for_remote_disk)?;
     let pool_config = PoolConfig {
         enable_pool: true,
         max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
@@ -179,12 +278,22 @@ async fn perform_allocation_and_build_handler(
         None
     };
 
+    // Create remote context if we have host blocks (for bounce buffers)
+    // Supports both Object storage (S3/MinIO) and Disk storage (shared filesystem)
+    let remote_context = if host_blocks.is_some() {
+        create_remote_context(transfer_context.clone(), worker_id)
+    } else {
+        None
+    };
+
     let handler = BlockTransferHandler::new(
         device_blocks,
         host_blocks,
         disk_blocks,
         transfer_context,
         scheduler_client,
+        remote_context,
+        cancel_token,
     )?;
     Ok(handler)
 }
@@ -222,6 +331,7 @@ struct LeaderMetadataHandler {
     scheduler_client: Option<TransferSchedulerClient>,
     handler_cell: Arc<RwLock<Option<BlockTransferHandler>>>,
     handler_tx: Arc<Mutex<Option<oneshot::Sender<BlockTransferHandler>>>>,
+    cancel_token: CancellationToken,
     started: AtomicBool,
 }
 
@@ -283,6 +393,7 @@ impl Handler for LeaderMetadataHandler {
         let handler_cell = self.handler_cell.clone();
         let handler_tx = self.handler_tx.clone();
         let state = self.state.clone();
+        let cancel_token = self.cancel_token.clone();
 
         tokio::spawn(async move {
             match perform_allocation_and_build_handler(
@@ -293,11 +404,12 @@ impl Handler for LeaderMetadataHandler {
                 worker_id,
                 device_id,
                 scheduler_client,
+                cancel_token,
             )
             .await
             {
                 Ok(handler) => {
-                    // Install transfer handler
+                    // Install transfer handler (includes remote transfer support if configured)
                     {
                         let mut w = handler_cell.write().await;
                         *w = Some(handler.clone());
@@ -371,6 +483,58 @@ impl Handler for BlockTransferDispatch {
         } else {
             Err(anyhow::anyhow!("transfer handler not ready yet"))
         }
+    }
+}
+
+// Remote transfer dispatcher for G4/object storage transfers
+struct RemoteTransferDispatch {
+    cell: Arc<RwLock<Option<BlockTransferHandler>>>,
+}
+
+#[async_trait]
+impl Handler for RemoteTransferDispatch {
+    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+        let handler = { self.cell.read().await.clone() };
+
+        let handler = match handler {
+            Some(h) => h,
+            None => {
+                tracing::warn!("Transfer handler not ready - remote transfer request dropped");
+                message.mark_handled();
+                return Ok(());
+            }
+        };
+
+        if message.data.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "Remote transfer request must have exactly one data element"
+            ));
+        }
+
+        let request: RemoteTransferRequest = serde_json::from_slice(&message.data[0])?;
+
+        tracing::debug!(
+            target: "kvbm-g4",
+            request_id = %request.request_id,
+            operation_id = %request.operation_id,
+            direction = if request.is_onboard() { "onboard" } else { "offload" },
+            num_blocks = request.num_blocks(),
+            "received remote transfer request"
+        );
+
+        // Execute the remote transfer
+        match handler.execute_remote_transfer(request).await {
+            Ok(()) => {
+                tracing::debug!(target: "kvbm-g4", "remote transfer completed successfully");
+            }
+            Err(e) => {
+                tracing::error!(target: "kvbm-g4", "remote transfer failed: {e:#}");
+                // Still ACK to avoid blocking leader
+            }
+        }
+
+        message.ack().await?;
+        Ok(())
     }
 }
 
@@ -701,7 +865,7 @@ impl KvbmWorker {
         // Readiness gating for ping
         let state = Arc::new(WorkerState::new());
 
-        // Cell to publish the transfer handler
+        // Cell to publish the transfer handler (used for both local and remote transfers)
         let transfer_handler_cell: Arc<RwLock<Option<BlockTransferHandler>>> =
             Arc::new(RwLock::new(None));
 
@@ -736,6 +900,7 @@ impl KvbmWorker {
                 scheduler_client,
                 handler_cell: transfer_handler_cell.clone(),
                 handler_tx, // sends BlockTransferHandler to caller
+                cancel_token: cancel_token.clone(),
                 started: AtomicBool::new(false),
             }) as Arc<dyn Handler>,
         );
@@ -744,6 +909,14 @@ impl KvbmWorker {
         handlers.insert(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
             Arc::new(BlockTransferDispatch {
+                cell: transfer_handler_cell.clone(),
+            }) as Arc<dyn Handler>,
+        );
+
+        // remote transfer requests (G4 object storage, remote disk)
+        handlers.insert(
+            ZMQ_REMOTE_TRANSFER_MESSAGE.to_string(),
+            Arc::new(RemoteTransferDispatch {
                 cell: transfer_handler_cell.clone(),
             }) as Arc<dyn Handler>,
         );
@@ -761,6 +934,154 @@ impl KvbmWorker {
 
         Ok(())
     }
+}
+
+/// Create a remote storage context based on environment variable configuration.
+///
+/// Supports both Object storage (S3/MinIO) and Disk storage (shared filesystem).
+///
+/// Environment variables:
+/// - `DYN_KVBM_REMOTE_STORAGE_TYPE`: "object", "disk", or "auto" (default: "auto")
+/// - `DYN_KVBM_OBJECT_BUCKET` or `AWS_DEFAULT_BUCKET`: Bucket name for object storage
+/// - `DYN_KVBM_REMOTE_DISK_PATH`: Base path for disk storage
+/// - `DYN_KVBM_REMOTE_DISK_USE_GDS`: Enable GPU Direct Storage for disk (default: true)
+///
+/// Auto-detection logic:
+/// - If only bucket is set -> object storage
+/// - If only disk path is set -> disk storage
+/// - If both are set -> object storage (unless explicitly overridden)
+fn create_remote_context(
+    transfer_context: Arc<crate::block_manager::block::transfer::TransferContext>,
+    worker_id: usize,
+) -> Option<Arc<RemoteTransferContext>> {
+    use crate::block_manager::config::RemoteStorageConfig;
+
+    // Get storage type preference
+    let storage_type =
+        std::env::var("DYN_KVBM_REMOTE_STORAGE_TYPE").unwrap_or_else(|_| "auto".to_string());
+    let storage_type = storage_type.to_lowercase();
+
+    // Get object storage config
+    let bucket = std::env::var("DYN_KVBM_OBJECT_BUCKET")
+        .or_else(|_| std::env::var("AWS_DEFAULT_BUCKET"))
+        .ok()
+        .map(|b| b.replace("{worker_id}", &worker_id.to_string()));
+
+    let object_endpoint = std::env::var("DYN_KVBM_OBJECT_ENDPOINT")
+        .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
+        .or_else(|_| std::env::var("AWS_ENDPOINT_OVERRIDE"))
+        .ok();
+
+    let object_region = std::env::var("DYN_KVBM_OBJECT_REGION")
+        .or_else(|_| std::env::var("AWS_REGION"))
+        .ok();
+
+    // Get disk storage config
+    let disk_path = std::env::var("DYN_KVBM_REMOTE_DISK_PATH")
+        .ok()
+        .map(|p| p.replace("{worker_id}", &worker_id.to_string()));
+
+    let disk_use_gds = std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(true);
+
+    // Determine storage config based on type and available settings
+    let storage_config: Option<RemoteStorageConfig> = match storage_type.as_str() {
+        "disk" => {
+            // Explicit disk selection
+            if let Some(path) = disk_path {
+                tracing::info!(
+                    worker_id = worker_id,
+                    base_path = %path,
+                    use_gds = disk_use_gds,
+                    "Creating remote context for disk storage (explicit)"
+                );
+                Some(RemoteStorageConfig::Disk {
+                    base_path: path,
+                    use_gds: disk_use_gds,
+                })
+            } else {
+                tracing::warn!(
+                    "DYN_KVBM_REMOTE_STORAGE_TYPE=disk but DYN_KVBM_REMOTE_DISK_PATH not set"
+                );
+                None
+            }
+        }
+        "object" => {
+            // Explicit object selection
+            tracing::info!(
+                worker_id = worker_id,
+                bucket = ?bucket,
+                endpoint = ?object_endpoint,
+                "Creating remote context for object storage (explicit)"
+            );
+            Some(RemoteStorageConfig::Object {
+                default_bucket: bucket,
+                endpoint: object_endpoint,
+                region: object_region,
+            })
+        }
+        _ => {
+            // Auto-detect based on which env vars are set
+            match (&bucket, &disk_path) {
+                (Some(_), Some(path)) => {
+                    // Both configured - prefer object (can be overridden with explicit type)
+                    tracing::info!(
+                        worker_id = worker_id,
+                        bucket = ?bucket,
+                        disk_path = %path,
+                        "Both object and disk storage configured, defaulting to object"
+                    );
+                    Some(RemoteStorageConfig::Object {
+                        default_bucket: bucket,
+                        endpoint: object_endpoint,
+                        region: object_region,
+                    })
+                }
+                (Some(_), None) => {
+                    // Only object configured
+                    tracing::info!(
+                        worker_id = worker_id,
+                        bucket = ?bucket,
+                        endpoint = ?object_endpoint,
+                        "Creating remote context for object storage (auto-detected)"
+                    );
+                    Some(RemoteStorageConfig::Object {
+                        default_bucket: bucket,
+                        endpoint: object_endpoint,
+                        region: object_region,
+                    })
+                }
+                (None, Some(path)) => {
+                    // Only disk configured
+                    tracing::info!(
+                        worker_id = worker_id,
+                        base_path = %path,
+                        use_gds = disk_use_gds,
+                        "Creating remote context for disk storage (auto-detected)"
+                    );
+                    Some(RemoteStorageConfig::Disk {
+                        base_path: path.clone(),
+                        use_gds: disk_use_gds,
+                    })
+                }
+                (None, None) => {
+                    // No remote storage configured
+                    tracing::debug!(
+                        worker_id = worker_id,
+                        "No remote storage configured (set DYN_KVBM_OBJECT_BUCKET or DYN_KVBM_REMOTE_DISK_PATH)"
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    storage_config.map(|config| {
+        Arc::new(
+            RemoteTransferContext::new(transfer_context, config).with_worker_id(worker_id as u64),
+        )
+    })
 }
 
 impl Drop for KvbmWorker {

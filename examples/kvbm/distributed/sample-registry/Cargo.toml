@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "sample-registry"
+version = "0.1.0"
+edition = "2024"
+description = "Sample distributed registry hub for KV cache block coordination"
+authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
+license = "Apache-2.0"
+
+[[bin]]
+name = "registry"
+path = "registry.rs"
+
+# Keep this package out of the main workspace
+[workspace]
+
+[dependencies]
+dynamo-llm = { path = "../../../../lib/llm", features = ["block-manager"] }
+
+anyhow = "1"
+tokio = { version = "1", features = ["full", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+

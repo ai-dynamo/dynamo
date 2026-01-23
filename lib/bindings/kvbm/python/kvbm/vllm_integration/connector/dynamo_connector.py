@@ -139,3 +139,27 @@ class DynamoConnector(KVConnectorBase_V1):
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         return self._worker.get_finished(finished_req_ids)
+
+    # --- Missing KVConnectorBase_V1 methods for production readiness ---
+
+    @override
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return block IDs that failed to load asynchronously."""
+        if self._worker is None:
+            return set()
+        return self._worker.get_block_ids_with_load_errors()
+
+    @override
+    def shutdown(self):
+        """
+        Shutdown the connector and cleanup resources.
+
+        Called when the worker process is shutting down to ensure
+        all async operations complete and resources are released.
+        """
+        # TODO: Implement proper cleanup in Rust layer
+        # if self._worker:
+        #     self._worker.shutdown()
+        # if self._scheduler:
+        #     self._scheduler.shutdown()
+        pass
