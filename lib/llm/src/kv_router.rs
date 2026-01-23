@@ -951,7 +951,15 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             self.chooser.kv_router_config.router_track_output_blocks && handle_local_updates;
 
         let (mut backend_input, context) = request.into_parts();
-        backend_input.routing_mut().dp_rank = Some(dp_rank);
+        // Only set dp_rank if not already set.
+        // For disaggregated decode, prefill_router sets dp_rank to match the prefill worker's
+        // DP rank, which is required for KV transfer. We must preserve it here.
+        // TODO: These changes were made specifically for DP rank aware routing in SGLang.
+        // We need to think of a way to make these cleaner and/or more abstract.
+        // They should NOT apply when we do normal disagg (non-DP attention mode).
+        if backend_input.routing.as_ref().and_then(|r| r.dp_rank).is_none() {
+            backend_input.routing_mut().dp_rank = Some(dp_rank);
+        }
         let updated_request = context.map(|_| backend_input);
 
         let chooser = self.chooser.clone();

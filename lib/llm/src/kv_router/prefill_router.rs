@@ -599,6 +599,9 @@ impl
                 // Set dp_rank on decode request to match prefill's DP rank.
                 // This ensures decode routes to the same DP rank that prefill used,
                 // which is required for KV transfer to work correctly.
+                // TODO: These changes were made specifically for DP rank aware routing in SGLang.
+                // We need to think of a way to make these cleaner and/or more abstract.
+                // They should NOT apply when we do normal disagg (non-DP attention mode).
                 if let Some(dp_rank) = prefill_dp_rank {
                     decode_req.routing_mut().dp_rank = Some(dp_rank);
                 }

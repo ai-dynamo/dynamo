@@ -119,6 +119,9 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
         # Extract dp_rank from routing info (set by KV router)
         # This ensures prefill uses the same DP rank as decode for KV transfer
+        # TODO: These changes were made specifically for DP rank aware routing in SGLang.
+        # We need to think of a way to make these cleaner and/or more abstract.
+        # They should NOT apply when we do normal disagg (non-DP attention mode).
         routing = inner_request.get("routing") or {}
         dp_rank = routing.get("dp_rank")
 
