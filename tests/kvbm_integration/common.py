@@ -322,6 +322,9 @@ class DeterminismTester(ApiTester):
         if seed == 42:  # Default seed, use env override
             seed = int(os.environ.get("KVBM_SEED", "42"))
 
+        top_k = -1
+        if check_module_available("tensorrt_llm"):
+            top_k = 0
         # For determinism: use temperature=0 which should trigger greedy decoding in vLLM
         # Setting top_p=1.0 and top_k=-1 to avoid any sampling/filtering
         return super().make_request(
@@ -330,7 +333,7 @@ class DeterminismTester(ApiTester):
             temperature=temperature,
             seed=seed,
             top_p=1.0,  # No nucleus sampling filtering
-            top_k=-1,  # No top-k filtering
+            top_k=top_k,  # No top-k filtering
             **kwargs,
         )
 
