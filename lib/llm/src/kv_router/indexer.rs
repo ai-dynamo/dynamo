@@ -392,7 +392,17 @@ impl RadixTree {
                 for block_data in op.blocks {
                     let mut parent_mut = current.borrow_mut();
                     let child = match parent_mut.children.get(&block_data.tokens_hash) {
-                        Some(block) => block.clone(),
+                        Some(block) => {
+                            // Verify our simplifying assumption: block_hash is uniform across workers
+                            if block.borrow().block_hash != Some(block_data.block_hash) {
+                                tracing::warn!(
+                                    expected = ?block_data.block_hash,
+                                    actual = ?block.borrow().block_hash,
+                                    "block_hash mismatch: sequence hashes should be uniform across workers"
+                                );
+                            }
+                            block.clone()
+                        }
                         None => {
                             // create new block or reuse existing from global lookup
                             let new_block = self
@@ -488,11 +498,7 @@ impl RadixTree {
                         self.lookup.remove(&block_hash);
                     }
                 }
-                if let Some(err) = kv_cache_err {
-                    Err(err)
-                } else {
-                    Ok(())
-                }
+                kv_cache_err.map_or(Ok(()), Err)
             }
             KvCacheEventData::Cleared => {
                 self.clear_all_blocks(worker.worker_id);
