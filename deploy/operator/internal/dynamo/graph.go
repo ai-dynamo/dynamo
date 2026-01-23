@@ -304,12 +304,11 @@ func GenerateDynamoComponentsDeployments(
 		if err != nil {
 			return nil, err
 		}
+		dcd.Name = dcd.Name + "-" + rolloutCtx.NewWorkerHash
 
 		// During rolling update, use hash-based suffix for stable naming
 		// and override replicas for worker components to gradually scale up
 		if rolloutCtx != nil && rolloutCtx.InProgress {
-			dcd.Name = dcd.Name + "-" + rolloutCtx.NewWorkerHash
-
 			// Override replicas for worker components with pre-calculated new worker replicas
 			if IsWorkerComponent(component.ComponentType) {
 				if replicas, ok := rolloutCtx.NewWorkerReplicas[componentName]; ok {
