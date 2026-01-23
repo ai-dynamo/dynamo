@@ -248,94 +248,184 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 	return config, err
 }
 
-// GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+// RolloutContext provides information about an in-progress rolling update.
+// When InProgress is true, GenerateDynamoComponentsDeployments will generate
+// DCDs for both old and new namespaces.
+type RolloutContext struct {
+	// InProgress indicates whether a rolling update is currently in progress
+	InProgress bool
+	// OldDynamoNamespace is the dynamo namespace for the old (current) deployment
+	OldDynamoNamespace string
+	// NewDynamoNamespace is the dynamo namespace for the new (target) deployment
+	NewDynamoNamespace string
+	// OldWorkerReplicas maps service name to the desired replica count for old workers.
+	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
+	OldWorkerReplicas map[string]int32
+	// NewWorkerReplicas maps service name to the desired replica count for new workers.
+	// Calculated as: min(desiredReplicas, newReadyReplicas + 1) to gradually scale up.
+	NewWorkerReplicas map[string]int32
+}
+
+// GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
+// The map key is a unique identifier for each DCD (serviceName for normal, serviceName-old/new for rollouts).
+//
+// When rolloutCtx.InProgress is true, this generates DCDs for BOTH namespaces:
+// - New namespace: all services with full replicas from spec
+// - Old namespace: worker services only with replicas from rolloutCtx.OldWorkerReplicas
+func GenerateDynamoComponentsDeployments(
+	ctx context.Context,
+	parentDGD *v1alpha1.DynamoGraphDeployment,
+	defaultIngressSpec *v1alpha1.IngressSpec,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+	rolloutCtx *RolloutContext,
+) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 
-	dynamoNamespace := ComputeHashedDynamoNamespace(parentDynamoGraphDeployment)
-
-	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
-		deployment := &v1alpha1.DynamoComponentDeployment{}
-		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
-		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
-		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
-		deployment.Namespace = parentDynamoGraphDeployment.Namespace
-		deployment.Spec.ServiceName = componentName
-		deployment.Spec.DynamoNamespace = &dynamoNamespace
-		labels := make(map[string]string)
-		// add the labels in the spec in order to label all sub-resources
-		deployment.Spec.Labels = labels
-		// and add the labels to the deployment itself
-		deployment.Labels = labels
-		labels[commonconsts.KubeLabelDynamoComponent] = componentName
-		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
-		labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDynamoGraphDeployment.Name
-
-		// Propagate metrics annotation from parent deployment if present
-		if parentDynamoGraphDeployment.Annotations != nil {
-			if deployment.Spec.Annotations == nil {
-				deployment.Spec.Annotations = make(map[string]string)
-			}
-			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
-				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
-			}
-			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
-				deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
-			}
-		}
-
-		// Apply restart annotation if this service should be restarted.
-		// For services not in the current restart order, preserve their existing annotation
-		// to avoid triggering unwanted rollouts when a new restart begins.
-		if restartState.ShouldAnnotateService(componentName) {
-			if deployment.Spec.Annotations == nil {
-				deployment.Spec.Annotations = make(map[string]string)
-			}
-			deployment.Spec.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
-		} else if existingRestartAnnotations != nil {
-			if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
-				if deployment.Spec.Annotations == nil {
-					deployment.Spec.Annotations = make(map[string]string)
-				}
-				deployment.Spec.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
-			}
-		}
-
-		if component.ComponentType == commonconsts.ComponentTypePlanner {
-			// ensure that the extraPodSpec is not nil
-			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
-			}
-			// ensure that the embedded PodSpec struct is not nil
-			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
-				deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
-			}
-			// finally set the service account name
-			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
-		}
-		if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
-			deployment.Spec.Ingress = defaultIngressSpec
-		}
-		// merge the envs from the parent deployment with the envs from the service
-		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
-			deployment.Spec.Envs = MergeEnvs(parentDynamoGraphDeployment.Spec.Envs, deployment.Spec.Envs)
-		}
-		err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort)
-		if err != nil {
-			return nil, err
-		}
-		err = overrideWithDynDeploymentConfig(ctx, deployment)
-		if err != nil {
-			return nil, err
-		}
-		// we only override the replicas if it is not set in the CRD.
-		// replicas, if set in the CRD must always be the source of truth.
-		if component.Replicas != nil {
-			deployment.Spec.Replicas = component.Replicas
-		}
-		deployments[componentName] = deployment
+	// Determine namespaces to generate DCDs for
+	var newNamespace string
+	if rolloutCtx != nil && rolloutCtx.InProgress {
+		newNamespace = rolloutCtx.NewDynamoNamespace
+	} else {
+		newNamespace = ComputeHashedDynamoNamespace(parentDGD)
 	}
+
+	// Generate DCDs for new/current namespace (all services)
+	for componentName, component := range parentDGD.Spec.Services {
+		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, newNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
+		if err != nil {
+			return nil, err
+		}
+
+		// During rolling update, suffix the DCD name to differentiate from old
+		// and override replicas for worker components to gradually scale up
+		if rolloutCtx != nil && rolloutCtx.InProgress {
+			dcd.Name = dcd.Name + "-new"
+
+			// Override replicas for worker components with pre-calculated new worker replicas
+			if IsWorkerComponent(component.ComponentType) {
+				if replicas, ok := rolloutCtx.NewWorkerReplicas[componentName]; ok {
+					dcd.Spec.Replicas = &replicas
+				}
+			}
+		}
+
+		deployments[componentName] = dcd
+	}
+
+	// During rolling update, also generate DCDs for old namespace (workers only)
+	if rolloutCtx != nil && rolloutCtx.InProgress {
+		for componentName, component := range parentDGD.Spec.Services {
+			// Only generate old DCDs for worker components
+			if !IsWorkerComponent(component.ComponentType) {
+				continue
+			}
+
+			dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, rolloutCtx.OldDynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
+			if err != nil {
+				return nil, err
+			}
+
+			// Override replicas with pre-calculated old worker replicas
+			if replicas, ok := rolloutCtx.OldWorkerReplicas[componentName]; ok {
+				dcd.Spec.Replicas = &replicas
+			}
+
+			// Suffix the DCD name to differentiate from new
+			dcd.Name = dcd.Name + "-old"
+
+			// Use a different key to avoid overwriting the new DCD
+			deployments[componentName+"-old"] = dcd
+		}
+	}
+
 	return deployments, nil
+}
+
+// generateSingleDCD creates a DynamoComponentDeployment for a single service.
+func generateSingleDCD(
+	ctx context.Context,
+	parentDGD *v1alpha1.DynamoGraphDeployment,
+	componentName string,
+	component *v1alpha1.DynamoComponentDeploymentSharedSpec,
+	dynamoNamespace string,
+	defaultIngressSpec *v1alpha1.IngressSpec,
+	restartState *RestartState,
+	existingRestartAnnotations map[string]string,
+) (*v1alpha1.DynamoComponentDeployment, error) {
+	deployment := &v1alpha1.DynamoComponentDeployment{}
+	deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
+	deployment.Name = GetDynamoComponentName(parentDGD, componentName)
+	deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
+	deployment.Namespace = parentDGD.Namespace
+	deployment.Spec.ServiceName = componentName
+	deployment.Spec.DynamoNamespace = &dynamoNamespace
+
+	labels := make(map[string]string)
+	deployment.Spec.Labels = labels
+	deployment.Labels = labels
+	labels[commonconsts.KubeLabelDynamoComponent] = componentName
+	labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+	labels[commonconsts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+
+	// Propagate metrics annotation from parent deployment if present
+	if parentDGD.Annotations != nil {
+		if deployment.Spec.Annotations == nil {
+			deployment.Spec.Annotations = make(map[string]string)
+		}
+		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
+			deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
+		}
+		if val, exists := parentDGD.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+			deployment.Spec.Annotations[commonconsts.KubeAnnotationDynamoDiscoveryBackend] = val
+		}
+	}
+
+	// Apply restart annotation if this service should be restarted.
+	if restartState.ShouldAnnotateService(componentName) {
+		if deployment.Spec.Annotations == nil {
+			deployment.Spec.Annotations = make(map[string]string)
+		}
+		deployment.Spec.Annotations[commonconsts.RestartAnnotation] = restartState.Timestamp
+	} else if existingRestartAnnotations != nil {
+		if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Annotations[commonconsts.RestartAnnotation] = existingRestartAt
+		}
+	}
+
+	if component.ComponentType == commonconsts.ComponentTypePlanner {
+		if deployment.Spec.ExtraPodSpec == nil {
+			deployment.Spec.ExtraPodSpec = &v1alpha1.ExtraPodSpec{}
+		}
+		if deployment.Spec.ExtraPodSpec.PodSpec == nil {
+			deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
+		}
+		deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
+	}
+
+	if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+		deployment.Spec.Ingress = defaultIngressSpec
+	}
+
+	if len(parentDGD.Spec.Envs) > 0 {
+		deployment.Spec.Envs = MergeEnvs(parentDGD.Spec.Envs, deployment.Spec.Envs)
+	}
+
+	if err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort); err != nil {
+		return nil, err
+	}
+	if err := overrideWithDynDeploymentConfig(ctx, deployment); err != nil {
+		return nil, err
+	}
+
+	if component.Replicas != nil {
+		deployment.Spec.Replicas = component.Replicas
+	}
+
+	return deployment, nil
 }
 
 // updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent

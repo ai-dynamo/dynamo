@@ -235,13 +235,14 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"oldNamespace", oldNamespace,
 		"newNamespace", newNamespace)
 
+	// Initialize rollout status
+	// Note: Namespaces are computed dynamically from worker hash annotation,
+	// not stored in status, to avoid staleness issues
 	now := metav1.Now()
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhasePending
 	rolloutStatus.StartTime = &now
 	rolloutStatus.TrafficWeightOld = 100
 	rolloutStatus.TrafficWeightNew = 0
-	rolloutStatus.OldDynamoNamespace = oldNamespace
-	rolloutStatus.NewDynamoNamespace = newNamespace
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from namespace %s to %s", oldNamespace, newNamespace)
