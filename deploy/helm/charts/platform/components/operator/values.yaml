@@ -104,19 +104,6 @@ trafficProxy:
   image:
     repository: haproxy
     tag: "2.9-alpine"
-    pullPolicy: IfNotPresent
-
-  # Resource requests for proxy pods
-  resources:
-    requests:
-      cpu: "100m"
-      memory: "128Mi"
-
-  # Tolerations for proxy pods
-  tolerations: []
-
-  # Affinity rules for proxy pods
-  affinity: {}
 
 dynamo:
   components:
