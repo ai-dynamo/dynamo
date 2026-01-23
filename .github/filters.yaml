@@ -57,6 +57,7 @@ ignore:
   - 'container/Dockerfile.local_dev'
   - 'container/run.sh'
   - 'container/use-sccache.sh'
+  - 'container/dev/**'
 
 ci: &ci
   - '.github/workflows/**'
@@ -69,7 +70,6 @@ core:
   - 'container/build.sh'
   - 'container/Dockerfile'
   - '.dockerignore'
-  - 'container/dev/**'
   - 'container/deps/*'
   - '.cargo/config.toml'
   - 'lib/**'
@@ -78,6 +78,7 @@ core:
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/gpu_memory_service/**'
   - '*.toml'
   - '*.lock'
   - '*.py'

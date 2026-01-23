@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 {{- /* ------------ file-scope vars (no output) ------------ */ -}}
 {{- $platformNs   := default .Release.Namespace .Values.platformNamespace -}}
 {{- $platformName := default "dynamo-platform" .Values.platformReleaseName -}}
@@ -23,10 +24,10 @@
 {{- $std          := .Values.extension.standardImage -}}
 {{- $dyn          := .Values.extension.dynamoImage -}}
 {{- $fallback     := ternary $dyn $std .Values.epp.useDynamo -}}
-{{- $eppImage     := default $fallback .Values.extension.image -}}
+{{- $eppImage     := default $fallback .Values.extension.image }}
 
-
----  # <-- start of actual YAML document
+---
+# Deployment for the EPP (Endpoint Picker Plugin)
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -61,26 +62,30 @@ spec:
         {{- if .Values.epp.argsOverride }}
         {{- toYaml .Values.epp.argsOverride | nindent 8 }}
         {{- else }}
-          - -poolName
+          - -pool-name
           - "{{ .Values.model.shortName }}-pool"
-          - -poolNamespace
+          - -pool-namespace
           - "{{ .Release.Namespace }}"
+          - -pool-group
+          - "inference.networking.x-k8s.io"
           - -v
           - "4"
           - --zap-encoder
           - "json"
-          - -grpcPort
+          - -grpc-port
           - "9002"
-          - -grpcHealthPort
+          - -grpc-health-port
           - "9003"
           {{- if $useDynamo }}
-          - -configFile
+          - -config-file
           - "{{ .Values.epp.configFile }}"
           {{- end }}
         {{- end }}
 
-        {{- if $useDynamo }}
         volumeMounts:
+          - name: hf-cache
+            mountPath: /home/nonroot/.cache
+        {{- if $useDynamo }}
           - name: epp-config
             mountPath: /etc/epp
             readOnly: true
@@ -117,11 +122,21 @@ spec:
             value: "true"
           - name: USE_STREAMING
             value: "true"
+          # HuggingFace token for downloading model config files
+          # Without this, HuggingFace rate-limits requests (429 Too Many Requests)
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: hf-token-secret
+                key: HF_TOKEN
+                optional: true
         {{- end }}
         {{- range .Values.epp.extraEnv }}
           - name: {{ .name }}
             value: {{ .value | quote }}
         {{- end }}
+          - name: RUST_LOG
+            value: "debug,dynamo_llm::kv_router=trace"
 
         ports:
           - containerPort: 9002
@@ -141,8 +156,10 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
 
-      {{- if $useDynamo }}
       volumes:
+        - name: hf-cache
+          emptyDir: {}
+      {{- if $useDynamo }}
         - name: epp-config
           configMap:
             name: {{ include "dynamo-gaie.fullname" . }}-epp-config

@@ -45,7 +45,9 @@ import (
 	sigsyaml "sigs.k8s.io/yaml"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
 
@@ -1554,6 +1556,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) updateStateWithCondition(
 func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.DynamoGraphDeploymentRequest{}).
+		Named(consts.ResourceTypeDynamoGraphDeploymentRequest).
 		Owns(&batchv1.Job{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the job
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1587,5 +1590,5 @@ func (r *DynamoGraphDeploymentRequestReconciler) SetupWithManager(mgr ctrl.Manag
 			}),
 		).                                                                          // Watch DGDs created by this controller (via label)
 		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
-		Complete(r)
+		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeploymentRequest))
 }
