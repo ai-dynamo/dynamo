@@ -67,7 +67,7 @@ spec:
           - -pool-namespace
           - "{{ .Release.Namespace }}"
           - -pool-group
-          - "inference.networking.x-k8s.io"
+          - "inference.networking.k8s.io"
           - -v
           - "4"
           - --zap-encoder
