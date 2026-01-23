@@ -80,7 +80,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         Yields:
             Response dict with generated images (OpenAI-compatible format).
         """
-        logger.debug(f"Image diffusion request: {request}")
+        logger.info(f"Image diffusion request: {request}")
 
         # Get trace header for distributed tracing (for logging/observability)
         trace_header = self._get_trace_header(context)
@@ -92,6 +92,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             # if await self._check_cancellation(context):
             #     logger.info(f"Request cancelled before generation: {context.id()}")
             #     return
+
+            # Default to 50 steps if not provided
+            request.num_inference_steps = request.num_inference_steps or 50
 
             req = CreateImageRequest(**request)
 
@@ -106,10 +109,10 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             # Generate images (may batch multiple requests at same step)
             images = await self._generate_images(
                 prompt=req.prompt,
-                num_images=req.n,
+                negative_prompt=req.negative_prompt,
                 width=width,
                 height=height,
-                num_steps=req.num_inference_steps,
+                num_inference_steps=req.num_inference_steps,
                 guidance_scale=req.guidance_scale,
                 seed=req.seed,
             )
@@ -149,23 +152,24 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
     async def _generate_images(
         self,
         prompt: str,
-        num_images: int,
         width: int,
         height: int,
-        num_steps: int,
+        num_inference_steps: int,
         guidance_scale: float,
         seed: Optional[int],
+        negative_prompt: Optional[str] = None,
     ) -> list[bytes]:
         """Generate images using SGLang DiffGenerator"""
         # DiffGenerator handles batching internally if multiple images
         # Run in thread pool to avoid blocking event loop
         args = {
             "prompt": prompt,
+            "negative_prompt": negative_prompt,
             "height": height,
             "width": width,
-            "num_inference_steps": num_images,
+            "num_inference_steps": num_inference_steps,
             "save_output": False,  # We handle saving ourselves
-            # "guidance_scale": guidance_scale,
+            "guidance_scale": guidance_scale,
             # "seed": seed,
         }
         result = await asyncio.to_thread(
