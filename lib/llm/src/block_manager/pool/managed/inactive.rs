@@ -958,8 +958,6 @@ pub(crate) mod tests {
         let reacquired_blocks = pool.acquire_free_blocks(3).unwrap();
 
         // Step 5: Verify priority is reset to default (0)
-        // BUG: This will FAIL because blocks from uninitialized_set are not reset
-        // when acquired - they still have priority=100
         for (i, block) in reacquired_blocks.iter().enumerate() {
             assert_eq!(
                 block.metadata().offload_priority(),
