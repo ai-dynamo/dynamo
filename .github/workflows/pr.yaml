@@ -63,8 +63,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-v1 }
-          - { arch: arm64, runner: p-builder-arm-v1 }
+          - { arch: amd64, runner: prod-builder-amd-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
     name: operator-build (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -140,8 +140,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-          - { arch: arm64, runner: p-builder-arm-v1 }
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
@@ -218,8 +218,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-          - { arch: arm64, runner: p-builder-arm-v1 }
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
@@ -237,8 +237,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-          - { arch: arm64, runner: p-builder-arm-v1 }
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
     name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
@@ -249,7 +249,7 @@ jobs:
     steps: *runtime-container-build-push-test
 
   deploy-operator:
-    runs-on: p-default-v1
+    runs-on: prod-default-v1
     if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
@@ -324,7 +324,7 @@ jobs:
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   deploy-test-vllm:
-    runs-on: p-default-v1
+    runs-on: prod-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, vllm]
@@ -514,7 +514,7 @@ jobs:
   # - Run vllm disagg_router on all commits
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
-    runs-on: p-default-v1
+    runs-on: prod-default-v1
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
@@ -534,7 +534,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-sglang:
-    runs-on: p-default-v1
+    runs-on: prod-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
@@ -556,7 +556,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
-    runs-on: p-default-v1
+    runs-on: prod-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, trtllm]
@@ -580,7 +580,7 @@ jobs:
     steps: *deploy-test-steps
 
   cleanup:
-    runs-on: p-default-v1
+    runs-on: prod-default-v1
     if: always()
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-vllm-disagg-router]
     steps:
