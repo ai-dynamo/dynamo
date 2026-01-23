@@ -10,19 +10,21 @@ import (
 
 	"github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 const (
 	// InferencePoolGroup is the API group for InferencePool (stable API)
-	InferencePoolGroup = "inference.networking.k8s.io"
+	// Using the stable v1 API group instead of the experimental x-k8s.io group
+	InferencePoolGroup = gaiev1.GroupName
 )
 
 // InferencePoolGVK is the GroupVersionKind for InferencePool (stable API)
 var InferencePoolGVK = schema.GroupVersionKind{
-	Group:   InferencePoolGroup,
-	Version: "v1",
+	Group:   gaiev1.GroupName,
+	Version: gaiev1.GroupVersion.Version,
 	Kind:    "InferencePool",
 }
 
@@ -33,42 +35,39 @@ func GenerateInferencePool(
 	dgd *v1alpha1.DynamoGraphDeployment,
 	serviceName string,
 	eppConfig *v1alpha1.EPPConfig,
-) (*unstructured.Unstructured, error) {
+) (*gaiev1.InferencePool, error) {
 	poolName := GetPoolName(dgd.Name, eppConfig)
 	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
 	dynamoNamespace := dgd.GetDynamoNamespaceForService(dgd.Spec.Services[serviceName])
 	eppServiceName := GetServiceName(dgd.Name)
 
-	// Build InferencePool using stable v1 API
-	pool := &unstructured.Unstructured{}
-	pool.SetGroupVersionKind(InferencePoolGVK)
-	pool.SetName(poolName)
-	pool.SetNamespace(poolNamespace)
-	pool.SetLabels(map[string]string{
-		consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-		consts.KubeLabelDynamoComponent:           serviceName,
-		consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
-	})
-
-	// Set spec fields - build spec directly in pool.Object to avoid deep copy issues
-	pool.Object["spec"] = map[string]interface{}{
-		"targetPorts": []interface{}{
-			map[string]interface{}{
-				"number": int64(8000), // Frontend port
+	// Build InferencePool using typed API
+	pool := &gaiev1.InferencePool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      poolName,
+			Namespace: poolNamespace,
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+				consts.KubeLabelDynamoComponent:           serviceName,
+				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 			},
 		},
-		"selector": map[string]interface{}{
-			"matchLabels": map[string]string{
-				consts.KubeLabelDynamoComponent: "Frontend",
-				consts.KubeLabelDynamoNamespace: dynamoNamespace,
+		Spec: gaiev1.InferencePoolSpec{
+			TargetPorts: []gaiev1.Port{
+				{Number: 8000}, // Frontend port
 			},
-		},
-		"endpointPickerRef": map[string]interface{}{
-			"group": "",
-			"kind":  "Service",
-			"name":  eppServiceName,
-			"port": map[string]interface{}{
-				"number": int64(9002),
+			Selector: gaiev1.LabelSelector{
+				MatchLabels: map[gaiev1.LabelKey]gaiev1.LabelValue{
+					consts.KubeLabelDynamoComponent: "Frontend",
+					consts.KubeLabelDynamoNamespace: gaiev1.LabelValue(dynamoNamespace),
+				},
+			},
+			EndpointPickerRef: gaiev1.EndpointPickerRef{
+				Kind: "Service",
+				Name: gaiev1.ObjectName(eppServiceName),
+				Port: &gaiev1.Port{
+					Number: 9002,
+				},
 			},
 		},
 	}

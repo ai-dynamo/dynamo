@@ -13,6 +13,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apixv1alpha1 "sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1"
 	"sigs.k8s.io/yaml"
 )
 
@@ -73,8 +74,14 @@ func GetConfigMapName(dgdName string) string {
 	return fmt.Sprintf("%s-%s", dgdName, ConfigMapSuffix)
 }
 
-// marshalEndpointPickerConfig marshals EndpointPickerConfig to YAML
-func marshalEndpointPickerConfig(config interface{}) (string, error) {
+// marshalEndpointPickerConfig marshals EndpointPickerConfig to YAML with proper API metadata
+func marshalEndpointPickerConfig(config *apixv1alpha1.EndpointPickerConfig) (string, error) {
+	// Set the TypeMeta fields using upstream constants
+	config.TypeMeta = metav1.TypeMeta{
+		APIVersion: apixv1alpha1.SchemeGroupVersion.String(),
+		Kind:       "EndpointPickerConfig",
+	}
+
 	yamlBytes, err := yaml.Marshal(config)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal EndpointPickerConfig to YAML: %w", err)

@@ -33,7 +33,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/scale"
@@ -56,6 +55,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
+	gaiev1 "sigs.k8s.io/gateway-api-inference-extension/api/v1"
 )
 
 type State string
@@ -1258,7 +1258,14 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)
 	}
 
-	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*unstructured.Unstructured, bool, error) {
+	// Debug: log the generated InferencePool
+	logger.Info("Generated InferencePool",
+		"name", inferencePool.GetName(),
+		"namespace", inferencePool.GetNamespace(),
+		"targetPorts", inferencePool.Spec.TargetPorts,
+		"endpointPickerRef", inferencePool.Spec.EndpointPickerRef)
+
+	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*gaiev1.InferencePool, bool, error) {
 		return inferencePool, false, nil
 	})
 	if err != nil {
@@ -1266,7 +1273,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		return fmt.Errorf("failed to sync EPP InferencePool: %w", err)
 	}
 
-	logger.Info("Successfully reconciled EPP resources")
+	logger.Info("Successfully reconciled EPP resources", "poolName", inferencePool.GetName())
 	return nil
 }
 
