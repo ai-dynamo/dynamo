@@ -68,6 +68,14 @@ kubectl get gateway inference-gateway
 ### 3. Deploy Your Model ###
 
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Make sure to enable kv-routing by adding the env var in the FrontEnd.
+```bash
+    mainContainer:
+      image: ...
+      env:
+        - name: DYN_ROUTER_MODE
+          value: "kv"
+```
 
 Sample commands to deploy model:
 
