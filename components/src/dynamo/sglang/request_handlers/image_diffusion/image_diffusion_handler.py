@@ -37,7 +37,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         config: Config,
         publisher: Optional[DynamoSglangPublisher] = None,
         fs: Any = None,  # fsspec.AbstractFileSystem for primary storage
-        bucket: Optional[str] = None,
     ):
         """Initialize diffusion worker handler.
 
@@ -47,7 +46,6 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             config: SGLang and Dynamo configuration.
             publisher: Optional metrics publisher (not used for diffusion currently).
             fs: Optional fsspec filesystem for primary image storage.
-            bucket: Optional bucket name for cloud storage.
         """
         # Call parent constructor for common setup
         super().__init__(component, config, publisher)
@@ -55,10 +53,18 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # Image diffusion-specific initialization
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
-        self.bucket = bucket if bucket else ""
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
 
-        logger.info(f"Image diffusion worker handler initialized with fs_url={self.fs_url}")
+        fs_url_parts = self.fs_url.split("://")
+        self.protocol = fs_url_parts[0] if "://" in self.fs_url else "file"
+
+        self.root_path = ""  # s3 uses bucket
+        if self.protocol == "file":
+            self.root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else "/"
+
+        logger.info(
+            f"Image diffusion worker handler initialized with fs_url={self.fs_url}"
+        )
 
     def cleanup(self) -> None:
         """Cleanup generator resources"""
@@ -220,7 +226,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         # TODO: allowed sizes, max 1024? configurable?
         return int(w), int(h)
 
-    async def _upload_to_fs(self, image_bytes: bytes, user_id: str, request_id: str) -> str:
+    async def _upload_to_fs(
+        self, image_bytes: bytes, user_id: str, request_id: str
+    ) -> str:
         """Upload image to filesystem and return URL.
 
         Uses per-user storage path:
@@ -238,9 +246,8 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         image_filename = f"{image_uuid}.png"
 
         # Per-user storage path
-        storage_dir = f"{self.bucket}/users/{user_id}/generations/{request_id}"
-        storage_path = f"{storage_dir}/{image_filename}"
-        full_path = f"{self.fs_url.rstrip('/')}/{storage_path}"
+        storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
+        full_path = f"{self.root_path}/{storage_path}"
 
         # Use pipe() for writing bytes (standard fsspec API)
         await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
@@ -290,7 +297,7 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             return full_path  # Return as-is if format unclear
         elif self.fs_url.startswith("file://"):
             # Local filesystem
-            return full_path
+            return f"file://{full_path}"
         else:
             # Unknown filesystem type, return path as-is
             logger.warning(f"Unknown filesystem type for URL generation: {self.fs_url}")
