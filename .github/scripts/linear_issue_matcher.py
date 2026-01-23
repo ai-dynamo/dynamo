@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -62,7 +63,8 @@ MAX_CANDIDATES_FOR_FINAL = 5  # Max issues for final model matching
 # Linear settings
 LINEAR_DAYS_LOOKBACK = 60  # Days to search Linear issues
 LINEAR_AUTHOR_LIMIT = 50  # Max issues to fetch for author
-LINEAR_FALLBACK_LIMIT = 100  # Max issues for fallback search
+LINEAR_FALLBACK_LIMIT = 500  # Max issues for fallback search (increased for multi-team)
+LINEAR_TEAMS = ["DYN", "DIS", "DEP", "LLM", "OPS", "DGH"]  # All teams to search
 
 # Path to team members file (relative to repo root)
 TEAM_MEMBERS_FILE = ".github/config/dynamo-team-members.txt"
@@ -120,6 +122,7 @@ class LinearIssue:
     priority: int
     url: str
     labels: list[str] = field(default_factory=list)
+    project: Optional[str] = None  # Project name for alignment scoring
 
 
 @dataclass
@@ -323,7 +326,7 @@ def extract_linear_issue_ids(text: str) -> list[str]:
     """Extract Linear issue IDs from text (e.g., DYN-1234)."""
     standard_pattern = r"\b([A-Za-z]{2,4})-(\d{1,5})\b"
     no_hyphen_pattern = r"\b([A-Za-z]{2,4})(\d{1,5})\b"
-    valid_prefixes = {"DYN", "DIS", "DEP", "LLM", "OPS", "DIA"}
+    valid_prefixes = {"DYN", "DIS", "DEP", "LLM", "OPS", "DGH", "DIA"}
 
     matches = []
     for prefix, num in re.findall(standard_pattern, text):
@@ -383,6 +386,7 @@ def fetch_linear_issues_for_assignee(
                 state { name }
                 assignee { name }
                 labels { nodes { name } }
+                project { name }
             }
         }
     }
@@ -414,6 +418,7 @@ def fetch_linear_issues_for_team(
                 state { name }
                 assignee { name }
                 labels { nodes { name } }
+                project { name }
             }
         }
     }
@@ -422,6 +427,40 @@ def fetch_linear_issues_for_team(
     filter_parts = {
         "createdAt": {"gte": cutoff_date},
         "team": {"key": {"eq": team}},
+    }
+
+    return _fetch_linear_issues(token, query, filter_parts, limit)
+
+
+def fetch_linear_issues_for_teams(
+    token: str,
+    teams: list[str] = None,
+    days: int = LINEAR_DAYS_LOOKBACK,
+    limit: int = LINEAR_FALLBACK_LIMIT,
+) -> list[LinearIssue]:
+    """Fetch Linear issues from multiple teams using IN filter."""
+    if teams is None:
+        teams = LINEAR_TEAMS
+    cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+
+    query = """
+    query($filter: IssueFilter, $first: Int!, $after: String) {
+        issues(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {
+            pageInfo { hasNextPage, endCursor }
+            nodes {
+                identifier, title, description, priority, url
+                state { name }
+                assignee { name }
+                labels { nodes { name } }
+                project { name }
+            }
+        }
+    }
+    """
+
+    filter_parts = {
+        "createdAt": {"gte": cutoff_date},
+        "team": {"key": {"in": teams}},  # Multi-team query
     }
 
     return _fetch_linear_issues(token, query, filter_parts, limit)
@@ -477,6 +516,9 @@ def _fetch_linear_issues(
                         label["name"]
                         for label in node.get("labels", {}).get("nodes", [])
                     ],
+                    project=node.get("project", {}).get("name")
+                    if node.get("project")
+                    else None,
                 )
                 issues.append(issue)
 
@@ -499,26 +541,32 @@ def _fetch_linear_issues(
 # =============================================================================
 
 
-def prefilter_score_issue(pr: PRContext, issue: LinearIssue) -> tuple[float, list[str]]:
+def prefilter_score_issue(
+    pr: PRContext, issue: LinearIssue, author_team: Optional[str] = None
+) -> tuple[float, list[str]]:
     """Score an issue using fast heuristics (no LLM). Returns (score, reasons)."""
     score = 0.0
     reasons = []
     pr_text = f"{pr.title} {pr.body} {pr.branch}"
     pr_text_upper = pr_text.upper()
+    pr_text_lower = pr_text.lower()
 
     # 1. Direct issue reference (immediate 100% match)
     if issue.identifier.upper() in pr_text_upper:
         return (1.0, [f"Direct reference to {issue.identifier}"])
 
-    # 2. Category overlap
+    # 2. Category overlap (rebalanced: +0.15 for 1 cat, +0.25 for 2+)
     pr_categories = set(categorize_by_keywords(pr.title, pr.body))
     issue_categories = set(categorize_by_keywords(issue.title, issue.description))
     common_categories = pr_categories & issue_categories
     if common_categories and "Other" not in common_categories:
-        score += 0.35
+        if len(common_categories) >= 2:
+            score += 0.25
+        else:
+            score += 0.15
         reasons.append(f"Category: {', '.join(list(common_categories)[:2])}")
 
-    # 3. Title keyword overlap
+    # 3. Title keyword overlap (rebalanced: +0.08/word, max 0.35)
     stop_words = {
         "the",
         "and",
@@ -551,10 +599,10 @@ def prefilter_score_issue(pr: PRContext, issue: LinearIssue) -> tuple[float, lis
     )
     common_words = pr_words & issue_words
     if common_words:
-        score += min(len(common_words) * 0.12, 0.4)
+        score += min(len(common_words) * 0.08, 0.35)
         reasons.append(f"Keywords: {', '.join(list(common_words)[:3])}")
 
-    # 4. Description keyword overlap
+    # 4. Description keyword overlap (rebalanced: +0.03/word, max 0.20)
     pr_desc_words = set(
         w.lower()
         for w in re.findall(r"\b\w{4,}\b", pr.body or "")
@@ -568,7 +616,7 @@ def prefilter_score_issue(pr: PRContext, issue: LinearIssue) -> tuple[float, lis
     desc_overlap = (pr_words & issue_desc_words) | (issue_words & pr_desc_words)
     desc_overlap = desc_overlap - common_words  # Don't double count
     if desc_overlap:
-        score += min(len(desc_overlap) * 0.05, 0.2)
+        score += min(len(desc_overlap) * 0.03, 0.20)
         if len(desc_overlap) >= 2:
             reasons.append(f"Desc: {', '.join(list(desc_overlap)[:2])}")
 
@@ -582,7 +630,26 @@ def prefilter_score_issue(pr: PRContext, issue: LinearIssue) -> tuple[float, lis
                 reasons.append(f"Component: {comp}")
                 break
 
-    return (max(0.0, min(score, 1.0)), reasons)
+    # 6. Team compatibility scoring
+    issue_team = issue.identifier.split("-")[0].upper()
+    core_teams = {"DYN", "DIS", "DEP", "LLM"}
+    if author_team:
+        if issue_team == "OPS" and author_team.upper() in core_teams:
+            score -= 0.2
+            reasons.append("Team mismatch: core author, OPS issue")
+        elif issue_team == author_team.upper():
+            score += 0.1
+            reasons.append(f"Team match: {issue_team}")
+
+    # 7. Project alignment scoring
+    if issue.project:
+        project_words = [w for w in issue.project.lower().split() if len(w) > 3]
+        if any(w in pr_text_lower for w in project_words):
+            score += 0.08
+            reasons.append(f"Project: {issue.project}")
+
+    # Return score without upper clamp to avoid saturation
+    return (max(0.0, score), reasons)
 
 
 def prefilter_issues(
@@ -590,11 +657,12 @@ def prefilter_issues(
     issues: list[LinearIssue],
     max_candidates: int = MAX_CANDIDATES_FOR_SCREENING,
     min_score: float = 0.10,
+    author_team: Optional[str] = None,
 ) -> list[tuple[LinearIssue, float, list[str]]]:
     """Pre-filter issues using fast heuristics. Returns sorted (issue, score, reasons)."""
     scored = []
     for issue in issues:
-        score, reasons = prefilter_score_issue(pr, issue)
+        score, reasons = prefilter_score_issue(pr, issue, author_team=author_team)
         if score >= min_score:
             scored.append((issue, score, reasons))
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -634,6 +702,26 @@ def call_llm(
         raise
 
 
+def call_llm_with_retry(
+    messages: list[dict],
+    api_key: str,
+    model: str,
+    max_retries: int = 3,
+    **kwargs,
+) -> str:
+    """Call LLM with exponential backoff retry logic for transient failures."""
+    for attempt in range(max_retries):
+        try:
+            return call_llm(messages, api_key, model, **kwargs)
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                wait = 2**attempt
+                logger.warning(f"Retry {attempt + 1}/{max_retries} in {wait}s: {e}")
+                time.sleep(wait)
+            else:
+                raise
+
+
 def screen_issue_fast(
     pr: PRContext,
     issue: LinearIssue,
@@ -658,7 +746,7 @@ Reply ONLY with JSON: {{"score": 0.0-1.0, "reason": "10 words max"}}
 - <0.3: Not related"""
 
     try:
-        response = call_llm(
+        response = call_llm_with_retry(
             [{"role": "user", "content": prompt}],
             api_key,
             FAST_MODEL,
@@ -720,7 +808,7 @@ Confidence guide:
 - <0.50: Not a match"""
 
     try:
-        response = call_llm(
+        response = call_llm_with_retry(
             [
                 {
                     "role": "system",
@@ -754,6 +842,7 @@ def find_related_issues(
     pr: PRContext,
     issues: list[LinearIssue],
     nvidia_api_key: str,
+    author_team: Optional[str] = None,
 ) -> list[MatchResult]:
     """
     Find Linear issues related to a PR using three-stage matching:
@@ -784,7 +873,7 @@ def find_related_issues(
 
     # Stage 2: Pre-filter with heuristics
     prefiltered = prefilter_issues(
-        pr, issues, max_candidates=MAX_CANDIDATES_FOR_SCREENING
+        pr, issues, max_candidates=MAX_CANDIDATES_FOR_SCREENING, author_team=author_team
     )
 
     if not prefiltered:
@@ -1004,20 +1093,28 @@ def main():
         issues = fetch_linear_issues_for_assignee(linear_api_key, member.linear_id)
         logger.info(f"Found {len(issues)} issues assigned to author")
 
-    # Fall back to team-wide search if no author issues or author has no Linear ID
+    # Fall back to multi-team search if no author issues or author has no Linear ID
     if not issues:
-        logger.info("Fetching issues for DYN team (fallback)")
-        issues = fetch_linear_issues_for_team(linear_api_key, team="DYN")
-        logger.info(f"Found {len(issues)} issues in DYN team")
+        logger.info(f"Fetching issues for all teams: {LINEAR_TEAMS} (fallback)")
+        issues = fetch_linear_issues_for_teams(linear_api_key, teams=LINEAR_TEAMS)
+        logger.info(f"Found {len(issues)} issues across all teams")
 
     if not issues:
         logger.warning("No Linear issues found")
         print("::notice::No Linear issues found")
         sys.exit(0)
 
+    # Infer author's team from their assigned issues (first issue's team prefix)
+    author_team = None
+    if member.linear_id:
+        author_issues = [i for i in issues if i.assignee]
+        if author_issues:
+            author_team = author_issues[0].identifier.split("-")[0].upper()
+            logger.info(f"Inferred author team: {author_team}")
+
     # Find related issues
     logger.info("Finding related issues...")
-    matches = find_related_issues(pr, issues, nvidia_api_key)
+    matches = find_related_issues(pr, issues, nvidia_api_key, author_team=author_team)
 
     if not matches:
         logger.info(f"No matches found above {CONFIDENCE_THRESHOLD:.0%} threshold")
