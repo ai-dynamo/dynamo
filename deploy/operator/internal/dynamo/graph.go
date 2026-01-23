@@ -291,7 +291,11 @@ func GenerateDynamoComponentsDeployments(
 	var newNamespace string
 	if rolloutCtx != nil && rolloutCtx.InProgress {
 		newNamespace = rolloutCtx.NewDynamoNamespace
+	} else if parentDGD.HasAnyMultinodeService() {
+		// LWS/multinode pathway doesn't support rolling updates, so use base namespace
+		newNamespace = ComputeBaseDynamoNamespace(parentDGD)
 	} else {
+		// Standard Deployment pathway supports rolling updates, use hashed namespace
 		newNamespace = ComputeHashedDynamoNamespace(parentDGD)
 	}
 

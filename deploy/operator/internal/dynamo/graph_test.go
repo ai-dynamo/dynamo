@@ -3678,10 +3678,6 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 				}
 			}
 
-			// Update expected namespace values dynamically based on computed hash
-			// This is needed because namespace now uses hash-based naming
-			updateExpectedNamespaces(tt.want, expectedNamespace)
-
 			if diff := cmp.Diff(got, tt.want); diff != "" {
 				t.Errorf("GenerateGrovePodCliqueSet() mismatch (-want +got):\n%s", diff)
 			}
@@ -3689,11 +3685,12 @@ func TestGenerateGrovePodCliqueSet(t *testing.T) {
 	}
 }
 
-// updateExpectedNamespaces updates namespace values in expected PodCliqueSet to use computed hash.
-// All components use the hash-based namespace (GlobalDynamoNamespace is deprecated and ignored).
+// updateExpectedNamespaces updates namespace values in expected PodCliqueSet.
+// Grove pathway uses base namespace (no hash) since rolling updates aren't supported.
+// GlobalDynamoNamespace is deprecated and ignored.
 func updateExpectedNamespaces(expected *grovev1alpha1.PodCliqueSet, defaultNamespace string) {
 	for _, clique := range expected.Spec.Template.Cliques {
-		// All components use the hash-based namespace
+		// All components use the base namespace (Grove doesn't support rolling updates)
 		namespace := defaultNamespace
 
 		// Update labels
@@ -3714,7 +3711,7 @@ func updateExpectedNamespaces(expected *grovev1alpha1.PodCliqueSet, defaultNames
 
 func Test_GeneratePodCliqueSetGlobalDynamoNamespaceIgnored(t *testing.T) {
 	// GlobalDynamoNamespace is DEPRECATED and IGNORED.
-	// All components use hash-based namespace regardless of this field.
+	// Grove pathway uses base namespace (without hash) since it doesn't support rolling updates.
 	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-dynamo-graph",
@@ -3744,11 +3741,11 @@ func Test_GeneratePodCliqueSetGlobalDynamoNamespaceIgnored(t *testing.T) {
 		return
 	}
 
-	// All components use hash-based namespace, GlobalDynamoNamespace is ignored
-	expectedNamespace := ComputeHashedDynamoNamespace(dynamoDeployment)
+	// Grove pathway uses base namespace (no hash) since rolling updates aren't supported
+	expectedNamespace := ComputeBaseDynamoNamespace(dynamoDeployment)
 	for _, clique := range got.Spec.Template.Cliques {
 		assert.Equal(t, expectedNamespace, clique.Labels[commonconsts.KubeLabelDynamoNamespace],
-			"GlobalDynamoNamespace should be ignored, clique %s should use hash-based namespace", clique.Name)
+			"GlobalDynamoNamespace should be ignored, clique %s should use base namespace", clique.Name)
 		assertDYNNamespace(t, clique.Spec.PodSpec, expectedNamespace)
 	}
 }
