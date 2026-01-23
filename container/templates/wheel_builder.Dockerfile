@@ -8,6 +8,7 @@
 
 # Redeclare ARCH_ALT ARG so it's available for interpolation in the FROM instruction
 ARG ARCH_ALT
+ARG DEVICE
 
 FROM quay.io/pypa/manylinux_2_28_${ARCH_ALT} AS wheel_builder
 

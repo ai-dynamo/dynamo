@@ -28,6 +28,10 @@ LMCACHE_REF="0.3.12"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --device)
+            DEVICE="$2"
+            shift 2
+            ;;
         --vllm-ref)
             VLLM_REF="$2"
             shift 2
@@ -65,8 +69,9 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         -h|--help)
-            echo "Usage: $0 [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
+            echo "Usage: $0 [--device DEVICE] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--lmcache-ref REF] [--torch-cuda-arch-list LIST] [--cuda-version VERSION]"
             echo "Options:"
+            echo "  --device DEVICE     Device Selection (default: cuda)"
             echo "  --vllm-ref REF      vLLM release version (default: ${VLLM_REF})"
             echo "  --max-jobs NUM      Maximum parallel jobs (default: ${MAX_JOBS})"
             echo "  --arch ARCH         Architecture amd64|arm64 (default: auto-detect)"

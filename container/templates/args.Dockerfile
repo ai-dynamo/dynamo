@@ -23,14 +23,17 @@ ARG PYTHON_VERSION={{ context.dynamo.python_version }}
 ARG CUDA_VERSION={{ cuda_version }}
 ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 
-{% if framework == "vllm" or framework == "sglang" -%}
+{% if (framework == "vllm" or framework == "sglang") and device == "cuda"-%}
 {% set cuda_context_key = "cuda" + cuda_version %}
 # Base image configuration
-ARG BASE_IMAGE={{ context[framework].base_image }}
-ARG BASE_IMAGE_TAG={{ context[framework][cuda_context_key].base_image_tag }}
+ARG BASE_IMAGE={{ context.cuda.[framework].base_image }}
+ARG BASE_IMAGE_TAG={{ context.cuda.[framework][cuda_context_key].base_image_tag }}
 {% elif framework != "vllm" and framework != "sglang" -%}
-ARG BASE_IMAGE={{ context[framework].base_image }}
-ARG BASE_IMAGE_TAG={{ context[framework].base_image_tag }}
+ARG BASE_IMAGE={{ context.cuda.[framework].base_image }}
+ARG BASE_IMAGE_TAG={{ context.cuda.[framework].base_image_tag }}
+{% elif framework == "vllm" and device == "xpu" -%}
+ARG BASE_IMAGE={{ context.xpu.[framework].base_image }}
+ARG BASE_IMAGE_TAG={{ context.xpu.[framework].base_image_tag }}
 {%- endif %}
 
 {% if framework == "sglang" -%}

@@ -15,6 +15,14 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Renders dynamo Dockerfiles from templates"
     )
+
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Dockerfile framework to use [cuda, xpu]",
+    )
+
     parser.add_argument(
         "--framework",
         type=str,
@@ -65,6 +73,7 @@ def render(args, context, script_dir):
     )
     template = env.get_template("Dockerfile.template")
     rendered = template.render(
+        device=device,
         context=context,
         framework=args.framework,
         target=args.target,
@@ -78,7 +87,8 @@ def render(args, context, script_dir):
     if args.short_output:
         filename = "rendered.Dockerfile"
     else:
-        filename = f"{args.framework}-{args.target}-cuda{args.cuda_version}-{args.platform}-rendered.Dockerfile"
+        if args.device == "cuda":
+            filename = f"{args.framework}-{args.target}-cuda{args.cuda_version}-{args.platform}-rendered.Dockerfile"
 
     with open(f"{script_dir}/{filename}", "w") as f:
         f.write(cleaned)

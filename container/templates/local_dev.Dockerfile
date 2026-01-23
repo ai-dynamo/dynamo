@@ -5,6 +5,8 @@
 # ======================================================================
 # TARGET: local-dev (non-root development with UID/GID remapping)
 # ======================================================================
+ARG DEVICE
+
 {% if make_efa != true %}
 FROM dev AS local-dev
 {% else %}

@@ -5,7 +5,7 @@
 #######################################
 ########## Runtime image ##############
 #######################################
-
+ARG DEVICE
 FROM dynamo_base AS runtime
 
 ARG ARCH_ALT
@@ -106,5 +106,6 @@ RUN --mount=type=cache,target=/home/dynamo/.cache/uv,uid=1000,gid=0,mode=0775 \
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
+# TODO: Set ENTRYPOINT based on ARG DEVICE
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

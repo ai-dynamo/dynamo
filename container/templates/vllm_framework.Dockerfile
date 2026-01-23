@@ -21,6 +21,8 @@
 #
 
 # Use dynamo base image (see /container/Dockerfile for more details)
+ARG DEVICE
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS framework
 
 COPY --from=dynamo_base /bin/uv /bin/uvx /bin/
@@ -80,6 +82,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh \
+        --device $DEVICE    \
         --vllm-ref $VLLM_REF \
         --max-jobs $MAX_JOBS \
         --arch $ARCH \
