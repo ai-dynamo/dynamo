@@ -451,16 +451,16 @@ impl RadixTree {
             }
             KvCacheEventData::Removed(remove) => {
                 let mut kv_cache_err: Option<KvCacheEventError> = None;
-                for block_hash in remove.block_hashes {
+                for block in remove.block_hashes {
                     // lookup block in worker's table
-                    let entry = match worker_lookup.get(&block_hash) {
+                    let entry = match worker_lookup.get(&block) {
                         Some(entry) => entry.clone(),
                         None => {
                             tracing::warn!(
                                 worker_id = worker.worker_id.to_string(),
                                 dp_rank = worker.dp_rank,
                                 id,
-                                block_hash = ?block_hash,
+                                block_hash = ?block,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             // Kv cache removed events may be batched; we should try to apply all
@@ -480,7 +480,7 @@ impl RadixTree {
                         guard.children.clear();
                     }
                     // remove the block from the worker's lookup table
-                    worker_lookup.remove(&block_hash);
+                    worker_lookup.remove(&block);
                 }
                 kv_cache_err.map_or(Ok(()), Err)
             }
@@ -599,8 +599,6 @@ impl RadixTree {
         events
     }
 
-    /// Returns the total number of (worker, block) pairs tracked.
-    /// A block shared by N workers counts N times.
     pub fn current_size(&self) -> usize {
         self.lookup.values().map(|m| m.len()).sum()
     }
@@ -2367,7 +2365,6 @@ mod tests {
                 .len(),
             2
         );
-        // Block 200 is shared by both workers
         assert_eq!(
             trie.lookup
                 .get(&WorkerWithDpRank::from_worker_id(worker_1))
