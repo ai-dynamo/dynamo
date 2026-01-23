@@ -372,11 +372,8 @@ pub struct VllmConnectorSlot {
     /// All blocks after the first occurance of block priority < threshold are not offloaded.
     offload_min_priority: u32,
 
-    /// Flag indicating offload has been permanently terminated for this slot.
-    /// Once true, no further blocks will be offloaded to ensure global contiguity.
-    offload_terminated: bool,
-
-    /// For debugging: block index where offload was terminated.
+    /// Block index where offload was terminated due to priority filtering.
+    /// When Some, no further blocks will be offloaded to ensure global contiguity.
     offload_terminated_at_block: Option<usize>,
 }
 
@@ -419,7 +416,6 @@ impl VllmConnectorSlot {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0),
-            offload_terminated: false,
             offload_terminated_at_block: None,
         }
     }
@@ -498,7 +494,6 @@ impl Slot for VllmConnectorSlot {
         self.tokens_cached_from_disk = 0;
         self.performed_cache_lookup = false;
         self.total_blocks_queried = 0;
-        self.offload_terminated = false;
         self.offload_terminated_at_block = None;
     }
 
@@ -566,10 +561,10 @@ impl Slot for VllmConnectorSlot {
         // Early exit if offload has been permanently terminated.
         // This ensures global contiguity: once a gap is created by priority filtering,
         // no subsequent blocks will be offloaded for this request.
-        if self.offload_terminated {
+        if let Some(terminated_at) = self.offload_terminated_at_block {
             tracing::debug!(
                 "offload terminated at block {}; skipping offload evaluation",
-                self.offload_terminated_at_block.unwrap_or(0)
+                terminated_at
             );
             self.current_position += num_scheduled_tokens;
             return Ok(());
@@ -709,7 +704,6 @@ impl Slot for VllmConnectorSlot {
             // If so, terminate offloading for this request to ensure global contiguity.
             if num_blocks_to_offload < num_candidate_blocks {
                 let termination_index = self.evaluated_blocks + num_blocks_to_offload;
-                self.offload_terminated = true;
                 self.offload_terminated_at_block = Some(termination_index);
 
                 tracing::info!(
