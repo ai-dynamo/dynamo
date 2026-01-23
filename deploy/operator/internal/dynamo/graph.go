@@ -251,8 +251,10 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec, restartState *RestartState, existingRestartAnnotations map[string]string) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
+
+	dynamoNamespace := ComputeHashedDynamoNamespace(parentDynamoGraphDeployment)
+
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
-		dynamoNamespace := parentDynamoGraphDeployment.GetDynamoNamespace()
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
@@ -1143,7 +1145,10 @@ func GenerateGrovePodCliqueSet(
 
 	discoveryBackend := controllerConfig.GetDiscoveryBackend(dynamoDeployment.Annotations)
 
-	dynamoNamespace := dynamoDeployment.GetDynamoNamespace()
+	dynamoNamespace := ComputeHashedDynamoNamespace(
+		dynamoDeployment,
+	)
+
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		component.DynamoNamespace = &dynamoNamespace

@@ -23,6 +23,7 @@ import (
 	"sort"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -226,7 +227,7 @@ func (v *DynamoGraphDeploymentValidator) validateReplicasChanges(old *nvidiacomv
 func (v *DynamoGraphDeploymentValidator) validateService(serviceName string, service *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec) (admission.Warnings, error) {
 	// Use SharedSpecValidator to validate service spec (which is a DynamoComponentDeploymentSharedSpec)
 	fieldPath := fmt.Sprintf("spec.services[%s]", serviceName)
-	calculatedNamespace := v.deployment.GetDynamoNamespace()
+	calculatedNamespace := dynamo.ComputeHashedDynamoNamespace(v.deployment)
 	sharedValidator := NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
 	return sharedValidator.Validate()
 }
