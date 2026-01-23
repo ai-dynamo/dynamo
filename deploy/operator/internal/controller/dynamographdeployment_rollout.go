@@ -107,3 +107,36 @@ func (r *DynamoGraphDeploymentReconciler) setActiveWorkerHash(
 	}
 	dgd.Annotations[consts.AnnotationActiveWorkerHash] = hash
 }
+
+// getOrCreateRolloutStatus returns the existing rollout status or creates a new one.
+func (r *DynamoGraphDeploymentReconciler) getOrCreateRolloutStatus(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) *nvidiacomv1alpha1.RolloutStatus {
+	if dgd.Status.Rollout == nil {
+		dgd.Status.Rollout = &nvidiacomv1alpha1.RolloutStatus{
+			Phase: nvidiacomv1alpha1.RolloutPhaseNone,
+		}
+	}
+	return dgd.Status.Rollout
+}
+
+// isRollingUpdateInProgress returns true if a rolling update is currently active.
+func (r *DynamoGraphDeploymentReconciler) isRollingUpdateInProgress(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) bool {
+	if dgd.Status.Rollout == nil {
+		return false
+	}
+	phase := dgd.Status.Rollout.Phase
+	return phase == nvidiacomv1alpha1.RolloutPhasePending ||
+		phase == nvidiacomv1alpha1.RolloutPhaseInProgress
+}
+
+// clearRolloutStatus resets the rollout status after completion or failure cleanup.
+func (r *DynamoGraphDeploymentReconciler) clearRolloutStatus(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) {
+	dgd.Status.Rollout = &nvidiacomv1alpha1.RolloutStatus{
+		Phase: nvidiacomv1alpha1.RolloutPhaseNone,
+	}
+}
