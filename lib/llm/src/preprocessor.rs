@@ -1051,6 +1051,7 @@ impl
         let (mut common_request, annotations) = self
             .preprocess_request(&request, tracker.as_deref())
             .await?;
+        tracing::trace!(request = ?common_request, "Pre-processed request");
 
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = tracker;

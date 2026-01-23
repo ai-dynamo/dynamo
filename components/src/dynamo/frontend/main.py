@@ -25,7 +25,13 @@ import time
 import uuid
 
 import uvloop
+from openai.types.chat.chat_completion_user_message_param import (
+    ChatCompletionUserMessageParam,
+)
 from vllm.engine.arg_utils import EngineArgs
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
@@ -66,24 +72,51 @@ def random_uuid() -> str:
 
 
 class VllmEngine:
-    def __init__(self, vllm_engine: AsyncLLM, router: Client):
+    def __init__(
+        self, vllm_engine: AsyncLLM, vllm_openai: OpenAIServing, router: Client
+    ):
         self.engine = vllm_engine
+        self.openai = vllm_openai
         self.router = router
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
     # request: dynamo.NVCreateChatCompletionRequest
     async def generator(self, request):
-        """Minimal generator that yields nothing. Work in progress."""
+        """document"""
 
         # ** VllmEngine.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
         print(f"** VllmEngine.generator called: {request}")
 
-        # Let vllm handle all pre-processing
+        message = ChatCompletionUserMessageParam(request["messages"][0])
+        # TODO: There are lots of other fields to copy over
+        vllm_request: ChatCompletionRequest = ChatCompletionRequest(
+            messages=[message], model=request["model"]
+        )
+
+        # conversation: list[ConversationMessage], engine_prompts: list[TokensPrompt]
+        conversation, engine_prompts = await self.openai._preprocess_chat(
+            vllm_request,
+            None,  # tokenizer
+            request["messages"],
+            # chat_template=request.chat_template or self.chat_template,
+            chat_template=None,  # WORK HERE - we need the chat template likely from vllm's process_chat_template
+            chat_template_content_format="auto",  # chat_template_content_format=self.chat_template_content_format,
+            # add_generation_prompt=request.add_generation_prompt,
+            # continue_final_message=request.continue_final_message,
+            # tool_dicts=tool_dicts,
+            # documents=request.documents,
+            # chat_template_kwargs=request.chat_template_kwargs,
+            # tool_parser=tool_parser,
+            # add_special_tokens=request.add_special_tokens,
+        )
+        print(f"conversation: {conversation}")
+        print(f"engine_prompts: {engine_prompts}")
+
         request_id = random_uuid()
         vllm_preproc: EngineCoreRequest = self.engine.input_processor.process_inputs(
             request_id,
-            request["messages"][0]["content"],  # prompt
+            engine_prompts[0]["prompt_token_ids"],
             SamplingParams(),
             # arrival_time: float | None = None,
             # lora_request: LoRARequest | None = None,
@@ -247,6 +280,10 @@ class EngineFactory:
             vllm_config=vllm_config,
             usage_context=UsageContext.OPENAI_API_SERVER,
         )
+        vllm_models = OpenAIServingModels(
+            vllm_engine, BaseModelPath(name=mdc.name(), model_path=mdc.source_path())
+        )
+        vllm_openai = OpenAIServing(vllm_engine, vllm_models, request_logger=None)
 
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
         generate_endpoint = (
@@ -256,7 +293,8 @@ class EngineFactory:
         )
         router = await generate_endpoint.client()
 
-        gen = VllmEngine(vllm_engine, router)
+        gen = VllmEngine(vllm_engine, vllm_openai, router)
+
         return PythonAsyncEngine(gen.generator, loop)
 
 

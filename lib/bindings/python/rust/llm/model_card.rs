@@ -36,4 +36,8 @@ impl ModelDeploymentCard {
     fn source_path(&self) -> &str {
         self.inner.source_path()
     }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
 }
