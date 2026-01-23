@@ -36,8 +36,7 @@ def ensure_cuda_initialized() -> None:
         RuntimeError: If cuInit fails
     """
     (result,) = cuda.cuInit(0)
-    if result != cuda.CUresult.CUDA_SUCCESS:
-        check_cuda_result(result, "cuInit")
+    check_cuda_result(result, "cuInit")
 
 
 def get_allocation_granularity(device: int) -> int:

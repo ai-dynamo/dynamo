@@ -290,6 +290,9 @@ class GMSClientMemoryManager:
             return self._allocation_id_to_va[allocation_id]
 
         client = self._client_rpc
+        # lock_type is guaranteed non-None when connected (after _client_rpc succeeds)
+        assert self.lock_type is not None
+        current_access = self.lock_type
         alloc_info = client.get_allocation(allocation_id)
         aligned_size = int(alloc_info.aligned_size)
         size = int(alloc_info.size)
@@ -300,7 +303,7 @@ class GMSClientMemoryManager:
             fd = client.export(allocation_id)
             handle = import_handle_from_fd(fd)
             map_to_va(va, aligned_size, handle)
-            set_access(va, aligned_size, self.device, self.lock_type)
+            set_access(va, aligned_size, self.device, current_access)
 
             self._track_mapping(
                 LocalMapping(
@@ -310,7 +313,7 @@ class GMSClientMemoryManager:
                     aligned_size=aligned_size,
                     handle=handle,
                     tag=tag,
-                    access=self.lock_type,
+                    access=current_access,
                 )
             )
             return va
@@ -578,6 +581,9 @@ class GMSClientMemoryManager:
             return va  # Already mapped
 
         client = self._client_rpc
+        # lock_type is guaranteed non-None when connected (after _client_rpc succeeds)
+        assert self.lock_type is not None
+        current_access = self.lock_type
 
         # Validate allocation still exists and size matches
         try:
@@ -599,7 +605,7 @@ class GMSClientMemoryManager:
         map_to_va(va, mapping.aligned_size, handle)
 
         # Set access permissions based on current lock type
-        set_access(va, mapping.aligned_size, self.device, self.lock_type)
+        set_access(va, mapping.aligned_size, self.device, current_access)
 
         # Synchronize to ensure mapping is complete before any access
         cuda.cuCtxSynchronize()
@@ -626,7 +632,7 @@ class GMSClientMemoryManager:
 
         # Update mapping with new handle and access
         updated = mapping.with_handle(handle)
-        self._mappings[va] = updated.with_access(self.lock_type)
+        self._mappings[va] = updated.with_access(current_access)
 
         return va
 

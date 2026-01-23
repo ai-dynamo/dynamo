@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 
 from gpu_memory_service.common.protocol.messages import (
     AllocateRequest,
@@ -101,6 +101,11 @@ class GMSRPCServer:
         """Ready = committed and no RW connection."""
         return self._sm.committed and self._sm.rw_conn is None
 
+    @property
+    def running(self) -> bool:
+        """Whether the server is running."""
+        return self._running
+
     def _generate_session_id(self) -> str:
         self._next_session_id += 1
         return f"session_{self._next_session_id}"
@@ -123,10 +128,10 @@ class GMSRPCServer:
             logger.debug(f"Connection reset: {session_id}")
         except asyncio.CancelledError:
             raise
-        except Exception as e:
-            logger.error(f"Connection error: {session_id}, {e}")
+        except Exception:
+            logger.exception(f"Connection error: {session_id}")
         finally:
-            await self._cleanup_connection(conn, session_id)
+            await self._cleanup_connection(conn)
 
     async def _do_handshake(
         self,
@@ -138,8 +143,8 @@ class GMSRPCServer:
         try:
             # Server never receives FDs from clients, so no need for raw_sock
             msg, _, recv_buffer = await recv_message(reader, bytearray())
-        except Exception as e:
-            logger.error(f"Handshake recv error: {e}")
+        except Exception:
+            logger.exception("Handshake recv error")
             return None
 
         if not isinstance(msg, HandshakeRequest):
@@ -250,9 +255,7 @@ class GMSRPCServer:
                     return None
         return None
 
-    async def _cleanup_connection(
-        self, conn: Optional[Connection], session_id: str
-    ) -> None:
+    async def _cleanup_connection(self, conn: Optional[Connection]) -> None:
         """Clean up after connection closes via state machine transition."""
         if conn is None:
             return
@@ -287,8 +290,8 @@ class GMSRPCServer:
                 return
             except asyncio.CancelledError:
                 raise
-            except Exception as e:
-                logger.error(f"Recv error: {e}")
+            except Exception:
+                logger.exception("Recv error")
                 return
 
             if msg is None:
@@ -305,12 +308,12 @@ class GMSRPCServer:
                 if should_close:
                     return
             except Exception as e:
-                logger.error(f"Request error: {e}")
+                logger.exception("Request error")
                 await send_message(conn.writer, ErrorResponse(error=str(e)))
 
     # Dispatch table: message type -> handler method name
     # Handlers take (msg) and return response. Special cases handled separately.
-    _HANDLERS: dict[type, str] = {
+    _HANDLERS: ClassVar[dict[type, str]] = {
         AllocateRequest: "handle_allocate",
         GetAllocationRequest: "handle_get_allocation",
         ListAllocationsRequest: "handle_list_allocations",

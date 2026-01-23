@@ -129,9 +129,9 @@ class GMSRPCClient:
         try:
             self._socket.connect(self.socket_path)
         except FileNotFoundError:
-            raise ConnectionError(f"Server not running at {self.socket_path}")
+            raise ConnectionError(f"Server not running at {self.socket_path}") from None
         except Exception as e:
-            raise ConnectionError(f"Failed to connect: {e}")
+            raise ConnectionError(f"Failed to connect: {e}") from e
 
         # Send handshake (this IS lock acquisition)
         request = HandshakeRequest(

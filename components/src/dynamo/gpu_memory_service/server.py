@@ -17,10 +17,7 @@ Usage:
 
 import asyncio
 import logging
-import os
 import signal
-import threading
-from typing import Optional
 
 import uvloop
 from gpu_memory_service.server import GMSRPCServer
@@ -32,83 +29,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-
-class GMSRPCServerThread:
-    """Wrapper to run GMSRPCServer in a background thread."""
-
-    def __init__(self, socket_path: str, device: int):
-        self.socket_path = socket_path
-        self.device = device
-        self._server: Optional[GMSRPCServer] = None
-        self._thread: Optional[threading.Thread] = None
-        self._started = threading.Event()
-        self._error: Optional[Exception] = None
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-
-    def start(self) -> None:
-        """Start the allocation server in a background thread."""
-        self._thread = threading.Thread(
-            target=self._run_server,
-            name=f"GMSRPCServer-GPU{self.device}",
-            daemon=True,
-        )
-        self._thread.start()
-        # Wait for server to be ready (socket file created)
-        self._started.wait(timeout=10.0)
-        if self._error is not None:
-            raise self._error
-        if not self._started.is_set():
-            raise RuntimeError("GMSRPCServer failed to start within timeout")
-
-    def _run_server(self) -> None:
-        """Run the server (called in background thread).
-
-        The GMSRPCServer is async-based, so we create a new event loop for this thread.
-        """
-        try:
-            # Create a new event loop for this thread
-            self._loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self._loop)
-
-            self._server = GMSRPCServer(self.socket_path, device=self.device)
-
-            # Start the server (creates the socket)
-            self._loop.run_until_complete(self._server.start())
-            logger.info(
-                f"GMSRPCServer started on device {self.device} at {self.socket_path}"
-            )
-            self._started.set()
-
-            # Run the main loop
-            while self._server._running:
-                self._loop.run_until_complete(asyncio.sleep(1))
-
-        except Exception as e:
-            logger.error(f"GMSRPCServer error: {e}")
-            self._error = e
-            self._started.set()  # Unblock waiter even on error
-        finally:
-            if self._loop is not None:
-                self._loop.close()
-
-    def stop(self) -> None:
-        """Stop the allocation server."""
-        if self._server is not None:
-            logger.info(f"Stopping GMSRPCServer on device {self.device}")
-            # Signal the server to stop - the loop in _run_server will exit
-            self._server._running = False
-            self._server._shutdown = True
-            # Wake any blocked waiters from the server's event loop
-            if self._loop is not None and self._loop.is_running():
-
-                async def _notify():
-                    async with self._server._condition:
-                        self._server._condition.notify_all()
-
-                asyncio.run_coroutine_threadsafe(_notify(), self._loop)
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=5.0)
 
 
 async def worker() -> None:
@@ -123,26 +43,20 @@ async def worker() -> None:
     logger.info(f"Starting GPU Memory Service Server for device {config.device}")
     logger.info(f"Socket path: {config.socket_path}")
 
-    loop = asyncio.get_running_loop()
+    server = GMSRPCServer(config.socket_path, device=config.device)
 
-    # Clean up any existing socket file
-    if config.socket_path and os.path.exists(config.socket_path):
-        os.unlink(config.socket_path)
-        logger.debug(f"Removed existing socket file: {config.socket_path}")
-
-    # Start GMSRPCServer in a background thread
-    server = GMSRPCServerThread(config.socket_path, config.device)
-    server.start()
-
-    # Set up shutdown event
+    # Set up shutdown handling
     shutdown_event = asyncio.Event()
 
     def signal_handler():
         logger.info("Received shutdown signal")
         shutdown_event.set()
 
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
+
+    await server.start()
 
     logger.info("GPU Memory Service Server ready, waiting for connections...")
     logger.info(
@@ -155,7 +69,7 @@ async def worker() -> None:
         await shutdown_event.wait()
     finally:
         logger.info("Shutting down GPU Memory Service Server...")
-        server.stop()
+        await server.stop()
         logger.info("GPU Memory Service Server shutdown complete")
 
 

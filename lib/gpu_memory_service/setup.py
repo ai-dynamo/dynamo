@@ -17,10 +17,13 @@ class BuildExtension(build_ext):
     """Custom build extension for C++ modules."""
 
     def build_extensions(self):
-        # Configure compiler
-        self.compiler.set_executable("compiler_so", "g++")
-        self.compiler.set_executable("compiler_cxx", "g++")
-        self.compiler.set_executable("linker_so", "g++ -shared")
+        import os
+
+        # Use CXX environment variable if set, otherwise default to g++
+        cxx = os.environ.get("CXX", "g++")
+        self.compiler.set_executable("compiler_so", cxx)
+        self.compiler.set_executable("compiler_cxx", cxx)
+        self.compiler.set_executable("linker_so", f"{cxx} -shared")
 
         build_ext.build_extensions(self)
 

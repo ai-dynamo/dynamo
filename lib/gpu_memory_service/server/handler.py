@@ -161,7 +161,7 @@ class RequestHandler:
                 tag=info.tag,
             )
         except AllocationNotFoundError:
-            raise ValueError(f"Unknown allocation: {req.allocation_id}")
+            raise ValueError(f"Unknown allocation: {req.allocation_id}") from None
 
     def handle_list_allocations(
         self, req: ListAllocationsRequest

@@ -61,7 +61,7 @@ def _tensor_from_pointer(
                 f"Shape and stride length mismatch: {len(shape)} vs {len(stride)}"
             )
         # Maximum offset = sum of stride[i] * (shape[i] - 1) for all dimensions
-        max_offset = sum(s * (d - 1) for s, d in zip(stride, shape) if d > 0)
+        max_offset = sum(s * (d - 1) for s, d in zip(stride, shape, strict=True) if d > 0)
         required_elements = max_offset + 1
     else:
         # Scalar tensor or empty tensor
