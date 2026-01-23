@@ -292,9 +292,7 @@ async def register_image_diffusion_model(
             model_name,
             model_name,
         )
-        logging.info(
-            f"Successfully registered diffusion model: {model_name}"
-        )
+        logging.info(f"Successfully registered diffusion model: {model_name}")
     except Exception as e:
         logging.error(f"Failed to register diffusion model: {e}")
         raise RuntimeError("Image diffusion model registration failed")
