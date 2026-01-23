@@ -290,7 +290,11 @@ func GenerateDynamoComponentsDeployments(
 	var newNamespace string
 	if rolloutCtx != nil && rolloutCtx.InProgress {
 		newNamespace = rolloutCtx.NewDynamoNamespace
+	} else if parentDGD.HasAnyMultinodeService() {
+		// LWS/multinode pathway doesn't support rolling updates, so use base namespace
+		newNamespace = ComputeBaseDynamoNamespace(parentDGD)
 	} else {
+		// Standard Deployment pathway supports rolling updates, use hashed namespace
 		newNamespace = ComputeHashedDynamoNamespace(parentDGD)
 	}
 
@@ -1243,9 +1247,9 @@ func GenerateGrovePodCliqueSet(
 
 	discoveryBackend := controllerConfig.GetDiscoveryBackend(dynamoDeployment.Annotations)
 
-	dynamoNamespace := ComputeHashedDynamoNamespace(
-		dynamoDeployment,
-	)
+	// Grove pathway doesn't support rolling updates, so use base namespace without hash.
+	// This prevents unnecessary cascading restarts when individual component specs change.
+	dynamoNamespace := ComputeBaseDynamoNamespace(dynamoDeployment)
 
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
