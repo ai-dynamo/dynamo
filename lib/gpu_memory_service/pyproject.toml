@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpu-memory-service"
+version = "0.8.0"
+description = "GPU Memory Service for Dynamo - CUDA VMM-based GPU memory allocation and sharing"
+readme = "README.md"
+authors = [
+    { name = "NVIDIA Inc.", email = "sw-dl-dynamo@nvidia.com" },
+]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "msgspec>=0.18.0",
+    "uvloop>=0.21.0",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Operating System :: POSIX :: Linux",
+]
+keywords = ["llm", "genai", "inference", "nvidia", "gpu", "memory", "dynamo"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3.4",
+    "pytest-asyncio",
+]

@@ -464,7 +464,9 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
 RUN mkdir -p /home/$USERNAME/.cache/ \
-    && chmod g+w /home/$USERNAME/.cache/
+    && mkdir -p /home/$USERNAME/.cache/pre-commit \
+    && chmod g+w /home/$USERNAME/.cache/ \
+    && chmod g+w /home/$USERNAME/.cache/pre-commit
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
