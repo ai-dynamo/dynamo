@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Argument parsing for GPU Memory Service server component."""
+"""Argument parsing for GPU Memory Service server."""
 
 import argparse
 import logging
@@ -23,7 +23,7 @@ class Config:
 def parse_args() -> Config:
     """Parse command line arguments for GPU Memory Service server."""
     parser = argparse.ArgumentParser(
-        description="GPU Memory Service allocation server for Dynamo."
+        description="GPU Memory Service allocation server."
     )
 
     # GPU Memory Service specific arguments

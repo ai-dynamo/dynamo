@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU Memory Service allocation server component for Dynamo.
+"""GPU Memory Service allocation server runner.
 
-This component wraps the GMSRPCServer from gpu_memory_service to manage
-GPU memory allocations with connection-based RW/RO locking.
+This module provides the CLI runner for the GPU Memory Service server,
+which manages GPU memory allocations with connection-based RW/RO locking.
 
 Workers connect via the socket path, which should be passed to vLLM/SGLang via:
     --load-format gpu_memory_service
     --model-loader-extra-config '{"gpu_memory_service_socket_path": "/tmp/gpu_memory_service_{device}.sock"}'
 
 Usage:
-    python -m dynamo.gpu_memory_service --device 0
-    python -m dynamo.gpu_memory_service --device 0 --socket-path /tmp/gpu_memory_service_{device}.sock
+    python -m gpu_memory_service --device 0
+    python -m gpu_memory_service --device 0 --socket-path /tmp/gpu_memory_service_{device}.sock
 """
 
 import asyncio
@@ -38,7 +38,7 @@ async def worker() -> None:
     # Configure logging level
     if config.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-        logging.getLogger("dynamo.gpu_memory_service").setLevel(logging.DEBUG)
+        logging.getLogger("gpu_memory_service").setLevel(logging.DEBUG)
 
     logger.info(f"Starting GPU Memory Service Server for device {config.device}")
     logger.info(f"Socket path: {config.socket_path}")
