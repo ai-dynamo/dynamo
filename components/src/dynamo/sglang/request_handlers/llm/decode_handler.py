@@ -23,6 +23,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
+        generate_endpoint=None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -31,12 +32,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
             component,
             engine,
             config,
             publisher,
+            generate_endpoint,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
             logging.info(
@@ -141,12 +144,26 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            # Extract image URLs for multimodal requests. SGLang's mm_data_processor
+            # handles loading/preprocessing, and the scheduler does vision encoding.
+            image_data = None
+            image_items = request.get("multi_modal_data", {}).get("image_url")
+            if image_items:
+                image_data = []
+                for item in image_items:
+                    if isinstance(item, str):
+                        image_data.append(item)
+                    elif isinstance(item, dict) and "Url" in item:
+                        image_data.append(item["Url"])
+                image_data = image_data or None
+
             trace_header = (
                 self._get_trace_header(context) if self.enable_trace else None
             )
 
             agg = await self.engine.async_generate(
                 **input_param,
+                image_data=image_data,
                 sampling_params=sampling_params,
                 stream=True,
                 external_trace_header=trace_header,
@@ -166,6 +183,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
+        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
+        containing only new tokens since the last output. We pass these through directly.
+
         Args:
             stream_source: Async generator from engine.async_generate.
             context: Context object for cancellation handling.
@@ -173,8 +193,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
-        num_output_tokens_so_far = 0
-
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
@@ -196,6 +214,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if finish_reason:
                     out["finish_reason"] = finish_reason["type"]
 
+                # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
                 # If request is not finished yet, but there are no outputs, return an error.
                 if not output_ids and not finish_reason:
@@ -203,9 +222,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                     break
 
-                next_total_toks = len(output_ids)
-                out["token_ids"] = output_ids[num_output_tokens_so_far:]
-                num_output_tokens_so_far = next_total_toks
+                # Pass through disjoint token segments directly
+                out["token_ids"] = output_ids
                 if finish_reason:
                     input_tokens = res["meta_info"]["prompt_tokens"]
                     completion_tokens = res["meta_info"]["completion_tokens"]

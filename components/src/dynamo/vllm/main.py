@@ -447,6 +447,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register sleep/wake engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake", handler.wake)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+
     # Register prefill model with ModelType.Prefill
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         model_input = (
@@ -565,6 +570,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publishers = kv_publishers
 
     setup_metrics_collection(config, generate_endpoint, logger)
+
+    # Register sleep/wake engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake", handler.wake)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         # Parse endpoint types from --dyn-endpoint-types flag
@@ -861,9 +871,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
     await encoder_client.wait_for_instances()
     await pd_client.wait_for_instances()
 
-    # Register the endpoint as entrypoint to a model (same as regular processor)
+    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
         config.model,

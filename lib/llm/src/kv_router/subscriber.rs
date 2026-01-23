@@ -654,7 +654,7 @@ pub async fn start_kv_router_background(
 
                     let router_instance_id = id.instance_id();
 
-                    // The consumer UUID is the instance_id in hex format
+                    // The consumer ID is the instance_id as a string
                     let consumer_to_delete = router_instance_id.to_string();
 
                     tracing::info!(

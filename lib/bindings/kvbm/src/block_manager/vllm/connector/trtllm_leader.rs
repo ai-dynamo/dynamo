@@ -351,11 +351,16 @@ impl Leader for KvConnectorLeader {
                 slot.state()
             );
 
-            slot.apply_scheduler_output_with_computed_position(
+            let scheduled_tokens = *scheduler_output
+                .num_scheduled_tokens
+                .get(request_id)
+                .unwrap_or(&0);
+
+            slot.apply_scheduler_output(
                 &new_req.prompt_token_ids,
                 &new_req.block_ids,
                 new_req.num_computed_tokens,
-                true,
+                scheduled_tokens,
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
@@ -382,11 +387,16 @@ impl Leader for KvConnectorLeader {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-            slot.apply_scheduler_output_with_computed_position(
+            let scheduled_tokens = *scheduler_output
+                .num_scheduled_tokens
+                .get(request_id)
+                .unwrap_or(&0);
+
+            slot.apply_scheduler_output(
                 &cached_req.new_token_ids,
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
-                false,
+                scheduled_tokens,
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
