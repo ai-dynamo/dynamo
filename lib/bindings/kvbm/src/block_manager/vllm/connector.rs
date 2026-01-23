@@ -133,13 +133,23 @@ impl std::fmt::Debug for CachedRequestData {
     }
 }
 
+/// Information about a new slot to be created on the worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewSlotInfo {
+    /// The request ID for the new slot.
+    pub request_id: String,
+    /// Expected number of immediate (onboard) operations for this slot.
+    /// This enables proper completion tracking and avoids race conditions in TP>1.
+    pub expected_immediate_ops: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectorMetadata {
     /// The iteration at which the metadata was built.
     pub iteration: u64,
 
     /// The new slots that were created in this iteration.
-    pub new_slots: Vec<String>,
+    pub new_slots: Vec<NewSlotInfo>,
 
     /// The operations that were initialized in this iteration.
     pub operations: Vec<WorkerTransferRequest>,
@@ -154,8 +164,12 @@ impl ConnectorMetadata {
         }
     }
 
-    pub fn create_slot(&mut self, request_id: String) {
-        self.new_slots.push(request_id);
+    /// Create a slot with the expected number of immediate operations.
+    pub fn create_slot(&mut self, request_id: String, expected_immediate_ops: u64) {
+        self.new_slots.push(NewSlotInfo {
+            request_id,
+            expected_immediate_ops,
+        });
     }
 
     pub fn add_operations(&mut self, xfer_reqs: Vec<WorkerTransferRequest>) {
