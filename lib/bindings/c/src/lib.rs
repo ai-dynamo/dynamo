@@ -1248,7 +1248,8 @@ pub async fn query_worker_selection_and_annotate(
         result.decode_worker_id,
         result.prefill_worker_id,
     );
-    set_token_data_for_stage2(&mut original_request, &result.tokens);
+    // do not send token_data into stage 2 till GIE proposes a solution.
+    // set_token_data_for_stage2(&mut original_request, &result.tokens);
 
     Ok((result, original_request))
 }

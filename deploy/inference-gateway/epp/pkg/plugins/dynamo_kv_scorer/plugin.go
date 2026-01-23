@@ -122,6 +122,9 @@ const (
 	WorkerIDHeader        = "x-worker-instance-id"
 	PrefillWorkerIDHeader = "x-prefill-instance-id"
 	RoutingModeHeader     = "x-dynamo-routing-mode"
+	// EnableLocalUpdatesHeader controls router bookkeeping in the Dynamo frontend.
+	// Set to "false" for GAIE Stage 2 so the EPP handles bookkeeping via C FFI.
+	EnableLocalUpdatesHeader = "x-enable-local-updates"
 
 	// stateKey is the key used to store routing state in PluginState
 	stateKey = "dynamo-routing-state"
@@ -365,6 +368,10 @@ func (k *KVAwareScorer) Score(
 			req.Headers = map[string]string{}
 		}
 		req.Headers[WorkerIDHeader] = workerID
+
+		// Disable local updates in the Dynamo frontend router.
+		// EPP handles bookkeeping via C FFI (add_request, mark_prefill_complete, free_request).
+		req.Headers[EnableLocalUpdatesHeader] = "false"
 
 		// Set routing mode and prefill worker ID based on disaggregated vs aggregated
 		if prefillWorkerID != "" && prefillWorkerID != workerID {
