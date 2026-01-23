@@ -7,6 +7,8 @@ CONCURRENCY=1
 
 python local_media_server.py \
     --image test.jpg:https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg &
+IMG_SERVER_PID=$!
+trap "kill $IMG_SERVER_PID" EXIT
 
 # Wait for the server to start
 for i in {1..10}; do

@@ -5,8 +5,9 @@
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 CONCURRENCY=1
 
+# 500 * 333 pixels image
 python local_media_server.py \
-    --image test.jpg:http://images.cocodataset.org/test2017/000000155781.jpg &
+    --image test.jpg:http://images.cocodataset.org/test2017/000000000183.jpg &
 IMG_SERVER_PID=$!
 trap "kill $IMG_SERVER_PID" EXIT
 
@@ -26,10 +27,10 @@ for i in {1..10}; do
     fi
 done
 
-# Create a JSONL file with 12 identical small image URLs
+# Create a JSONL file with 30 identical small image URLs
 # NOTE: any kind of caching can significantly affect the benchmark results,
 # should make sure what you are doing.
-echo '{"images": ["http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg"]}' \
+echo '{"images": ["http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg","http://localhost:8233/test.jpg"]}' \
     > data_small.jsonl
 echo "This benchmark uses duplicate image urls, so any kind of caching can significantly affect the benchmark results, please make sure the caching setting is properly configured for your experiment."
 
@@ -61,8 +62,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 aiperf profile -m $MODEL_NAME --endpoint-type chat \
-    --synthetic-input-tokens-mean 1 --synthetic-input-tokens-stddev 0 \
-    --streaming --request-count 100 --warmup-request-count 2 \
+    --synthetic-input-tokens-mean 15000 --synthetic-input-tokens-stddev 0 \
+    --streaming --request-count 100 --warmup-request-count 5 \
     --concurrency $CONCURRENCY --osl 1 \
     --input-file data_small.jsonl \
     --custom-dataset-type single_turn --ui none \
