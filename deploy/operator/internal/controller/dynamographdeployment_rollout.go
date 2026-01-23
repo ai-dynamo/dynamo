@@ -22,14 +22,17 @@ import (
 	"fmt"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/proxy"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rollout"
@@ -43,6 +46,7 @@ func (r *DynamoGraphDeploymentReconciler) shouldTriggerRollingUpdate(
 
 	activeHash := r.getCurrentActiveWorkerHash(dgd)
 
+	// If no active hash exists (new deployment), no rolling update needed
 	if activeHash == "" {
 		return false
 	}
@@ -440,8 +444,50 @@ func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 }
 
 // finalizeRollingUpdate cleans up after a completed rolling update.
-// The rollout status is preserved (not cleared) so users can see completion info.
+// This deletes old DCDs from the old namespace and updates the active worker hash.
 func (r *DynamoGraphDeploymentReconciler) finalizeRollingUpdate(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	newWorkerHash string,
+) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Get the old worker hash to identify old resources
+	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
+	if oldWorkerHash == "" {
+		// No old hash means this is likely a first deployment, nothing to clean up
+		logger.Info("No old worker hash found, skipping cleanup")
+		return r.completeFinalization(ctx, dgd, newWorkerHash)
+	}
+
+	if oldWorkerHash == newWorkerHash {
+		// Hashes are the same, nothing to clean up
+		logger.Info("Old and new worker hashes are the same, skipping cleanup")
+		return r.completeFinalization(ctx, dgd, newWorkerHash)
+	}
+
+	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHash)
+
+	// Delete old DCDs from the old namespace
+	if err := r.deleteOldDCDs(ctx, dgd, oldNamespace); err != nil {
+		logger.Error(err, "Failed to delete old DCDs", "oldNamespace", oldNamespace)
+		// Don't fail the whole finalization, just log the error
+		// The old resources will be orphaned but won't affect the new deployment
+		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
+			"Failed to delete some old resources from namespace %s: %v", oldNamespace, err)
+	}
+
+	logger.Info("Old resources cleaned up", "oldNamespace", oldNamespace, "oldWorkerHash", oldWorkerHash)
+	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCleanup",
+		"Cleaned up old resources from namespace %s", oldNamespace)
+
+	return r.completeFinalization(ctx, dgd, newWorkerHash)
+}
+
+// completeFinalization updates the active worker hash after cleanup.
+// The rollout status is preserved (not cleared) so users can see completion info.
+// It will be reset when a new rollout starts.
+func (r *DynamoGraphDeploymentReconciler) completeFinalization(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	newWorkerHash string,
@@ -460,8 +506,210 @@ func (r *DynamoGraphDeploymentReconciler) finalizeRollingUpdate(
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
-	// TODO: Delete old DCDs and associated resources from the old namespace
-	// This would involve listing DCDs by label and deleting those with the old namespace
-
 	return ctrl.Result{}, nil
+}
+
+// deleteOldDCDs deletes all DCDs belonging to this DGD that have the old Dynamo namespace.
+func (r *DynamoGraphDeploymentReconciler) deleteOldDCDs(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	oldDynamoNamespace string,
+) error {
+	logger := log.FromContext(ctx)
+
+	// List all DCDs that belong to this DGD and have the old Dynamo namespace
+	dcdList := &nvidiacomv1alpha1.DynamoComponentDeploymentList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(dgd.Namespace),
+		client.MatchingLabels{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoNamespace:           oldDynamoNamespace,
+		},
+	}
+
+	if err := r.List(ctx, dcdList, listOpts...); err != nil {
+		return fmt.Errorf("failed to list old DCDs: %w", err)
+	}
+
+	if len(dcdList.Items) == 0 {
+		logger.Info("No old DCDs found to delete", "oldDynamoNamespace", oldDynamoNamespace)
+		return nil
+	}
+
+	logger.Info("Deleting old DCDs", "count", len(dcdList.Items), "oldDynamoNamespace", oldDynamoNamespace)
+
+	var deleteErrors []error
+	for i := range dcdList.Items {
+		dcd := &dcdList.Items[i]
+		logger.Info("Deleting old DCD", "name", dcd.Name, "dynamoNamespace", oldDynamoNamespace)
+
+		if err := r.Delete(ctx, dcd); err != nil {
+			if !apierrors.IsNotFound(err) {
+				deleteErrors = append(deleteErrors, fmt.Errorf("failed to delete DCD %s: %w", dcd.Name, err))
+			}
+		}
+	}
+
+	if len(deleteErrors) > 0 {
+		return fmt.Errorf("failed to delete %d DCDs: %v", len(deleteErrors), deleteErrors)
+	}
+
+	return nil
+}
+
+// reconcileTrafficProxy ensures the HAProxy traffic proxy resources exist and are configured.
+// The proxy is used for traffic shifting during rolling updates.
+func (r *DynamoGraphDeploymentReconciler) reconcileTrafficProxy(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) error {
+	logger := log.FromContext(ctx)
+
+	// Build the proxy configuration
+	proxyConfig := r.buildProxyConfig(dgd)
+
+	// Generate proxy resources
+	proxyDeployment := dynamo.GenerateProxyDeployment(proxyConfig)
+	proxyService := dynamo.GenerateProxyService(proxyConfig)
+	proxyRuntimeService := dynamo.GenerateProxyRuntimeService(proxyConfig)
+	proxyConfigMap := dynamo.GenerateProxyConfigMap(proxyConfig)
+
+	// Sync ConfigMap first (Deployment mounts it)
+	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.ConfigMap, bool, error) {
+		return proxyConfigMap, false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync proxy ConfigMap: %w", err)
+	}
+
+	// Sync main Service (for frontend traffic)
+	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return proxyService, false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync proxy Service: %w", err)
+	}
+
+	// Sync runtime Service (for controller weight updates)
+	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.Service, bool, error) {
+		return proxyRuntimeService, false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync proxy runtime Service: %w", err)
+	}
+
+	// Sync Deployment
+	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*appsv1.Deployment, bool, error) {
+		return proxyDeployment, false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to sync proxy Deployment: %w", err)
+	}
+
+	logger.V(1).Info("Traffic proxy reconciled successfully", "name", dynamo.GetProxyName(dgd.Name))
+	return nil
+}
+
+// buildProxyConfig constructs the ProxyConfig from DGD spec and platform defaults.
+func (r *DynamoGraphDeploymentReconciler) buildProxyConfig(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) *dynamo.ProxyConfig {
+	// Default values from platform config
+	replicas := r.Config.TrafficProxy.Replicas
+	image := r.Config.TrafficProxy.Image
+	resources := r.Config.TrafficProxy.Resources
+
+	// Override with DGD-specific settings if provided
+	if dgd.Spec.TrafficProxy != nil {
+		if dgd.Spec.TrafficProxy.Replicas != nil {
+			replicas = *dgd.Spec.TrafficProxy.Replicas
+		}
+		if dgd.Spec.TrafficProxy.Resources != nil {
+			resources = *dgd.Spec.TrafficProxy.Resources
+		}
+	}
+
+	// Get frontend service name for backend configuration
+	frontendServiceName := r.getFrontendServiceName(dgd)
+
+	// Configure backends based on rollout state
+	var oldBackend, newBackend *dynamo.BackendConfig
+
+	if r.isRollingUpdateInProgress(dgd) && dgd.Status.Rollout != nil {
+		// During rollout, configure both backends with current weights
+		oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
+		newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
+
+		oldBackend = &dynamo.BackendConfig{
+			ServiceName: r.getFrontendServiceNameWithHash(dgd, oldWorkerHash),
+			ServicePort: consts.DynamoServicePort,
+			Weight:      dgd.Status.Rollout.TrafficWeightOld,
+		}
+		newBackend = &dynamo.BackendConfig{
+			ServiceName: r.getFrontendServiceNameWithHash(dgd, newWorkerHash),
+			ServicePort: consts.DynamoServicePort,
+			Weight:      dgd.Status.Rollout.TrafficWeightNew,
+		}
+	} else {
+		// Normal operation - single backend at 100%
+		oldBackend = &dynamo.BackendConfig{
+			ServiceName: frontendServiceName,
+			ServicePort: consts.DynamoServicePort,
+			Weight:      100,
+		}
+	}
+
+	// Build tolerations - merge platform defaults with DGD-specific
+	var tolerations []corev1.Toleration
+	tolerations = append(tolerations, r.Config.TrafficProxy.Tolerations...)
+	if dgd.Spec.TrafficProxy != nil {
+		tolerations = append(tolerations, dgd.Spec.TrafficProxy.Tolerations...)
+	}
+
+	// Affinity - DGD overrides platform default
+	var affinity *corev1.Affinity
+	if dgd.Spec.TrafficProxy != nil && dgd.Spec.TrafficProxy.Affinity != nil {
+		affinity = dgd.Spec.TrafficProxy.Affinity
+	} else {
+		affinity = r.Config.TrafficProxy.Affinity
+	}
+
+	return &dynamo.ProxyConfig{
+		DGDName:     dgd.Name,
+		Namespace:   dgd.Namespace,
+		Replicas:    replicas,
+		Image:       image,
+		Resources:   resources,
+		Tolerations: tolerations,
+		Affinity:    affinity,
+		OldBackend:  oldBackend,
+		NewBackend:  newBackend,
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+		},
+	}
+}
+
+// getFrontendServiceName returns the frontend service name for normal operation.
+func (r *DynamoGraphDeploymentReconciler) getFrontendServiceName(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+) string {
+	// Find the frontend service
+	for name, spec := range dgd.Spec.Services {
+		if spec != nil && spec.ComponentType == consts.ComponentTypeFrontend {
+			return fmt.Sprintf("%s-%s", dgd.Name, name)
+		}
+	}
+	// Fallback to default frontend naming
+	return fmt.Sprintf("%s-frontend", dgd.Name)
+}
+
+// getFrontendServiceNameWithHash returns the frontend service name for a specific worker hash.
+// During rolling updates, frontends are also versioned by the worker hash.
+func (r *DynamoGraphDeploymentReconciler) getFrontendServiceNameWithHash(
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	workerHash string,
+) string {
+	baseName := r.getFrontendServiceName(dgd)
+	return fmt.Sprintf("%s-%s", baseName, workerHash[:8])
 }

@@ -534,3 +534,161 @@ func TestGetWorkerServices(t *testing.T) {
 		})
 	}
 }
+
+func TestDeleteOldDCDs(t *testing.T) {
+	oldNamespace := "default-test-dgd-oldhash1"
+	newNamespace := "default-test-dgd-newhash2"
+
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+
+	// Create DCDs with old namespace
+	oldDCD1 := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-old",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoNamespace:           oldNamespace,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		},
+	}
+
+	// Create DCD with new namespace (should not be deleted)
+	newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-worker-new",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoNamespace:           newNamespace,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeWorker,
+			},
+		},
+	}
+
+	r := createTestReconciler(dgd, oldDCD1, newDCD)
+	ctx := context.Background()
+
+	// Delete old DCDs
+	err := r.deleteOldDCDs(ctx, dgd, oldNamespace)
+	require.NoError(t, err)
+
+	// Verify old DCD is deleted
+	dcdList := &nvidiacomv1alpha1.DynamoComponentDeploymentList{}
+	err = r.List(ctx, dcdList)
+	require.NoError(t, err)
+
+	// Should only have the new DCD remaining
+	assert.Len(t, dcdList.Items, 1)
+	assert.Equal(t, "test-dgd-worker-new", dcdList.Items[0].Name)
+}
+
+func TestDeleteOldDCDs_NoDCDsToDelete(t *testing.T) {
+	oldNamespace := "default-test-dgd-oldhash1"
+
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"worker": {ComponentType: consts.ComponentTypeWorker},
+	})
+
+	r := createTestReconciler(dgd)
+	ctx := context.Background()
+
+	// Delete old DCDs when there are none - should not error
+	err := r.deleteOldDCDs(ctx, dgd, oldNamespace)
+	require.NoError(t, err)
+}
+
+func TestBuildProxyConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		services         map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		trafficProxy     *nvidiacomv1alpha1.TrafficProxySpec
+		rolloutStatus    *nvidiacomv1alpha1.RolloutStatus
+		expectedReplicas int32
+	}{
+		{
+			name: "uses default replicas when no override",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+				"worker":   {ComponentType: consts.ComponentTypeWorker},
+			},
+			trafficProxy:     nil,
+			expectedReplicas: 2, // Default
+		},
+		{
+			name: "uses DGD override for replicas",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"frontend": {ComponentType: consts.ComponentTypeFrontend},
+				"worker":   {ComponentType: consts.ComponentTypeWorker},
+			},
+			trafficProxy: &nvidiacomv1alpha1.TrafficProxySpec{
+				Replicas: ptr.To(int32(4)),
+			},
+			expectedReplicas: 4,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", "default", tt.services)
+			dgd.Spec.TrafficProxy = tt.trafficProxy
+			dgd.Status.Rollout = tt.rolloutStatus
+
+			r := createTestReconciler(dgd)
+			// Set default config
+			r.Config.TrafficProxy.Replicas = 2
+			r.Config.TrafficProxy.Image = "haproxy:2.9-alpine"
+
+			config := r.buildProxyConfig(dgd)
+
+			assert.Equal(t, tt.expectedReplicas, config.Replicas)
+			assert.Equal(t, "test-dgd", config.DGDName)
+			assert.Equal(t, "default", config.Namespace)
+		})
+	}
+}
+
+func TestGetFrontendServiceName(t *testing.T) {
+	tests := []struct {
+		name     string
+		services map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		expected string
+	}{
+		{
+			name: "finds frontend service",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"my-frontend": {ComponentType: consts.ComponentTypeFrontend},
+				"worker":      {ComponentType: consts.ComponentTypeWorker},
+			},
+			expected: "test-dgd-my-frontend",
+		},
+		{
+			name: "returns default when no frontend",
+			services: map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				"worker": {ComponentType: consts.ComponentTypeWorker},
+			},
+			expected: "test-dgd-frontend",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dgd := createTestDGD("test-dgd", "default", tt.services)
+			r := createTestReconciler(dgd)
+
+			result := r.getFrontendServiceName(dgd)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
