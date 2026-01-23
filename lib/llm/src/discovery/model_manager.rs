@@ -32,8 +32,7 @@ use crate::{
         openai::{
             chat_completions::OpenAIChatCompletionsStreamingEngine,
             completions::OpenAICompletionsStreamingEngine,
-            embeddings::OpenAIEmbeddingsStreamingEngine,
-            images::OpenAIImagesStreamingEngine,
+            embeddings::OpenAIEmbeddingsStreamingEngine, images::OpenAIImagesStreamingEngine,
         },
     },
 };

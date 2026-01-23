@@ -5,7 +5,7 @@ use futures::{Stream, StreamExt};
 
 use crate::types::Annotated;
 
-use super::{NvImagesResponse};
+use super::NvImagesResponse;
 
 /// Aggregator for combining image response deltas into a final response.
 #[derive(Debug)]
@@ -62,9 +62,7 @@ impl DeltaAggregator {
         }
 
         // Return the aggregated response or an empty response if none was found.
-        Ok(aggregator
-            .response
-            .unwrap_or_else(NvImagesResponse::empty))
+        Ok(aggregator.response.unwrap_or_else(NvImagesResponse::empty))
     }
 }
 

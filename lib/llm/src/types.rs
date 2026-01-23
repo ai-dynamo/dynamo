@@ -66,8 +66,7 @@ pub mod openai {
         pub use protocols::openai::images::{NvCreateImageRequest, NvImagesResponse};
 
         /// A [`UnaryEngine`] implementation for the OpenAI Images API
-        pub type OpenAIImagesUnaryEngine =
-            UnaryEngine<NvCreateImageRequest, NvImagesResponse>;
+        pub type OpenAIImagesUnaryEngine = UnaryEngine<NvCreateImageRequest, NvImagesResponse>;
 
         /// A [`ServerStreamingEngine`] implementation for the OpenAI Images API
         pub type OpenAIImagesStreamingEngine =
