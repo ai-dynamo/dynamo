@@ -27,7 +27,6 @@ import (
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -42,13 +41,13 @@ const (
 // DynamoGraphDeploymentHandler is a handler for validating DynamoGraphDeployment resources.
 // It is a thin wrapper around DynamoGraphDeploymentValidator.
 type DynamoGraphDeploymentHandler struct {
-	client client.Client
+	mgr manager.Manager
 }
 
 // NewDynamoGraphDeploymentHandler creates a new handler for DynamoGraphDeployment Webhook.
-func NewDynamoGraphDeploymentHandler(client client.Client) *DynamoGraphDeploymentHandler {
+func NewDynamoGraphDeploymentHandler(mgr manager.Manager) *DynamoGraphDeploymentHandler {
 	return &DynamoGraphDeploymentHandler{
-		client: client,
+		mgr: mgr,
 	}
 }
 
@@ -63,8 +62,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateCreate(ctx context.Context, obj r
 
 	logger.Info("validate create", "name", deployment.Name, "namespace", deployment.Namespace)
 
-	// Create validator with client for CRD feature detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithClient(deployment, h.client)
+	// Create validator with manager for API group detection and perform validation
+	validator := NewDynamoGraphDeploymentValidatorWithManager(deployment, h.mgr)
 	return validator.Validate(ctx)
 }
 
@@ -90,8 +89,8 @@ func (h *DynamoGraphDeploymentHandler) ValidateUpdate(ctx context.Context, oldOb
 		return nil, err
 	}
 
-	// Create validator with client for CRD feature detection and perform validation
-	validator := NewDynamoGraphDeploymentValidatorWithClient(newDeployment, h.client)
+	// Create validator with manager for API group detection and perform validation
+	validator := NewDynamoGraphDeploymentValidatorWithManager(newDeployment, h.mgr)
 
 	// Validate stateless rules
 	warnings, err := validator.Validate(ctx)

@@ -651,7 +651,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr.GetClient())
+		dgdHandler := webhookvalidation.NewDynamoGraphDeploymentHandler(mgr)
 		if err = dgdHandler.RegisterWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to register webhook", "webhook", "DynamoGraphDeployment")
 			os.Exit(1)

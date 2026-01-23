@@ -131,6 +131,12 @@ func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool 
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai")
 }
 
+// DetectInferencePoolAvailability checks if the Gateway API Inference Extension is available
+// by checking if the inference.networking.k8s.io API group is registered
+func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "inference.networking.k8s.io")
+}
+
 // detectAPIGroupAvailability checks if a specific API group is registered in the cluster
 func detectAPIGroupAvailability(ctx context.Context, mgr ctrl.Manager, groupName string) bool {
 	logger := log.FromContext(ctx)

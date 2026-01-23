@@ -26,7 +26,7 @@ import (
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	authenticationv1 "k8s.io/api/authentication/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -34,22 +34,22 @@ import (
 // This validator can be used by both webhooks and controllers for consistent validation.
 type DynamoGraphDeploymentValidator struct {
 	deployment *nvidiacomv1alpha1.DynamoGraphDeployment
-	client     client.Client // Optional: for feature detection
+	mgr        ctrl.Manager // Optional: for API group detection via discovery client
 }
 
 // NewDynamoGraphDeploymentValidator creates a new validator for DynamoGraphDeployment.
 func NewDynamoGraphDeploymentValidator(deployment *nvidiacomv1alpha1.DynamoGraphDeployment) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment: deployment,
-		client:     nil,
+		mgr:        nil,
 	}
 }
 
-// NewDynamoGraphDeploymentValidatorWithClient creates a validator with a Kubernetes client for feature detection.
-func NewDynamoGraphDeploymentValidatorWithClient(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, client client.Client) *DynamoGraphDeploymentValidator {
+// NewDynamoGraphDeploymentValidatorWithManager creates a validator with a manager for API group detection.
+func NewDynamoGraphDeploymentValidatorWithManager(deployment *nvidiacomv1alpha1.DynamoGraphDeployment, mgr ctrl.Manager) *DynamoGraphDeploymentValidator {
 	return &DynamoGraphDeploymentValidator{
 		deployment: deployment,
-		client:     client,
+		mgr:        mgr,
 	}
 }
 
@@ -242,8 +242,8 @@ func (v *DynamoGraphDeploymentValidator) validateService(ctx context.Context, se
 	calculatedNamespace := v.deployment.GetDynamoNamespaceForService(service)
 
 	var sharedValidator *SharedSpecValidator
-	if v.client != nil {
-		sharedValidator = NewSharedSpecValidatorWithClient(service, fieldPath, calculatedNamespace, v.client)
+	if v.mgr != nil {
+		sharedValidator = NewSharedSpecValidatorWithManager(service, fieldPath, calculatedNamespace, v.mgr)
 	} else {
 		sharedValidator = NewSharedSpecValidator(service, fieldPath, calculatedNamespace)
 	}

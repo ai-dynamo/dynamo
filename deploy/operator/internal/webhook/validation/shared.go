@@ -22,11 +22,9 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -35,9 +33,9 @@ import (
 // to provide consistent validation logic for shared spec fields.
 type SharedSpecValidator struct {
 	spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-	fieldPath           string        // e.g., "spec" for DCD, "spec.services[foo]" for DGD
-	calculatedNamespace string        // The namespace that will be used: {k8s_namespace}-{dgd_name}
-	client              client.Client // Optional: for feature detection (e.g., CRD availability)
+	fieldPath           string       // e.g., "spec" for DCD, "spec.services[foo]" for DGD
+	calculatedNamespace string       // The namespace that will be used: {k8s_namespace}-{dgd_name}
+	mgr                 ctrl.Manager // Optional: for API group detection via discovery client
 }
 
 // NewSharedSpecValidator creates a new validator for DynamoComponentDeploymentSharedSpec.
@@ -50,18 +48,18 @@ func NewSharedSpecValidator(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSha
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
-		client:              nil,
+		mgr:                 nil,
 	}
 }
 
-// NewSharedSpecValidatorWithClient creates a validator with a Kubernetes client for feature detection.
-// This allows the validator to check for CRD availability (e.g., InferencePool) when validating EPP components.
-func NewSharedSpecValidatorWithClient(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, client client.Client) *SharedSpecValidator {
+// NewSharedSpecValidatorWithManager creates a validator with a manager for API group detection.
+// This allows the validator to check for API group availability (e.g., inference.networking.k8s.io) when validating EPP components.
+func NewSharedSpecValidatorWithManager(spec *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, fieldPath string, calculatedNamespace string, mgr ctrl.Manager) *SharedSpecValidator {
 	return &SharedSpecValidator{
 		spec:                spec,
 		fieldPath:           fieldPath,
 		calculatedNamespace: calculatedNamespace,
-		client:              client,
+		mgr:                 mgr,
 	}
 }
 
@@ -164,9 +162,9 @@ func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if InferencePool CRD is available in the cluster (if client is provided)
-	if v.client != nil {
-		if err := v.checkInferencePoolCRDAvailability(ctx); err != nil {
+	// Check if InferencePool API group is available in the cluster (if manager is provided)
+	if v.mgr != nil {
+		if err := v.checkInferencePoolAPIAvailability(ctx); err != nil {
 			return fmt.Errorf("%s: cannot deploy EPP component: %w", v.fieldPath, err)
 		}
 	}
@@ -204,23 +202,21 @@ func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 	return nil
 }
 
-// checkInferencePoolCRDAvailability checks if the InferencePool CRD is installed in the cluster.
-// Returns an error if the CRD is not available, which prevents EPP deployment.
-func (v *SharedSpecValidator) checkInferencePoolCRDAvailability(ctx context.Context) error {
-	crdName := fmt.Sprintf("%ss.%s", "inferencepool", epp.InferencePoolGroup)
-	crd := &apiextensionsv1.CustomResourceDefinition{}
+// checkInferencePoolAPIAvailability checks if the inference.networking.k8s.io API group is available in the cluster.
+// Returns an error if the API group is not available, which prevents EPP deployment.
+// This reuses the controller_common.DetectInferencePoolAvailability function.
+func (v *SharedSpecValidator) checkInferencePoolAPIAvailability(ctx context.Context) error {
+	if v.mgr == nil {
+		// No manager provided, skip the check (e.g., in controller without webhooks)
+		return nil
+	}
 
-	err := v.client.Get(ctx, types.NamespacedName{Name: crdName}, crd)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return fmt.Errorf(
-				"InferencePool CRD (%s) is not installed in the cluster. "+
-					"EPP requires the Gateway API Inference Extension to be installed. "+
-					"Please install the InferencePool CRD before deploying EPP components",
-				crdName)
-		}
-		// Other errors (e.g., permission issues) - return as-is
-		return fmt.Errorf("failed to check InferencePool CRD availability: %w", err)
+	if !controllercommon.DetectInferencePoolAvailability(ctx, v.mgr) {
+		return fmt.Errorf(
+			"InferencePool API group (%s) is not available in the cluster. "+
+				"EPP requires the Gateway API Inference Extension to be installed. "+
+				"Please install the Gateway API Inference Extension before deploying EPP components",
+			epp.InferencePoolGroup)
 	}
 
 	return nil
