@@ -298,13 +298,21 @@ func GenerateDynamoComponentsDeployments(
 		newNamespace = ComputeHashedDynamoNamespace(parentDGD)
 	}
 
+	// Determine the hash suffix for DCD naming
+	var hashSuffix string
+	if rolloutCtx != nil && rolloutCtx.InProgress {
+		hashSuffix = rolloutCtx.NewWorkerHash
+	} else {
+		hashSuffix = ComputeWorkerSpecHash(parentDGD)
+	}
+
 	// Generate DCDs for new/current namespace (all services)
 	for componentName, component := range parentDGD.Spec.Services {
 		dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, newNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
 		if err != nil {
 			return nil, err
 		}
-		dcd.Name = dcd.Name + "-" + rolloutCtx.NewWorkerHash
+		dcd.Name = dcd.Name + "-" + hashSuffix
 
 		// During rolling update, use hash-based suffix for stable naming
 		// and override replicas for worker components to gradually scale up
