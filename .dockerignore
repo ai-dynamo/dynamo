@@ -45,6 +45,10 @@ container/Dockerfile*
 .venv
 .venv-docs
 
+# GPU Memory Service build artifacts
+lib/gpu_memory_service/build/
+lib/gpu_memory_service/*.egg-info/
+lib/gpu_memory_service/**/*.so
 
 # Python
 __pycache__/
