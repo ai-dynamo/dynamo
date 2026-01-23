@@ -6,6 +6,8 @@
 package dynamo
 
 import (
+	"fmt"
+
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	corev1 "k8s.io/api/core/v1"
@@ -31,8 +33,8 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	container.Ports = []corev1.ContainerPort{
 		{
 			Protocol:      corev1.ProtocolTCP,
-			Name:          "grpc",
-			ContainerPort: 9002,
+			Name:          commonconsts.EPPGRPCPortName,
+			ContainerPort: commonconsts.EPPGRPCPort,
 		},
 		{
 			Protocol:      corev1.ProtocolTCP,
@@ -98,7 +100,7 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		"-pool-group", epp.InferencePoolGroup,
 		"-v", "4",
 		"--zap-encoder", "json",
-		"-grpc-port", "9002",
+		"-grpc-port", fmt.Sprintf("%d", commonconsts.EPPGRPCPort),
 		"-grpc-health-port", "9003",
 		"-config-file", configFilePath,
 	}

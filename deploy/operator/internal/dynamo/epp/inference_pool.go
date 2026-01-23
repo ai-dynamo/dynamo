@@ -54,7 +54,7 @@ func GenerateInferencePool(
 		},
 		Spec: gaiev1.InferencePoolSpec{
 			TargetPorts: []gaiev1.Port{
-				{Number: 8000}, // Frontend port
+				{Number: consts.DynamoServicePort}, // Frontend port
 			},
 			Selector: gaiev1.LabelSelector{
 				MatchLabels: map[gaiev1.LabelKey]gaiev1.LabelValue{
@@ -66,7 +66,7 @@ func GenerateInferencePool(
 				Kind: "Service",
 				Name: gaiev1.ObjectName(eppServiceName),
 				Port: &gaiev1.Port{
-					Number: 9002,
+					Number: consts.EPPGRPCPort,
 				},
 			},
 		},
