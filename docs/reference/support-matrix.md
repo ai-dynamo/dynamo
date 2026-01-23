@@ -60,6 +60,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 ### Build Dependency
 
+For detailed artifact versions and NGC links (including container images, Python wheels, Helm charts, and Rust crates), see the [Release Artifacts](release-artifacts.md) page.
+
 The following table shows the dependency versions included with each Dynamo release:
 
 | **Dependency** | **main (ToT)** | **v0.8.0** | **v0.7.1** | **v0.7.0.post1** | **v0.7.0** |
