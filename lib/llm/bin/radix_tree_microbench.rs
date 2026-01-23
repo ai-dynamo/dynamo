@@ -827,7 +827,9 @@ fn bench_sweep_match_length(args: &Args) {
     // Print results
     println!();
     if args.sweep_format == "csv" {
-        println!("match_length,seq_length,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns");
+        println!(
+            "match_length,seq_length,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns"
+        );
         for r in &results {
             println!(
                 "{},{},{},{},{}",
