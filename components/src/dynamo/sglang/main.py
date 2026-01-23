@@ -23,7 +23,7 @@ from dynamo.sglang.health_check import (
 )
 from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
 from dynamo.sglang.register import (
-    register_diffusion_model,
+    register_image_diffusion_model,
     register_llm_with_readiness_gate,
 )
 from dynamo.sglang.request_handlers import (
@@ -426,17 +426,20 @@ async def init_embedding(runtime: DistributedRuntime, config: Config):
 
 async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     """Initialize image diffusion worker component"""
-    dynamo_args = config.dynamo_args
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    print(f"Server args: {server_args}")
+    print(f"Dynamo args: {dynamo_args}")
 
     # Initialize DiffGenerator (not sgl.Engine)
     from sglang.multimodal_gen import DiffGenerator
     import torch
 
-    if not dynamo_args.model_path:
+    if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
     generator = DiffGenerator.from_pretrained(
-        model_path=dynamo_args.model_path
+        model_path=server_args.model_path
     )
 
 
@@ -485,7 +488,7 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
 
     # Create proper health check payload that sends a minimal diffusion request
     health_check_payload = ImageDiffusionHealthCheckPayload(
-        model_path=dynamo_args.model_path
+        model_path=server_args.model_path
     ).to_dict()
 
     ready_event = asyncio.Event()
@@ -498,15 +501,15 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
                 metrics_labels=[],  # No LLM metrics labels
                 health_check_payload=health_check_payload,
             ),
-            register_diffusion_model(
+            register_image_diffusion_model(
                 generator,
                 generate_endpoint,
-                dynamo_args,
+                server_args,
                 readiness_gate=ready_event,
             ),
         )
     except Exception as e:
-        logging.error(f"Failed to serve diffusion endpoints: {e}")
+        logging.error(f"Failed to serve image diffusion endpoints: {e}")
         raise
     finally:
         handler.cleanup()

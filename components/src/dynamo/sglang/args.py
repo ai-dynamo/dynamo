@@ -543,6 +543,7 @@ async def parse_args(args: list[str]) -> Config:
         server_args.kv_events_config = getattr(parsed_args, "kv_events_config", None)
         server_args.speculative_algorithm = None
         server_args.disaggregation_mode = None
+        server_args.dllm_algorithm = False
         logging.info(f"Created stub ServerArgs for diffusion: model_path={server_args.model_path}")
     else:
         server_args = ServerArgs.from_cli_args(parsed_args)
@@ -579,6 +580,9 @@ async def parse_args(args: list[str]) -> Config:
         f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
     )
 
+    # Auto-detect diffusion worker mode if dllm_algorithm
+    diffusion_worker = server_args.dllm_algorithm is not None
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -595,10 +599,9 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
-        diffusion_worker=getattr(server_args, "dllm_algorithm") is not None, # Auto-detect diffusion worker mode if dllm_algorithm
+        diffusion_worker=diffusion_worker,
         image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
-        model_path=getattr(parsed_args, "model_path", None),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,

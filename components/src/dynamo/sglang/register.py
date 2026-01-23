@@ -264,10 +264,10 @@ async def register_llm_with_readiness_gate(
     logging.info("Model registration succeeded; processing queued requests")
 
 
-async def register_diffusion_model(
+async def register_image_diffusion_model(
     generator: Any,  # DiffGenerator
     endpoint: Endpoint,
-    dynamo_args: DynamoArgs,
+    server_args: ServerArgs,
     readiness_gate: Optional[asyncio.Event] = None,
 ) -> None:
     """Register diffusion model with Dynamo runtime.
@@ -275,14 +275,14 @@ async def register_diffusion_model(
     Args:
         generator: The SGLang DiffGenerator instance.
         endpoint: The Dynamo endpoint for generation requests.
-        dynamo_args: Dynamo-specific configuration.
+        server_args: SGLang server configuration.
         readiness_gate: Optional event to signal when registration completes.
 
     Note:
         Image diffusion models use ModelInput.Text (text prompts) and ModelType.Images.
     """
     # Use model_path as the model name (diffusion workers don't have served_model_name)
-    model_name = dynamo_args.model_path
+    model_name = server_args.model_path
 
     try:
         await register_llm(
