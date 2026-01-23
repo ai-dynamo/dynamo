@@ -129,6 +129,8 @@ cargo add dynamo-config@0.8.1
 
 ## CUDA and Driver Requirements
 
+Dynamo container images include CUDA toolkit libraries. The host machine must have a compatible NVIDIA GPU driver installed. The table below shows the minimum required driver version for each container image.
+
 | Image:Tag | CUDA Toolkit | Min Driver (Linux) | Min Driver (Windows) |
 |-----------|--------------|--------------------|--------------------|
 | `vllm-runtime:0.8.1` | `v12.9` | `v560.28+` | `v560.94+` |
@@ -141,6 +143,24 @@ cargo add dynamo-config@0.8.1
 
 > [!Note]
 > `vllm-runtime:0.8.1-cuda13` is a placeholder tag and is not published yet.
+
+### CUDA Compatibility Resources
+
+For detailed information on CUDA driver compatibility, forward compatibility, and troubleshooting:
+
+- [CUDA Compatibility Overview](https://docs.nvidia.com/deploy/cuda-compatibility/)
+- [Why CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/why-cuda-compatibility.html)
+- [Minor Version Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
+- [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
+- [FAQ](https://docs.nvidia.com/deploy/cuda-compatibility/frequently-asked-questions.html)
+
+> [!Tip]
+> For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
+
+**Related Support Matrices:**
+
+- [Deep Learning Frameworks Support Matrix](https://docs.nvidia.com/deeplearning/frameworks/support-matrix/index.html)
+- [cuDNN Support Matrix](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/reference/support-matrix.html)
 
 ## Known Issues (Dynamo v0.8.x)
 
