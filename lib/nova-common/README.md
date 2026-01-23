@@ -21,8 +21,10 @@ This crate provides the foundational types used across Nova for identity and add
 - Peer management
 
 ```rust
+use dynamo_nova_common::InstanceId;
+
 let instance_id = InstanceId::new_v4();
-let uuid: &Uuid = instance_id.as_uuid();
+let uuid = instance_id.as_uuid();
 ```
 
 ### WorkerId
@@ -36,10 +38,13 @@ let uuid: &Uuid = instance_id.as_uuid();
 This value-semantics approach simplifies passing identity through systems that work with fixed-size integers.
 
 ```rust
+use dynamo_nova_common::InstanceId;
+
 let instance_id = InstanceId::new_v4();
 let worker_id = instance_id.worker_id();  // Deterministic derivation
 
 // Embed in a u128 handle
+let other_data: u128 = 42;
 let handle: u128 = (worker_id.as_u64() as u128) << 64 | other_data;
 ```
 
@@ -60,11 +65,20 @@ The derivation is always consistent—calling `worker_id()` multiple times retur
 3. **KV-store friendly**: The entire address serializes to a `Bytes` blob, suitable for storage in etcd, Redis, or any key-value store without schema changes.
 
 ```rust
-// Reading an address (consumer perspective)
-let transports = address.available_transports()?;  // ["tcp", "rdma"]
-let tcp_endpoint = address.get_entry("tcp")?;      // Some(Bytes)
+use dynamo_nova_common::WorkerAddress;
+use std::collections::HashMap;
 
-// The actual construction happens in nova-backend transport builders
+// Addresses are typically constructed by nova-backend transport builders,
+// but here we demonstrate the consumer API:
+let mut map = HashMap::new();
+map.insert("tcp".to_string(), b"tcp://127.0.0.1:5555".to_vec());
+map.insert("rdma".to_string(), b"rdma://10.0.0.1:6666".to_vec());
+let encoded = rmp_serde::to_vec(&map).unwrap();
+let address = WorkerAddress::from_encoded(encoded);
+
+// Reading an address (consumer perspective)
+let transports = address.available_transports().unwrap();  // ["tcp", "rdma"]
+let tcp_endpoint = address.get_entry("tcp").unwrap();      // Some(Bytes)
 ```
 
 ### TransportKey
@@ -72,12 +86,15 @@ let tcp_endpoint = address.get_entry("tcp")?;      // Some(Bytes)
 A type-safe wrapper around transport identifiers. Provides zero-cost abstraction over `Arc<str>` with efficient cloning and HashMap compatibility.
 
 ```rust
+use dynamo_nova_common::TransportKey;
+use std::collections::HashMap;
+
 let key = TransportKey::from("tcp");
 let key2: TransportKey = "rdma".into();
 
 // Works with HashMap lookups via Borrow<str>
 let mut map = HashMap::new();
-map.insert(TransportKey::from("tcp"), endpoint);
+map.insert(TransportKey::from("tcp"), "127.0.0.1:5555");
 assert!(map.get("tcp").is_some());  // &str lookup works
 ```
 
@@ -86,17 +103,23 @@ assert!(map.get("tcp").is_some());  // &str lookup works
 Combines `InstanceId` and `WorkerAddress` into a single structure representing a discoverable peer. This is the primary type exchanged during peer discovery and registration.
 
 ```rust
-let peer_info = PeerInfo::new(instance_id, worker_address);
+use dynamo_nova_common::{InstanceId, PeerInfo, WorkerAddress};
+use std::collections::HashMap;
 
-// Register with a Nova instance
-nova.register_peer(peer_info)?;
+let instance_id = InstanceId::new_v4();
+let map: HashMap<String, Vec<u8>> = HashMap::new();
+let encoded = rmp_serde::to_vec(&map).unwrap();
+let worker_address = WorkerAddress::from_encoded(encoded);
+
+let peer_info = PeerInfo::new(instance_id, worker_address);
+assert_eq!(peer_info.instance_id(), instance_id);
 ```
 
 ## Address Construction
 
 `WorkerAddress` instances are constructed by transport builders in `nova-backend`. Each transport (TCP, gRPC, NATS, UCX, etc.) contributes its endpoint data:
 
-```
+```text
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  TCP Transport  │     │ gRPC Transport  │     │  UCX Transport  │
 │  Builder        │     │  Builder        │     │  Builder        │
