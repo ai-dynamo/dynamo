@@ -12,7 +12,7 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1"
 
     # NOTE: any image built before January 10 and any release prior to 0.8.1
     # will need to use snake_case within profilingConfig.config
@@ -26,5 +26,5 @@ spec:
         ttft: 500.0
         itl: 30.0
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1"
+    workersImage: "nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1"
   autoApply: true

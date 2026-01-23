@@ -50,7 +50,7 @@ spec:
                     - qwen3-235b-a22b-agg-frontend
               topologyKey: kubernetes.io/hostname
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1
           args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           command:
@@ -89,7 +89,7 @@ spec:
               --max-num-tokens 8192 \
               --max-seq-len 8192 \
               --extra-engine-args "${ENGINE_ARGS}"
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1
           workingDir: /workspace/components/backends/trtllm
           volumeMounts:
             - name: agg-config
