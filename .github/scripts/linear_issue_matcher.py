@@ -133,6 +133,7 @@ class MatchResult:
     confidence: float
     reasoning: str
     screening_score: float = 0.0  # Score from fast model screening
+    prefilter_signals: list[str] = field(default_factory=list)  # Features that matched
 
 
 # =============================================================================
@@ -864,6 +865,7 @@ def find_related_issues(
                     confidence=1.0,
                     reasoning=f"PR directly references {issue.identifier}",
                     screening_score=1.0,
+                    prefilter_signals=["Direct reference"],
                 )
             )
             logger.info(f"✓ Direct reference: {issue.identifier}")
@@ -918,6 +920,7 @@ def find_related_issues(
                     confidence=confidence,
                     reasoning=reasoning,
                     screening_score=screen_score,
+                    prefilter_signals=pf_reasons,
                 )
             )
             logger.info(f"    ✓ Match: {confidence:.0%} - {reasoning[:50]}...")
@@ -1034,6 +1037,7 @@ def log_match_analytics(
                 "issue_state": m.issue.state,
                 "issue_priority": m.issue.priority,
                 "issue_team": m.issue.identifier.split("-")[0],
+                "signals": m.prefilter_signals,  # Features that contributed to match
             }
             for m in matches
         ],
