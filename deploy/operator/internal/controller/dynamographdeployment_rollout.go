@@ -20,13 +20,11 @@ package controller
 import (
 	"context"
 	"fmt"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -35,7 +33,6 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/proxy"
-	"github.com/ai-dynamo/dynamo/deploy/operator/internal/rollout"
 )
 
 // shouldTriggerRollingUpdate determines if WORKER spec changes require a rolling update.
@@ -166,12 +163,22 @@ func (r *DynamoGraphDeploymentReconciler) getWorkerServices(
 	return workers
 }
 
-// reconcileRollingUpdate orchestrates the rolling update process.
-// This is called when a rolling update is in progress or needs to be started.
+// reconcileRollingUpdate orchestrates the rolling update state machine and proxy weights.
+// It updates the rollout status and proxy configuration but does NOT return early.
+// The caller (main Reconcile) should always proceed to reconcileResources afterward.
+//
+// This function is responsible for:
+// - Phase transitions (None -> Pending -> InProgress -> Completed)
+// - Proxy weight updates based on worker readiness
+// - Storing namespace info in status for reconcileResources to use
+//
+// reconcileResources is responsible for:
+// - Creating/updating DCDs for both old and new namespaces
+// - Calculating replica counts based on fresh DCD queries
 func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-) (ctrl.Result, error) {
+) error {
 	logger := log.FromContext(ctx)
 
 	// Get or create rollout status
@@ -183,44 +190,34 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 	newNamespace := dynamo.ComputeHashedDynamoNamespace(dgd)
 	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHash)
 
-	// Reconstruct state machine from current status
-	sm := rollout.NewStateMachineFromRolloutStatus(rolloutStatus, "")
-
 	logger.Info("Reconciling rolling update",
 		"phase", rolloutStatus.Phase,
-		"state", sm.CurrentState,
 		"oldNamespace", oldNamespace,
 		"newNamespace", newNamespace)
 
-	// Handle based on current phase
 	switch rolloutStatus.Phase {
 	case nvidiacomv1alpha1.RolloutPhaseNone:
-		// Start new rollout
 		return r.startRollingUpdate(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash, oldNamespace, newNamespace)
 
 	case nvidiacomv1alpha1.RolloutPhasePending:
-		// Rollout is pending, transition to in progress
 		rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseInProgress
 		if err := r.Status().Update(ctx, dgd); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update rollout status to InProgress: %w", err)
+			return fmt.Errorf("failed to update rollout status to InProgress: %w", err)
 		}
-		return ctrl.Result{Requeue: true}, nil
+		return nil
 
 	case nvidiacomv1alpha1.RolloutPhaseInProgress:
-		// Continue the rollout
 		return r.continueRollingUpdate(ctx, dgd, rolloutStatus, oldNamespace, newNamespace)
 
 	case nvidiacomv1alpha1.RolloutPhaseCompleted:
-		// Cleanup completed rollout
 		return r.finalizeRollingUpdate(ctx, dgd, newWorkerHash)
 
 	case nvidiacomv1alpha1.RolloutPhaseFailed:
-		// Rollout failed - leave status for user inspection
 		logger.Info("Rolling update in failed state, manual intervention may be required")
-		return ctrl.Result{}, nil
+		return nil
 	}
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // startRollingUpdate initializes a new rolling update.
@@ -229,7 +226,7 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
 	oldWorkerHash, newWorkerHash, oldNamespace, newNamespace string,
-) (ctrl.Result, error) {
+) error {
 	logger := log.FromContext(ctx)
 
 	logger.Info("Starting rolling update",
@@ -238,39 +235,32 @@ func (r *DynamoGraphDeploymentReconciler) startRollingUpdate(
 		"oldNamespace", oldNamespace,
 		"newNamespace", newNamespace)
 
-	// Initialize rollout status
 	now := metav1.Now()
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhasePending
 	rolloutStatus.StartTime = &now
 	rolloutStatus.TrafficWeightOld = 100
 	rolloutStatus.TrafficWeightNew = 0
+	rolloutStatus.OldDynamoNamespace = oldNamespace
+	rolloutStatus.NewDynamoNamespace = newNamespace
 
-	// Record event
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateStarted",
 		"Starting rolling update from namespace %s to %s", oldNamespace, newNamespace)
 
-	// Update status
 	if err := r.Status().Update(ctx, dgd); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to initialize rollout status: %w", err)
+		return fmt.Errorf("failed to initialize rollout status: %w", err)
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return nil
 }
 
 // continueRollingUpdate handles the in-progress phase of a rolling update.
-// This is where the actual scaling and traffic shifting happens.
-// The algorithm follows maxSurge=1, maxUnavailable=0:
-// 1. Scale up one new worker
-// 2. Wait for it to become ready
-// 3. Scale down one old worker
-// 4. Update HAProxy weights proportionally
-// 5. Repeat until all workers are migrated
+// This function updates proxy weights based on worker readiness.
 func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
 	oldNamespace, newNamespace string,
-) (ctrl.Result, error) {
+) error {
 	logger := log.FromContext(ctx)
 
 	workerServices := r.getWorkerServices(dgd)
@@ -279,39 +269,61 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 		return r.completeRollout(ctx, dgd, rolloutStatus, newNamespace)
 	}
 
-	// Count ready workers in old and new namespaces
-	oldReadyWorkers, err := r.countReadyWorkersInNamespace(ctx, dgd, oldNamespace)
+	oldInfo, err := r.getWorkerInfoForDynamoNamespace(ctx, dgd, oldNamespace)
 	if err != nil {
-		logger.Error(err, "Failed to count old workers")
-		// Continue anyway - we may be in a state where old DCDs don't exist yet
-		oldReadyWorkers = 0
+		logger.Error(err, "Failed to get old namespace worker status")
+		// Continue with empty status - old DCDs may not exist yet
+		oldInfo = &dynamoNamespaceWorkerInfo{}
 	}
 
-	newReadyWorkers, err := r.countReadyWorkersInNamespace(ctx, dgd, newNamespace)
+	newInfo, err := r.getWorkerInfoForDynamoNamespace(ctx, dgd, newNamespace)
 	if err != nil {
-		logger.Error(err, "Failed to count new workers")
-		newReadyWorkers = 0
+		logger.Error(err, "Failed to get new namespace worker status")
+		newInfo = &dynamoNamespaceWorkerInfo{}
 	}
 
-	// Get desired total replicas
 	desiredReplicas := r.getDesiredWorkerReplicas(dgd)
 
 	logger.Info("Rolling update progress",
-		"oldReadyWorkers", oldReadyWorkers,
-		"newReadyWorkers", newReadyWorkers,
+		"oldReadyWorkers", oldInfo.TotalReadyWorkers(),
+		"newReadyWorkers", newInfo.TotalReadyWorkers(),
 		"desiredReplicas", desiredReplicas,
 		"oldNamespace", oldNamespace,
 		"newNamespace", newNamespace)
 
 	// Check if rollout is complete
-	if newReadyWorkers >= desiredReplicas && oldReadyWorkers == 0 {
+	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
 		return r.completeRollout(ctx, dgd, rolloutStatus, newNamespace)
 	}
 
-	// Calculate and update traffic weights based on ready workers
-	totalReady := oldReadyWorkers + newReadyWorkers
+	allGroupsReady, notReadyServices := newInfo.AllServicesHaveMinimumReady(1)
+
+	// Ensure all worker services have at least 1 ready replica before proceeding with traffic shifting
+	if !allGroupsReady {
+		// Not all groups have minimum ready workers - keep 100% traffic on old
+		logger.Info("Waiting for all worker services to have minimum ready replicas",
+			"notReadyServices", notReadyServices)
+
+		// Ensure traffic stays on old deployment
+		if rolloutStatus.TrafficWeightNew != 0 {
+			rolloutStatus.TrafficWeightOld = 100
+			rolloutStatus.TrafficWeightNew = 0
+			if err := r.updateProxyWeights(ctx, dgd, 100, 0); err != nil {
+				logger.Error(err, "Failed to reset proxy weights to old deployment")
+			}
+		}
+
+		// Update status
+		if err := r.Status().Update(ctx, dgd); err != nil {
+			return fmt.Errorf("failed to update rollout status: %w", err)
+		}
+
+		return nil
+	}
+
+	totalReady := oldInfo.TotalReadyWorkers() + newInfo.TotalReadyWorkers()
 	if totalReady > 0 {
-		newWeight := (newReadyWorkers * 100) / totalReady
+		newWeight := (newInfo.TotalReadyWorkers() * 100) / totalReady
 		oldWeight := 100 - newWeight
 
 		// Only update weights if they changed
@@ -331,12 +343,10 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 
 	// Update status
 	if err := r.Status().Update(ctx, dgd); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update rollout status: %w", err)
+		return fmt.Errorf("failed to update rollout status: %w", err)
 	}
 
-	// Requeue to continue monitoring progress
-	// The normal DCD reconciliation will handle creating/scaling the new workers
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return nil
 }
 
 // completeRollout marks the rollout as completed and updates status.
@@ -345,7 +355,7 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
 	newNamespace string,
-) (ctrl.Result, error) {
+) error {
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
 	rolloutStatus.TrafficWeightOld = 0
 	rolloutStatus.TrafficWeightNew = 100
@@ -361,20 +371,48 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 		"Rolling update completed, traffic shifted to namespace %s", newNamespace)
 
 	if err := r.Status().Update(ctx, dgd); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update rollout status: %w", err)
+		return fmt.Errorf("failed to update rollout status: %w", err)
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return nil
 }
 
-// countReadyWorkersInNamespace counts ready worker replicas across all worker DCDs
-// in the specified Dynamo namespace.
-func (r *DynamoGraphDeploymentReconciler) countReadyWorkersInNamespace(
+// workerServiceInfo holds ready replica count for a worker service.
+type workerServiceInfo struct {
+	readyReplicas int32
+	desired       int32
+}
+
+// dynamoNamespaceWorkerInfo holds aggregated worker status for a single dynamo namespace.
+type dynamoNamespaceWorkerInfo struct {
+	// totalReadyWorkers is the sum of ready replicas across all worker services
+	totalReadyWorkers int32
+	// services contains per-component-type status (e.g., "prefill", "decode", "worker")
+	services map[string]*workerServiceInfo
+}
+
+func (s *dynamoNamespaceWorkerInfo) TotalReadyWorkers() int32 {
+	return s.totalReadyWorkers
+}
+
+// AllServicesHaveMinimumReady checks if all expected worker services have at least minReady replicas.
+func (s *dynamoNamespaceWorkerInfo) AllServicesHaveMinimumReady(minReady int32) (bool, []string) {
+	var notReady []string
+	for serviceName, service := range s.services {
+		if service == nil || service.readyReplicas < minReady {
+			notReady = append(notReady, serviceName)
+		}
+	}
+	return len(notReady) == 0, notReady
+}
+
+// getWorkerInfoForDynamoNamespace queries DCDs for a specific dynamo namespace and returns
+// aggregated worker info.
+func (r *DynamoGraphDeploymentReconciler) getWorkerInfoForDynamoNamespace(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	dynamoNamespace string,
-) (int32, error) {
-	// List DCDs that belong to this DGD and have the specified Dynamo namespace
+) (*dynamoNamespaceWorkerInfo, error) {
 	dcdList := &nvidiacomv1alpha1.DynamoComponentDeploymentList{}
 	listOpts := []client.ListOption{
 		client.InNamespace(dgd.Namespace),
@@ -385,23 +423,38 @@ func (r *DynamoGraphDeploymentReconciler) countReadyWorkersInNamespace(
 	}
 
 	if err := r.List(ctx, dcdList, listOpts...); err != nil {
-		return 0, fmt.Errorf("failed to list DCDs: %w", err)
+		return nil, fmt.Errorf("failed to list DCDs: %w", err)
 	}
 
-	var totalReady int32
+	status := &dynamoNamespaceWorkerInfo{
+		services: make(map[string]*workerServiceInfo),
+	}
+
 	for _, dcd := range dcdList.Items {
-		// Only count worker components
 		if !dynamo.IsWorkerComponent(dcd.Spec.ComponentType) {
 			continue
 		}
 
-		// Check DCD status for ready replicas (via Service status)
+		// Add ready replicas
+		readyReplicas := int32(0)
 		if dcd.Status.Service != nil && dcd.Status.Service.ReadyReplicas != nil {
-			totalReady += *dcd.Status.Service.ReadyReplicas
+			readyReplicas = *dcd.Status.Service.ReadyReplicas
 		}
+
+		// Add desired replicas
+		desiredReplicas := int32(0)
+		if dcd.Spec.Replicas != nil {
+			desiredReplicas = *dcd.Spec.Replicas
+		}
+		status.services[dcd.Spec.ServiceName] = &workerServiceInfo{
+			readyReplicas: readyReplicas,
+			desired:       desiredReplicas,
+		}
+
+		status.totalReadyWorkers += readyReplicas
 	}
 
-	return totalReady, nil
+	return status, nil
 }
 
 // getDesiredWorkerReplicas returns the total desired replicas across all worker services.
@@ -449,7 +502,7 @@ func (r *DynamoGraphDeploymentReconciler) finalizeRollingUpdate(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	newWorkerHash string,
-) (ctrl.Result, error) {
+) error {
 	logger := log.FromContext(ctx)
 
 	// Get the old worker hash to identify old resources
@@ -491,13 +544,13 @@ func (r *DynamoGraphDeploymentReconciler) completeFinalization(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	newWorkerHash string,
-) (ctrl.Result, error) {
+) error {
 	logger := log.FromContext(ctx)
 
 	// Update the active worker hash to the new hash
 	r.setActiveWorkerHash(dgd, newWorkerHash)
 	if err := r.Update(ctx, dgd); err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to update active worker hash: %w", err)
+		return fmt.Errorf("failed to update active worker hash: %w", err)
 	}
 
 	// Note: We intentionally keep the rollout status with Phase=Completed
@@ -506,7 +559,7 @@ func (r *DynamoGraphDeploymentReconciler) completeFinalization(
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
-	return ctrl.Result{}, nil
+	return nil
 }
 
 // deleteOldDCDs deletes all DCDs belonging to this DGD that have the old Dynamo namespace.

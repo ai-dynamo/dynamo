@@ -692,3 +692,70 @@ func TestGetFrontendServiceName(t *testing.T) {
 		})
 	}
 }
+
+func TestGetWorkerStatusForNamespace(t *testing.T) {
+	namespace := "default-test-dgd-hash123"
+
+	dgd := createTestDGD("test-dgd", "default", map[string]*nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+		"prefill": {ComponentType: consts.ComponentTypePrefill},
+		"decode":  {ComponentType: consts.ComponentTypeDecode},
+	})
+
+	// Create DCDs for prefill and decode with different ready counts
+	prefillDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-prefill",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoNamespace:           namespace,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypePrefill,
+				ServiceName:   "prefill",
+				Replicas:      ptr.To(int32(2)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				ReadyReplicas: ptr.To(int32(2)),
+			},
+		},
+	}
+
+	decodeDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-dgd-decode",
+			Namespace: "default",
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: "test-dgd",
+				consts.KubeLabelDynamoNamespace:           namespace,
+			},
+		},
+		Spec: nvidiacomv1alpha1.DynamoComponentDeploymentSpec{
+			DynamoComponentDeploymentSharedSpec: nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				ComponentType: consts.ComponentTypeDecode,
+				ServiceName:   "decode",
+				Replicas:      ptr.To(int32(3)),
+			},
+		},
+		Status: nvidiacomv1alpha1.DynamoComponentDeploymentStatus{
+			Service: &nvidiacomv1alpha1.ServiceReplicaStatus{
+				ReadyReplicas: ptr.To(int32(1)),
+			},
+		},
+	}
+
+	r := createTestReconciler(dgd, prefillDCD, decodeDCD)
+	ctx := context.Background()
+
+	status, err := r.getWorkerInfoForDynamoNamespace(ctx, dgd, namespace)
+	require.NoError(t, err)
+
+	assert.Len(t, status.services, 2)
+	assert.Equal(t, int32(2), status.services[consts.ComponentTypePrefill].readyReplicas)
+	assert.Equal(t, int32(1), status.services[consts.ComponentTypeDecode].readyReplicas)
+	assert.Equal(t, int32(3), status.totalReadyWorkers) // 2 + 1
+}

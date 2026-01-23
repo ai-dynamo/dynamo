@@ -190,7 +190,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	// Rolling update handling for DCD pathway (non-Grove, non-multinode)
 	if !r.isUnsupportedRollingUpdatePathway(dynamoDeployment) {
-		// Initialize worker hash on first deployment
 		if err = r.initializeWorkerHashIfNeeded(ctx, dynamoDeployment); err != nil {
 			logger.Error(err, "Failed to initialize worker hash")
 			reason = "failed_to_initialize_worker_hash"
@@ -204,35 +203,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			return ctrl.Result{}, err
 		}
 
-		// Check if rolling update is in progress or needed
 		if r.isRollingUpdateInProgress(dynamoDeployment) || r.shouldTriggerRollingUpdate(dynamoDeployment) {
-			result, err = r.reconcileRollingUpdate(ctx, dynamoDeployment)
-			if err != nil {
+			if err = r.reconcileRollingUpdate(ctx, dynamoDeployment); err != nil {
 				logger.Error(err, "Failed to reconcile rolling update")
 				state = FailedState
 				reason = Reason("RollingUpdateFailed")
 				message = Message(err.Error())
-				return result, err
+				return ctrl.Result{}, err
 			}
-
-			// Set state based on rollout status
-			if dynamoDeployment.Status.Rollout != nil {
-				switch dynamoDeployment.Status.Rollout.Phase {
-				case v1alpha1.RolloutPhaseCompleted:
-					state = ReadyState
-					reason = "rolling_update_completed"
-					message = "Rolling update completed successfully"
-				case v1alpha1.RolloutPhaseFailed:
-					state = FailedState
-					reason = "rolling_update_failed"
-					message = "Rolling update failed"
-				default:
-					state = PendingState
-					reason = "rolling_update_in_progress"
-					message = "Rolling update in progress"
-				}
-			}
-			return result, nil
 		}
 	} else {
 		// For unsupported pathways, log if a rolling update would have been triggered
@@ -264,6 +242,25 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "failed to reconcile the resources")
 		reason = "failed_to_reconcile_the_resources"
 		return ctrl.Result{}, err
+	}
+
+	// Override state based on rollout status if a rolling update is in progress
+	if dynamoDeployment.Status.Rollout != nil {
+		switch dynamoDeployment.Status.Rollout.Phase {
+		case v1alpha1.RolloutPhaseCompleted:
+			// Keep the reconcileResult state (should be Ready if resources are ready)
+		case v1alpha1.RolloutPhaseFailed:
+			state = FailedState
+			reason = "rolling_update_failed"
+			message = "Rolling update failed"
+		case v1alpha1.RolloutPhasePending, v1alpha1.RolloutPhaseInProgress:
+			// Rolling update in progress - resources are being transitioned
+			if state != FailedState {
+				state = PendingState
+				reason = "rolling_update_in_progress"
+				message = "Rolling update in progress"
+			}
+		}
 	}
 
 	return ctrl.Result{}, nil
@@ -991,30 +988,266 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 		return ReconcileResult{}, fmt.Errorf("failed to get existing restart annotations: %w", err)
 	}
 
-	// generate the dynamoComponentsDeployments from the config
-	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
-	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations)
-	if err != nil {
-		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
-		return ReconcileResult{}, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)
-	}
+	newWorkerHash := dynamo.ComputeWorkerSpecHash(dynamoDeployment)
+	newDynamoNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dynamoDeployment, newWorkerHash)
+	oldWorkerHash := r.getCurrentActiveWorkerHash(dynamoDeployment)
+	oldDynamoNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dynamoDeployment, oldWorkerHash)
 
-	// reconcile the dynamoComponentsDeployments
-	for serviceName, dynamoComponentDeployment := range dynamoComponentsDeployments {
-		logger.Info("Reconciling the DynamoComponentDeployment", "serviceName", serviceName, "dynamoComponentDeployment", dynamoComponentDeployment)
-		_, dynamoComponentDeployment, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponentDeployment, bool, error) {
-			return dynamoComponentDeployment, false, nil
-		})
+	defaultIngressSpec := dynamo.GenerateDefaultIngressSpec(dynamoDeployment, r.Config.IngressConfig)
+
+	// Check if rolling update is in progress
+	if r.isRollingUpdateInProgress(dynamoDeployment) && dynamoDeployment.Status.Rollout != nil {
+		// Rolling update in progress - create DCDs for BOTH old and new namespaces
+		logger.Info("Rolling update in progress, reconciling both old and new DCDs",
+			"oldNamespace", oldDynamoNamespace,
+			"newNamespace", newDynamoNamespace)
+
+		// Reconcile NEW namespace DCDs (full replicas)
+		newResources, err := r.reconcileDCDsForNamespace(
+			ctx, dynamoDeployment, &defaultIngressSpec, restartState,
+			existingRestartAnnotations, newDynamoNamespace, false,
+		)
 		if err != nil {
-			logger.Error(err, "failed to sync the DynamoComponentDeployment")
-			return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
+			return ReconcileResult{}, fmt.Errorf("failed to reconcile new namespace DCDs: %w", err)
 		}
-		resources = append(resources, dynamoComponentDeployment)
+		resources = append(resources, newResources...)
+
+		// Reconcile OLD namespace DCDs (scaled down based on new readiness)
+		oldResources, err := r.reconcileDCDsForNamespace(
+			ctx, dynamoDeployment, &defaultIngressSpec, restartState,
+			existingRestartAnnotations, oldDynamoNamespace, true,
+		)
+		if err != nil {
+			return ReconcileResult{}, fmt.Errorf("failed to reconcile old namespace DCDs: %w", err)
+		}
+		resources = append(resources, oldResources...)
+	} else {
+		// Normal operation - create DCDs for current namespace
+		dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, &defaultIngressSpec, restartState, existingRestartAnnotations)
+		if err != nil {
+			logger.Error(err, "failed to generate the DynamoComponentsDeployments")
+			return ReconcileResult{}, fmt.Errorf("failed to generate the DynamoComponentsDeployments: %w", err)
+		}
+
+		for serviceName, dynamoComponentDeployment := range dynamoComponentsDeployments {
+			logger.Info("Reconciling the DynamoComponentDeployment", "serviceName", serviceName, "dynamoComponentDeployment", dynamoComponentDeployment)
+			_, dynamoComponentDeployment, err = commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponentDeployment, bool, error) {
+				return dynamoComponentDeployment, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync the DynamoComponentDeployment")
+				return ReconcileResult{}, fmt.Errorf("failed to sync the DynamoComponentDeployment: %w", err)
+			}
+			resources = append(resources, dynamoComponentDeployment)
+		}
 	}
 
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
 	return result, nil
+}
+
+// reconcileDCDsForNamespace generates and syncs DCDs for a specific dynamo namespace.
+// If isOldNamespace is true, worker replica counts are calculated based on new DCD readiness.
+func (r *DynamoGraphDeploymentReconciler) reconcileDCDsForNamespace(
+	ctx context.Context,
+	dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment,
+	defaultIngressSpec *nvidiacomv1alpha1.IngressSpec,
+	restartState *dynamo.RestartState,
+	existingRestartAnnotations map[string]string,
+	dynamoNamespace string,
+	isOldNamespace bool,
+) ([]Resource, error) {
+	logger := log.FromContext(ctx)
+	resources := []Resource{}
+
+	// Generate DCDs with the specified namespace
+	dynamoComponentsDeployments, err := r.generateDCDsWithNamespace(
+		ctx, dynamoDeployment, defaultIngressSpec, restartState,
+		existingRestartAnnotations, dynamoNamespace,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate DCDs for namespace %s: %w", dynamoNamespace, err)
+	}
+
+	for serviceName, dcd := range dynamoComponentsDeployments {
+		// For old namespace workers, calculate scaled-down replicas
+		if isOldNamespace && dynamo.IsWorkerComponent(dcd.Spec.ComponentType) {
+			scaledReplicas := r.calculateOldWorkerReplicas(ctx, dynamoDeployment, serviceName, dynamoNamespace)
+			dcd.Spec.Replicas = &scaledReplicas
+			logger.Info("Calculated old worker replicas",
+				"service", serviceName,
+				"namespace", dynamoNamespace,
+				"replicas", scaledReplicas)
+		}
+
+		// Append namespace suffix to DCD name to avoid conflicts
+		dcd.Name = fmt.Sprintf("%s-%s", dcd.Name, dynamoNamespace[len(dynamoNamespace)-8:])
+
+		logger.Info("Reconciling DCD",
+			"name", dcd.Name,
+			"service", serviceName,
+			"namespace", dynamoNamespace,
+			"isOld", isOldNamespace)
+
+		_, syncedDCD, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponentDeployment, bool, error) {
+			return dcd, false, nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to sync DCD %s: %w", dcd.Name, err)
+		}
+		resources = append(resources, syncedDCD)
+	}
+
+	return resources, nil
+}
+
+// generateDCDsWithNamespace generates DCDs with a specific dynamo namespace.
+// This is used during rolling updates to create DCDs for both old and new namespaces.
+func (r *DynamoGraphDeploymentReconciler) generateDCDsWithNamespace(
+	ctx context.Context,
+	parentDGD *nvidiacomv1alpha1.DynamoGraphDeployment,
+	defaultIngressSpec *nvidiacomv1alpha1.IngressSpec,
+	restartState *dynamo.RestartState,
+	existingRestartAnnotations map[string]string,
+	dynamoNamespace string,
+) (map[string]*nvidiacomv1alpha1.DynamoComponentDeployment, error) {
+	deployments := make(map[string]*nvidiacomv1alpha1.DynamoComponentDeployment)
+
+	for componentName, component := range parentDGD.Spec.Services {
+		deployment := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		deployment.Spec.DynamoComponentDeploymentSharedSpec = *component
+		deployment.Name = dynamo.GetDynamoComponentName(parentDGD, componentName)
+		deployment.Spec.BackendFramework = parentDGD.Spec.BackendFramework
+		deployment.Namespace = parentDGD.Namespace
+		deployment.Spec.ServiceName = componentName
+		deployment.Spec.DynamoNamespace = &dynamoNamespace
+
+		labels := make(map[string]string)
+		deployment.Spec.Labels = labels
+		deployment.Labels = labels
+		labels[consts.KubeLabelDynamoComponent] = componentName
+		labels[consts.KubeLabelDynamoNamespace] = dynamoNamespace
+		labels[consts.KubeLabelDynamoGraphDeploymentName] = parentDGD.Name
+
+		// Propagate annotations from parent
+		if parentDGD.Annotations != nil {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			if val, exists := parentDGD.Annotations[consts.KubeAnnotationEnableMetrics]; exists {
+				deployment.Spec.Annotations[consts.KubeAnnotationEnableMetrics] = val
+			}
+			if val, exists := parentDGD.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend]; exists {
+				deployment.Spec.Annotations[consts.KubeAnnotationDynamoDiscoveryBackend] = val
+			}
+		}
+
+		// Apply restart annotation
+		if restartState != nil && restartState.ShouldAnnotateService(componentName) {
+			if deployment.Spec.Annotations == nil {
+				deployment.Spec.Annotations = make(map[string]string)
+			}
+			deployment.Spec.Annotations[consts.RestartAnnotation] = restartState.Timestamp
+		} else if existingRestartAnnotations != nil {
+			if existingRestartAt, ok := existingRestartAnnotations[componentName]; ok && existingRestartAt != "" {
+				if deployment.Spec.Annotations == nil {
+					deployment.Spec.Annotations = make(map[string]string)
+				}
+				deployment.Spec.Annotations[consts.RestartAnnotation] = existingRestartAt
+			}
+		}
+
+		// Set planner service account
+		if component.ComponentType == consts.ComponentTypePlanner {
+			if deployment.Spec.ExtraPodSpec == nil {
+				deployment.Spec.ExtraPodSpec = &nvidiacomv1alpha1.ExtraPodSpec{}
+			}
+			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
+				deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
+			}
+			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = consts.PlannerServiceAccountName
+		}
+
+		// Set default ingress for frontend
+		if deployment.IsFrontendComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+			deployment.Spec.Ingress = defaultIngressSpec
+		}
+
+		// Merge parent envs
+		if len(parentDGD.Spec.Envs) > 0 {
+			deployment.Spec.Envs = dynamo.MergeEnvs(parentDGD.Spec.Envs, deployment.Spec.Envs)
+		}
+
+		// Set replicas from spec
+		if component.Replicas != nil {
+			deployment.Spec.Replicas = component.Replicas
+		}
+
+		deployments[componentName] = deployment
+	}
+
+	return deployments, nil
+}
+
+// calculateOldWorkerReplicas determines how many replicas the old worker should have
+// based on the new worker's readiness. The formula is:
+// oldReplicas = max(0, desiredReplicas - newReadyReplicas)
+func (r *DynamoGraphDeploymentReconciler) calculateOldWorkerReplicas(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	serviceName string,
+	oldNamespace string,
+) int32 {
+	logger := log.FromContext(ctx)
+
+	// Get desired replicas from spec
+	spec := dgd.Spec.Services[serviceName]
+	desiredReplicas := int32(1)
+	if spec != nil && spec.Replicas != nil {
+		desiredReplicas = *spec.Replicas
+	}
+
+	// Get new namespace from rollout status
+	if dgd.Status.Rollout == nil || dgd.Status.Rollout.NewDynamoNamespace == "" {
+		return desiredReplicas // No rollout, keep full replicas
+	}
+	newNamespace := dgd.Status.Rollout.NewDynamoNamespace
+
+	// Query ready replicas for the new DCD
+	newDCDName := fmt.Sprintf("%s-%s-%s", dgd.Name, strings.ToLower(serviceName), newNamespace[len(newNamespace)-8:])
+	newDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+	err := r.Get(ctx, types.NamespacedName{Name: newDCDName, Namespace: dgd.Namespace}, newDCD)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// New DCD doesn't exist yet, keep full replicas on old
+			logger.V(1).Info("New DCD not found, keeping full old replicas",
+				"newDCD", newDCDName, "oldReplicas", desiredReplicas)
+			return desiredReplicas
+		}
+		logger.Error(err, "Failed to get new DCD", "name", newDCDName)
+		return desiredReplicas
+	}
+
+	// Get ready replicas from new DCD status
+	newReadyReplicas := int32(0)
+	if newDCD.Status.Service != nil && newDCD.Status.Service.ReadyReplicas != nil {
+		newReadyReplicas = *newDCD.Status.Service.ReadyReplicas
+	}
+
+	// Scale down old: keep enough to cover what new can't handle
+	oldNeeded := desiredReplicas - newReadyReplicas
+	if oldNeeded < 0 {
+		oldNeeded = 0
+	}
+
+	logger.Info("Calculated old worker replicas",
+		"service", serviceName,
+		"desired", desiredReplicas,
+		"newReady", newReadyReplicas,
+		"oldNeeded", oldNeeded)
+
+	return oldNeeded
 }
 
 func (r *DynamoGraphDeploymentReconciler) getExistingRestartAnnotationsDCD(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (map[string]string, error) {
