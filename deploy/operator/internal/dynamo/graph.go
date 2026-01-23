@@ -1127,7 +1127,10 @@ func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.
 }
 
 func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentSharedSpec, parentGraphDeploymentName string, namespace string, numberOfNodes int32, discoveryBackend string) ComponentContext {
-	dynamoNamespace := v1alpha1.ComputeDynamoNamespace(component.GlobalDynamoNamespace, namespace, parentGraphDeploymentName)
+	var dynamoNamespace string
+	if component.DynamoNamespace != nil {
+		dynamoNamespace = *component.DynamoNamespace
+	}
 
 	componentContext := ComponentContext{
 		numberOfNodes:                  numberOfNodes,
