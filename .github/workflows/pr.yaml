@@ -33,10 +33,10 @@ jobs:
       fail-fast: false
       matrix:
         runner:
-          - { name: p-builder-amd-gpu-v1 }
-          - { name: p-builder-arm-v1 }
-          - { name: p-builder-amd-v1 }
-          - { name: p-default-v1 }
+          - { name: prod-builder-amd-gpu-v1 }
+          - { name: prod-builder-arm-v1 }
+          - { name: prod-builder-amd-v1 }
+          - { name: prod-default-v1 }
     name: ${{ matrix.runner.name }}
     runs-on: ${{ matrix.runner.name }}
     timeout-minutes: 90
@@ -54,8 +54,8 @@ jobs:
   #     matrix:
   #       stress: [ '1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
   #       platform:
-  #         - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-  #         - { arch: arm64, runner: p-builder-arm-v1 }
+  #         - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+  #         - { arch: arm64, runner: prod-builder-arm-v1 }
   #       cuda_version:
   #         - { major_minor: '13.0', major: '13' }
   #         - { major_minor: '12.9', major: '12' }
@@ -131,8 +131,8 @@ jobs:
   #     matrix:
   #       stress: [ '1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
   #       platform:
-  #         - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-  #         - { arch: arm64, runner: p-builder-arm-v1 }
+  #         - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+  #         - { arch: arm64, runner: prod-builder-arm-v1 }
   #       cuda_version:
   #         - { major_minor: '13.0', major: '13' }
   #         - { major_minor: '12.9', major: '12' }
@@ -149,8 +149,8 @@ jobs:
   #     matrix:
   #       stress: [ '1', '2', '3', '4', '5', '6', '7', '8', '9', '10']
   #       platform:
-  #         - { arch: amd64, runner: p-builder-amd-gpu-v1 }
-  #         - { arch: arm64, runner: p-builder-arm-v1 }
+  #         - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+  #         - { arch: arm64, runner: prod-builder-arm-v1 }
   #       cuda_version:
   #         - { major_minor: '13.0', major: '13' }
   #   name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})

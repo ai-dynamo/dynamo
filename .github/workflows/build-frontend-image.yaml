@@ -21,8 +21,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: p-builder-amd-v1  }
-          - { arch: arm64, runner: p-builder-arm-v1 }
+          - { arch: amd64, runner: prod-builder-amd-v1  }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
