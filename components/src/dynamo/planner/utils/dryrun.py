@@ -24,6 +24,8 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
         )
 
     metrics = extract_metrics_from_mooncake(args.dataset, args.adjustment_interval)
+    if not metrics:
+        raise ValueError("Empty metrics dataset: cannot run dryrun")
 
     mode = getattr(args, "mode", "disagg")
     prefill_planner: Optional[PrefillPlanner] = None

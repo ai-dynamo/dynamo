@@ -144,4 +144,5 @@ class VirtualConnector(PlannerConnector):
         self, require_prefill: bool = True, require_decode: bool = True
     ) -> str:
         """Get the model name from the deployment"""
+        del require_prefill, require_decode
         return self.model_name

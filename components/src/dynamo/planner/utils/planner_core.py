@@ -139,14 +139,27 @@ def _apply_global_gpu_budget(
     )
     if total_gpu_required <= args.max_gpu_budget:
         return next_num_p, next_num_d
+    min_required = (
+        args.min_endpoint * args.prefill_engine_num_gpu
+        + args.min_endpoint * args.decode_engine_num_gpu
+    )
+    if args.max_gpu_budget < min_required:
+        logger.warning(
+            f"max_gpu_budget ({args.max_gpu_budget}) is below the minimum required "
+            f"for min_endpoint ({min_required}); enforcing zero replicas"
+        )
+        return 0, 0
     scale = args.max_gpu_budget / total_gpu_required
-    next_num_p = max(args.min_endpoint, round(next_num_p * scale))
+    max_prefill = math.floor(
+        (args.max_gpu_budget - args.min_endpoint * args.decode_engine_num_gpu)
+        / args.prefill_engine_num_gpu
+    )
+    next_num_p = max(
+        args.min_endpoint, min(max_prefill, math.floor(next_num_p * scale))
+    )
+    remaining = args.max_gpu_budget - next_num_p * args.prefill_engine_num_gpu
     next_num_d = max(
-        args.min_endpoint,
-        round(
-            (args.max_gpu_budget - next_num_p * args.prefill_engine_num_gpu)
-            / args.decode_engine_num_gpu
-        ),
+        args.min_endpoint, math.floor(remaining / args.decode_engine_num_gpu)
     )
     logger.warning(
         f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({args.max_gpu_budget}), "
@@ -163,8 +176,15 @@ def _apply_component_gpu_budget(
     total_gpu_required = desired_replicas * engine_num_gpu
     if total_gpu_required <= args.max_gpu_budget:
         return desired_replicas
+    min_required = args.min_endpoint * engine_num_gpu
+    if args.max_gpu_budget < min_required:
+        logger.warning(
+            f"max_gpu_budget ({args.max_gpu_budget}) is below the minimum required "
+            f"for min_endpoint ({min_required}); enforcing zero replicas"
+        )
+        return 0
     scale = args.max_gpu_budget / total_gpu_required
-    next_num = max(args.min_endpoint, round(desired_replicas * scale))
+    next_num = max(args.min_endpoint, math.floor(desired_replicas * scale))
     logger.warning(
         f"Total number of GPUs required ({total_gpu_required}) exceeds the max GPU budget ({args.max_gpu_budget}), "
         f"scaling down to {next_num} replicas"
