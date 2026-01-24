@@ -25,9 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 # Trigger model loader registration and utility patches on import
-from gpu_memory_service.client.vllm_integration import (  # noqa: E402
-    register_gms_loader,
-)
+from gpu_memory_service.client.vllm_integration import register_gms_loader  # noqa: E402
 from gpu_memory_service.client.vllm_integration.patches import (  # noqa: E402
     patch_empty_cache,
     patch_memory_snapshot,

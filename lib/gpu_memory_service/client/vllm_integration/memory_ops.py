@@ -281,8 +281,6 @@ def establish_early_gms_connection() -> bool:
     Returns:
         True if connection was established successfully.
     """
-    import os
-
     from gpu_memory_service.common.types import RequestedLockType
 
     try:
