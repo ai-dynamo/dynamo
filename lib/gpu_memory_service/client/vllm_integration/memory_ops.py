@@ -8,22 +8,37 @@ This module contains the implementation logic for:
 - KV cache management via CuMemAllocator
 - Safe torch.cuda.empty_cache replacement
 
-These operations are called by the patched Worker methods (see patches.py).
+These operations are called by the GMSWorker class methods.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional, List
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
-from gpu_memory_service.client.vllm_integration.utils import get_gms_memory_manager
-
 if TYPE_CHECKING:
-    pass
+    from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# GMS client utilities
+# =============================================================================
+
+
+def get_gms_memory_manager() -> Optional["GMSClientMemoryManager"]:
+    """Get the GMS client memory manager singleton."""
+    from gpu_memory_service import get_gms_client_memory_manager
+    return get_gms_client_memory_manager()
+
+
+def has_vmm_allocations() -> bool:
+    """Check if there are active VMM allocations from GPU Memory Service."""
+    manager = get_gms_memory_manager()
+    return manager is not None and len(manager._mappings) > 0
 
 
 # =============================================================================
@@ -40,8 +55,6 @@ def safe_empty_cache() -> None:
     torch.cuda.empty_cache() causes segfaults because the native caching allocator
     tries to release blocks that were allocated through VMM APIs.
     """
-    from gpu_memory_service.client.vllm_integration.utils import has_vmm_allocations
-
     if has_vmm_allocations():
         logger.debug(
             "[GMS] Blocking torch.cuda.empty_cache() - VMM allocations would be destroyed"

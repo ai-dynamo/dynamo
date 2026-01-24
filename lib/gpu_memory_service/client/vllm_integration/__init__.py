@@ -9,60 +9,53 @@ This package provides GPU Memory Service integration for vLLM, enabling:
 - Efficient model weight loading via memory service
 
 Usage:
-    Set GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER=1 to enable auto-registration.
-    The plugin will be initialized when vLLM loads.
+    Use the GMSWorker class as a custom worker:
+
+        --worker-cls=gpu_memory_service.client.vllm_integration.worker:GMSWorker
+
+    This automatically:
+    - Registers the 'gpu_memory_service' model loader
+    - Applies necessary utility patches
+    - Provides VA-stable sleep/wake functionality
 
 Module structure:
     - config.py: Configuration constants and environment handling
-    - utils.py: Shared utilities (Worker class detection, etc.)
-    - memory_ops.py: Sleep/wake implementation logic
+    - memory_ops.py: Sleep/wake implementation and GMS utilities
     - model_loader.py: Model loading implementation
-    - patches.py: All monkey-patching logic
+    - patches.py: Utility patching (empty_cache, MemorySnapshot)
+    - worker.py: GMSWorker subclass with proper overrides
 """
 
 from __future__ import annotations
 
 import logging
 
-from gpu_memory_service.client.vllm_integration.config import GMS_ENABLED
 from gpu_memory_service.client.vllm_integration.model_loader import (
     get_imported_weights_bytes,
-    register_gpu_memory_service_loader,
+    register_gms_loader,
 )
 from gpu_memory_service.client.vllm_integration.patches import (
-    apply_all_patches,
-    patch_sleep_wake,
-    patch_worker_for_gms,
+    patch_empty_cache,
+    patch_memory_snapshot,
 )
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "register_gpu_memory_service_loader",
-    "apply_all_patches",
-    "patch_sleep_wake",
-    "patch_worker_for_gms",
+    # Model loader
+    "register_gms_loader",
     "get_imported_weights_bytes",
-    "vllm_plugin_init",
+    # Utility patches
+    "patch_empty_cache",
+    "patch_memory_snapshot",
+    # Worker class (imported lazily to avoid circular imports)
+    "GMSWorker",
 ]
 
 
-def vllm_plugin_init():
-    """vLLM plugin entry point for GPU Memory Service.
-
-    This function is called by vLLM's plugin system in all processes (main process,
-    engine core, and worker processes). It registers the GPU Memory Service loader
-    and applies necessary patches if the GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER
-    environment variable is set.
-    """
-    if GMS_ENABLED:
-        register_gpu_memory_service_loader()
-        apply_all_patches()
-        logger.info("[GMS] vLLM plugin initialized")
-
-
-# Auto-register when environment variable is set.
-# This handles vLLM's multiprocessing with spawn mode, where child
-# processes start fresh and don't inherit the parent's loader registration.
-if GMS_ENABLED:
-    vllm_plugin_init()
+def __getattr__(name):
+    """Lazy import for GMSWorker to avoid circular imports."""
+    if name == "GMSWorker":
+        from gpu_memory_service.client.vllm_integration.worker import GMSWorker
+        return GMSWorker
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

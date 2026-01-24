@@ -54,30 +54,28 @@ _gpu_memory_service_setup_done = False
 def _setup_gpu_memory_service_if_needed(config: Config) -> None:
     """Setup GPU Memory Service if load_format indicates GPU Memory Service usage.
 
-    This does TWO things:
-    1. Sets environment variables for patches (needed in spawned workers)
-    2. Registers the GPU Memory Service loader and applies patches
+    This sets up the GMSWorker class which handles:
+    - Model loader registration (on import)
+    - Utility patches (empty_cache, MemorySnapshot)
+    - VA-stable sleep/wake functionality
+    - Proper memory accounting
 
-    The model loader reads config from load_config.model_loader_extra_config,
-    but the patches (memory accounting, sleep/wake) run at module import time
-    and rely on environment variables.
+    The worker class is imported by vLLM in each spawned worker process,
+    which triggers the necessary setup automatically.
     """
     global _gpu_memory_service_setup_done
     if _gpu_memory_service_setup_done:
         return
 
     load_format = getattr(config.engine_args, "load_format", None)
-    if load_format != "gpu_memory_service":
+    if load_format != "gms":
         return
 
     logger.info(
-        "[GPU Memory Service] Detected load_format='gpu_memory_service', setting up GPU Memory Service integration"
+        "[GPU Memory Service] Detected load_format='gms', setting up GPU Memory Service integration"
     )
 
-    # Set env var to trigger auto-registration in spawned workers
-    os.environ["GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER"] = "1"
-
-    # Also pass socket path to workers via environment variable
+    # Pass socket path to workers via environment variable
     # Workers need this to establish early GMS connection before model loading
     extra_config = getattr(config.engine_args, "model_loader_extra_config", None) or {}
     socket_path = extra_config.get(
@@ -86,21 +84,15 @@ def _setup_gpu_memory_service_if_needed(config: Config) -> None:
     os.environ["GPU_MEMORY_SERVICE_SOCKET_PATH"] = socket_path
     logger.debug(f"[GPU Memory Service] Set socket path env var: {socket_path}")
 
-    # Register loader and apply patches in main process
-    try:
-        from gpu_memory_service.client.vllm_integration import (
-            apply_all_patches,
-            register_gpu_memory_service_loader,
-        )
-
-        register_gpu_memory_service_loader()
-        apply_all_patches()
-        logger.info(
-            "[GPU Memory Service] Registered GPU Memory Service loader and applied patches"
-        )
-    except Exception as e:
-        logger.error(f"[GPU Memory Service] Failed to setup GPU Memory Service: {e}")
-        raise
+    # Set worker_cls to use GMSWorker - this is the key integration point
+    # When vLLM imports the worker class, it triggers model loader registration
+    # and utility patches automatically
+    config.engine_args.worker_cls = (
+        "gpu_memory_service.client.vllm_integration.worker.GMSWorker"
+    )
+    logger.info(
+        "[GPU Memory Service] Set worker_cls to GMSWorker for GPU Memory Service integration"
+    )
 
     _gpu_memory_service_setup_done = True
 

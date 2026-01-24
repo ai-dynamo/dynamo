@@ -15,8 +15,8 @@ This test validates the GPU Memory Service shadow engine architecture for fault 
 Supports both vLLM and SGLang backends through parametrization.
 
 Based on:
-- components/src/dynamo/vllm/gpu_memory_service_adapters/TESTING.md
-- components/src/dynamo/sglang/gpu_memory_service_adapters/TESTING.md
+- components/src/dynamo/vllm/gms_adapters/TESTING.md
+- components/src/dynamo/sglang/gms_adapters/TESTING.md
 
 Test Execution Notes:
 - Requires 2+ GPUs (for TP=2 model configurations)
@@ -318,7 +318,7 @@ class VLLMWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
             "-tp",
             str(tp),
             "--load-format",
-            "gpu_memory_service",
+            "gms",
             "--enable-sleep-mode",
             "--gpu-memory-utilization",
             "0.8",
@@ -429,7 +429,7 @@ class SGLangWithGPUMemoryServiceProcess(EngineWithGPUMemoryServiceProcess):
             "--tensor-parallel-size",
             str(tp),
             "--load-format",
-            "gpu_memory_service",
+            "gms",
             "--enable-memory-saver",
             "--mem-fraction-static",
             "0.8",  # Test multiple engine sleep/wake
@@ -615,7 +615,7 @@ def create_engine_process(
 
 
 @pytest.fixture
-def gpu_memory_service_ports(request):
+def gms_ports(request):
     """Allocate ports for GPU Memory Service test."""
     # Allocate ports: system ports for workers, one frontend port
     shadow_system_port = allocate_port(8100)
@@ -693,10 +693,10 @@ def gpu_memory_service_ports(request):
         ),
     ],
 )
-def test_gpu_memory_service_shadow_engine_failover(
+def test_gms_shadow_engine_failover(
     request,
     runtime_services,
-    gpu_memory_service_ports,
+    gms_ports,
     predownload_models,
     backend: Backend,
 ):
@@ -724,7 +724,7 @@ def test_gpu_memory_service_shadow_engine_failover(
     Args:
         backend: The inference backend to test (vLLM or SGLang)
     """
-    ports = gpu_memory_service_ports
+    ports = gms_ports
     tp = GPU_MEMORY_SERVICE_TP
     frontend_port = ports["frontend_port"]
 
@@ -964,7 +964,7 @@ def test_gpu_memory_service_shadow_engine_failover(
         ),
     ],
 )
-def test_gpu_memory_service_basic_sleep_wake(
+def test_gms_basic_sleep_wake(
     request,
     runtime_services,
     predownload_models,
