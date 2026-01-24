@@ -219,19 +219,15 @@ impl KvbmLeader {
     /// This mirrors the logic in `create_remote_context` in worker.rs.
     ///
     /// Environment variables:
-    /// - `DYN_KVBM_REMOTE_STORAGE_TYPE`: "object", "disk", or "auto" (default: "auto")
     /// - `DYN_KVBM_OBJECT_BUCKET` or `AWS_DEFAULT_BUCKET`: Bucket name for object storage
-    /// - `DYN_KVBM_REMOTE_DISK_PATH`: Base path for disk storage
-    /// - `DYN_KVBM_REMOTE_DISK_USE_GDS`: Enable GPU Direct Storage for disk (default: true)
+    /// - `DYN_KVBM_OBJECT_ENDPOINT` or `AWS_ENDPOINT_URL`: Object storage endpoint
+    /// - `DYN_KVBM_OBJECT_REGION` or `AWS_REGION`: Object storage region
     pub fn remote_storage_config(
         &self,
     ) -> Option<crate::block_manager::config::RemoteStorageConfig> {
         use crate::block_manager::config::RemoteStorageConfig;
 
         let worker_id = self.config.rank;
-        let storage_type = std::env::var("DYN_KVBM_REMOTE_STORAGE_TYPE")
-            .unwrap_or_else(|_| "auto".to_string())
-            .to_lowercase();
 
         // Get object storage config
         let bucket = std::env::var("DYN_KVBM_OBJECT_BUCKET")
@@ -248,37 +244,14 @@ impl KvbmLeader {
             .or_else(|_| std::env::var("AWS_REGION"))
             .ok();
 
-        // Get disk storage config
-        let disk_path = std::env::var("DYN_KVBM_REMOTE_DISK_PATH")
-            .ok()
-            .map(|p| p.replace("{worker_id}", &worker_id.to_string()));
-
-        let disk_use_gds = std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(true);
-
-        match storage_type.as_str() {
-            "disk" => disk_path.map(|path| RemoteStorageConfig::Disk {
-                base_path: path,
-                use_gds: disk_use_gds,
-            }),
-            "object" => Some(RemoteStorageConfig::Object {
+        if bucket.is_some() || object_endpoint.is_some() {
+            Some(RemoteStorageConfig::Object {
                 default_bucket: bucket,
                 endpoint: object_endpoint,
                 region: object_region,
-            }),
-            _ => match (&bucket, &disk_path) {
-                (Some(_), Some(_)) | (Some(_), None) => Some(RemoteStorageConfig::Object {
-                    default_bucket: bucket,
-                    endpoint: object_endpoint,
-                    region: object_region,
-                }),
-                (None, Some(path)) => Some(RemoteStorageConfig::Disk {
-                    base_path: path.clone(),
-                    use_gds: disk_use_gds,
-                }),
-                (None, None) => None,
-            },
+            })
+        } else {
+            None
         }
     }
 

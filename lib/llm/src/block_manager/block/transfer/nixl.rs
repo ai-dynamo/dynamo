@@ -5,8 +5,7 @@ use super::*;
 
 use super::remote::{RemoteBlockDescriptor, RemoteKey, RemoteStorageKind, RemoteTransferDirection};
 use crate::block_manager::config::RemoteTransferContext;
-use crate::block_manager::storage::nixl::NixlRegisterableStorage;
-use crate::block_manager::storage::{DiskStorage, ObjectStorage};
+use crate::block_manager::storage::ObjectStorage;
 use anyhow::Result;
 use nixl_sys::{
     Agent as NixlAgent, MemType, MemoryRegion, NixlDescriptor, XferDescList, XferOp, XferRequest,
@@ -189,15 +188,14 @@ where
     }
 }
 
-/// Execute a remote storage transfer (object storage or disk).
+/// Execute a remote storage transfer (object storage).
 ///
 /// This function handles the NIXL-level execution of remote transfers.
-/// It supports both object storage and remote disk.
 ///
 /// # Arguments
 ///
 /// * `direction` - Whether this is an onboard (read) or offload (write)
-/// * `kind` - Type of remote storage (Object or Disk)
+/// * `kind` - Type of remote storage (Object)
 /// * `descriptors` - Remote block descriptors with keys and sizes
 /// * `local_blocks` - Local host blocks (source for offload, destination for onboard)
 /// * `ctx` - Remote transfer context
@@ -267,18 +265,6 @@ where
             )
             .await
         }
-        RemoteStorageKind::Disk => {
-            execute_disk_transfer(
-                agent,
-                direction,
-                descriptors,
-                local_blocks,
-                block_size,
-                ctx,
-                cancel_token,
-            )
-            .await
-        }
     }
 }
 
@@ -316,11 +302,6 @@ where
         for desc in descriptors.iter() {
             let bucket = match desc.key() {
                 RemoteKey::Object(obj_key) => obj_key.bucket.as_str(),
-                _ => {
-                    return Err(TransferError::IncompatibleTypes(
-                        "Expected Object key for object storage transfer".to_string(),
-                    ));
-                }
             };
 
             // Use sequence hash directly as device_id - NIXL uses this as the object key
@@ -435,139 +416,6 @@ where
     Ok(())
 }
 
-/// Execute disk storage transfer.
-async fn execute_disk_transfer<LB>(
-    agent: &NixlAgent,
-    direction: RemoteTransferDirection,
-    descriptors: &[RemoteBlockDescriptor],
-    local_blocks: &[LB],
-    block_size: usize,
-    ctx: &RemoteTransferContext,
-    cancel_token: &CancellationToken,
-) -> Result<(), TransferError>
-where
-    LB: ReadableBlock + WritableBlock + Local,
-    <LB as StorageTypeProvider>::StorageType: NixlDescriptor,
-{
-    let num_blocks = descriptors.len();
-
-    // For Offload (write): create files
-    // For Onboard (read): open existing files
-    let create_files = matches!(direction, RemoteTransferDirection::Offload);
-
-    // Use a scope block to ensure all non-Send types are dropped before await
-    let (xfer_req, still_pending, _disk_storages) = {
-        // Dynamically create/open and register disk storage for each block
-        let mut disk_storages = Vec::with_capacity(num_blocks);
-
-        for desc in descriptors.iter() {
-            // Get file path from descriptor's DiskKey
-            let file_path = match desc.key() {
-                RemoteKey::Disk(disk_key) => disk_key.full_path(),
-                _ => {
-                    return Err(TransferError::IncompatibleTypes(
-                        "Expected Disk key for disk storage transfer".to_string(),
-                    ));
-                }
-            };
-
-            // Create or open DiskStorage at the specified path
-            // persist=true ensures files aren't deleted when DiskStorage is dropped
-            let mut disk_storage =
-                DiskStorage::new_at_path(&file_path, block_size, create_files, true).map_err(
-                    |e| {
-                        TransferError::ExecutionError(format!(
-                            "Failed to {} DiskStorage at {}: {:?}",
-                            if create_files { "create" } else { "open" },
-                            file_path,
-                            e
-                        ))
-                    },
-                )?;
-
-            // Register with NIXL - this makes it available for transfers
-            disk_storage.nixl_register(agent, None).map_err(|e| {
-                TransferError::ExecutionError(format!(
-                    "Failed to register disk storage {}: {:?}",
-                    file_path, e
-                ))
-            })?;
-
-            disk_storages.push(disk_storage);
-        }
-
-        // Build transfer descriptor lists for disk
-        let mut src_dl = XferDescList::new(MemType::Dram).map_err(|e| {
-            TransferError::ExecutionError(format!("Failed to create src_dl: {:?}", e))
-        })?;
-        let mut dst_dl = XferDescList::new(MemType::File).map_err(|e| {
-            TransferError::ExecutionError(format!("Failed to create dst_dl: {:?}", e))
-        })?;
-
-        for (block, disk_storage) in local_blocks.iter().zip(disk_storages.iter()) {
-            let block_view = block.block_data().block_view()?;
-            let addr = unsafe { block_view.as_ptr() as usize };
-
-            // Add DRAM source descriptor
-            src_dl.add_desc(addr, block_size, 0);
-
-            // Add FILE destination descriptor using the actual file descriptor
-            let fd = disk_storage.fd();
-            dst_dl.add_desc(0, block_size, fd);
-        }
-
-        // Determine the transfer operation
-        let xfer_op = match direction {
-            RemoteTransferDirection::Offload => XferOp::Write,
-            RemoteTransferDirection::Onboard => XferOp::Read,
-        };
-
-        // Create transfer request
-        let agent_name = agent.name();
-        let xfer_req = agent
-            .create_xfer_req(xfer_op, &src_dl, &dst_dl, &agent_name, None)
-            .map_err(|e| {
-                TransferError::ExecutionError(format!("Failed to create xfer_req: {:?}", e))
-            })?;
-
-        let still_pending = agent.post_xfer_req(&xfer_req, None).map_err(|e| {
-            TransferError::ExecutionError(format!("Failed to post xfer_req: {:?}", e))
-        })?;
-
-        // Return disk_storages to keep them alive during the transfer
-        (xfer_req, still_pending, disk_storages)
-    };
-
-    // Wait for completion with cancellation support
-    if still_pending {
-        // Try async notification system, fall back to inline polling if unavailable
-        match ctx.register_nixl_transfer(agent, xfer_req) {
-            Ok(notification) => {
-                tokio::select! {
-                    result = notification => {
-                        result.map_err(|e| TransferError::ExecutionError(e.to_string()))?;
-                    }
-                    _ = cancel_token.cancelled() => {
-                        return Err(TransferError::Cancelled);
-                    }
-                }
-            }
-            Err((_, xfer_req)) => {
-                // Fall back to inline polling
-                poll_transfer_completion_inline(agent, &xfer_req, cancel_token).await?;
-            }
-        }
-    }
-
-    tracing::debug!(
-        "Disk transfer complete: {} blocks, direction={:?}",
-        num_blocks,
-        direction
-    );
-
-    Ok(())
-}
-
 #[cfg(all(test, feature = "testing-cuda", feature = "testing-nixl"))]
 mod tests {
     use super::*;
@@ -582,7 +430,7 @@ mod tests {
     use cudarc::driver::CudaContext;
     use std::sync::Arc;
 
-    // Shared NIXL agent with OBJ and POSIX backends
+    // Shared NIXL agent with OBJ backend for object storage
     lazy_static::lazy_static! {
         static ref TEST_AGENT: Arc<Option<NixlAgent>> = {
             let agent = NixlAgent::new("nixl-transfer-test").expect("Failed to create NIXL agent");
@@ -595,16 +443,6 @@ mod tests {
                 }
             } else {
                 eprintln!("OBJ plugin not found");
-            }
-
-            // Create POSIX backend for disk storage
-            if let Ok((_, params)) = agent.get_plugin_params("POSIX") {
-                match agent.create_backend("POSIX", &params) {
-                    Ok(_) => eprintln!("POSIX backend created"),
-                    Err(e) => eprintln!("POSIX backend failed: {}", e),
-                }
-            } else {
-                eprintln!("POSIX plugin not found");
             }
 
             Arc::new(Some(agent))
@@ -641,10 +479,6 @@ mod tests {
         ))
     }
 
-    fn create_disk_remote_context(base: Arc<TransferContext>, path: &str) -> RemoteTransferContext {
-        RemoteTransferContext::new(base, RemoteStorageConfig::disk(path, false))
-    }
-
     fn create_object_remote_context(
         base: Arc<TransferContext>,
         bucket: &str,
@@ -655,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_remote_transfer_empty_descriptors() {
         let base_ctx = create_transfer_context();
-        let remote_ctx = create_disk_remote_context(base_ctx, "/tmp/nixl-test");
+        let remote_ctx = create_object_remote_context(base_ctx, "test-bucket");
         let cancel_token = CancellationToken::new();
 
         let descriptors: Vec<RemoteBlockDescriptor> = vec![];
@@ -663,7 +497,7 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Disk,
+            RemoteStorageKind::Object,
             &descriptors,
             &local_blocks,
             &remote_ctx,
@@ -677,13 +511,13 @@ mod tests {
     #[tokio::test]
     async fn test_execute_remote_transfer_count_mismatch() {
         let base_ctx = create_transfer_context();
-        let remote_ctx = create_disk_remote_context(base_ctx, "/tmp/nixl-test");
+        let remote_ctx = create_object_remote_context(base_ctx, "test-bucket");
         let cancel_token = CancellationToken::new();
 
         // Create 2 descriptors but 1 block - should fail
         let descriptors = vec![
-            RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024),
-            RemoteBlockDescriptor::disk_from_hash("/tmp", 0x5678, 1024),
+            RemoteBlockDescriptor::object_from_hash("test-bucket", 0x1234, 1024),
+            RemoteBlockDescriptor::object_from_hash("test-bucket", 0x5678, 1024),
         ];
 
         let mut layout = create_test_layout(1);
@@ -700,7 +534,7 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Disk,
+            RemoteStorageKind::Object,
             &descriptors,
             &blocks,
             &remote_ctx,
@@ -714,13 +548,13 @@ mod tests {
     #[tokio::test]
     async fn test_execute_remote_transfer_early_cancellation() {
         let base_ctx = create_transfer_context();
-        let remote_ctx = create_disk_remote_context(base_ctx, "/tmp/nixl-test");
+        let remote_ctx = create_object_remote_context(base_ctx, "test-bucket");
         let cancel_token = CancellationToken::new();
 
         // Cancel before starting
         cancel_token.cancel();
 
-        let descriptors = vec![RemoteBlockDescriptor::disk_from_hash("/tmp", 0x1234, 1024)];
+        let descriptors = vec![RemoteBlockDescriptor::object_from_hash("test-bucket", 0x1234, 1024)];
 
         let mut layout = create_test_layout(1);
         layout
@@ -736,7 +570,7 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Disk,
+            RemoteStorageKind::Object,
             &descriptors,
             &blocks,
             &remote_ctx,
@@ -745,122 +579,6 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(TransferError::Cancelled)));
-    }
-
-    /// Test disk transfer using POSIX backend - writes data to disk and reads it back
-    #[tokio::test]
-    async fn test_posix_disk_transfer_roundtrip() {
-        use tempfile::tempdir;
-
-        let temp_dir = tempdir().unwrap();
-        let base_path = temp_dir.path().to_str().unwrap().to_string();
-
-        let base_ctx = create_transfer_context();
-        let remote_ctx = create_disk_remote_context(base_ctx, &base_path);
-        let cancel_token = CancellationToken::new();
-
-        // Create blocks and fill with test data
-        let mut layout = create_test_layout(2);
-        layout
-            .nixl_register(TEST_AGENT.as_ref().as_ref().unwrap(), None)
-            .unwrap();
-        let block_size = layout.layout_data_bytes() / layout.num_blocks();
-        let layout = Arc::new(layout);
-
-        let mut blocks: Vec<Block<PinnedStorage, locality::Local, BasicMetadata>> = (0..2)
-            .map(|i| {
-                let data = BlockData::new(layout.clone(), i, 0, 0);
-                Block::new(data, BasicMetadata::default()).unwrap()
-            })
-            .collect();
-
-        // Fill blocks with recognizable pattern
-        for (i, block) in blocks.iter_mut().enumerate() {
-            let mut view = block.block_data_mut().block_view_mut().unwrap();
-            let slice = unsafe { std::slice::from_raw_parts_mut(view.as_mut_ptr(), view.size()) };
-            for (j, byte) in slice.iter_mut().enumerate() {
-                *byte = ((i * 100 + j) % 256) as u8;
-            }
-        }
-
-        let descriptors: Vec<RemoteBlockDescriptor> = (0..2u64)
-            .map(|i| RemoteBlockDescriptor::disk_from_hash(&base_path, 0x1000 + i, block_size))
-            .collect();
-
-        // Offload (write to disk via POSIX)
-        let result = execute_remote_transfer(
-            RemoteTransferDirection::Offload,
-            RemoteStorageKind::Disk,
-            &descriptors,
-            &blocks,
-            &remote_ctx,
-            &cancel_token,
-        )
-        .await;
-
-        if result.is_err() {
-            eprintln!(
-                "POSIX disk transfer test skipped - backend may not be available: {:?}",
-                result
-            );
-            return;
-        }
-        assert!(result.is_ok(), "POSIX Offload failed: {:?}", result);
-
-        // Drop offload blocks to ensure we're not reusing cached memory
-        drop(blocks);
-
-        // Create fresh blocks for onboarding (different memory)
-        let mut onboard_layout = create_test_layout(2);
-        onboard_layout
-            .nixl_register(TEST_AGENT.as_ref().as_ref().unwrap(), None)
-            .unwrap();
-        let onboard_layout = Arc::new(onboard_layout);
-
-        let mut onboard_blocks: Vec<Block<PinnedStorage, locality::Local, BasicMetadata>> = (0..2)
-            .map(|i| {
-                let data = BlockData::new(onboard_layout.clone(), i, 0, 0);
-                Block::new(data, BasicMetadata::default()).unwrap()
-            })
-            .collect();
-
-        // Verify onboard blocks start zeroed (not containing our pattern)
-        for block in onboard_blocks.iter() {
-            let view = block.block_data().block_view().unwrap();
-            let slice = unsafe { std::slice::from_raw_parts(view.as_ptr(), view.size()) };
-            assert!(
-                slice.iter().all(|&b| b == 0),
-                "Onboard blocks should start zeroed"
-            );
-        }
-
-        // Onboard (read from disk via POSIX) into fresh blocks
-        let result = execute_remote_transfer(
-            RemoteTransferDirection::Onboard,
-            RemoteStorageKind::Disk,
-            &descriptors,
-            &onboard_blocks,
-            &remote_ctx,
-            &cancel_token,
-        )
-        .await;
-
-        assert!(result.is_ok(), "POSIX Onboard failed: {:?}", result);
-
-        // Verify data was restored to the new blocks
-        for (i, block) in onboard_blocks.iter().enumerate() {
-            let view = block.block_data().block_view().unwrap();
-            let slice = unsafe { std::slice::from_raw_parts(view.as_ptr(), view.size()) };
-            for (j, &byte) in slice.iter().enumerate() {
-                let expected = ((i * 100 + j) % 256) as u8;
-                assert_eq!(
-                    byte, expected,
-                    "POSIX: Data mismatch at block {} byte {}",
-                    i, j
-                );
-            }
-        }
-        eprintln!("POSIX disk roundtrip transfer successful (using separate blocks for onboard)");
     }
 
     /// Test object storage transfer using OBJ backend - writes data to S3/object store and reads it back

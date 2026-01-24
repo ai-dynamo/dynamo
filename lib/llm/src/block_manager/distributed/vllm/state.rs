@@ -3,7 +3,7 @@
 
 //! G4 State Machine for remote storage operations.
 //!
-//! Provides formal state tracking for G4 (object/remote disk storage) transfers,
+//! Provides formal state tracking for G4 (object storage) transfers,
 //! ensuring correct state transitions and enabling proper failure recovery.
 
 use serde::{Deserialize, Serialize};

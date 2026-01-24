@@ -9,7 +9,7 @@
 //! - **Transfer pipelines**: Descriptor and pipeline construction
 
 use crate::block_manager::block::transfer::remote::{
-    DiskKey, ObjectKey, RemoteBlockDescriptor, RemoteKey, RemoteTransferPipeline,
+    ObjectKey, RemoteBlockDescriptor, RemoteKey, RemoteTransferPipeline,
 };
 use crate::block_manager::config::RemoteStorageConfig;
 use crate::block_manager::connector::protocol::{RequestType, TransferType, WorkerTransferRequest};
@@ -159,19 +159,6 @@ fn build_entries(
                 })
                 .collect()
         }
-        RemoteStorageConfig::Disk { base_path, .. } => {
-            let path = base_path.replace("{worker_id}", &worker_id.to_string());
-            hashes_with_positions
-                .iter()
-                .map(|&(hash, pos)| {
-                    let key = RemoteKey::Disk(DiskKey {
-                        path: path.clone(),
-                        key: format!("{:016x}", hash),
-                    });
-                    (hash, pos, key)
-                })
-                .collect()
-        }
     }
 }
 
@@ -191,10 +178,6 @@ pub fn create_descriptors(
                 .map(|&hash| RemoteBlockDescriptor::object_from_hash(bucket, hash, block_size))
                 .collect()
         }
-        RemoteStorageConfig::Disk { base_path, .. } => hashes
-            .iter()
-            .map(|&hash| RemoteBlockDescriptor::disk_from_hash(base_path, hash, block_size))
-            .collect(),
     }
 }
 

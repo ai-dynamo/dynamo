@@ -23,22 +23,18 @@ use crate::block_manager::distributed::registry::RegistryValue;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteStorageKind {
     Object,
-    Disk,
 }
 
 /// A key that identifies a block in remote storage.
 ///
 /// This is an abstract type that can represent different addressing schemes:
 /// - Object storage: bucket + object key
-/// - Remote disk: path + offset/key
 ///
 /// The key must be serializable for registry storage and network transmission.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteKey {
     /// Object storage
     Object(ObjectKey),
-    /// Remote disk
-    Disk(DiskKey),
 }
 
 /// Key for object storage - bucket + object identifier.
@@ -73,44 +69,11 @@ impl ObjectKey {
     }
 }
 
-/// Key for remote disk storage - path + identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct DiskKey {
-    /// Base path (mount point, share path, etc.)
-    pub path: String,
-    /// Block identifier within the path (could be filename, offset, etc.)
-    pub key: String,
-}
-
-impl DiskKey {
-    /// Create a new disk key.
-    pub fn new(path: impl Into<String>, key: impl Into<String>) -> Self {
-        Self {
-            path: path.into(),
-            key: key.into(),
-        }
-    }
-
-    /// Create from sequence hash.
-    pub fn from_hash(path: impl Into<String>, hash: u64) -> Self {
-        Self {
-            path: path.into(),
-            key: format!("{:016x}", hash),
-        }
-    }
-
-    /// Get full path (path + key).
-    pub fn full_path(&self) -> String {
-        format!("{}/{}", self.path, self.key)
-    }
-}
-
 impl RemoteKey {
     /// Get the storage kind.
     pub fn kind(&self) -> RemoteStorageKind {
         match self {
             RemoteKey::Object(_) => RemoteStorageKind::Object,
-            RemoteKey::Disk(_) => RemoteStorageKind::Disk,
         }
     }
 
@@ -127,32 +90,24 @@ impl RemoteKey {
         RemoteKey::Object(ObjectKey::new(bucket, key))
     }
 
-    /// Create disk key.
-    pub fn disk(path: impl Into<String>, key: impl Into<String>) -> Self {
-        RemoteKey::Disk(DiskKey::new(path, key))
-    }
-
     /// Get the sequence hash if this is an object key created from a hash.
     pub fn sequence_hash(&self) -> Option<u64> {
         match self {
             RemoteKey::Object(obj) => obj.as_hash(),
-            RemoteKey::Disk(disk) => u64::from_str_radix(&disk.key, 16).ok(),
         }
     }
 
-    /// Get the location (bucket for Object, path for Disk).
+    /// Get the location (bucket for Object).
     pub fn location(&self) -> &str {
         match self {
             RemoteKey::Object(obj) => &obj.bucket,
-            RemoteKey::Disk(disk) => &disk.path,
         }
     }
 
-    /// Get the key portion (object key or disk key).
+    /// Get the key portion.
     pub fn key_str(&self) -> &str {
         match self {
             RemoteKey::Object(obj) => &obj.key,
-            RemoteKey::Disk(disk) => &disk.key,
         }
     }
 
@@ -160,16 +115,11 @@ impl RemoteKey {
     pub fn object_from_hash(bucket: impl Into<String>, hash: u64) -> Self {
         RemoteKey::Object(ObjectKey::from_hash(bucket, hash))
     }
-
-    /// Create disk key from sequence hash.
-    pub fn disk_from_hash(path: impl Into<String>, hash: u64) -> Self {
-        RemoteKey::Disk(DiskKey::from_hash(path, hash))
-    }
 }
 
 /// Binary format for RemoteKey:
-/// - Byte 0: variant tag (0 = Object, 1 = Disk)
-/// - Bytes 1-2: location length (u16 LE) - bucket for Object, path for Disk
+/// - Byte 0: variant tag (0 = Object)
+/// - Bytes 1-2: location length (u16 LE) - bucket for Object
 /// - Bytes 3..3+loc_len: location bytes
 /// - Bytes after location: 2 bytes for key length (u16 LE) + key bytes
 impl RegistryValue for RemoteKey {
@@ -182,17 +132,6 @@ impl RegistryValue for RemoteKey {
                 buf.push(0u8); // Object variant
                 buf.extend_from_slice(&(bucket_bytes.len() as u16).to_le_bytes());
                 buf.extend_from_slice(bucket_bytes);
-                buf.extend_from_slice(&(key_bytes.len() as u16).to_le_bytes());
-                buf.extend_from_slice(key_bytes);
-                buf
-            }
-            RemoteKey::Disk(disk) => {
-                let path_bytes = disk.path.as_bytes();
-                let key_bytes = disk.key.as_bytes();
-                let mut buf = Vec::with_capacity(1 + 2 + path_bytes.len() + 2 + key_bytes.len());
-                buf.push(1u8); // Disk variant
-                buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
-                buf.extend_from_slice(path_bytes);
                 buf.extend_from_slice(&(key_bytes.len() as u16).to_le_bytes());
                 buf.extend_from_slice(key_bytes);
                 buf
@@ -222,10 +161,6 @@ impl RegistryValue for RemoteKey {
         match variant {
             0 => Some(RemoteKey::Object(ObjectKey {
                 bucket: location,
-                key,
-            })),
-            1 => Some(RemoteKey::Disk(DiskKey {
-                path: location,
                 key,
             })),
             _ => None,
@@ -299,17 +234,6 @@ impl RemoteBlockDescriptor {
     pub fn object_from_hash(bucket: impl Into<String>, hash: u64, size: usize) -> Self {
         let bucket = bucket.into();
         let mut desc = Self::new(RemoteKey::Object(ObjectKey::from_hash(&bucket, hash)), size);
-        desc.metadata = Some(RemoteBlockMetadata::new(hash));
-        desc
-    }
-
-    pub fn disk(path: impl Into<String>, key: impl Into<String>, size: usize) -> Self {
-        Self::new(RemoteKey::disk(path, key), size)
-    }
-
-    pub fn disk_from_hash(path: impl Into<String>, hash: u64, size: usize) -> Self {
-        let path = path.into();
-        let mut desc = Self::new(RemoteKey::Disk(DiskKey::from_hash(&path, hash)), size);
         desc.metadata = Some(RemoteBlockMetadata::new(hash));
         desc
     }
@@ -505,23 +429,18 @@ impl RemoteTransferPipeline {
 pub enum RemoteTransferStrategy {
     NixlObjectRead,
     NixlObjectWrite,
-    NixlDiskRead,
-    NixlDiskWrite,
     Invalid,
 }
 
 impl RemoteTransferStrategy {
     pub fn is_read(&self) -> bool {
-        matches!(self, Self::NixlObjectRead | Self::NixlDiskRead)
+        matches!(self, Self::NixlObjectRead)
     }
     pub fn is_write(&self) -> bool {
-        matches!(self, Self::NixlObjectWrite | Self::NixlDiskWrite)
+        matches!(self, Self::NixlObjectWrite)
     }
     pub fn is_object(&self) -> bool {
         matches!(self, Self::NixlObjectRead | Self::NixlObjectWrite)
-    }
-    pub fn is_disk(&self) -> bool {
-        matches!(self, Self::NixlDiskRead | Self::NixlDiskWrite)
     }
 
     pub fn from_direction_and_kind(
@@ -531,8 +450,6 @@ impl RemoteTransferStrategy {
         match (direction, kind) {
             (RemoteTransferDirection::Onboard, RemoteStorageKind::Object) => Self::NixlObjectRead,
             (RemoteTransferDirection::Offload, RemoteStorageKind::Object) => Self::NixlObjectWrite,
-            (RemoteTransferDirection::Onboard, RemoteStorageKind::Disk) => Self::NixlDiskRead,
-            (RemoteTransferDirection::Offload, RemoteStorageKind::Disk) => Self::NixlDiskWrite,
         }
     }
 }
@@ -587,18 +504,9 @@ mod tests {
     }
 
     #[test]
-    fn test_disk_key_full_path() {
-        let key = DiskKey::new("/mnt/nfs", "block_001");
-        assert_eq!(key.full_path(), "/mnt/nfs/block_001");
-    }
-
-    #[test]
     fn test_remote_key_kind() {
         let obj_key = RemoteKey::object("bucket", "key");
         assert_eq!(obj_key.kind(), RemoteStorageKind::Object);
-
-        let disk_key = RemoteKey::disk("/path", "key");
-        assert_eq!(disk_key.kind(), RemoteStorageKind::Disk);
     }
 
     #[test]
@@ -633,10 +541,8 @@ mod tests {
         assert!(RemoteTransferStrategy::NixlObjectRead.is_read());
         assert!(RemoteTransferStrategy::NixlObjectRead.is_object());
         assert!(!RemoteTransferStrategy::NixlObjectRead.is_write());
-        assert!(!RemoteTransferStrategy::NixlObjectRead.is_disk());
 
-        assert!(RemoteTransferStrategy::NixlDiskWrite.is_write());
-        assert!(RemoteTransferStrategy::NixlDiskWrite.is_disk());
+        assert!(RemoteTransferStrategy::NixlObjectWrite.is_write());
         assert_eq!(
             RemoteTransferStrategy::from_direction_and_kind(
                 RemoteTransferDirection::Onboard,
@@ -647,9 +553,9 @@ mod tests {
         assert_eq!(
             RemoteTransferStrategy::from_direction_and_kind(
                 RemoteTransferDirection::Offload,
-                RemoteStorageKind::Disk,
+                RemoteStorageKind::Object,
             ),
-            RemoteTransferStrategy::NixlDiskWrite
+            RemoteTransferStrategy::NixlObjectWrite
         );
     }
 
@@ -660,12 +566,6 @@ mod tests {
         let bytes = obj_key.to_bytes();
         let decoded = RemoteKey::from_bytes(&bytes).unwrap();
         assert_eq!(decoded, obj_key);
-
-        // Test Disk key roundtrip
-        let disk_key = RemoteKey::disk("/mnt/storage", "block-001");
-        let bytes = disk_key.to_bytes();
-        let decoded = RemoteKey::from_bytes(&bytes).unwrap();
-        assert_eq!(decoded, disk_key);
 
         // Test from_hash pattern
         let hash_key = RemoteKey::object_from_hash("cache-bucket", 0x123456789ABCDEF0);

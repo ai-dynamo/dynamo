@@ -205,15 +205,9 @@ async fn perform_allocation_and_build_handler(
 ) -> anyhow::Result<BlockTransferHandler> {
     // Determine if GDS_MT backend should be enabled:
     // - For local disk cache (G3): enabled if disk blocks are configured
-    // - For remote disk storage (G4): enabled if DYN_KVBM_REMOTE_DISK_PATH is set
-    //   and DYN_KVBM_REMOTE_DISK_USE_GDS is true (default: true)
     let use_gds_for_local_disk = leader_meta.num_disk_blocks > 0;
-    let use_gds_for_remote_disk = std::env::var("DYN_KVBM_REMOTE_DISK_PATH").is_ok()
-        && std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
-            .map(|v| v == "1" || v.to_lowercase() == "true")
-            .unwrap_or(true);
 
-    let agent = build_agent(worker_id, use_gds_for_local_disk || use_gds_for_remote_disk)?;
+    let agent = build_agent(worker_id, use_gds_for_local_disk)?;
     let pool_config = PoolConfig {
         enable_pool: true,
         max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
@@ -953,28 +947,17 @@ impl KvbmWorker {
 
 /// Create a remote storage context based on environment variable configuration.
 ///
-/// Supports both Object storage (S3/MinIO) and Disk storage (shared filesystem).
+/// Supports Object storage (S3/MinIO).
 ///
 /// Environment variables:
-/// - `DYN_KVBM_REMOTE_STORAGE_TYPE`: "object", "disk", or "auto" (default: "auto")
 /// - `DYN_KVBM_OBJECT_BUCKET` or `AWS_DEFAULT_BUCKET`: Bucket name for object storage
-/// - `DYN_KVBM_REMOTE_DISK_PATH`: Base path for disk storage
-/// - `DYN_KVBM_REMOTE_DISK_USE_GDS`: Enable GPU Direct Storage for disk (default: true)
-///
-/// Auto-detection logic:
-/// - If only bucket is set -> object storage
-/// - If only disk path is set -> disk storage
-/// - If both are set -> object storage (unless explicitly overridden)
+/// - `DYN_KVBM_OBJECT_ENDPOINT` or `AWS_ENDPOINT_URL`: Object storage endpoint
+/// - `DYN_KVBM_OBJECT_REGION` or `AWS_REGION`: Object storage region
 fn create_remote_context(
     transfer_context: Arc<crate::block_manager::block::transfer::TransferContext>,
     worker_id: usize,
 ) -> Option<Arc<RemoteTransferContext>> {
     use crate::block_manager::config::RemoteStorageConfig;
-
-    // Get storage type preference
-    let storage_type =
-        std::env::var("DYN_KVBM_REMOTE_STORAGE_TYPE").unwrap_or_else(|_| "auto".to_string());
-    let storage_type = storage_type.to_lowercase();
 
     // Get object storage config
     let bucket = std::env::var("DYN_KVBM_OBJECT_BUCKET")
@@ -991,112 +974,29 @@ fn create_remote_context(
         .or_else(|_| std::env::var("AWS_REGION"))
         .ok();
 
-    // Get disk storage config
-    let disk_path = std::env::var("DYN_KVBM_REMOTE_DISK_PATH")
-        .ok()
-        .map(|p| p.replace("{worker_id}", &worker_id.to_string()));
-
-    let disk_use_gds = std::env::var("DYN_KVBM_REMOTE_DISK_USE_GDS")
-        .map(|v| v == "1" || v.to_lowercase() == "true")
-        .unwrap_or(true);
-
-    // Determine storage config based on type and available settings
-    let storage_config: Option<RemoteStorageConfig> = match storage_type.as_str() {
-        "disk" => {
-            // Explicit disk selection
-            if let Some(path) = disk_path {
-                tracing::info!(
-                    worker_id = worker_id,
-                    base_path = %path,
-                    use_gds = disk_use_gds,
-                    "Creating remote context for disk storage (explicit)"
-                );
-                Some(RemoteStorageConfig::Disk {
-                    base_path: path,
-                    use_gds: disk_use_gds,
-                })
-            } else {
-                tracing::warn!(
-                    "DYN_KVBM_REMOTE_STORAGE_TYPE=disk but DYN_KVBM_REMOTE_DISK_PATH not set"
-                );
-                None
-            }
-        }
-        "object" => {
-            // Explicit object selection
-            tracing::info!(
-                worker_id = worker_id,
-                bucket = ?bucket,
-                endpoint = ?object_endpoint,
-                "Creating remote context for object storage (explicit)"
-            );
-            Some(RemoteStorageConfig::Object {
-                default_bucket: bucket,
-                endpoint: object_endpoint,
-                region: object_region,
-            })
-        }
-        _ => {
-            // Auto-detect based on which env vars are set
-            match (&bucket, &disk_path) {
-                (Some(_), Some(path)) => {
-                    // Both configured - prefer object (can be overridden with explicit type)
-                    tracing::info!(
-                        worker_id = worker_id,
-                        bucket = ?bucket,
-                        disk_path = %path,
-                        "Both object and disk storage configured, defaulting to object"
-                    );
-                    Some(RemoteStorageConfig::Object {
-                        default_bucket: bucket,
-                        endpoint: object_endpoint,
-                        region: object_region,
-                    })
-                }
-                (Some(_), None) => {
-                    // Only object configured
-                    tracing::info!(
-                        worker_id = worker_id,
-                        bucket = ?bucket,
-                        endpoint = ?object_endpoint,
-                        "Creating remote context for object storage (auto-detected)"
-                    );
-                    Some(RemoteStorageConfig::Object {
-                        default_bucket: bucket,
-                        endpoint: object_endpoint,
-                        region: object_region,
-                    })
-                }
-                (None, Some(path)) => {
-                    // Only disk configured
-                    tracing::info!(
-                        worker_id = worker_id,
-                        base_path = %path,
-                        use_gds = disk_use_gds,
-                        "Creating remote context for disk storage (auto-detected)"
-                    );
-                    Some(RemoteStorageConfig::Disk {
-                        base_path: path.clone(),
-                        use_gds: disk_use_gds,
-                    })
-                }
-                (None, None) => {
-                    // No remote storage configured
-                    tracing::debug!(
-                        worker_id = worker_id,
-                        "No remote storage configured (set DYN_KVBM_OBJECT_BUCKET or DYN_KVBM_REMOTE_DISK_PATH)"
-                    );
-                    None
-                }
-            }
-        }
-    };
-
-    storage_config.map(|config| {
-        Arc::new(
+    // Create object storage config if bucket is available
+    if bucket.is_some() || object_endpoint.is_some() {
+        tracing::info!(
+            worker_id = worker_id,
+            bucket = ?bucket,
+            endpoint = ?object_endpoint,
+            "Creating remote context for object storage"
+        );
+        let config = RemoteStorageConfig::Object {
+            default_bucket: bucket,
+            endpoint: object_endpoint,
+            region: object_region,
+        };
+        Some(Arc::new(
             RemoteTransferContext::new(transfer_context, config).with_worker_id(worker_id as u64),
-        )
-    })
+        ))
+    } else {
+        tracing::debug!(
+            worker_id = worker_id,
+            "No remote storage configured (set DYN_KVBM_OBJECT_BUCKET)"
+        );
+        None
+    }
 }
 
 impl Drop for KvbmWorker {

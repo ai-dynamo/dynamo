@@ -316,10 +316,6 @@ pub enum RemoteStorageConfig {
         endpoint: Option<String>,
         region: Option<String>,
     },
-    Disk {
-        base_path: String,
-        use_gds: bool,
-    },
 }
 
 impl RemoteStorageConfig {
@@ -340,13 +336,6 @@ impl RemoteStorageConfig {
             default_bucket: bucket,
             endpoint,
             region,
-        }
-    }
-
-    pub fn disk(base_path: impl Into<String>, use_gds: bool) -> Self {
-        Self::Disk {
-            base_path: base_path.into(),
-            use_gds,
         }
     }
 }
@@ -402,16 +391,6 @@ impl RemoteTransferContext {
         }
     }
 
-    pub fn for_disk(base: Arc<TransferContext>, base_path: String, use_gds: bool) -> Self {
-        let tx = spawn_notification_handler(base.async_rt_handle());
-        Self {
-            base,
-            config: RemoteStorageConfig::Disk { base_path, use_gds },
-            worker_id: 0,
-            tx_notifications: Some(tx),
-        }
-    }
-
     pub fn new(base: Arc<TransferContext>, config: RemoteStorageConfig) -> Self {
         let tx = spawn_notification_handler(base.async_rt_handle());
         Self {
@@ -450,14 +429,6 @@ impl RemoteTransferContext {
     pub fn default_bucket(&self) -> Option<&str> {
         match &self.config {
             RemoteStorageConfig::Object { default_bucket, .. } => default_bucket.as_deref(),
-            _ => None,
-        }
-    }
-
-    pub fn base_path(&self) -> Option<&str> {
-        match &self.config {
-            RemoteStorageConfig::Disk { base_path, .. } => Some(base_path),
-            _ => None,
         }
     }
 
@@ -578,30 +549,6 @@ mod tests {
         }
 
         #[test]
-        fn test_disk_config() {
-            let config = RemoteStorageConfig::disk("/mnt/kv-cache", false);
-            match config {
-                RemoteStorageConfig::Disk { base_path, use_gds } => {
-                    assert_eq!(base_path, "/mnt/kv-cache");
-                    assert!(!use_gds);
-                }
-                _ => panic!("Expected Disk variant"),
-            }
-        }
-
-        #[test]
-        fn test_disk_config_with_gds() {
-            let config = RemoteStorageConfig::disk("/mnt/nvme", true);
-            match config {
-                RemoteStorageConfig::Disk { base_path, use_gds } => {
-                    assert_eq!(base_path, "/mnt/nvme");
-                    assert!(use_gds);
-                }
-                _ => panic!("Expected Disk variant"),
-            }
-        }
-
-        #[test]
         fn test_config_clone() {
             let config = RemoteStorageConfig::object("bucket");
             let cloned = config.clone();
@@ -644,22 +591,6 @@ mod tests {
                     assert_eq!(default_bucket, Some("test-bucket".to_string()));
                 }
                 _ => panic!("Expected Object variant"),
-            }
-        }
-
-        #[test]
-        fn test_remote_context_config_disk() {
-            let config = RemoteContextConfig {
-                remote_storage_config: RemoteStorageConfig::disk("/data/cache", true),
-                worker_id: 7,
-            };
-            assert_eq!(config.worker_id, 7);
-            match config.remote_storage_config {
-                RemoteStorageConfig::Disk { base_path, use_gds } => {
-                    assert_eq!(base_path, "/data/cache");
-                    assert!(use_gds);
-                }
-                _ => panic!("Expected Disk variant"),
             }
         }
 

@@ -228,6 +228,7 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     /// Cache statistics tracker
     cache_stats: Arc<CacheStatsTracker>,
     /// KVBM metrics for exposing cache hit rates
+    #[allow(dead_code)]
     kvbm_metrics: KvbmMetrics,
     /// Reference to the leader for G4 operations
     leader: Arc<KvbmLeader>,
@@ -2302,7 +2303,6 @@ async fn process_remote_transfer_request(
 
     let storage_type_str = match &storage_config {
         RemoteStorageConfig::Object { .. } => "object",
-        RemoteStorageConfig::Disk { .. } => "disk",
     };
 
     tracing::debug!(

@@ -157,7 +157,6 @@ pub struct SerializableRemoteBlockDescriptor {
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerializableStorageType {
     Object,
-    Disk,
 }
 
 impl From<&RemoteBlockDescriptor> for SerializableRemoteBlockDescriptor {
@@ -168,13 +167,6 @@ impl From<&RemoteBlockDescriptor> for SerializableRemoteBlockDescriptor {
                 storage_type: SerializableStorageType::Object,
                 location: obj.bucket.clone(),
                 key: obj.key.clone(),
-                size: desc.size(),
-                sequence_hash: desc.sequence_hash(),
-            },
-            RemoteKey::Disk(disk) => Self {
-                storage_type: SerializableStorageType::Disk,
-                location: disk.path.clone(),
-                key: disk.key.clone(),
                 size: desc.size(),
                 sequence_hash: desc.sequence_hash(),
             },
@@ -213,14 +205,11 @@ impl SerializableRemoteBlockDescriptor {
     /// Convert back to RemoteBlockDescriptor.
     pub fn to_descriptor(&self) -> RemoteBlockDescriptor {
         use crate::block_manager::block::transfer::remote::{
-            DiskKey, ObjectKey, RemoteBlockMetadata, RemoteKey,
+            ObjectKey, RemoteBlockMetadata, RemoteKey,
         };
         let key = match self.storage_type {
             SerializableStorageType::Object => {
                 RemoteKey::Object(ObjectKey::new(&self.location, &self.key))
-            }
-            SerializableStorageType::Disk => {
-                RemoteKey::Disk(DiskKey::new(&self.location, &self.key))
             }
         };
         if let Some(hash) = self.sequence_hash {
@@ -485,22 +474,4 @@ mod tests {
         assert!(restored_pipeline.has_bounce());
     }
 
-    #[test]
-    fn test_disk_descriptor_roundtrip() {
-        use crate::block_manager::block::transfer::remote::{DiskKey, RemoteKey};
-
-        let key = RemoteKey::Disk(DiskKey::new("/mnt/nvme", "block_001"));
-        let desc = RemoteBlockDescriptor::new(key, 8192);
-
-        let serializable: SerializableRemoteBlockDescriptor = (&desc).into();
-        assert_eq!(serializable.storage_type, SerializableStorageType::Disk);
-        assert_eq!(serializable.location, "/mnt/nvme");
-        assert_eq!(serializable.key, "block_001");
-
-        let restored = serializable.to_descriptor();
-        assert_eq!(
-            restored.kind(),
-            crate::block_manager::block::transfer::remote::RemoteStorageKind::Disk
-        );
-    }
 }
