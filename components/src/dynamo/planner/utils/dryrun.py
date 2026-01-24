@@ -71,9 +71,7 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
         num_p = [args.start_num_p]
         p_thpt = [metrics[0]["request_count"] * metrics[0]["avg_isl"]]
         safe_p_thpt = [
-            compute_safe_p_thpt(
-                args.start_num_p, metrics[0]["avg_isl"], args.ttft
-            )
+            compute_safe_p_thpt(args.start_num_p, metrics[0]["avg_isl"], args.ttft)
             * args.adjustment_interval
         ]
         prefill_planner.dryrun_observe_metrics(

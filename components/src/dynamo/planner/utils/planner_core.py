@@ -213,12 +213,9 @@ class BasePlanner:
                 else:
                     raise ValueError(f"Invalid environment: {args.environment}")
 
-            self.prometheus_api_client = (
-                prometheus_api_client
-                or PrometheusAPIClient(
-                    args.metric_pulling_prometheus_endpoint,
-                    args.namespace,
-                )
+            self.prometheus_api_client = prometheus_api_client or PrometheusAPIClient(
+                args.metric_pulling_prometheus_endpoint,
+                args.namespace,
             )
 
         predictor_cls = LOAD_PREDICTORS[args.load_predictor]
@@ -342,9 +339,7 @@ class BasePlanner:
         ):
             await self.connector._async_init()
 
-    async def _get_model_name(
-        self, require_prefill: bool, require_decode: bool
-    ) -> str:
+    async def _get_model_name(self, require_prefill: bool, require_decode: bool) -> str:
         model_name = self.connector.get_model_name(
             require_prefill=require_prefill, require_decode=require_decode
         )
@@ -658,13 +653,9 @@ class PrefillPlanner(BasePlanner):
     component_type = SubComponentType.PREFILL
 
     def _update_correction_factor(self) -> bool:
-        expect_ttft = self.prefill_interpolator.interpolate_ttft(
-            self.last_metrics.isl
-        )
+        expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
         self.p_correction_factor = self.last_metrics.ttft / expect_ttft
-        logger.info(
-            f"Correction factor (prefill TTFT): {self.p_correction_factor:.3f}"
-        )
+        logger.info(f"Correction factor (prefill TTFT): {self.p_correction_factor:.3f}")
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
             self.prometheus_metrics.p_correction_factor.set(self.p_correction_factor)
         return True
@@ -678,13 +669,9 @@ class PrefillPlanner(BasePlanner):
             / self.args.adjustment_interval
             * min(1, self.p_correction_factor)
         )
-        p_thpt_per_gpu = self.prefill_interpolator.interpolate_thpt_per_gpu(
-            next_isl
-        )
+        p_thpt_per_gpu = self.prefill_interpolator.interpolate_thpt_per_gpu(next_isl)
         next_num_p = math.ceil(
-            pred_prefill_throughput
-            / p_thpt_per_gpu
-            / self.args.prefill_engine_num_gpu
+            pred_prefill_throughput / p_thpt_per_gpu / self.args.prefill_engine_num_gpu
         )
         next_num_p = max(next_num_p, self.args.min_endpoint)
         logger.info(
@@ -716,9 +703,7 @@ class DecodePlanner(BasePlanner):
             context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
         )
         self.d_correction_factor = self.last_metrics.itl / expect_itl
-        logger.info(
-            f"Correction factor (decode ITL): {self.d_correction_factor:.3f}"
-        )
+        logger.info(f"Correction factor (decode ITL): {self.d_correction_factor:.3f}")
         if self.prometheus_port != 0 and self.prometheus_metrics is not None:
             self.prometheus_metrics.d_correction_factor.set(self.d_correction_factor)
         return True
@@ -733,10 +718,12 @@ class DecodePlanner(BasePlanner):
             corrected_itl = self.args.itl
         else:
             corrected_itl = self.args.itl / self.d_correction_factor
-        pred_decode_thpt_per_gpu, _, _ = (
-            self.decode_interpolator.find_best_throughput_per_gpu(
-                itl=corrected_itl, context_length=next_isl + next_osl / 2
-            )
+        (
+            pred_decode_thpt_per_gpu,
+            _,
+            _,
+        ) = self.decode_interpolator.find_best_throughput_per_gpu(
+            itl=corrected_itl, context_length=next_isl + next_osl / 2
         )
         pred_decode_throughput = next_num_req * next_osl / self.args.adjustment_interval
         next_num_d = math.ceil(

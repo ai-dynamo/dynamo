@@ -85,7 +85,10 @@ def _build_planners(args, prometheus_client):
     decode_planner.model_name = "test-model"
 
     async def mock_get_workers_info(include_prefill=True, include_decode=True):
-        return (["prefill-0"] if include_prefill else [], ["decode-0"] if include_decode else [])
+        return (
+            ["prefill-0"] if include_prefill else [],
+            ["decode-0"] if include_decode else [],
+        )
 
     prefill_planner.get_workers_info = mock_get_workers_info
     decode_planner.get_workers_info = mock_get_workers_info
@@ -106,10 +109,12 @@ def _expected_prefill(args, prefill_planner, sample):
 
 
 def _expected_decode(args, decode_planner, sample):
-    pred_decode_thpt_per_gpu, _, _ = (
-        decode_planner.decode_interpolator.find_best_throughput_per_gpu(
-            itl=args.itl, context_length=sample["isl"] + sample["osl"] / 2
-        )
+    (
+        pred_decode_thpt_per_gpu,
+        _,
+        _,
+    ) = decode_planner.decode_interpolator.find_best_throughput_per_gpu(
+        itl=args.itl, context_length=sample["isl"] + sample["osl"] / 2
     )
     pred_decode_throughput = (
         sample["num_req"] * sample["osl"] / args.adjustment_interval
