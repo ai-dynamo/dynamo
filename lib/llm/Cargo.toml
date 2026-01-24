@@ -208,7 +208,8 @@ name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
 
-[[bin]]
+[[bench]]
 name = "radix_tree_microbench"
-path = "bin/radix_tree_microbench.rs"
+path = "benches/radix_tree_microbench.rs"
+harness = false
 required-features = ["kv-router-stress"]
