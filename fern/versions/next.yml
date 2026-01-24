@@ -88,6 +88,20 @@ navigation:
             path: ../pages/observability/tracing.md
           - page: Logging
             path: ../pages/observability/logging.md
+      - section: Fault Tolerance
+        contents:
+          - page: Overview
+            path: ../pages/fault-tolerance/README.md
+          - page: Request Migration
+            path: ../pages/fault-tolerance/request-migration.md
+          - page: Request Cancellation
+            path: ../pages/fault-tolerance/request-cancellation.md
+          - page: Graceful Shutdown
+            path: ../pages/fault-tolerance/graceful-shutdown.md
+          - page: Request Rejection
+            path: ../pages/fault-tolerance/request-rejection.md
+          - page: Testing
+            path: ../pages/fault-tolerance/testing.md
       - page: Glossary
         path: ../pages/reference/glossary.md
 
@@ -148,6 +162,8 @@ navigation:
         path: ../pages/design-docs/disagg-serving.md
       - page: Distributed Runtime
         path: ../pages/design-docs/distributed-runtime.md
+      - page: Event Plane
+        path: ../pages/design-docs/event-plane.md
 
   # ==================== Additional Resources ====================
   # Hidden section - these pages are accessible via direct URL but not shown in navigation
@@ -182,12 +198,6 @@ navigation:
         contents:
           - page: KV Cache Routing
             path: ../pages/router/kv-cache-routing.md
-      - section: Fault Tolerance
-        contents:
-          - page: Request Cancellation
-            path: ../pages/fault-tolerance/request-cancellation.md
-          - page: Request Migration
-            path: ../pages/fault-tolerance/request-migration.md
       - section: Benchmarks
         contents:
           - page: KV Router A/B Testing
