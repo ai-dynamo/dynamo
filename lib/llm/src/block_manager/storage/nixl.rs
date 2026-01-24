@@ -388,11 +388,6 @@ impl NixlRegisterableStorage for DiskStorage {
 
         handle_nixl_register(self, agent, opt_args)?;
 
-        // Only unlink if this is a temporary file (not persisted).
-        // For persistent files, we need to keep the path accessible for later reads.
-        if !self.persist() {
-            self.unlink()?;
-        }
         Ok(())
     }
 }
