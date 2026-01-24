@@ -8,6 +8,7 @@
 
 mod cache;
 mod discovery;
+mod events;
 mod nixl;
 mod nova;
 mod object;
@@ -20,6 +21,7 @@ pub use cache::{CacheConfig, DiskCacheConfig, HostCacheConfig, ParallelismMode};
 pub use discovery::{
     DiscoveryConfig, EtcdDiscoveryConfig, FilesystemDiscoveryConfig, P2pDiscoveryConfig,
 };
+pub use events::{BatchingConfig as EventsBatchingConfig, EventPolicyConfig, EventsConfig};
 pub use nixl::NixlConfig;
 pub use nova::{NovaBackendConfig, NovaConfig};
 pub use object::{NixlObjectConfig, ObjectClientConfig, ObjectConfig, S3ObjectConfig};
@@ -92,6 +94,11 @@ pub struct KvbmConfig {
     #[validate(nested)]
     #[serde(default)]
     pub object: Option<ObjectConfig>,
+
+    /// Event publishing configuration for distributed coordination.
+    #[validate(nested)]
+    #[serde(default)]
+    pub events: EventsConfig,
 }
 
 impl KvbmConfig {
@@ -146,6 +153,16 @@ impl KvbmConfig {
             )
             // Cache parallelism mode: KVBM_CACHE_PARALLELISM=tensor_parallel|replicated_data
             .merge(Env::prefixed("KVBM_CACHE_PARALLELISM").map(|_| "cache.parallelism".into()))
+            // Events config: KVBM_EVENTS_ENABLED, KVBM_EVENTS_SUBJECT
+            .merge(
+                Env::prefixed("KVBM_EVENTS_")
+                    .map(|k| format!("events.{}", k.as_str().to_lowercase()).into()),
+            )
+            // Events batching config: KVBM_EVENTS_BATCHING_WINDOW_DURATION_MS, etc.
+            .merge(
+                Env::prefixed("KVBM_EVENTS_BATCHING_")
+                    .map(|k| format!("events.batching.{}", k.as_str().to_lowercase()).into()),
+            )
     }
 
     /// Load configuration from default figment (env and files).

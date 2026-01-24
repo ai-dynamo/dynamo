@@ -69,6 +69,26 @@ impl EventEmissionPolicy for PowerOfTwoPolicy {
     }
 }
 
+/// Policy that emits events for all blocks.
+///
+/// This is primarily useful for testing, where you want to emit events for
+/// every block registration without filtering.
+#[derive(Debug, Clone, Default)]
+pub struct AllEventsPolicy;
+
+impl AllEventsPolicy {
+    /// Creates a new all-events policy.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl EventEmissionPolicy for AllEventsPolicy {
+    fn should_emit(&self, _seq_hash: SequenceHash) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

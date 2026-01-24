@@ -31,6 +31,59 @@ type RegisteredReturnFn<T> = Arc<dyn Fn(Arc<Block<T, Registered>>) + Send + Sync
 
 pub type PositionalRadixTree<V> = dynamo_tokens::PositionalRadixTree<V, SequenceHash>;
 
+/// Builder for [`BlockRegistry`].
+///
+/// # Example
+///
+/// ```ignore
+/// // Simple registry with no tracking
+/// let registry = BlockRegistry::builder().build();
+///
+/// // With frequency tracking
+/// let registry = BlockRegistry::builder()
+///     .frequency_tracker(tracker)
+///     .build();
+///
+/// // With both frequency tracking and event management
+/// let registry = BlockRegistry::builder()
+///     .frequency_tracker(tracker)
+///     .event_manager(events_manager)
+///     .build();
+/// ```
+#[derive(Default)]
+pub struct BlockRegistryBuilder {
+    frequency_tracker: Option<Arc<dyn FrequencyTracker<u128>>>,
+    event_manager: Option<Arc<EventsManager>>,
+}
+
+impl BlockRegistryBuilder {
+    /// Creates a new builder with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the frequency tracker for block access tracking.
+    pub fn frequency_tracker(mut self, tracker: Arc<dyn FrequencyTracker<u128>>) -> Self {
+        self.frequency_tracker = Some(tracker);
+        self
+    }
+
+    /// Sets the events manager for distributed coordination.
+    pub fn event_manager(mut self, manager: Arc<EventsManager>) -> Self {
+        self.event_manager = Some(manager);
+        self
+    }
+
+    /// Builds the BlockRegistry.
+    pub fn build(self) -> BlockRegistry {
+        BlockRegistry {
+            frequency_tracker: self.frequency_tracker,
+            event_manager: self.event_manager,
+            prt: Arc::new(PositionalRadixTree::new()),
+        }
+    }
+}
+
 /// Global registry for managing block registrations.
 /// Tracks canonical blocks and provides registration handles.
 #[derive(Clone)]
@@ -41,48 +94,40 @@ pub struct BlockRegistry {
 }
 
 impl BlockRegistry {
-    pub fn new() -> Self {
-        Self {
-            frequency_tracker: None,
-            event_manager: None,
-            prt: Arc::new(PositionalRadixTree::new()),
-        }
+    /// Creates a new builder for BlockRegistry.
+    pub fn builder() -> BlockRegistryBuilder {
+        BlockRegistryBuilder::new()
     }
 
+    /// Creates a new BlockRegistry with no tracking.
+    pub fn new() -> Self {
+        Self::builder().build()
+    }
+
+    /// Creates a new BlockRegistry with frequency tracking.
+    #[deprecated(note = "Use BlockRegistry::builder().frequency_tracker(tracker).build() instead")]
     pub fn with_frequency_tracker(frequency_tracker: Arc<dyn FrequencyTracker<u128>>) -> Self {
-        Self {
-            frequency_tracker: Some(frequency_tracker),
-            event_manager: None,
-            prt: Arc::new(PositionalRadixTree::new()),
-        }
+        Self::builder().frequency_tracker(frequency_tracker).build()
     }
 
     /// Creates a new BlockRegistry with an EventsManager for distributed coordination.
-    ///
-    /// # Arguments
-    /// * `event_manager` - Manager for emitting block registration events to the hub
+    #[deprecated(note = "Use BlockRegistry::builder().event_manager(manager).build() instead")]
     pub fn with_event_manager(event_manager: Arc<EventsManager>) -> Self {
-        Self {
-            frequency_tracker: None,
-            event_manager: Some(event_manager),
-            prt: Arc::new(PositionalRadixTree::new()),
-        }
+        Self::builder().event_manager(event_manager).build()
     }
 
     /// Creates a new BlockRegistry with both frequency tracking and event management.
-    ///
-    /// # Arguments
-    /// * `frequency_tracker` - Tracker for block access frequency
-    /// * `event_manager` - Manager for emitting block registration events to the hub
+    #[deprecated(
+        note = "Use BlockRegistry::builder().frequency_tracker(tracker).event_manager(manager).build() instead"
+    )]
     pub fn with_frequency_and_events(
         frequency_tracker: Arc<dyn FrequencyTracker<u128>>,
         event_manager: Arc<EventsManager>,
     ) -> Self {
-        Self {
-            frequency_tracker: Some(frequency_tracker),
-            event_manager: Some(event_manager),
-            prt: Arc::new(PositionalRadixTree::new()),
-        }
+        Self::builder()
+            .frequency_tracker(frequency_tracker)
+            .event_manager(event_manager)
+            .build()
     }
 
     pub fn has_frequency_tracking(&self) -> bool {
@@ -1106,7 +1151,9 @@ pub(crate) mod tests {
     #[test]
     fn test_frequency_tracking() {
         let tracker = Arc::new(TinyLFUTracker::new(100));
-        let registry = BlockRegistry::with_frequency_tracker(tracker.clone());
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(tracker.clone())
+            .build();
 
         let block_1 = create_test_token_block(&[1, 2, 3, 4]);
         let seq_hash_1 = block_1.kvbm_sequence_hash();
@@ -1137,7 +1184,9 @@ pub(crate) mod tests {
     #[test]
     fn test_transfer_registration_no_tracking() {
         let tracker = Arc::new(TinyLFUTracker::new(100));
-        let registry = BlockRegistry::with_frequency_tracker(tracker.clone());
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(tracker.clone())
+            .build();
 
         let seq_hash_1 = create_test_token_block(&[1, 2, 3, 4]).kvbm_sequence_hash();
         let seq_hash_2 = create_test_token_block(&[5, 6, 7, 8]).kvbm_sequence_hash();

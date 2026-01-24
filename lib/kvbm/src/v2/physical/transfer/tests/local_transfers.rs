@@ -38,37 +38,41 @@ fn build_layout(
     }
 }
 
-fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result<NixlAgent> {
-    use std::collections::HashSet;
+/// Check if a transfer between two storage kinds requires GDS_MT (Device ↔ Disk direct).
+fn requires_gds(src_kind: StorageKind, dst_kind: StorageKind) -> bool {
+    matches!(
+        (src_kind, dst_kind),
+        (StorageKind::Device(_), StorageKind::Disk(_))
+            | (StorageKind::Disk(_), StorageKind::Device(_))
+    )
+}
 
-    let mut backends = HashSet::new();
+fn build_agent_for_kinds(src_kind: StorageKind, dst_kind: StorageKind) -> Result<NixlAgent> {
+    use crate::v2::testing::physical::TestAgentBuilder;
+
+    let mut builder = TestAgentBuilder::new("agent");
 
     // Determine required backends for both source and destination
     for kind in [src_kind, dst_kind] {
         match kind {
             StorageKind::System | StorageKind::Pinned => {
-                backends.insert("POSIX"); // Lightweight for DRAM
+                builder = builder.try_backend("POSIX"); // Lightweight for DRAM
             }
             StorageKind::Device(_) => {
-                backends.insert("UCX"); // Required for VRAM (expensive)
+                builder = builder.require_backend("UCX"); // Required for VRAM
             }
             StorageKind::Disk(_) => {
-                backends.insert("POSIX"); // Required for disk I/O
+                builder = builder.try_backend("POSIX"); // Required for disk I/O
             }
         }
     }
 
-    // Optional: Add GDS for Device <-> Disk optimization
-    match (src_kind, dst_kind) {
-        (StorageKind::Device(_), StorageKind::Disk(_))
-        | (StorageKind::Disk(_), StorageKind::Device(_)) => {
-            backends.insert("GDS_MT");
-        }
-        _ => {}
+    // GDS_MT is optional for Device <-> Disk (will be checked separately)
+    if requires_gds(src_kind, dst_kind) {
+        builder = builder.try_backend("GDS_MT");
     }
 
-    let backend_vec: Vec<&str> = backends.into_iter().collect();
-    create_test_agent_with_backends("agent", &backend_vec)
+    Ok(builder.build()?.into_nixl_agent())
 }
 
 #[rstest]
@@ -92,6 +96,12 @@ async fn test_p2p(
     dst_kind: StorageKind,
 ) -> Result<()> {
     skip_if_stubs_and_device!(src_kind, dst_kind);
+
+    // Device ↔ Disk direct transfers require GDS_MT
+    if requires_gds(src_kind, dst_kind) && !NixlAgent::is_backend_available("GDS_MT") {
+        eprintln!("Skipping Device ↔ Disk test - GDS_MT backend unavailable");
+        return Ok(());
+    }
 
     use crate::physical::transfer::{BounceBufferInternal, executor::TransferOptionsInternal};
 

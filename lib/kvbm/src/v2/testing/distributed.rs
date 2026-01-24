@@ -28,7 +28,7 @@ use crate::{
         },
     },
 };
-use dynamo_memory::{StorageKind, nixl::NixlAgent};
+use dynamo_memory::StorageKind;
 
 use super::{managers, nova, physical, token_blocks};
 
@@ -82,30 +82,38 @@ pub async fn create_instance_leader_pair(
     let nova::NovaPair { nova_a, nova_b } = nova::create_nova_pair_tcp().await?;
 
     // Create G2 managers
-    let registry_a = managers::create_test_registry();
-    let registry_b = managers::create_test_registry();
+    let registry_a = managers::TestRegistryBuilder::new().build();
+    let registry_b = managers::TestRegistryBuilder::new().build();
 
-    let g2_manager_a = Arc::new(managers::create_test_manager::<G2>(
-        block_count,
-        block_size,
-        registry_a.clone(),
-    ));
-    let g3_manager_a = Arc::new(managers::create_test_manager::<G3>(
-        block_count,
-        block_size,
-        registry_a.clone(),
-    ));
+    let g2_manager_a = Arc::new(
+        managers::TestManagerBuilder::<G2>::new()
+            .block_count(block_count)
+            .block_size(block_size)
+            .registry(registry_a.clone())
+            .build(),
+    );
+    let g3_manager_a = Arc::new(
+        managers::TestManagerBuilder::<G3>::new()
+            .block_count(block_count)
+            .block_size(block_size)
+            .registry(registry_a.clone())
+            .build(),
+    );
 
-    let g2_manager_b = Arc::new(managers::create_test_manager::<G2>(
-        block_count,
-        block_size,
-        registry_b.clone(),
-    ));
-    let g3_manager_b = Arc::new(managers::create_test_manager::<G3>(
-        block_count,
-        block_size,
-        registry_b.clone(),
-    ));
+    let g2_manager_b = Arc::new(
+        managers::TestManagerBuilder::<G2>::new()
+            .block_count(block_count)
+            .block_size(block_size)
+            .registry(registry_b.clone())
+            .build(),
+    );
+    let g3_manager_b = Arc::new(
+        managers::TestManagerBuilder::<G3>::new()
+            .block_count(block_count)
+            .block_size(block_size)
+            .registry(registry_b.clone())
+            .build(),
+    );
 
     // Build InstanceLeader A
     let leader_a = InstanceLeader::builder()
@@ -327,6 +335,161 @@ impl TestInstanceLeaderWithWorkers {
     }
 }
 
+// =============================================================================
+// Test Session Helper
+// =============================================================================
+
+use crate::v2::distributed::leader::session::{
+    BlockInfo, EndpointSessionHandle, SessionHandle as UnifiedSessionHandle,
+    SessionId, SessionPhase, SessionStateSnapshot,
+};
+use crate::v2::physical::transfer::TransferCompleteNotification;
+use std::time::Duration;
+
+/// Helper for establishing and managing test sessions with reduced boilerplate.
+///
+/// Encapsulates the create→attach→wait_for_ready pattern common in tests.
+///
+/// # Example
+///
+/// ```ignore
+/// // BEFORE: 6 lines repeated in many tests
+/// let (session_id, handle) = leader.create_endpoint_session(&hashes)?;
+/// let mut remote_handle = remote_leader.attach_session(instance_id, session_id).await?;
+/// let state = timeout(Duration::from_secs(5), remote_handle.wait_for_ready())
+///     .await.expect("Timeout").expect("Ready");
+///
+/// // AFTER: 1 line
+/// let session = TestSession::establish_default(&leader, &remote_leader, &hashes).await?;
+/// ```
+pub struct TestSession {
+    /// The session ID.
+    pub session_id: SessionId,
+    /// Handle held by the endpoint (source).
+    pub endpoint_handle: EndpointSessionHandle,
+    /// Handle held by the controller (destination).
+    pub controller_handle: UnifiedSessionHandle,
+    /// The initial state snapshot after ready.
+    pub initial_state: SessionStateSnapshot,
+}
+
+impl TestSession {
+    /// Establish a session between two leaders with default timeout (5 seconds).
+    ///
+    /// # Arguments
+    /// * `endpoint_leader` - The source leader (endpoint) that creates the session
+    /// * `controller_leader` - The destination leader (controller) that attaches
+    /// * `hashes` - Sequence hashes for the blocks to expose in the session
+    pub async fn establish_default(
+        endpoint_leader: &InstanceLeader,
+        controller_leader: &InstanceLeader,
+        hashes: &[SequenceHash],
+    ) -> Result<Self> {
+        Self::establish(
+            endpoint_leader,
+            controller_leader,
+            hashes,
+            Duration::from_secs(5),
+        )
+        .await
+    }
+
+    /// Establish a session between two leaders with custom timeout.
+    ///
+    /// # Arguments
+    /// * `endpoint_leader` - The source leader (endpoint) that creates the session
+    /// * `controller_leader` - The destination leader (controller) that attaches
+    /// * `hashes` - Sequence hashes for the blocks to expose in the session
+    /// * `timeout_duration` - How long to wait for the session to become ready
+    pub async fn establish(
+        endpoint_leader: &InstanceLeader,
+        controller_leader: &InstanceLeader,
+        hashes: &[SequenceHash],
+        timeout_duration: Duration,
+    ) -> Result<Self> {
+        // Create endpoint session on source
+        let (session_id, endpoint_handle) = endpoint_leader.create_endpoint_session(hashes)?;
+
+        // Controller attaches - get instance ID from Nova
+        let endpoint_instance_id = endpoint_leader.nova().instance_id();
+        let mut controller_handle = controller_leader
+            .attach_session(endpoint_instance_id, session_id)
+            .await?;
+
+        // Wait for ready state
+        let initial_state = tokio::time::timeout(timeout_duration, controller_handle.wait_for_ready())
+            .await
+            .map_err(|_| anyhow::anyhow!("Timeout waiting for session to become ready"))?
+            .map_err(|e| anyhow::anyhow!("Session ready failed: {}", e))?;
+
+        Ok(Self {
+            session_id,
+            endpoint_handle,
+            controller_handle,
+            initial_state,
+        })
+    }
+
+    /// Returns the G2 blocks available in the session.
+    pub fn g2_blocks(&self) -> &[BlockInfo] {
+        &self.initial_state.g2_blocks
+    }
+
+    /// Returns the count of G3 blocks pending staging.
+    pub fn g3_pending(&self) -> usize {
+        self.initial_state.g3_pending
+    }
+
+    /// Returns the session phase.
+    pub fn phase(&self) -> &SessionPhase {
+        &self.initial_state.phase
+    }
+
+    /// Pull blocks via RDMA using the controller handle.
+    ///
+    /// # Arguments
+    /// * `src_blocks` - Source block info (from g2_blocks())
+    /// * `dst_ids` - Destination block IDs on the controller side
+    pub async fn pull_blocks_rdma(
+        &mut self,
+        src_blocks: &[BlockInfo],
+        dst_ids: &[BlockId],
+    ) -> Result<TransferCompleteNotification> {
+        self.controller_handle.pull_blocks_rdma(src_blocks, dst_ids).await
+    }
+
+    /// Notify that layers are ready (called from endpoint side).
+    ///
+    /// # Arguments
+    /// * `layer_range` - Range of layers that are ready
+    pub async fn notify_layers_ready(&self, layer_range: std::ops::Range<usize>) -> Result<()> {
+        self.endpoint_handle.notify_layers_ready(layer_range).await
+    }
+
+    /// Mark blocks as pulled (called from controller side).
+    pub async fn mark_blocks_pulled(&mut self, hashes: Vec<SequenceHash>) -> Result<()> {
+        self.controller_handle.mark_blocks_pulled(hashes).await
+    }
+
+    /// Close the endpoint session.
+    pub async fn close_endpoint(&self) -> Result<()> {
+        self.endpoint_handle.close().await
+    }
+
+    /// Clean shutdown of both sides of the session.
+    ///
+    /// This consumes self because detach() takes ownership of the handle.
+    pub async fn close(self) -> Result<()> {
+        self.controller_handle.detach().await.ok();
+        self.endpoint_handle.close().await.ok();
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Instance Leader Pair with Workers
+// =============================================================================
+
 /// Container for a pair of leaders with workers for RDMA testing.
 ///
 /// This is the primary test fixture for prefill-decode RDMA scenarios:
@@ -353,6 +516,10 @@ pub struct InstanceLeaderPairWithWorkers {
 /// # Worker ID Derivation
 /// The worker_id is derived from instance_id using xxh3_64 hash, ensuring
 /// unique LayoutHandles (worker_id, layout_id) for each worker.
+///
+/// # Backend Requirements
+/// This function requires UCX backend for RDMA operations. Use
+/// `physical::TestAgentBuilder` for more flexible backend handling.
 pub fn create_direct_worker(
     instance_id: InstanceId,
     agent_name: &str,
@@ -365,8 +532,12 @@ pub fn create_direct_worker(
     // Create LocalEventSystem with the derived worker_id (already returns Arc<Self>)
     let event_system = dynamo_nova::events::LocalEventSystem::new(worker_id);
 
-    // Create NixlAgent with UCX backend
-    let agent = NixlAgent::with_backends(agent_name, &["UCX"])?;
+    // Create NixlAgent with UCX backend using TestAgentBuilder
+    // UCX is required for RDMA operations
+    let test_agent = physical::TestAgentBuilder::new(agent_name)
+        .require_backend("UCX")
+        .build()?;
+    let agent = test_agent.into_nixl_agent();
 
     // Create TransferManager with the event_system
     let manager = TransferManager::builder()
@@ -455,17 +626,21 @@ pub async fn create_instance_leader_with_workers(
     agent_name_prefix: &str,
 ) -> Result<TestInstanceLeaderWithWorkers> {
     // Create G2 and G3 managers
-    let registry = managers::create_test_registry();
-    let g2_manager = Arc::new(managers::create_test_manager::<G2>(
-        block_count,
-        block_size,
-        registry.clone(),
-    ));
-    let g3_manager = Arc::new(managers::create_test_manager::<G3>(
-        block_count,
-        block_size,
-        registry.clone(),
-    ));
+    let registry = managers::TestRegistryBuilder::new().build();
+    let g2_manager = Arc::new(
+        managers::TestManagerBuilder::<G2>::new()
+            .block_count(block_count)
+            .block_size(block_size)
+            .registry(registry.clone())
+            .build(),
+    );
+    let g3_manager = Arc::new(
+        managers::TestManagerBuilder::<G3>::new()
+            .block_count(block_count)
+            .block_size(block_size)
+            .registry(registry.clone())
+            .build(),
+    );
 
     // Create DirectWorkers
     let workers = create_direct_workers(num_workers, layout_config, storage, agent_name_prefix)?;

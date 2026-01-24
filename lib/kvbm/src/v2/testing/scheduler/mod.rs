@@ -42,9 +42,12 @@ pub fn create_test_scheduler(
     block_size: usize,
     enable_prefix_caching: bool,
 ) -> (Scheduler, BlockRegistry) {
-    let registry = managers::create_test_registry();
-    let block_manager =
-        managers::create_test_manager::<G1>(block_count, block_size, registry.clone());
+    let registry = managers::TestRegistryBuilder::new().build();
+    let block_manager = managers::TestManagerBuilder::<G1>::new()
+        .block_count(block_count)
+        .block_size(block_size)
+        .registry(registry.clone())
+        .build();
 
     let kv_cache =
         KVCacheManager::with_prefix_caching(block_manager, block_size, enable_prefix_caching)
@@ -214,8 +217,12 @@ mod tests {
     fn test_prefix_cache_hit_basic() {
         // Setup: 100 blocks, block_size=16, prefix_caching=true
         let block_size = 16;
-        let registry = managers::create_test_registry();
-        let block_manager = managers::create_test_manager::<G1>(100, block_size, registry.clone());
+        let registry = managers::TestRegistryBuilder::new().build();
+        let block_manager = managers::TestManagerBuilder::<G1>::new()
+            .block_count(100)
+            .block_size(block_size)
+            .registry(registry.clone())
+            .build();
 
         // Pre-populate the cache with 4 blocks of tokens (0..64)
         // This simulates a previous request that completed and released its blocks
@@ -297,8 +304,12 @@ mod tests {
     fn test_prefix_cache_partial_match() {
         // Setup with prefix caching
         let block_size = 16;
-        let registry = managers::create_test_registry();
-        let block_manager = managers::create_test_manager::<G1>(100, block_size, registry.clone());
+        let registry = managers::TestRegistryBuilder::new().build();
+        let block_manager = managers::TestManagerBuilder::<G1>::new()
+            .block_count(100)
+            .block_size(block_size)
+            .registry(registry.clone())
+            .build();
 
         // Pre-populate the cache with 3 blocks of tokens (0..48)
         let token_sequence = token_blocks::create_token_sequence(3, block_size, 0);
@@ -340,8 +351,12 @@ mod tests {
     fn test_block_count_matches_computed_plus_new() {
         // Setup with prefix caching
         let block_size = 16;
-        let registry = managers::create_test_registry();
-        let block_manager = managers::create_test_manager::<G1>(100, block_size, registry.clone());
+        let registry = managers::TestRegistryBuilder::new().build();
+        let block_manager = managers::TestManagerBuilder::<G1>::new()
+            .block_count(100)
+            .block_size(block_size)
+            .registry(registry.clone())
+            .build();
 
         // Pre-populate the cache with 3 blocks of tokens (0..48)
         let token_sequence = token_blocks::create_token_sequence(3, block_size, 0);
@@ -447,7 +462,7 @@ mod tests {
         let total_scheduled =
             output2.scheduled_new_reqs.len() + output2.scheduled_cached_reqs.len();
         assert!(
-            total_scheduled >= 0,
+            total_scheduled >= 1,
             "Scheduler should not crash with limited blocks"
         );
     }

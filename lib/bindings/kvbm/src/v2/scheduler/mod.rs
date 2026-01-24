@@ -91,7 +91,9 @@ impl PyScheduler {
         let frequency_tracker = Arc::new(TinyLFUTracker::<u128>::new(total_blocks));
 
         // Create BlockRegistry with frequency tracking for MultiLRU backend
-        let registry = BlockRegistry::with_frequency_tracker(frequency_tracker);
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(frequency_tracker)
+            .build();
 
         // Create BlockManager<G1> with real blocks
         let block_manager = BlockManager::<G1>::builder()

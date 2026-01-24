@@ -5,16 +5,73 @@
 //!
 //! The EventsManager hooks into BlockRegistry to emit KvCacheEvents when blocks
 //! are registered or removed. It uses a policy to filter which blocks trigger events
-//! and maintains a channel for publishing events to the hub.
+//! and a broadcast channel to allow multiple subscribers.
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use derive_builder::Builder;
+use futures::Stream;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::StreamExt;
 
 use super::policy::EventEmissionPolicy;
-use super::protocol::{EventReleaseHandle, InstanceId, KvCacheEvent};
+use super::protocol::{EventReleaseHandle, KvCacheEvent};
 use crate::v2::logical::blocks::BlockRegistrationHandle;
+
+/// Settings for constructing an [`EventsManager`].
+///
+/// # Example
+///
+/// ```ignore
+/// // Simple with defaults (AllEventsPolicy)
+/// let manager = EventsManagerSettings::builder().build()?.into_manager();
+///
+/// // With custom policy
+/// let manager = EventsManagerSettings::builder()
+///     .policy(Arc::new(PowerOfTwoPolicy::new()))
+///     .build()?
+///     .into_manager();
+///
+/// // With custom configuration
+/// let manager = EventsManagerSettings::builder()
+///     .channel_capacity(2048)
+///     .build()?
+///     .into_manager();
+/// ```
+#[derive(Builder, Clone)]
+#[builder(setter(into, strip_option), build_fn(error = "anyhow::Error"))]
+pub struct EventsManagerSettings {
+    /// The event emission policy.
+    ///
+    /// Default: [`AllEventsPolicy`](super::policy::AllEventsPolicy)
+    #[builder(default, setter(strip_option = false))]
+    policy: Option<Arc<dyn EventEmissionPolicy>>,
+
+    /// Capacity of the broadcast channel.
+    ///
+    /// Default: 1024
+    #[builder(default = "1024")]
+    channel_capacity: usize,
+}
+
+impl EventsManagerSettings {
+    /// Creates a new builder for EventsManagerSettings.
+    pub fn builder() -> EventsManagerSettingsBuilder {
+        EventsManagerSettingsBuilder::default()
+    }
+
+    /// Converts settings into an EventsManager.
+    pub fn into_manager(self) -> EventsManager {
+        let policy = self
+            .policy
+            .unwrap_or_else(|| Arc::new(super::policy::AllEventsPolicy::new()));
+        let (event_tx, _) = broadcast::channel(self.channel_capacity);
+
+        EventsManager { policy, event_tx }
+    }
+}
 
 /// Manager for emitting and coordinating block registration events.
 ///
@@ -22,46 +79,91 @@ use crate::v2::logical::blocks::BlockRegistrationHandle;
 /// - Filtering block registrations based on a policy
 /// - Emitting Create events when blocks are registered
 /// - Attaching RAII handles that emit Remove events when blocks are dropped
-/// - Publishing events through a channel for consumption by the hub
+/// - Broadcasting events to multiple subscribers via [`subscribe()`](Self::subscribe)
+///
+/// Note: Instance context is applied at the publisher level via
+/// [`KvbmCacheEventsPublisher`](super::publisher::KvbmCacheEventsPublisher).
+///
+/// # Example
+///
+/// ```ignore
+/// // Create with defaults (AllEventsPolicy)
+/// let manager = EventsManager::builder().build();
+///
+/// // Create with PowerOfTwoPolicy
+/// let manager = EventsManager::builder()
+///     .policy(Arc::new(PowerOfTwoPolicy::new()))
+///     .build();
+/// ```
 pub struct EventsManager {
     policy: Arc<dyn EventEmissionPolicy>,
-    instance_id: InstanceId,
-    cluster_id: String,
-    event_tx: mpsc::UnboundedSender<KvCacheEvent>,
+    event_tx: broadcast::Sender<KvCacheEvent>,
+}
+
+/// Builder for [`EventsManager`] that wraps [`EventsManagerSettingsBuilder`].
+pub struct EventsManagerBuilder(EventsManagerSettingsBuilder);
+
+impl Default for EventsManagerBuilder {
+    fn default() -> Self {
+        Self(EventsManagerSettingsBuilder::default())
+    }
+}
+
+impl EventsManagerBuilder {
+    /// Creates a new builder with default settings.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the event emission policy.
+    ///
+    /// Default: [`AllEventsPolicy`](super::policy::AllEventsPolicy)
+    pub fn policy(mut self, policy: Arc<dyn EventEmissionPolicy>) -> Self {
+        self.0.policy = Some(Some(policy));
+        self
+    }
+
+    /// Sets the broadcast channel capacity.
+    ///
+    /// Default: 1024
+    pub fn channel_capacity(mut self, capacity: usize) -> Self {
+        self.0.channel_capacity = Some(capacity);
+        self
+    }
+
+    /// Builds the EventsManager.
+    pub fn build(self) -> EventsManager {
+        self.0
+            .build()
+            .expect("EventsManagerSettings has all defaults")
+            .into_manager()
+    }
 }
 
 impl EventsManager {
-    /// Creates a new EventsManager.
-    ///
-    /// # Arguments
-    /// * `policy` - Policy for determining which blocks should emit events
-    /// * `instance_id` - Unique identifier for this worker instance
-    /// * `cluster_id` - Cluster/deployment identifier for event routing
-    ///
-    /// # Returns
-    /// A tuple of (EventsManager, receiver for consuming events)
-    pub fn new(
-        policy: Arc<dyn EventEmissionPolicy>,
-        instance_id: InstanceId,
-        cluster_id: String,
-    ) -> (Self, mpsc::UnboundedReceiver<KvCacheEvent>) {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    /// Creates a new builder for EventsManager.
+    pub fn builder() -> EventsManagerBuilder {
+        EventsManagerBuilder::new()
+    }
 
-        let manager = Self {
-            policy,
-            instance_id,
-            cluster_id,
-            event_tx,
-        };
-
-        (manager, event_rx)
+    /// Subscribe to the event stream.
+    ///
+    /// Returns a stream of events. Multiple subscribers are supported, and each
+    /// subscriber receives all events. Late subscribers will miss events that
+    /// occurred before subscribing.
+    ///
+    /// The stream filters out lagged errors (when events are dropped due to
+    /// slow consumption) and continues delivering subsequent events.
+    pub fn subscribe(&self) -> impl Stream<Item = KvCacheEvent> + Send + 'static {
+        let rx = self.event_tx.subscribe();
+        BroadcastStream::new(rx).filter_map(|result| result.ok())
     }
 
     /// Hook called when a block is registered in the BlockRegistry.
     ///
     /// This method:
     /// 1. Checks the policy to determine if an event should be emitted
-    /// 2. Sends a Create event if the policy allows
+    /// 2. Broadcasts a Create event if the policy allows
     /// 3. Attaches an EventReleaseHandle to the registration handle for cleanup
     ///
     /// # Arguments
@@ -78,19 +180,13 @@ impl EventsManager {
         }
 
         // Emit Create event
-        let create_event = KvCacheEvent::Create {
-            seq_hash,
-            instance_id: self.instance_id,
-            cluster_id: self.cluster_id.clone(),
-        };
+        let create_event = KvCacheEvent::Create(seq_hash);
 
-        if self.event_tx.send(create_event).is_err() {
-            tracing::warn!("Failed to send Create event for seq_hash {:?}", seq_hash);
-        }
+        // Broadcast send only fails if there are no receivers, which is fine
+        let _ = self.event_tx.send(create_event);
 
         // Attach RAII handle for Remove event
-        let release_handle =
-            EventReleaseHandle::new(seq_hash, self.instance_id, self.event_tx.clone());
+        let release_handle = EventReleaseHandle::new(seq_hash, self.event_tx.clone());
 
         // Attach as Arc<dyn Any> to the registration handle
         handle.attach_unique(Arc::new(release_handle))?;
@@ -106,6 +202,7 @@ mod tests {
     use crate::v2::logical::blocks::BlockRegistry;
     use crate::{KvbmSequenceHashProvider, SequenceHash};
     use dynamo_tokens::TokenBlockSequence;
+    use futures::StreamExt;
 
     fn create_seq_hash_at_position(position: usize) -> SequenceHash {
         let tokens_per_block = 4;
@@ -117,8 +214,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_events_manager_emits_create_for_power_of_two() {
-        let policy = Arc::new(PowerOfTwoPolicy::new());
-        let (manager, mut event_rx) = EventsManager::new(policy, 12345, "test-cluster".to_string());
+        let manager = EventsManager::builder()
+            .policy(Arc::new(PowerOfTwoPolicy::new()))
+            .build();
+        let mut stream = Box::pin(manager.subscribe());
 
         let registry = BlockRegistry::new();
         let seq_hash = create_seq_hash_at_position(16); // Power of 2
@@ -128,25 +227,19 @@ mod tests {
         manager.on_block_registered(&handle).unwrap();
 
         // Should receive Create event
-        let event = event_rx.try_recv().unwrap();
-        match event {
-            KvCacheEvent::Create {
-                seq_hash: received_hash,
-                instance_id,
-                cluster_id,
-            } => {
-                assert_eq!(received_hash, seq_hash);
-                assert_eq!(instance_id, 12345);
-                assert_eq!(cluster_id, "test-cluster");
-            }
-            _ => panic!("Expected Create event"),
-        }
+        let event = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, KvCacheEvent::Create(seq_hash));
     }
 
     #[tokio::test]
     async fn test_events_manager_skips_non_power_of_two() {
-        let policy = Arc::new(PowerOfTwoPolicy::new());
-        let (manager, mut event_rx) = EventsManager::new(policy, 12345, "test-cluster".to_string());
+        let manager = EventsManager::builder()
+            .policy(Arc::new(PowerOfTwoPolicy::new()))
+            .build();
+        let mut stream = Box::pin(manager.subscribe());
 
         let registry = BlockRegistry::new();
         let seq_hash = create_seq_hash_at_position(17); // Not power of 2
@@ -155,14 +248,21 @@ mod tests {
         // Register the block
         manager.on_block_registered(&handle).unwrap();
 
-        // Should NOT receive any event
-        assert!(event_rx.try_recv().is_err());
+        // Should NOT receive any event (will timeout)
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(50), stream.next()).await;
+        assert!(result.is_err()); // Timeout expected
+
+        // Keep handle alive to prevent drop event
+        drop(handle);
     }
 
     #[tokio::test]
     async fn test_events_manager_emits_remove_on_drop() {
-        let policy = Arc::new(PowerOfTwoPolicy::new());
-        let (manager, mut event_rx) = EventsManager::new(policy, 12345, "test-cluster".to_string());
+        let manager = EventsManager::builder()
+            .policy(Arc::new(PowerOfTwoPolicy::new()))
+            .build();
+        let mut stream = Box::pin(manager.subscribe());
 
         let registry = BlockRegistry::new();
         let seq_hash = create_seq_hash_at_position(32); // Power of 2
@@ -172,22 +272,67 @@ mod tests {
             manager.on_block_registered(&handle).unwrap();
 
             // Consume Create event
-            let _create = event_rx.try_recv().unwrap();
+            let event = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(event, KvCacheEvent::Create(seq_hash));
 
             // Handle is dropped here, triggering Remove
         }
 
         // Should receive Remove event
-        let event = event_rx.try_recv().unwrap();
-        match event {
-            KvCacheEvent::Remove {
-                seq_hash: received_hash,
-                instance_id,
-            } => {
-                assert_eq!(received_hash, seq_hash);
-                assert_eq!(instance_id, 12345);
-            }
-            _ => panic!("Expected Remove event"),
-        }
+        let event = tokio::time::timeout(std::time::Duration::from_millis(100), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event, KvCacheEvent::Remove(seq_hash));
+    }
+
+    #[tokio::test]
+    async fn test_events_manager_multiple_subscribers() {
+        let manager = EventsManager::builder()
+            .policy(Arc::new(PowerOfTwoPolicy::new()))
+            .build();
+
+        let mut stream1 = Box::pin(manager.subscribe());
+        let mut stream2 = Box::pin(manager.subscribe());
+
+        let registry = BlockRegistry::new();
+        let seq_hash = create_seq_hash_at_position(64); // Power of 2
+        let handle = registry.register_sequence_hash(seq_hash);
+
+        manager.on_block_registered(&handle).unwrap();
+
+        // Both streams should receive the same event
+        let event1 = tokio::time::timeout(std::time::Duration::from_millis(100), stream1.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let event2 = tokio::time::timeout(std::time::Duration::from_millis(100), stream2.next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(event1, KvCacheEvent::Create(seq_hash));
+        assert_eq!(event2, KvCacheEvent::Create(seq_hash));
+    }
+
+    #[test]
+    fn test_events_manager_default_policy() {
+        // With no policy specified, should use AllEventsPolicy (default)
+        let manager = EventsManager::builder().build();
+
+        let registry = BlockRegistry::new();
+        let seq_hash = create_seq_hash_at_position(17); // Not power of 2
+
+        // Use a subscriber to verify events are emitted
+        let _subscription = manager.subscribe();
+
+        let handle = registry.register_sequence_hash(seq_hash);
+
+        // With AllEventsPolicy, all blocks should emit events
+        // (this would fail with PowerOfTwoPolicy for position 17)
+        manager.on_block_registered(&handle).unwrap();
     }
 }

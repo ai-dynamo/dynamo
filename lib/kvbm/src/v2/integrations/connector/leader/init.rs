@@ -314,9 +314,9 @@ impl ConnectorLeader {
         tracing::debug!("Lock released, configured layout handles for all workers");
 
         tracing::debug!("Creating block registry");
-        let registry = BlockRegistry::with_frequency_tracker(
-            FrequencyTrackingCapacity::Medium.create_tracker(),
-        );
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
+            .build();
         tracing::debug!("Block registry created");
 
         tracing::debug!(

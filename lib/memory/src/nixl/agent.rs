@@ -193,6 +193,33 @@ impl NixlAgent {
             )
         }
     }
+
+    /// Check if a backend is available on this system.
+    ///
+    /// Creates a temporary agent to probe backend availability without
+    /// affecting any existing agent state. Useful for tests that need to
+    /// skip gracefully when certain backends (like GDS_MT) aren't available,
+    /// or for runtime feature detection.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// #[test]
+    /// fn test_gds_transfer() -> Result<()> {
+    ///     if !NixlAgent::is_backend_available("GDS_MT") {
+    ///         eprintln!("Skipping test - GDS_MT unavailable");
+    ///         return Ok(());
+    ///     }
+    ///     // ... rest of test
+    /// }
+    /// ```
+    pub fn is_backend_available(backend: &str) -> bool {
+        let mut agent = match Self::new("__backend_probe__") {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+        agent.add_backend(backend).is_ok()
+    }
 }
 
 // Delegate common methods to the underlying agent
@@ -294,5 +321,14 @@ mod tests {
 
         let agent = result.unwrap();
         assert!(agent.has_backend("UCX"));
+    }
+
+    #[test]
+    fn test_is_backend_available() {
+        // POSIX should always be available
+        assert!(NixlAgent::is_backend_available("POSIX"));
+
+        // Nonexistent backend should not be available
+        assert!(!NixlAgent::is_backend_available("NONEXISTENT_BACKEND_XYZ"));
     }
 }

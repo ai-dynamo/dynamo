@@ -136,7 +136,7 @@ impl<T: BlockMetadata> BlockManager<T> {
     /// # Example
     /// ```ignore
     /// let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
-    /// let registry = BlockRegistry::with_frequency_tracker(tracker);
+    /// let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
     ///
     /// let manager = BlockManager::builder()
     ///     .block_count(1000)
@@ -692,9 +692,9 @@ mod tests {
 
     /// Helper function to create a basic manager for testing
     fn create_test_manager(block_count: usize) -> BlockManager<TestBlockData> {
-        let registry = BlockRegistry::with_frequency_tracker(
-            FrequencyTrackingCapacity::default().create_tracker(),
-        );
+        let registry = BlockRegistry::builder()
+            .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
+            .build();
 
         BlockManager::<TestBlockData>::builder()
             .block_count(block_count)
@@ -745,9 +745,9 @@ mod tests {
 
         #[test]
         fn test_builder_with_multi_lru_backend() {
-            let registry = BlockRegistry::with_frequency_tracker(
-                FrequencyTrackingCapacity::Small.create_tracker(),
-            );
+            let registry = BlockRegistry::builder()
+                .frequency_tracker(FrequencyTrackingCapacity::Small.create_tracker())
+                .build();
             let manager = BlockManager::<TestBlockData>::builder()
                 .block_count(100)
                 .registry(registry)
@@ -763,9 +763,9 @@ mod tests {
 
         #[test]
         fn test_builder_with_custom_multi_lru_thresholds() {
-            let registry = BlockRegistry::with_frequency_tracker(
-                FrequencyTrackingCapacity::Medium.create_tracker(),
-            );
+            let registry = BlockRegistry::builder()
+                .frequency_tracker(FrequencyTrackingCapacity::Medium.create_tracker())
+                .build();
             let manager = BlockManager::<TestBlockData>::builder()
                 .block_count(100)
                 .registry(registry)
@@ -2057,9 +2057,9 @@ mod tests {
                 BlockManagerConfigBuilder<TestBlockData>,
             ) -> BlockManagerConfigBuilder<TestBlockData>,
         ) {
-            let registry = BlockRegistry::with_frequency_tracker(
-                FrequencyTrackingCapacity::default().create_tracker(),
-            );
+            let registry = BlockRegistry::builder()
+                .frequency_tracker(FrequencyTrackingCapacity::default().create_tracker())
+                .build();
             let manager = backend_builder(
                 BlockManager::<TestBlockData>::builder()
                     .block_count(20)
@@ -2170,7 +2170,7 @@ mod tests {
         fn test_shared_registry_across_managers() {
             // Create shared registry with frequency tracking
             let tracker = FrequencyTrackingCapacity::Medium.create_tracker();
-            let registry = BlockRegistry::with_frequency_tracker(tracker);
+            let registry = BlockRegistry::builder().frequency_tracker(tracker).build();
 
             #[derive(Clone, Debug)]
             struct G1;

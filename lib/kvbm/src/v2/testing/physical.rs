@@ -24,6 +24,267 @@ use crate::{
     },
 };
 
+// =============================================================================
+// Flexible Backend Agent Builder
+// =============================================================================
+
+/// A NixlAgent wrapper that tracks which backends were successfully initialized.
+///
+/// This wrapper allows tests to check backend availability and conditionally
+/// skip tests that require unavailable backends.
+///
+/// # Example
+///
+/// ```ignore
+/// // Flexible - won't fail if UCX unavailable
+/// let agent = TestAgentBuilder::new("test")
+///     .try_backend("UCX")
+///     .try_backend("POSIX")  // Always available
+///     .build()?;
+///
+/// // Check what's available
+/// if !agent.has_backend("UCX") {
+///     eprintln!("Skipping RDMA test - UCX unavailable");
+///     return Ok(());
+/// }
+/// ```
+pub struct TestAgent {
+    agent: NixlAgent,
+    available_backends: Vec<String>,
+}
+
+impl TestAgent {
+    /// Returns true if the specified backend was successfully initialized.
+    pub fn has_backend(&self, backend: &str) -> bool {
+        self.available_backends
+            .iter()
+            .any(|b| b.eq_ignore_ascii_case(backend))
+    }
+
+    /// Returns the list of successfully initialized backends.
+    pub fn available_backends(&self) -> &[String] {
+        &self.available_backends
+    }
+
+    /// Consumes self and returns the underlying NixlAgent.
+    pub fn into_nixl_agent(self) -> NixlAgent {
+        self.agent
+    }
+
+    /// Returns a reference to the underlying NixlAgent.
+    pub fn nixl_agent(&self) -> &NixlAgent {
+        &self.agent
+    }
+}
+
+impl std::ops::Deref for TestAgent {
+    type Target = NixlAgent;
+
+    fn deref(&self) -> &Self::Target {
+        &self.agent
+    }
+}
+
+/// Builder for TestAgent with flexible backend handling.
+///
+/// Unlike `NixlAgent::with_backends()` which fails if ANY backend is unavailable,
+/// `TestAgentBuilder` allows graceful degradation by distinguishing between
+/// required and optional backends.
+///
+/// # Example
+///
+/// ```ignore
+/// // RDMA tests - UCX is required
+/// let agent = TestAgentBuilder::new("rdma-test")
+///     .require_backend("UCX")  // Fails if unavailable
+///     .try_backend("POSIX")    // Optional
+///     .build()?;
+///
+/// // Disk tests - POSIX only, no GDS requirement
+/// let agent = TestAgentBuilder::new("disk-test")
+///     .try_backend("POSIX")
+///     .build()?;
+/// ```
+#[derive(Default)]
+pub struct TestAgentBuilder {
+    name: Option<String>,
+    try_backends: Vec<String>,
+    required_backends: Vec<String>,
+}
+
+impl TestAgentBuilder {
+    /// Creates a new builder with the given agent name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: Some(name.into()),
+            try_backends: Vec::new(),
+            required_backends: Vec::new(),
+        }
+    }
+
+    /// Attempts to add a backend. If unavailable, build() will still succeed
+    /// but `has_backend(name)` will return false.
+    pub fn try_backend(mut self, backend: impl Into<String>) -> Self {
+        self.try_backends.push(backend.into());
+        self
+    }
+
+    /// Requires a backend. If unavailable, build() will fail.
+    ///
+    /// Use this for tests that cannot function without specific backends,
+    /// like RDMA tests requiring UCX.
+    pub fn require_backend(mut self, backend: impl Into<String>) -> Self {
+        self.required_backends.push(backend.into());
+        self
+    }
+
+    /// Builds the TestAgent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Agent creation fails
+    /// - Any required backend fails to initialize
+    pub fn build(self) -> Result<TestAgent> {
+        let name = self
+            .name
+            .ok_or_else(|| anyhow::anyhow!("Agent name is required"))?;
+
+        let mut agent = NixlAgent::new(&name)?;
+        let mut available_backends = Vec::new();
+
+        // Initialize required backends first - fail on error
+        for backend in &self.required_backends {
+            let backend_upper = backend.to_uppercase();
+            agent.add_backend(&backend_upper).map_err(|e| {
+                anyhow::anyhow!(
+                    "Required backend {} unavailable: {}. \
+                     Use try_backend() if this backend is optional.",
+                    backend_upper,
+                    e
+                )
+            })?;
+            available_backends.push(backend_upper);
+        }
+
+        // Initialize optional backends - log warning but continue
+        for backend in &self.try_backends {
+            let backend_upper = backend.to_uppercase();
+            // Skip if already added as required
+            if available_backends
+                .iter()
+                .any(|b| b.eq_ignore_ascii_case(&backend_upper))
+            {
+                continue;
+            }
+            match agent.add_backend(&backend_upper) {
+                Ok(_) => {
+                    tracing::debug!("Initialized optional backend: {}", backend_upper);
+                    available_backends.push(backend_upper);
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Optional backend {} unavailable: {} - continuing without it",
+                        backend_upper,
+                        e
+                    );
+                }
+            }
+        }
+
+        Ok(TestAgent {
+            agent,
+            available_backends,
+        })
+    }
+}
+
+// =============================================================================
+// Transfer Checksums Helper
+// =============================================================================
+
+/// Captures checksums for source blocks to enable verification after transfer.
+///
+/// This provides a cleaner pattern for the fill→transfer→verify workflow.
+///
+/// # Example
+///
+/// ```ignore
+/// // Capture source checksums
+/// let src = TransferChecksums::fill_and_capture(&src_layout, &src_ids, FillPattern::Sequential)?;
+///
+/// // ... execute transfer ...
+///
+/// // Verify destination matches
+/// src.verify_against(&dst_layout, &dst_ids)?;
+/// ```
+pub struct TransferChecksums {
+    checksums: HashMap<BlockId, BlockChecksum>,
+    block_ids: Vec<BlockId>,
+}
+
+impl TransferChecksums {
+    /// Fill blocks with a pattern and capture their checksums.
+    pub fn fill_and_capture(
+        layout: &PhysicalLayout,
+        block_ids: &[BlockId],
+        pattern: FillPattern,
+    ) -> Result<Self> {
+        let checksums = fill_and_checksum(layout, block_ids, pattern)?;
+        Ok(Self {
+            checksums,
+            block_ids: block_ids.to_vec(),
+        })
+    }
+
+    /// Capture checksums without filling (for already-filled blocks).
+    pub fn capture(layout: &PhysicalLayout, block_ids: &[BlockId]) -> Result<Self> {
+        let checksums = crate::v2::physical::transfer::compute_block_checksums(layout, block_ids)?;
+        Ok(Self {
+            checksums,
+            block_ids: block_ids.to_vec(),
+        })
+    }
+
+    /// Returns the captured checksums.
+    pub fn checksums(&self) -> &HashMap<BlockId, BlockChecksum> {
+        &self.checksums
+    }
+
+    /// Returns the block IDs for which checksums were captured.
+    pub fn block_ids(&self) -> &[BlockId] {
+        &self.block_ids
+    }
+
+    /// Verify that destination blocks match the captured source checksums.
+    ///
+    /// The destination block IDs must be the same length as source block IDs.
+    /// Comparison is done positionally: src_blocks[i] is compared with dst_ids[i].
+    pub fn verify_against(&self, dst_layout: &PhysicalLayout, dst_ids: &[BlockId]) -> Result<()> {
+        verify_checksums_by_position(&self.checksums, &self.block_ids, dst_layout, dst_ids)
+    }
+
+    /// Verify that destination blocks match using specific layers only.
+    pub fn verify_layers_against(
+        &self,
+        dst_layout: &PhysicalLayout,
+        dst_ids: &[BlockId],
+        layer_range: std::ops::Range<usize>,
+    ) -> Result<()> {
+        verify_layer_checksums_by_position(
+            &self.checksums,
+            &self.block_ids,
+            dst_layout,
+            dst_ids,
+            layer_range,
+        )
+    }
+}
+
+// =============================================================================
+// Layout Types
+// =============================================================================
+
 /// Layout kind for parameterized testing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayoutKind {
