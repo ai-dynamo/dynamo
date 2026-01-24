@@ -195,6 +195,26 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		"oldNamespace", oldNamespace,
 		"newNamespace", newNamespace)
 
+	if rolloutStatus.Phase == nvidiacomv1alpha1.RolloutPhaseCompleted {
+		if oldWorkerHash != newWorkerHash {
+			logger.Info("Rollout completed but annotation stale, updating annotation",
+				"oldHash", oldWorkerHash, "newHash", newWorkerHash)
+			r.setActiveWorkerHash(dgd, newWorkerHash)
+			return r.Update(ctx, dgd)
+		}
+		// Annotation matches, we're done
+		logger.V(1).Info("Rollout completed and annotation matches")
+		return nil
+	}
+
+	if oldWorkerHash == newWorkerHash &&
+		rolloutStatus.Phase == nvidiacomv1alpha1.RolloutPhaseInProgress {
+		logger.Info("Detected stuck rollout: hashes match but phase is InProgress",
+			"hash", newWorkerHash,
+			"phase", rolloutStatus.Phase)
+		return r.completeRollout(ctx, dgd, rolloutStatus, oldNamespace, newNamespace)
+	}
+
 	switch rolloutStatus.Phase {
 	case nvidiacomv1alpha1.RolloutPhaseNone:
 		return r.startRollingUpdate(ctx, dgd, rolloutStatus, oldWorkerHash, newWorkerHash, oldNamespace, newNamespace)
@@ -383,12 +403,6 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 		}
 	}
 
-	// Update the active worker hash to the new hash
-	r.setActiveWorkerHash(dgd, newWorkerHash)
-	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update active worker hash: %w", err)
-	}
-
 	// Update rollout status to Completed
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
 	rolloutStatus.TrafficWeightOld = 0
@@ -401,6 +415,12 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 
 	if err := r.Status().Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to update rollout status: %w", err)
+	}
+
+	// Update the active worker hash to the new hash
+	r.setActiveWorkerHash(dgd, newWorkerHash)
+	if err := r.Update(ctx, dgd); err != nil {
+		return fmt.Errorf("failed to update active worker hash: %w", err)
 	}
 
 	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
