@@ -88,7 +88,7 @@ def _setup_gpu_memory_service_if_needed(config: Config) -> None:
     # When vLLM imports the worker class, it triggers model loader registration
     # and utility patches automatically
     config.engine_args.worker_cls = (
-        "gpu_memory_service.client.vllm_integration.worker.GMSWorker"
+        "gpu_memory_service.vllm_integration.worker.GMSWorker"
     )
     logger.info(
         "[GPU Memory Service] Set worker_cls to GMSWorker for GPU Memory Service integration"

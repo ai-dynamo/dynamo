@@ -7,7 +7,7 @@ This module provides a custom Worker class that properly integrates with
 GPU Memory Service for VA-stable weight sharing and sleep/wake functionality.
 
 Usage:
-    Set --worker-cls=gpu_memory_service.client.vllm_integration.worker:GMSWorker
+    Set --worker-cls=gpu_memory_service.vllm_integration.worker:GMSWorker
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 # Trigger model loader registration and utility patches on import
-from gpu_memory_service.client.vllm_integration import register_gms_loader  # noqa: E402
-from gpu_memory_service.client.vllm_integration.patches import (  # noqa: E402
+from gpu_memory_service.vllm_integration import register_gms_loader  # noqa: E402
+from gpu_memory_service.vllm_integration.patches import (  # noqa: E402
     patch_empty_cache,
     patch_memory_snapshot,
 )
@@ -64,7 +64,7 @@ class GMSWorker(Worker):
         check runs, so that MemorySnapshot.measure can query committed bytes
         and adjust free_memory accordingly.
         """
-        from gpu_memory_service.client.vllm_integration.memory_ops import (
+        from gpu_memory_service.vllm_integration.memory_ops import (
             establish_early_gms_connection,
         )
         from vllm.platforms import current_platform
@@ -110,7 +110,7 @@ class GMSWorker(Worker):
 
         # Correct memory accounting for GMS-imported weights
         try:
-            from gpu_memory_service.client.vllm_integration.model_loader import (
+            from gpu_memory_service.vllm_integration.model_loader import (
                 get_imported_weights_bytes,
             )
 
@@ -140,7 +140,7 @@ class GMSWorker(Worker):
         We do NOT call super().sleep() because it tries to copy GPU buffers
         to CPU, which segfaults on already-unmapped GMS memory.
         """
-        from gpu_memory_service.client.vllm_integration.memory_ops import (
+        from gpu_memory_service.vllm_integration.memory_ops import (
             sleep_gms_weights,
             sleep_kv_cache,
         )
@@ -174,7 +174,7 @@ class GMSWorker(Worker):
 
         We do NOT call super().wake_up() - we manage allocators directly.
         """
-        from gpu_memory_service.client.vllm_integration.memory_ops import (
+        from gpu_memory_service.vllm_integration.memory_ops import (
             reinit_fp8_kv_scales,
             wake_gms_weights,
             wake_kv_cache,

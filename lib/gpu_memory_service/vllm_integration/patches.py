@@ -44,7 +44,7 @@ def patch_empty_cache() -> None:
     if _empty_cache_patched:
         return
 
-    from gpu_memory_service.client.vllm_integration.memory_ops import safe_empty_cache
+    from gpu_memory_service.vllm_integration.memory_ops import safe_empty_cache
 
     torch.cuda.empty_cache = safe_empty_cache
     _empty_cache_patched = True
@@ -75,7 +75,7 @@ def patch_memory_snapshot() -> None:
     def patched_measure(self):
         original_measure(self)
 
-        from gpu_memory_service.client.vllm_integration.memory_ops import (
+        from gpu_memory_service.vllm_integration.memory_ops import (
             get_gms_committed_bytes,
         )
 

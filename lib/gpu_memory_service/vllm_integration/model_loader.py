@@ -20,7 +20,7 @@ from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     register_module_tensors,
 )
-from gpu_memory_service.client.vllm_integration.config import (
+from gpu_memory_service.vllm_integration.config import (
     get_local_rank,
     resolve_socket_path,
     strip_gms_extra_config,

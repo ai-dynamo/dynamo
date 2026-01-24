@@ -11,7 +11,7 @@ This package provides GPU Memory Service integration for vLLM, enabling:
 Usage:
     Use the GMSWorker class as a custom worker:
 
-        --worker-cls=gpu_memory_service.client.vllm_integration.worker:GMSWorker
+        --worker-cls=gpu_memory_service.vllm_integration.worker:GMSWorker
 
     This automatically:
     - Registers the 'gpu_memory_service' model loader
@@ -30,11 +30,11 @@ from __future__ import annotations
 
 import logging
 
-from gpu_memory_service.client.vllm_integration.model_loader import (
+from gpu_memory_service.vllm_integration.model_loader import (
     get_imported_weights_bytes,
     register_gms_loader,
 )
-from gpu_memory_service.client.vllm_integration.patches import (
+from gpu_memory_service.vllm_integration.patches import (
     patch_empty_cache,
     patch_memory_snapshot,
 )
@@ -56,7 +56,7 @@ __all__ = [
 def __getattr__(name):
     """Lazy import for GMSWorker to avoid circular imports."""
     if name == "GMSWorker":
-        from gpu_memory_service.client.vllm_integration.worker import GMSWorker
+        from gpu_memory_service.vllm_integration.worker import GMSWorker
 
         return GMSWorker
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

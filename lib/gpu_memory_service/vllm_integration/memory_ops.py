@@ -287,7 +287,7 @@ def establish_early_gms_connection() -> bool:
         from gpu_memory_service.client.torch.allocator import (
             get_or_create_gms_client_memory_manager,
         )
-        from gpu_memory_service.client.vllm_integration.config import (
+        from gpu_memory_service.vllm_integration.config import (
             resolve_socket_path,
         )
 
