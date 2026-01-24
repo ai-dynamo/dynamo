@@ -300,15 +300,16 @@ fn bench_store(args: &Args) {
     println!("\n=== Benchmarking STORE_BLOCK ===");
 
     let num_sequences = args.size / args.depth;
+    let bench_iters = args.iterations.min(num_sequences);
     let pre_sequences = generate_sequences(
-        num_sequences.saturating_sub(args.iterations),
+        num_sequences.saturating_sub(bench_iters),
         args.depth,
         args.num_workers,
         args.prefix_share_ratio,
     );
 
     // Generate sequences to insert during benchmark
-    let bench_sequences: Vec<SequenceData> = ((num_sequences - args.iterations)..num_sequences)
+    let bench_sequences: Vec<SequenceData> = ((num_sequences - bench_iters)..num_sequences)
         .map(|seq_id| {
             SequenceData::new(
                 seq_id as u64,
@@ -324,10 +325,10 @@ fn bench_store(args: &Args) {
     println!(
         "  Initial tree size: {} blocks, will grow to ~{} blocks",
         tree.current_size(),
-        tree.current_size() + args.iterations * args.depth
+        tree.current_size() + bench_iters * args.depth
     );
 
-    let mut durations = Vec::with_capacity(args.iterations);
+    let mut durations = Vec::with_capacity(bench_iters);
 
     for (i, seq) in bench_sequences.iter().enumerate() {
         let event = seq.to_store_event(i as u64);
@@ -339,7 +340,7 @@ fn bench_store(args: &Args) {
         durations.push(elapsed);
 
         if args.verbose && (i + 1) % 100 == 0 {
-            println!("  Completed {}/{} iterations", i + 1, args.iterations);
+            println!("  Completed {}/{} iterations", i + 1, bench_iters);
         }
     }
 
@@ -875,6 +876,43 @@ fn format_duration_ns(ns: u64) -> String {
 fn main() {
     let args = Args::parse();
 
+    // Validate arguments to prevent panics
+    if args.size == 0
+        || args.depth == 0
+        || args.num_workers == 0
+        || args.iterations == 0
+        || args.block_size == 0
+        || args.min_depth == 0
+        || args.max_depth == 0
+        || args.sweep_iterations == 0
+    {
+        eprintln!(
+            "size, depth, num_workers, iterations, block_size, min_depth, max_depth, and sweep_iterations must be > 0"
+        );
+        std::process::exit(1);
+    }
+    if args.min_depth > args.max_depth {
+        eprintln!("min_depth must be <= max_depth");
+        std::process::exit(1);
+    }
+    if !(0.0..=1.0).contains(&args.prefix_share_ratio) {
+        eprintln!("prefix_share_ratio must be between 0.0 and 1.0");
+        std::process::exit(1);
+    }
+
+    let num_sequences = args.size / args.depth;
+    if matches!(
+        args.bench.as_str(),
+        "store" | "remove" | "lookup" | "sweep" | "all"
+    ) && num_sequences == 0
+    {
+        eprintln!(
+            "size must be >= depth to produce at least one sequence for {}",
+            args.bench
+        );
+        std::process::exit(1);
+    }
+
     println!("Radix Tree Microbenchmark");
     println!("=========================\n");
     println!("Configuration:");
@@ -894,7 +932,6 @@ fn main() {
     );
     println!("  Seed: {}", args.seed);
 
-    let num_sequences = args.size / args.depth;
     println!(
         "\n  Derived: {} sequences to reach target size",
         num_sequences
