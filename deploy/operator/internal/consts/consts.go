@@ -105,6 +105,8 @@ const (
 	HAProxyStatsPortName   = "stats"
 	HAProxyRuntimePort     = 9999
 	HAProxyRuntimePortName = "runtime"
+	HAProxyMetricsPort     = 9998
+	HAProxyMetricsPortName = "metrics"
 
 	HAProxyConfigMapKey    = "haproxy.cfg"
 	HAProxyContainerName   = "haproxy"

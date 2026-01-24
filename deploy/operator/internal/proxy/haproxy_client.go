@@ -167,6 +167,32 @@ func (c *HAProxyClient) setServerWeight(ctx context.Context, backend, server str
 	return nil
 }
 
+// SetServerAddr updates the address and port for a backend server dynamically.
+// This allows updating backend server addresses without reloading HAProxy configuration.
+func (c *HAProxyClient) SetServerAddr(ctx context.Context, backend, server, addr string, port int32) error {
+	// HAProxy Runtime API command: set server <backend>/<server> addr <addr> port <port>
+	cmd := fmt.Sprintf("set server %s/%s addr %s port %d\n", backend, server, addr, port)
+
+	resp, err := c.executeCommand(ctx, cmd)
+	if err != nil {
+		return err
+	}
+
+	// Check for error responses
+	resp = strings.TrimSpace(resp)
+	// Successful response typically contains "IP changed" or is empty
+	if resp != "" && !strings.Contains(resp, "changed") && !strings.Contains(resp, "addr") {
+		// Check if it's an error
+		if strings.Contains(strings.ToLower(resp), "error") ||
+			strings.Contains(strings.ToLower(resp), "no such") ||
+			strings.Contains(strings.ToLower(resp), "unknown") {
+			return fmt.Errorf("HAProxy error: %s", resp)
+		}
+	}
+
+	return nil
+}
+
 // getServerWeight retrieves the current weight for a specific server
 func (c *HAProxyClient) getServerWeight(ctx context.Context, backend, server string) (int32, error) {
 	// HAProxy Runtime API command: show servers state <backend>

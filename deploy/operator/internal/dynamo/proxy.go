@@ -125,6 +125,11 @@ func GenerateProxyDeployment(config *ProxyConfig) *appsv1.Deployment {
 									ContainerPort: commonconsts.HAProxyRuntimePort,
 									Protocol:      corev1.ProtocolTCP,
 								},
+								{
+									Name:          commonconsts.HAProxyMetricsPortName,
+									ContainerPort: commonconsts.HAProxyMetricsPort,
+									Protocol:      corev1.ProtocolTCP,
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{
@@ -346,9 +351,15 @@ listen stats
     stats show-legends
     stats show-node
 
-# Runtime API for weight updates
-# Connect via: echo "show servers state" | socat stdio tcp4-connect:127.0.0.1:%d
+# Runtime API for dynamic updates and metrics
+# Connect via: echo "show servers state" | nc <host> %d
 listen runtime_api
+    bind *:%d
+    mode tcp
+    server runtime_sock unix@%s send-proxy-v2
+
+# Metrics endpoint
+listen metrics
     bind *:%d
     http-request use-service prometheus-exporter if { path /metrics }
 `,
@@ -359,6 +370,8 @@ listen runtime_api
 		commonconsts.HAProxyStatsPort,
 		commonconsts.HAProxyRuntimePort,
 		commonconsts.HAProxyRuntimePort,
+		commonconsts.HAProxySocketPath,
+		commonconsts.HAProxyMetricsPort,
 	)
 
 	return config
