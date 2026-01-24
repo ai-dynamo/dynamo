@@ -473,5 +473,4 @@ mod tests {
         let restored_pipeline = restored.to_pipeline();
         assert!(restored_pipeline.has_bounce());
     }
-
 }

@@ -496,18 +496,14 @@ mod tests {
         #[test]
         fn test_object_with_bucket() {
             let config = RemoteStorageConfig::object("my-bucket");
-            match config {
-                RemoteStorageConfig::Object {
-                    default_bucket,
-                    endpoint,
-                    region,
-                } => {
-                    assert_eq!(default_bucket, Some("my-bucket".to_string()));
-                    assert!(endpoint.is_none());
-                    assert!(region.is_none());
-                }
-                _ => panic!("Expected Object variant"),
-            }
+            let RemoteStorageConfig::Object {
+                default_bucket,
+                endpoint,
+                region,
+            } = config;
+            assert_eq!(default_bucket, Some("my-bucket".to_string()));
+            assert!(endpoint.is_none());
+            assert!(region.is_none());
         }
 
         #[test]
@@ -517,54 +513,40 @@ mod tests {
                 Some("http://localhost:9000".to_string()),
                 Some("us-west-2".to_string()),
             );
-            match config {
-                RemoteStorageConfig::Object {
-                    default_bucket,
-                    endpoint,
-                    region,
-                } => {
-                    assert_eq!(default_bucket, Some("test-bucket".to_string()));
-                    assert_eq!(endpoint, Some("http://localhost:9000".to_string()));
-                    assert_eq!(region, Some("us-west-2".to_string()));
-                }
-                _ => panic!("Expected Object variant"),
-            }
+            let RemoteStorageConfig::Object {
+                default_bucket,
+                endpoint,
+                region,
+            } = config;
+            assert_eq!(default_bucket, Some("test-bucket".to_string()));
+            assert_eq!(endpoint, Some("http://localhost:9000".to_string()));
+            assert_eq!(region, Some("us-west-2".to_string()));
         }
 
         #[test]
         fn test_object_with_no_bucket() {
             let config = RemoteStorageConfig::object_with_options(None, None, None);
-            match config {
-                RemoteStorageConfig::Object {
-                    default_bucket,
-                    endpoint,
-                    region,
-                } => {
-                    assert!(default_bucket.is_none());
-                    assert!(endpoint.is_none());
-                    assert!(region.is_none());
-                }
-                _ => panic!("Expected Object variant"),
-            }
+            let RemoteStorageConfig::Object {
+                default_bucket,
+                endpoint,
+                region,
+            } = config;
+            assert!(default_bucket.is_none());
+            assert!(endpoint.is_none());
+            assert!(region.is_none());
         }
 
         #[test]
         fn test_config_clone() {
             let config = RemoteStorageConfig::object("bucket");
             let cloned = config.clone();
-            match (config, cloned) {
-                (
-                    RemoteStorageConfig::Object {
-                        default_bucket: b1, ..
-                    },
-                    RemoteStorageConfig::Object {
-                        default_bucket: b2, ..
-                    },
-                ) => {
-                    assert_eq!(b1, b2);
-                }
-                _ => panic!("Clone should preserve variant"),
-            }
+            let RemoteStorageConfig::Object {
+                default_bucket: b1, ..
+            } = config;
+            let RemoteStorageConfig::Object {
+                default_bucket: b2, ..
+            } = cloned;
+            assert_eq!(b1, b2);
         }
 
         #[test]
@@ -586,12 +568,8 @@ mod tests {
                 worker_id: 42,
             };
             assert_eq!(config.worker_id, 42);
-            match config.remote_storage_config {
-                RemoteStorageConfig::Object { default_bucket, .. } => {
-                    assert_eq!(default_bucket, Some("test-bucket".to_string()));
-                }
-                _ => panic!("Expected Object variant"),
-            }
+            let RemoteStorageConfig::Object { default_bucket, .. } = config.remote_storage_config;
+            assert_eq!(default_bucket, Some("test-bucket".to_string()));
         }
 
         #[test]

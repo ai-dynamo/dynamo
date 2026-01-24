@@ -554,7 +554,11 @@ mod tests {
         // Cancel before starting
         cancel_token.cancel();
 
-        let descriptors = vec![RemoteBlockDescriptor::object_from_hash("test-bucket", 0x1234, 1024)];
+        let descriptors = vec![RemoteBlockDescriptor::object_from_hash(
+            "test-bucket",
+            0x1234,
+            1024,
+        )];
 
         let mut layout = create_test_layout(1);
         layout
