@@ -525,12 +525,14 @@ func (r *DynamoGraphDeploymentReconciler) getDesiredWorkerReplicas(
 	return total
 }
 
-// updateProxyWeights updates the HAProxy backend weights via the runtime API.
+// updateProxyWeights updates the HAProxy backend weights and server addresses via the runtime API.
 func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	oldWeight, newWeight int32,
 ) error {
+	logger := log.FromContext(ctx)
+
 	// Get the HAProxy service address
 	// The proxy service is named <dgd-name>-traffic-proxy in the same namespace
 	proxyServiceName := fmt.Sprintf("%s-traffic-proxy-runtime", dgd.Name)
@@ -539,7 +541,30 @@ func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 	// Create HAProxy client connecting to the runtime API port
 	haproxyClient := proxy.NewHAProxyClientTCP(proxyHost, consts.HAProxyRuntimePort)
 
-	// Update weights
+	// Calculate old and new service names based on worker hashes
+	frontendServiceName := r.getFrontendServiceName(dgd)
+	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)[:8]
+	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
+
+	oldServiceName := frontendServiceName + "-" + oldWorkerHash
+	newServiceName := frontendServiceName + "-" + newWorkerHash
+
+	// Update backend server addresses FIRST (before adjusting weights)
+	// This ensures that both old_frontend and new_frontend point to the correct services
+	logger.Info("Updating HAProxy backend server addresses",
+		"oldService", oldServiceName,
+		"newService", newServiceName)
+
+	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.OldServerName, oldServiceName, consts.DynamoServicePort); err != nil {
+		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.OldServerName, oldServiceName, err)
+	}
+
+	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.NewServerName, newServiceName, consts.DynamoServicePort); err != nil {
+		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.NewServerName, newServiceName, err)
+	}
+
+	// Then update weights
+	logger.Info("Updating HAProxy traffic weights", "oldWeight", oldWeight, "newWeight", newWeight)
 	if err := haproxyClient.UpdateWeights(ctx, oldWeight, newWeight); err != nil {
 		return fmt.Errorf("failed to update HAProxy weights: %w", err)
 	}
