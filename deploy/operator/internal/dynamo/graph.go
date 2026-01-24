@@ -249,8 +249,10 @@ func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeplo
 }
 
 // RolloutContext provides information about an in-progress rolling update.
-// When InProgress is true, GenerateDynamoComponentsDeployments will generate
-// DCDs for both old and new namespaces.
+// When InProgress is true:
+// - GenerateDynamoComponentsDeployments generates DCDs only for the NEW namespace
+// - Old DCDs are NOT regenerated to avoid spec contamination
+// - Old worker replicas are scaled via direct patching in the controller
 type RolloutContext struct {
 	// InProgress indicates whether a rolling update is currently in progress
 	InProgress bool
@@ -263,6 +265,7 @@ type RolloutContext struct {
 	// NewWorkerHash is the short hash (8 chars) for the new worker spec, used for DCD naming
 	NewWorkerHash string
 	// OldWorkerReplicas maps service name to the desired replica count for old workers.
+	// Used by the controller to patch old worker DCDs directly.
 	// Calculated as: max(0, desiredReplicas - newReadyReplicas)
 	OldWorkerReplicas map[string]int32
 	// NewWorkerReplicas maps service name to the desired replica count for new workers.
@@ -271,11 +274,12 @@ type RolloutContext struct {
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig.
-// The map key is a unique identifier for each DCD (serviceName for normal, serviceName-old/new for rollouts).
+// The map key is a unique identifier for each DCD (serviceName).
 //
-// When rolloutCtx.InProgress is true, this generates DCDs for BOTH namespaces:
-// - New namespace: all services with full replicas from spec
-// - Old namespace: worker services only with replicas from rolloutCtx.OldWorkerReplicas
+// When rolloutCtx.InProgress is true, this generates DCDs only for the NEW namespace.
+// Old DCDs are NOT generated to avoid overwriting their original spec with the new spec
+// (which would trigger unwanted rolling updates). Instead, old worker replicas are
+// scaled down via direct patching in the controller.
 func GenerateDynamoComponentsDeployments(
 	ctx context.Context,
 	parentDGD *v1alpha1.DynamoGraphDeployment,
@@ -328,35 +332,15 @@ func GenerateDynamoComponentsDeployments(
 		deployments[componentName] = dcd
 	}
 
-	// During rolling update, also generate DCDs for old namespace
-	// This includes workers (with scaled replicas) and frontend (to maintain traffic routing)
-	if rolloutCtx != nil && rolloutCtx.InProgress {
-		for componentName, component := range parentDGD.Spec.Services {
-			// Skip non-worker and non-frontend components for old namespace
-			// (e.g., planner, router don't need old versions)
-			if !IsWorkerComponent(component.ComponentType) && component.ComponentType != commonconsts.ComponentTypeFrontend {
-				continue
-			}
-
-			dcd, err := generateSingleDCD(ctx, parentDGD, componentName, component, rolloutCtx.OldDynamoNamespace, defaultIngressSpec, restartState, existingRestartAnnotations)
-			if err != nil {
-				return nil, err
-			}
-
-			// Override replicas with pre-calculated old worker replicas (only for workers)
-			if IsWorkerComponent(component.ComponentType) {
-				if replicas, ok := rolloutCtx.OldWorkerReplicas[componentName]; ok {
-					dcd.Spec.Replicas = &replicas
-				}
-			}
-
-			// Use hash-based suffix for stable naming
-			dcd.Name = dcd.Name + "-" + rolloutCtx.OldWorkerHash
-
-			// Use a different key to avoid overwriting the new DCD
-			deployments[componentName+"-old"] = dcd
-		}
-	}
+	// During rolling update, we do NOT generate DCDs for the old namespace.
+	// The old DCDs (frontend, workers) already exist from before the rollout started.
+	// Generating them here would overwrite their original spec with the new spec,
+	// causing unwanted rolling updates on the old deployments.
+	//
+	// Instead:
+	// - Old worker replicas are scaled down via direct patching in the controller
+	// - Old frontend is left untouched; HAProxy handles traffic shifting via weights
+	// - Old DCDs are deleted after rollout completes via deleteOldDCDs()
 
 	return deployments, nil
 }

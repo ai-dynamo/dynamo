@@ -1022,6 +1022,16 @@ func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(c
 		resources = append(resources, syncedDCD)
 	}
 
+	// During rolling update, scale old worker DCDs via direct patching.
+	// This is done separately from DCD generation to avoid overwriting the old spec
+	// with the new spec (which would trigger an unwanted rolling update on old workers).
+	if rolloutCtx != nil {
+		if err := r.scaleOldWorkerDCDs(ctx, dynamoDeployment, rolloutCtx); err != nil {
+			logger.Error(err, "failed to scale old worker DCDs")
+			return ReconcileResult{}, fmt.Errorf("failed to scale old worker DCDs: %w", err)
+		}
+	}
+
 	// Check resource readiness
 	result := r.checkResourcesReadiness(resources)
 	return result, nil

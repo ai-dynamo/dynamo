@@ -563,6 +563,70 @@ func (r *DynamoGraphDeploymentReconciler) completeFinalization(
 	return nil
 }
 
+// scaleOldWorkerDCDs patches the replicas field on old worker DCDs during a rolling update.
+// This is done via direct patching rather than generating the full DCD spec to avoid
+// overwriting the old spec with the new spec (which would trigger an unwanted rolling update).
+func (r *DynamoGraphDeploymentReconciler) scaleOldWorkerDCDs(
+	ctx context.Context,
+	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
+	rolloutCtx *dynamo.RolloutContext,
+) error {
+	logger := log.FromContext(ctx)
+
+	if rolloutCtx == nil || !rolloutCtx.InProgress {
+		return nil
+	}
+
+	for serviceName, desiredReplicas := range rolloutCtx.OldWorkerReplicas {
+		// Construct the old DCD name using the hash-based naming convention
+		oldDCDName := dynamo.GetDynamoComponentName(dgd, serviceName) + "-" + rolloutCtx.OldWorkerHash
+
+		// Get the existing DCD
+		existingDCD := &nvidiacomv1alpha1.DynamoComponentDeployment{}
+		err := r.Get(ctx, client.ObjectKey{Name: oldDCDName, Namespace: dgd.Namespace}, existingDCD)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				// Old DCD doesn't exist yet (first reconcile of rolling update)
+				// This is expected - the old DCD was created before rolling update started
+				logger.V(1).Info("Old worker DCD not found, skipping scale",
+					"dcdName", oldDCDName,
+					"service", serviceName)
+				continue
+			}
+			return fmt.Errorf("failed to get old worker DCD %s: %w", oldDCDName, err)
+		}
+
+		// Check if replicas need to be updated
+		currentReplicas := int32(1)
+		if existingDCD.Spec.Replicas != nil {
+			currentReplicas = *existingDCD.Spec.Replicas
+		}
+
+		if currentReplicas == desiredReplicas {
+			logger.V(1).Info("Old worker DCD replicas already at desired value",
+				"dcdName", oldDCDName,
+				"replicas", desiredReplicas)
+			continue
+		}
+
+		// Patch only the replicas field
+		patch := client.MergeFrom(existingDCD.DeepCopy())
+		existingDCD.Spec.Replicas = &desiredReplicas
+
+		if err := r.Patch(ctx, existingDCD, patch); err != nil {
+			return fmt.Errorf("failed to patch old worker DCD %s replicas: %w", oldDCDName, err)
+		}
+
+		logger.Info("Scaled old worker DCD",
+			"dcdName", oldDCDName,
+			"service", serviceName,
+			"oldReplicas", currentReplicas,
+			"newReplicas", desiredReplicas)
+	}
+
+	return nil
+}
+
 // deleteOldDCDs deletes all DCDs belonging to this DGD that have the old Dynamo namespace.
 func (r *DynamoGraphDeploymentReconciler) deleteOldDCDs(
 	ctx context.Context,
