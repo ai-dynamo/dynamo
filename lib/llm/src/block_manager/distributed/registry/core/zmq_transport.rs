@@ -183,7 +183,8 @@ impl RegistryTransport for ZmqTransport {
                     if frames.is_empty() {
                         return Err(anyhow!("Empty response"));
                     }
-                    Ok(frames[0].to_vec())
+                    // Use the last frame as the data frame (DEALER socket may have identity frames first)
+                    Ok(frames[frames.len() - 1].to_vec())
                 }
                 Some(Err(e)) => Err(anyhow!("Receive error: {}", e)),
                 None => Err(anyhow!("Socket closed")),

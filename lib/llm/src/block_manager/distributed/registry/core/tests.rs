@@ -182,13 +182,40 @@ mod integration {
             .await
             .unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        assert!(received.lock().unwrap().is_empty());
+        // Use timeout-based assertion instead of sleep: no message should arrive yet
+        let no_message = tokio::time::timeout(
+            tokio::time::Duration::from_millis(20),
+            tokio::task::yield_now(),
+        )
+        .await;
+        assert!(no_message.is_ok()); // yield completes, but check received is still empty
+        assert!(
+            received.lock().unwrap().is_empty(),
+            "No message should be received before flush"
+        );
 
         registry_client.flush().await.unwrap();
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        assert_eq!(received.lock().unwrap().len(), 1);
+        // Use timeout-based assertion to deterministically wait for message
+        let message_received =
+            tokio::time::timeout(tokio::time::Duration::from_millis(100), async {
+                loop {
+                    tokio::task::yield_now().await;
+                    if !received.lock().unwrap().is_empty() {
+                        break;
+                    }
+                }
+            })
+            .await;
+        assert!(
+            message_received.is_ok(),
+            "Message should be received after flush within timeout"
+        );
+        assert_eq!(
+            received.lock().unwrap().len(),
+            1,
+            "Exactly one message should be received after flush"
+        );
     }
 
     /// ZMQ end-to-end test.

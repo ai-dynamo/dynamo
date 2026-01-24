@@ -9,6 +9,28 @@ use crate::block_manager::block::transfer::remote::RemoteKey;
 use utils::*;
 use zmq::*;
 
+use dynamo_runtime::config::environment_names::kvbm::remote_storage as env_g4;
+use std::sync::LazyLock;
+
+const DEFAULT_G4_ONBOARD_TIMEOUT_MS: u64 = 5000;
+const DEFAULT_G4_OFFLOAD_TIMEOUT_MS: u64 = 10000;
+
+static G4_ONBOARD_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
+    let ms: u64 = std::env::var(env_g4::DYN_KVBM_G4_ONBOARD_TIMEOUT_MS)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_G4_ONBOARD_TIMEOUT_MS);
+    Duration::from_millis(ms)
+});
+
+static G4_OFFLOAD_TIMEOUT: LazyLock<Duration> = LazyLock::new(|| {
+    let ms: u64 = std::env::var(env_g4::DYN_KVBM_G4_OFFLOAD_TIMEOUT_MS)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_G4_OFFLOAD_TIMEOUT_MS);
+    Duration::from_millis(ms)
+});
+
 use derive_builder::Builder;
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -260,18 +282,82 @@ impl KvbmLeader {
         }
     }
 
-    /// Send a remote transfer request to the workers.
-    /// Used for both G4 onboard (object -> device) and offload (device -> object).
     pub async fn remote_transfer_request(
         &self,
         request: RemoteTransferRequest,
-    ) -> anyhow::Result<oneshot::Receiver<()>> {
+    ) -> anyhow::Result<RemoteTransferResponse> {
         let zmq = self
             .zmq_leader
             .get()
             .ok_or_else(|| anyhow::anyhow!("ZMQ leader not ready"))?;
+
+        let request_id = request.request_id.clone();
+        let operation_id = request.operation_id;
+        let timeout = if request.is_onboard() {
+            *G4_ONBOARD_TIMEOUT
+        } else {
+            *G4_OFFLOAD_TIMEOUT
+        };
         let data = vec![serde_json::to_vec(&request)?];
-        zmq.broadcast(ZMQ_REMOTE_TRANSFER_MESSAGE, data).await
+
+        let payloads = zmq
+            .broadcast_collect(ZMQ_REMOTE_TRANSFER_MESSAGE, &data, true, timeout)
+            .await?;
+
+        // Aggregate all worker responses: ALL must succeed for overall success.
+        // If any worker fails, the KV cache would be inconsistent across TP ranks.
+        let mut first_failure: Option<RemoteTransferResponse> = None;
+        let mut success_response: Option<RemoteTransferResponse> = None;
+        let mut failed_workers = 0usize;
+        let total_workers = payloads.len();
+
+        for payload in payloads {
+            let response: RemoteTransferResponse = serde_json::from_slice(&payload)?;
+            match &response.status {
+                RemoteTransferStatus::Success => {
+                    success_response.get_or_insert(response);
+                }
+                RemoteTransferStatus::Failure { error, .. } => {
+                    failed_workers += 1;
+                    tracing::error!(
+                        target: "kvbm-g4",
+                        request_id = %request_id,
+                        operation_id = %operation_id,
+                        error = %error,
+                        "Worker reported g4 transfer failure"
+                    );
+                    first_failure.get_or_insert(response);
+                }
+            }
+        }
+
+        // If ANY worker failed, report failure to prevent KV cache inconsistency
+        if let Some(failure) = first_failure {
+            tracing::error!(
+                target: "kvbm-g4",
+                request_id = %request_id,
+                operation_id = %operation_id,
+                failed_workers,
+                total_workers,
+                "g4 transfer failed: {}/{} workers reported failure",
+                failed_workers,
+                total_workers
+            );
+            return Ok(failure);
+        }
+
+        // All workers succeeded
+        if let Some(response) = success_response {
+            Ok(response)
+        } else {
+            // No responses received at all
+            Ok(RemoteTransferResponse::failure(
+                request_id,
+                operation_id,
+                "No response received from any worker",
+                vec![],
+            ))
+        }
     }
 
     fn spawn_zmq_task(

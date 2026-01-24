@@ -423,10 +423,35 @@ where
         let offset = Self::header_offset(data);
         let data = &data[offset..];
 
-        if data.len() < 5 {
+        if data.is_empty() {
             return None;
         }
         let msg_type = MessageType::try_from(data[0]).ok()?;
+
+        // Handle RemoveResponse and TouchResponse separately as they use u64 count
+        // format: [msg_type (1 byte)][u64 count (8 bytes)]
+        match msg_type {
+            MessageType::RemoveResponse => {
+                if data.len() < 1 + 8 {
+                    return None;
+                }
+                let removed = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
+                return Some(ResponseType::Remove(removed));
+            }
+            MessageType::TouchResponse => {
+                if data.len() < 1 + 8 {
+                    return None;
+                }
+                let touched = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
+                return Some(ResponseType::Touch(touched));
+            }
+            _ => {}
+        }
+
+        // For other response types, parse u32 count
+        if data.len() < 5 {
+            return None;
+        }
         let count = u32::from_le_bytes(data[1..5].try_into().ok()?) as usize;
 
         match msg_type {
@@ -482,22 +507,6 @@ where
                 }
 
                 Some(ResponseType::Match(entries))
-            }
-            MessageType::RemoveResponse => {
-                // RemoveResponse contains a u64 count (1 byte msg type + 8 byte u64)
-                if data.len() < 1 + 8 {
-                    return None;
-                }
-                let removed = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
-                Some(ResponseType::Remove(removed))
-            }
-            MessageType::TouchResponse => {
-                // TouchResponse contains a u64 count (1 byte msg type + 8 byte u64)
-                if data.len() < 1 + 8 {
-                    return None;
-                }
-                let touched = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
-                Some(ResponseType::Touch(touched))
             }
             _ => None,
         }

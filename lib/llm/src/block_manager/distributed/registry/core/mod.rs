@@ -52,8 +52,8 @@ pub use zmq_transport::{ZmqTransport, ZmqTransportConfig};
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
 pub use hub_transport::{
-    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport, ZmqHubConfig,
-    ZmqHubTransport,
+    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport,
+    ZmqHubTransport, ZmqHubTransportConfig,
 };
 
 // Builder

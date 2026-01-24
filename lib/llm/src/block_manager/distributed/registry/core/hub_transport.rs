@@ -149,9 +149,12 @@ pub struct ZmqHubTransport {
 /// Default high-water mark for ZMQ hub sockets.
 pub const DEFAULT_HUB_HWM: i32 = 10_000;
 
-/// Configuration for ZMQ hub transport.
+/// Configuration for ZMQ hub transport (socket/bind settings).
+///
+/// Note: This is distinct from `ZmqHubConfig` in zmq_hub.rs which contains
+/// application-level settings (addresses/capacity).
 #[derive(Clone, Debug)]
-pub struct ZmqHubConfig {
+pub struct ZmqHubTransportConfig {
     pub query_bind_addr: String,
     pub subscribe_bind_addr: String,
     /// High-water mark for the ROUTER (query) socket.
@@ -160,7 +163,7 @@ pub struct ZmqHubConfig {
     pub pull_hwm: i32,
 }
 
-impl ZmqHubConfig {
+impl ZmqHubTransportConfig {
     pub fn new(query_addr: impl Into<String>, subscribe_addr: impl Into<String>) -> Self {
         Self {
             query_bind_addr: query_addr.into(),
@@ -187,7 +190,7 @@ impl ZmqHubConfig {
     }
 }
 
-impl Default for ZmqHubConfig {
+impl Default for ZmqHubTransportConfig {
     fn default() -> Self {
         Self::default_ports(5555)
     }
@@ -195,7 +198,7 @@ impl Default for ZmqHubConfig {
 
 impl ZmqHubTransport {
     /// Bind and start listening.
-    pub fn bind(config: ZmqHubConfig) -> Result<Self> {
+    pub fn bind(config: ZmqHubTransportConfig) -> Result<Self> {
         let context = Context::new();
 
         let router = router::router(&context)
@@ -228,7 +231,7 @@ impl ZmqHubTransport {
 
     /// Bind with default configuration.
     pub fn bind_default() -> Result<Self> {
-        Self::bind(ZmqHubConfig::default())
+        Self::bind(ZmqHubTransportConfig::default())
     }
 }
 

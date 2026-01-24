@@ -259,8 +259,11 @@ pub mod kvbm {
         /// Default: true
         pub const DYN_KVBM_REMOTE_DISK_USE_GDS: &str = "DYN_KVBM_REMOTE_DISK_USE_GDS";
 
-        /// Timeout in seconds for G4 (remote storage) transfers.
-        pub const DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS: &str = "DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS";
+        /// Timeout in milliseconds for G4 onboard transfers.
+        pub const DYN_KVBM_G4_ONBOARD_TIMEOUT_MS: &str = "DYN_KVBM_G4_ONBOARD_TIMEOUT_MS";
+
+        /// Timeout in milliseconds for G4 offload transfers.
+        pub const DYN_KVBM_G4_OFFLOAD_TIMEOUT_MS: &str = "DYN_KVBM_G4_OFFLOAD_TIMEOUT_MS";
 
         /// Enable checksum validation for G4 (remote storage) transfers.
         ///
@@ -448,6 +451,10 @@ mod tests {
             kvbm::remote_storage::DYN_KVBM_REMOTE_STORAGE_TYPE,
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_PATH,
             kvbm::remote_storage::DYN_KVBM_REMOTE_DISK_USE_GDS,
+            kvbm::remote_storage::DYN_KVBM_G4_ONBOARD_TIMEOUT_MS,
+            kvbm::remote_storage::DYN_KVBM_G4_OFFLOAD_TIMEOUT_MS,
+            kvbm::remote_storage::DYN_KVBM_G4_CHECKSUM_VALIDATION,
+            kvbm::remote_storage::DYN_KVBM_MAX_CONCURRENT_H2O,
             // LLM
             llm::DYN_HTTP_BODY_LIMIT_MB,
             llm::DYN_LORA_ENABLED,

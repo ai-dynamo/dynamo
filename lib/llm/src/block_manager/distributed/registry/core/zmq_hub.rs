@@ -124,19 +124,38 @@ where
         });
 
         // Wait for either to finish or cancellation
+        let mut query_handle = query_handle;
+        let mut pull_handle = pull_handle;
         tokio::select! {
-            result = query_handle => {
+            result = &mut query_handle => {
+                // Query handler finished first, cancel the other and await it
+                cancel.cancel();
                 if let Err(e) = result {
                     error!(error = %e, "Query handler panicked");
                 }
+                if let Err(e) = pull_handle.await {
+                    error!(error = %e, "Pull handler panicked during shutdown");
+                }
             }
-            result = pull_handle => {
+            result = &mut pull_handle => {
+                // Pull handler finished first, cancel the other and await it
+                cancel.cancel();
                 if let Err(e) = result {
                     error!(error = %e, "Pull handler panicked");
+                }
+                if let Err(e) = query_handle.await {
+                    error!(error = %e, "Query handler panicked during shutdown");
                 }
             }
             _ = cancel.cancelled() => {
                 info!("Hub received shutdown signal");
+                // Await both handlers to ensure clean shutdown
+                if let Err(e) = query_handle.await {
+                    error!(error = %e, "Query handler panicked during shutdown");
+                }
+                if let Err(e) = pull_handle.await {
+                    error!(error = %e, "Pull handler panicked during shutdown");
+                }
             }
         }
 

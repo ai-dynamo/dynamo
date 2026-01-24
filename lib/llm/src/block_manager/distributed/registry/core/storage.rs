@@ -185,11 +185,11 @@ where
         let inner = self.map.get(&position)?;
         let removed = inner.remove(key).map(|(_, v)| v);
 
-        // Clean up empty position maps
-        if inner.is_empty() {
-            drop(inner);
-            self.map.remove(&position);
-        }
+        // Clean up empty position maps atomically to avoid TOCTOU race
+        // Use remove_if to atomically check emptiness and remove in one operation
+        drop(inner);
+        self.map
+            .remove_if(&position, |_, inner_map| inner_map.is_empty());
 
         removed
     }

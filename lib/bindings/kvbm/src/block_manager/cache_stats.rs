@@ -26,10 +26,12 @@ struct CacheStatsEntry {
 /// Aggregated cache statistics for the current sliding window
 #[derive(Default)]
 struct AggregatedStats {
-    total_blocks_queried: u64, // Total blocks queried from host/disk (same for both tiers)
-    host_blocks_hit: u64,      // Blocks found in host cache
-    disk_blocks_hit: u64,      // Blocks found in disk cache
-    object_blocks_hit: u64,    // Blocks found in object cache
+    /// Total blocks queried across all tiers (host, disk, and object).
+    /// This is the denominator for host/disk/object hit rate calculations.
+    total_blocks_queried: u64,
+    host_blocks_hit: u64,   // Blocks found in host cache
+    disk_blocks_hit: u64,   // Blocks found in disk cache
+    object_blocks_hit: u64, // Blocks found in object cache
 }
 
 /// Cache statistics tracker with sliding window

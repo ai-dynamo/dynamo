@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use transfer::*;
 use utils::{
     LeaderMetadata, RemoteTransferRequest, WorkerMetadata, ZMQ_LEADER_METADATA_MESSAGE,
-    ZMQ_PING_MESSAGE, ZMQ_REMOTE_TRANSFER_MESSAGE, ZMQ_TRANSFER_BLOCKS_MESSAGE,
-    ZMQ_WORKER_METADATA_MESSAGE,
+    ZMQ_PING_MESSAGE, ZMQ_REMOTE_TRANSFER_MESSAGE, ZMQ_REMOTE_TRANSFER_RESPONSE,
+    ZMQ_TRANSFER_BLOCKS_MESSAGE, ZMQ_WORKER_METADATA_MESSAGE,
 };
 use zmq::*;
 
@@ -189,6 +189,8 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
 
     Ok(agent)
 }
+
+// Helper: perform allocation and build transfer handler (factored from previous code)
 
 #[allow(clippy::too_many_arguments)]
 async fn perform_allocation_and_build_handler(
@@ -506,12 +508,22 @@ impl Handler for RemoteTransferDispatch {
         };
 
         if message.data.len() != 1 {
+            message.mark_handled();
             return Err(anyhow::anyhow!(
                 "Remote transfer request must have exactly one data element"
             ));
         }
 
-        let request: RemoteTransferRequest = serde_json::from_slice(&message.data[0])?;
+        let request: RemoteTransferRequest = match serde_json::from_slice(&message.data[0]) {
+            Ok(req) => req,
+            Err(e) => {
+                message.mark_handled();
+                return Err(anyhow::anyhow!(
+                    "Failed to deserialize RemoteTransferRequest: {}",
+                    e
+                ));
+            }
+        };
 
         tracing::debug!(
             target: "kvbm-g4",
@@ -522,18 +534,21 @@ impl Handler for RemoteTransferDispatch {
             "received remote transfer request"
         );
 
-        // Execute the remote transfer
-        match handler.execute_remote_transfer(request).await {
-            Ok(()) => {
-                tracing::debug!(target: "kvbm-g4", "remote transfer completed successfully");
-            }
-            Err(e) => {
-                tracing::error!(target: "kvbm-g4", "remote transfer failed: {e:#}");
-                // Still ACK to avoid blocking leader
-            }
+        // Execute via handle_remote_transfer to ensure scheduler notification
+        let (result, response) = handler.handle_remote_transfer(request).await;
+        if let Err(e) = &result {
+            tracing::error!(target: "kvbm-g4", "remote transfer failed: {e:#}");
+        } else {
+            tracing::debug!(target: "kvbm-g4", "remote transfer completed successfully");
         }
 
-        message.ack().await?;
+        // Reply with the response (not just ACK) so leader knows the outcome
+        message
+            .reply(
+                ZMQ_REMOTE_TRANSFER_RESPONSE,
+                &[serde_json::to_vec(&response)?],
+            )
+            .await?;
         Ok(())
     }
 }

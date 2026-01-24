@@ -14,6 +14,7 @@ pub const ZMQ_WORKER_METADATA_MESSAGE: &str = "worker_metadata";
 pub const ZMQ_LEADER_METADATA_MESSAGE: &str = "leader_metadata";
 pub const ZMQ_TRANSFER_BLOCKS_MESSAGE: &str = "transfer_blocks";
 pub const ZMQ_REMOTE_TRANSFER_MESSAGE: &str = "remote_transfer";
+pub const ZMQ_REMOTE_TRANSFER_RESPONSE: &str = "remote_transfer_response";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerMetadata {
@@ -312,6 +313,82 @@ impl RemoteTransferRequest {
     /// Convert the serializable pipeline back to the real type.
     pub fn to_pipeline(&self) -> RemoteTransferPipeline {
         self.pipeline.to_pipeline()
+    }
+}
+
+/// Response from worker after processing a RemoteTransferRequest.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct RemoteTransferResponse {
+    /// Request ID for correlation
+    pub request_id: String,
+    /// Operation ID (UUID) that was processed
+    pub operation_id: uuid::Uuid,
+    /// Transfer result status
+    pub status: RemoteTransferStatus,
+}
+
+/// Status of a remote transfer operation.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum RemoteTransferStatus {
+    /// Transfer completed successfully
+    Success,
+    /// Transfer failed with error details
+    Failure {
+        /// Human-readable error message
+        error: String,
+        /// Block indices that failed (device block IDs for onboard)
+        failed_block_ids: Vec<usize>,
+    },
+}
+
+impl RemoteTransferResponse {
+    /// Create a success response.
+    pub fn success(request_id: String, operation_id: uuid::Uuid) -> Self {
+        Self {
+            request_id,
+            operation_id,
+            status: RemoteTransferStatus::Success,
+        }
+    }
+
+    /// Create a failure response.
+    pub fn failure(
+        request_id: String,
+        operation_id: uuid::Uuid,
+        error: impl Into<String>,
+        failed_block_ids: Vec<usize>,
+    ) -> Self {
+        Self {
+            request_id,
+            operation_id,
+            status: RemoteTransferStatus::Failure {
+                error: error.into(),
+                failed_block_ids,
+            },
+        }
+    }
+
+    /// Check if the transfer succeeded.
+    pub fn is_success(&self) -> bool {
+        matches!(self.status, RemoteTransferStatus::Success)
+    }
+
+    /// Get the error message if failed.
+    pub fn error(&self) -> Option<&str> {
+        match &self.status {
+            RemoteTransferStatus::Failure { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+
+    /// Get the failed block IDs if failed.
+    pub fn failed_block_ids(&self) -> Option<&[usize]> {
+        match &self.status {
+            RemoteTransferStatus::Failure {
+                failed_block_ids, ..
+            } => Some(failed_block_ids),
+            _ => None,
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::utils::RemoteTransferRequest;
+use super::utils::{RemoteTransferRequest, RemoteTransferResponse, ZMQ_REMOTE_TRANSFER_RESPONSE};
 use super::*;
 
 use futures::future::try_join_all;
@@ -257,11 +257,19 @@ impl BlockTransferHandler {
             .bounce_block_ids()
             .ok_or_else(|| anyhow::anyhow!("Remote transfer requires bounce buffer block IDs"))?;
 
-        // Get the host blocks for this transfer
+        // Get the host blocks for this transfer with bounds checking
         let bounce_blocks: Vec<LocalBlockData<PinnedStorage>> = bounce_ids
             .iter()
-            .map(|&idx| host_blocks[idx].clone())
-            .collect();
+            .map(|&idx| {
+                host_blocks.get(idx).cloned().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Invalid bounce block index: {} (host_blocks.len() = {})",
+                        idx,
+                        host_blocks.len()
+                    )
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
 
         // For offload: compute checksums before writing to remote
         if !is_onboard && g4_checksum_enabled() {
@@ -280,31 +288,31 @@ impl BlockTransferHandler {
         }
 
         // If this is a full pipeline with device blocks, execute host <-> device transfer
-        if let Some(device_ids) = pipeline.device_block_ids() {
-            if !device_ids.is_empty() {
-                let block_pairs: Vec<(usize, usize)> = if is_onboard {
-                    // Onboard: host -> device
-                    bounce_ids
-                        .iter()
-                        .copied()
-                        .zip(device_ids.iter().copied())
-                        .collect()
-                } else {
-                    // Offload: device -> host (already done before remote transfer)
-                    // This case is typically handled separately
-                    vec![]
-                };
+        if let Some(device_ids) = pipeline.device_block_ids()
+            && !device_ids.is_empty()
+        {
+            let block_pairs: Vec<(usize, usize)> = if is_onboard {
+                // Onboard: host -> device
+                bounce_ids
+                    .iter()
+                    .copied()
+                    .zip(device_ids.iter().copied())
+                    .collect()
+            } else {
+                // Offload: device -> host (already done before remote transfer)
+                // This case is typically handled separately
+                vec![]
+            };
 
-                if !block_pairs.is_empty() {
-                    let local_request = BlockTransferRequest {
-                        from_pool: if is_onboard { Host } else { Device },
-                        to_pool: if is_onboard { Device } else { Host },
-                        blocks: block_pairs,
-                        connector_req: None,
-                        sequence_hashes: None,
-                    };
-                    self.execute_transfer(local_request).await?;
-                }
+            if !block_pairs.is_empty() {
+                let local_request = BlockTransferRequest {
+                    from_pool: if is_onboard { Host } else { Device },
+                    to_pool: if is_onboard { Device } else { Host },
+                    blocks: block_pairs,
+                    connector_req: None,
+                    sequence_hashes: None,
+                };
+                self.execute_transfer(local_request).await?;
             }
         }
 
@@ -414,6 +422,60 @@ impl BlockTransferHandler {
     }
 }
 
+impl BlockTransferHandler {
+    pub(crate) async fn handle_remote_transfer(
+        &self,
+        request: RemoteTransferRequest,
+    ) -> (Result<()>, RemoteTransferResponse) {
+        let request_id = request.request_id.clone();
+        let operation_id = request.operation_id;
+        let device_block_ids = request
+            .pipeline
+            .device_block_ids
+            .clone()
+            .unwrap_or_default();
+
+        let exec_result = async {
+            if let Some(connector_req) = request.connector_req.clone() {
+                let client = self
+                    .scheduler_client
+                    .as_ref()
+                    .expect("scheduler client required")
+                    .clone();
+
+                let handle = client.schedule_transfer(connector_req).await?;
+                assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
+
+                let result = self.execute_remote_transfer(request).await;
+                handle
+                    .mark_complete(
+                        result
+                            .as_ref()
+                            .map(|_| ())
+                            .map_err(|e| anyhow::anyhow!("{}", e)),
+                    )
+                    .await;
+                result
+            } else {
+                self.execute_remote_transfer(request).await
+            }
+        }
+        .await;
+
+        let response = match &exec_result {
+            Ok(_) => RemoteTransferResponse::success(request_id, operation_id),
+            Err(e) => RemoteTransferResponse::failure(
+                request_id,
+                operation_id,
+                e.to_string(),
+                device_block_ids,
+            ),
+        };
+
+        (exec_result, response)
+    }
+}
+
 #[async_trait]
 impl Handler for BlockTransferHandler {
     async fn handle(&self, mut message: MessageHandle) -> Result<()> {
@@ -423,88 +485,67 @@ impl Handler for BlockTransferHandler {
             ));
         }
 
-        // Try to parse as RemoteTransferRequest first, then fall back to BlockTransferRequest
-        let result = if let Ok(remote_request) =
+        // Try to parse as RemoteTransferRequest first
+        if let Ok(remote_request) =
             serde_json::from_slice::<RemoteTransferRequest>(&message.data[0])
         {
-            // Handle remote transfer (G4 object storage)
-            let operation_id = remote_request.operation_id;
-
             tracing::debug!(
                 target: "kvbm-g4",
                 request_id = %remote_request.request_id,
-                operation_id = %operation_id,
+                operation_id = %remote_request.operation_id,
                 num_blocks = remote_request.num_blocks(),
                 is_onboard = remote_request.is_onboard(),
                 "handling remote transfer request"
             );
 
-            if let Some(connector_req) = remote_request.connector_req.clone() {
-                let client = self
-                    .scheduler_client
-                    .as_ref()
-                    .expect("scheduler client is required")
-                    .clone();
+            let (result, response) = self.handle_remote_transfer(remote_request).await;
+            message
+                .reply(
+                    ZMQ_REMOTE_TRANSFER_RESPONSE,
+                    &[serde_json::to_vec(&response)?],
+                )
+                .await?;
+            return result;
+        }
 
-                let handle = client.schedule_transfer(connector_req).await?;
-                assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
+        // Handle local block transfer
+        let mut request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
 
-                match self.execute_remote_transfer(remote_request).await {
-                    Ok(_) => {
-                        handle.mark_complete(Ok(())).await;
-                        Ok(())
-                    }
-                    Err(e) => {
-                        handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
-                        Err(e)
-                    }
+        let result = if let Some(req) = request.connector_req.take() {
+            let operation_id = req.uuid;
+
+            tracing::debug!(
+                request_id = %req.request_id,
+                operation_id = %operation_id,
+                "scheduling transfer"
+            );
+
+            let client = self
+                .scheduler_client
+                .as_ref()
+                .expect("scheduler client is required")
+                .clone();
+
+            let handle = client.schedule_transfer(req).await?;
+
+            // we don't support cancellation yet
+            assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
+
+            match self.execute_transfer(request).await {
+                Ok(_) => {
+                    handle.mark_complete(Ok(())).await;
+                    Ok(())
                 }
-            } else {
-                self.execute_remote_transfer(remote_request).await
+                Err(e) => {
+                    handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
+                    Err(e)
+                }
             }
         } else {
-            // Handle local block transfer
-            let mut request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
-
-            if let Some(req) = request.connector_req.take() {
-                let operation_id = req.uuid;
-
-                tracing::debug!(
-                    request_id = %req.request_id,
-                    operation_id = %operation_id,
-                    "scheduling transfer"
-                );
-
-                let client = self
-                    .scheduler_client
-                    .as_ref()
-                    .expect("scheduler client is required")
-                    .clone();
-
-                let handle = client.schedule_transfer(req).await?;
-
-                // we don't support cancellation yet
-                assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
-
-                match self.execute_transfer(request).await {
-                    Ok(_) => {
-                        handle.mark_complete(Ok(())).await;
-                        Ok(())
-                    }
-                    Err(e) => {
-                        handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
-                        Err(e)
-                    }
-                }
-            } else {
-                self.execute_transfer(request).await
-            }
+            self.execute_transfer(request).await
         };
 
-        // we always ack regardless of if we error or not
         message.ack().await?;
-
-        // the error may trigger a cancellation
         result
     }
 }

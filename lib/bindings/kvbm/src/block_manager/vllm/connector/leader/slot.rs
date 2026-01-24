@@ -1,16 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{any::Any, cmp::max, sync::Arc, time::Duration};
+use std::{any::Any, cmp::max, sync::Arc};
 
 use dynamo_runtime::config::environment_names::kvbm::remote_storage as env_g4;
-use once_cell::sync::Lazy;
+use once_cell::sync::{Lazy, OnceCell};
 
 /// Default maximum concurrent H2O (host-to-object) transfers.
 const DEFAULT_MAX_CONCURRENT_H2O: usize = 8;
-
-/// Default timeout in seconds for G4 (remote storage) transfers.
-const DEFAULT_G4_TRANSFER_TIMEOUT_SECS: u64 = 30;
 
 /// Maximum concurrent H2O transfers - cached from env var.
 static MAX_CONCURRENT_H2O: Lazy<usize> = Lazy::new(|| {
@@ -20,15 +17,6 @@ static MAX_CONCURRENT_H2O: Lazy<usize> = Lazy::new(|| {
         .unwrap_or(DEFAULT_MAX_CONCURRENT_H2O)
 });
 
-/// Timeout for G4 transfers - cached from env var.
-static G4_TRANSFER_TIMEOUT: Lazy<Duration> = Lazy::new(|| {
-    let secs: u64 = std::env::var(env_g4::DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_G4_TRANSFER_TIMEOUT_SECS);
-    Duration::from_secs(secs)
-});
-
 use dynamo_llm::{
     block_manager::{
         BlockPool, NixlRegisterableStorage, Storage,
@@ -36,8 +24,11 @@ use dynamo_llm::{
         config::{RemoteStorageConfig, should_bypass_cpu_cache},
         connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{
-            BlockTransferPool, BlockTransferRequest, KvbmLeader, RemoteHashOperationsSync,
-            vllm as vllm_int,
+            BlockTransferPool, BlockTransferRequest, KvbmLeader, PositionalRemoteHandle,
+            RemoteHashOperationsSync, RemoteTransferResponse, RemoteTransferStatus,
+            vllm::{
+                self as vllm_int, G4Action, G4OnboardEvent, G4OnboardState, G4OnboardStateMachine,
+            },
         },
         pool::{PinGuard, PinRegistry},
     },
@@ -50,6 +41,40 @@ use crate::block_manager::cache_stats::CacheStatsTracker;
 use crate::{get_current_cancel_token, get_current_tokio_handle};
 
 use super::*;
+
+/// Context needed by slots for G4 operations.
+/// This avoids passing Arc<KvbmLeader> directly to slots,
+/// reducing coupling and avoiding potential circular dependencies.
+#[derive(Clone)]
+pub struct SlotG4Context {
+    /// Handle for remote registry operations
+    pub remote_handle: Option<PositionalRemoteHandle>,
+    /// Worker ID for registry queries
+    pub worker_id: u64,
+    /// TP world size for consensus operations
+    pub world_size: usize,
+}
+
+impl std::fmt::Debug for SlotG4Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlotG4Context")
+            .field("remote_handle", &self.remote_handle.as_ref().map(|_| "..."))
+            .field("worker_id", &self.worker_id)
+            .field("world_size", &self.world_size)
+            .finish()
+    }
+}
+
+impl SlotG4Context {
+    /// Create a G4 context from a KvbmLeader reference
+    pub fn from_leader(leader: &KvbmLeader) -> Self {
+        Self {
+            remote_handle: leader.remote_handle(),
+            worker_id: leader.worker_id(),
+            world_size: leader.world_size(),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SlotError {
@@ -310,7 +335,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             self.block_manager.clone(),
             self.xfer_tx.clone(),
             self.cache_stats.clone(),
-            self.leader.clone(),
+            SlotG4Context::from_leader(&self.leader),
         );
         self.slots
             .lock()
@@ -365,8 +390,8 @@ pub struct VllmConnectorSlot {
     /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
     staging_from_disk: Option<Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>>,
 
-    /// Sequence hashes to be onboarded from g4 storage
-    staging_from_g4: Option<Vec<u64>>,
+    /// G4 state machine for tracking remote storage operations
+    g4_state: G4OnboardStateMachine,
 
     /// The number of blocks cached from the device
     tokens_cached_from_device: usize,
@@ -407,25 +432,20 @@ pub struct VllmConnectorSlot {
     /// Total number of blocks queried from host/disk cache
     total_blocks_queried: usize,
 
-    /// Skip G4 (remote) lookup on retry after a failed onboard.
-    /// This prevents infinite retry loops when remote storage has stale registry entries.
-    skip_g4_on_retry: bool,
-
     /// Flag indicating the slot just recovered from a failed transfer.
     /// When true, `apply_scheduler_output` should ignore vLLM's `num_computed_tokens`
     /// since it reflects pre-failure state, not our reset state.
     recovered_from_failed_transfer: bool,
 
-    /// G4 hashes with their positions that were attempted but may have failed.
-    /// Used to invalidate stale registry entries when onboard fails.
-    /// Stores (sequence_hash, position) pairs where position is the index in the offloaded sequence.
-    attempted_g4_hashes: Option<Vec<(u64, u32)>>,
-
     /// Cache statistics tracker for this KVBM instance
     cache_stats: Arc<CacheStatsTracker>,
 
-    // Reference to the leader for g4 operations
-    leader: Arc<KvbmLeader>,
+    /// Context for G4 operations (remote registry lookups, etc.)
+    g4_context: SlotG4Context,
+
+    /// Lock-free response cell for current G4 transfer.
+    /// Created per-transfer, not per-slot.
+    g4_response: Option<Arc<OnceCell<RemoteTransferResponse>>>,
 }
 
 impl VllmConnectorSlot {
@@ -436,7 +456,7 @@ impl VllmConnectorSlot {
         block_manager: VllmBlockManager,
         xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
         cache_stats: Arc<CacheStatsTracker>,
-        leader: Arc<KvbmLeader>,
+        g4_context: SlotG4Context,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
@@ -444,7 +464,7 @@ impl VllmConnectorSlot {
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
 
         Self {
-            request_id,
+            request_id: request_id.clone(),
             sequence,
             block_manager,
             block_size,
@@ -457,7 +477,7 @@ impl VllmConnectorSlot {
             device_blocks: Vec::new(),
             staging_from_host: None,
             staging_from_disk: None,
-            staging_from_g4: None,
+            g4_state: G4OnboardStateMachine::new(request_id),
             pending_operations: None,
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
@@ -465,11 +485,10 @@ impl VllmConnectorSlot {
             tokens_cached_from_g4: 0,
             performed_cache_lookup: false,
             total_blocks_queried: 0,
-            skip_g4_on_retry: false,
             recovered_from_failed_transfer: false,
-            attempted_g4_hashes: None,
             cache_stats,
-            leader,
+            g4_context,
+            g4_response: None,
         }
     }
 
@@ -511,6 +530,104 @@ impl VllmConnectorSlot {
             }
         }
     }
+
+    /// Execute G4 state machine actions
+    fn execute_g4_actions(&mut self, actions: &[G4Action]) {
+        for action in actions {
+            match action {
+                G4Action::EvictFromRegistry { hashes } => {
+                    if let Some(handle) = &self.g4_context.remote_handle {
+                        tracing::warn!(
+                            target: "kvbm-g4",
+                            request_id = %self.request_id,
+                            num_hashes = hashes.len(),
+                            "removing stale hashes from registry"
+                        );
+                        handle.remove_hashes_with_positions_blocking(hashes, self.g4_context.worker_id);
+                    }
+                }
+                G4Action::MarkBlocksFailed { block_ids } => {
+                    tracing::warn!(
+                        target: "kvbm-g4",
+                        request_id = %self.request_id,
+                        failed_blocks = ?block_ids,
+                        "marking blocks as failed"
+                    );
+                    // Failure is already reported through mark_complete(Err) in lib/llm
+                }
+                G4Action::Log { message } => {
+                    tracing::debug!(target: "kvbm-g4", "{}", message);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Check for G4 transfer response and update state machine.
+    ///
+    /// Lock-free read from OnceCell. State machine updated on this thread.
+    fn check_g4_response(&mut self) {
+        // Get response if available (lock-free read)
+        let response = match &self.g4_response {
+            Some(cell) => cell.get().cloned(),
+            None => return,
+        };
+
+        let Some(response) = response else {
+            return; // Not set yet, transfer still in progress
+        };
+
+        // Verify this response matches our current operation
+        if self.g4_state.operation_id() != Some(response.operation_id) {
+            tracing::warn!(
+                target: "kvbm-g4",
+                request_id = %self.request_id,
+                expected_op = ?self.g4_state.operation_id(),
+                received_op = %response.operation_id,
+                "Response for unexpected operation"
+            );
+            return;
+        }
+
+        // Update state machine (same thread, no sync needed)
+        match &response.status {
+            RemoteTransferStatus::Success => {
+                tracing::debug!(
+                    target: "kvbm-g4",
+                    request_id = %self.request_id,
+                    operation_id = %response.operation_id,
+                    "G4 transfer completed successfully"
+                );
+
+                if let Ok(result) = self.g4_state.transition(G4OnboardEvent::ResponseSuccess) {
+                    self.execute_g4_actions(&result.actions);
+                }
+            }
+            RemoteTransferStatus::Failure {
+                error,
+                failed_block_ids,
+            } => {
+                tracing::warn!(
+                    target: "kvbm-g4",
+                    request_id = %self.request_id,
+                    operation_id = %response.operation_id,
+                    error = %error,
+                    failed_blocks = ?failed_block_ids,
+                    "G4 transfer failed"
+                );
+
+                if let Ok(result) = self.g4_state.transition(G4OnboardEvent::ResponseFailure {
+                    error: error.clone(),
+                    failed_blocks: failed_block_ids.clone(),
+                }) {
+                    self.execute_g4_actions(&result.actions);
+                }
+            }
+        }
+
+        // Clear the cell for next transfer
+        self.g4_response = None;
+    }
 }
 
 impl std::fmt::Debug for VllmConnectorSlot {
@@ -545,10 +662,12 @@ impl Slot for VllmConnectorSlot {
             tracing::warn!(request_id = %self.request_id, "Preemption while host blocks staged");
             self.staging_from_host.take();
         }
-        if self.staging_from_g4.is_some() {
-            tracing::warn!(target: "kvbm-g4", request_id = %self.request_id, "preemption while hashes staged");
-            self.staging_from_g4.take();
+        if self.g4_state.state() != G4OnboardState::Idle {
+            tracing::warn!(target: "kvbm-g4", request_id = %self.request_id, g4_state = ?self.g4_state.state(), "preemption while G4 in progress");
+            let _ = self.g4_state.transition(G4OnboardEvent::Reset);
         }
+        // Clear any pending G4 response
+        self.g4_response = None;
         if self.pending_operations.is_some() {
             tracing::warn!(
                 request_id = %self.request_id,
@@ -569,8 +688,6 @@ impl Slot for VllmConnectorSlot {
         self.tokens_cached_from_g4 = 0;
         self.performed_cache_lookup = false;
         self.total_blocks_queried = 0;
-        self.skip_g4_on_retry = false;
-        self.attempted_g4_hashes = None;
     }
 
     fn reset(&mut self) {
@@ -611,32 +728,56 @@ impl Slot for VllmConnectorSlot {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
-        // Handle recovery from failed onboard prior to processing the scheduler output.
-        // When a transfer fails and vLLM reschedules the request, apply_scheduler_output
-        // is called BEFORE acquire_local_matches. We need to detect the failed state here
-        // and reset, otherwise our stale current_position will cause capacity errors.
+        // Check for G4 response (lock-free read, updates state machine).
+        // This allows proactive detection of transfer completion/failure
+        // before the recovery logic below runs.
+        self.check_g4_response();
+
+        // Handle recovery from failed/timed-out onboard.
+        // Only recover if we're in Onboarding state AND G4 indicates failure or timeout.
+        // G4 states that need recovery:
+        //   - Failed: transfer failed (detected via OnceCell)
+        //   - Transferring/AwaitingResponse: timeout (no response received yet)
+        // G4 states that should NOT trigger recovery:
+        //   - Complete: transfer succeeded
+        //   - Idle: no G4 operation was in progress (host/disk only)
         if matches!(self.state, SlotState::Onboarding(_)) {
-            tracing::warn!(
-                request_id = %self.request_id,
-                current_position = self.current_position,
-                device_blocks = self.device_blocks.len(),
-                num_computed_tokens = num_computed_tokens,
-                "Detected Onboarding state in apply_scheduler_output - recovering from failed transfer"
+            let g4_needs_recovery = matches!(
+                self.g4_state.state(),
+                G4OnboardState::Failed
+                    | G4OnboardState::Transferring
+                    | G4OnboardState::AwaitingResponse
             );
-            // Reset slot state for retry.
-            // Do not clear device_blocks
-            self.current_position = 0;
-            self.evaluated_blocks = 0;
-            self.tokens_cached_from_device = 0;
-            self.tokens_cached_from_host = 0;
-            self.tokens_cached_from_disk = 0;
-            self.tokens_cached_from_g4 = 0;
-            self.performed_cache_lookup = false;
-            self.total_blocks_queried = 0;
-            self.skip_g4_on_retry = true;
-            self.recovered_from_failed_transfer = true;
-            self.pending_operations.take();
-            self.attempted_g4_hashes.take();
+
+            if g4_needs_recovery {
+                tracing::warn!(
+                    request_id = %self.request_id,
+                    current_position = self.current_position,
+                    device_blocks = self.device_blocks.len(),
+                    num_computed_tokens = num_computed_tokens,
+                    g4_state = ?self.g4_state.state(),
+                    "Detected Onboarding state in apply_scheduler_output - recovering from failed transfer"
+                );
+
+                // Transition G4 state machine: Failed/Transferring/AwaitingResponse → Recovered
+                if let Ok(result) = self.g4_state.transition(G4OnboardEvent::Reschedule) {
+                    self.execute_g4_actions(&result.actions);
+                }
+                let _ = self.g4_state.transition(G4OnboardEvent::EvictionComplete);
+
+                // Reset slot state for retry
+                self.current_position = 0;
+                self.evaluated_blocks = 0;
+                self.tokens_cached_from_device = 0;
+                self.tokens_cached_from_host = 0;
+                self.tokens_cached_from_disk = 0;
+                self.tokens_cached_from_g4 = 0;
+                self.performed_cache_lookup = false;
+                self.total_blocks_queried = 0;
+                self.recovered_from_failed_transfer = true;
+                self.pending_operations.take();
+            }
+            // If G4 state is Complete or Idle, we continue normally (no recovery needed)
         }
 
         if !tokens.is_empty() {
@@ -659,7 +800,7 @@ impl Slot for VllmConnectorSlot {
         // After recovery, vLLM's num_computed_tokens reflects pre-failure state.
         // Use our reset position instead.
         let effective_computed_tokens = if self.recovered_from_failed_transfer {
-            tracing::info!(
+            tracing::debug!(
                 request_id = %self.request_id,
                 vllm_computed_tokens = num_computed_tokens,
                 our_position = self.current_position,
@@ -869,58 +1010,53 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        // Handle recovery from failed onboard - vLLM rescheduled the request
+        // Check for G4 response before recovery logic
+        self.check_g4_response();
+
+        // Handle recovery from failed/timed-out onboard.
+        // Only recover if G4 indicates failure or timeout (not success or idle).
         if matches!(self.state(), SlotState::Onboarding(_)) {
-            // Remove stale G4 hashes from registry to prevent other workers from hitting the same error
-            if let Some(stale_hash_positions) = self.attempted_g4_hashes.take() {
+            let g4_needs_recovery = matches!(
+                self.g4_state.state(),
+                G4OnboardState::Failed
+                    | G4OnboardState::Transferring
+                    | G4OnboardState::AwaitingResponse
+            );
+
+            if g4_needs_recovery {
                 tracing::warn!(
                     target: "kvbm-g4",
                     request_id = %self.request_id,
-                    num_stale_hashes = stale_hash_positions.len(),
-                    stale_hash_positions = ?stale_hash_positions,
-                    "onboard failed - removing stale hashes from registry"
+                    state = ?self.state(),
+                    g4_state = ?self.g4_state.state(),
+                    "slot in onboarding state during acquire_local_matches; recovering from failed onboard"
                 );
 
-                // Remove stale entries from the registry (fire-and-forget)
-                if let Some(handle) = self.leader.remote_handle() {
-                    let worker_id = self.leader.worker_id();
-                    handle.remove_hashes_with_positions_blocking(&stale_hash_positions, worker_id);
-                    tracing::info!(
-                        target: "kvbm-g4",
-                        request_id = %self.request_id,
-                        num_removed = stale_hash_positions.len(),
-                        "removed stale hashes from registry"
-                    );
+                // Transition G4 state machine: Failed/Transferring/AwaitingResponse → Recovered
+                if let Ok(result) = self.g4_state.transition(G4OnboardEvent::Reschedule) {
+                    self.execute_g4_actions(&result.actions);
                 }
-            }
+                let _ = self.g4_state.transition(G4OnboardEvent::EvictionComplete);
 
-            tracing::warn!(
-                target: "kvbm-g4",
-                request_id = %self.request_id,
-                state = ?self.state(),
-                "slot in onboarding state during acquire_local_matches; recovering from failed onboard - will skip lookup on retry"
-            );
-            // Clean up any pending operations from the failed onboard
-            let _ = self.pending_operations.take();
-            // Reset slot state to allow retry - staging fields should already be None
-            // since trigger_onboarding consumed them with .take()
-            self.state = SlotState::Preempted;
-            self.iteration_first_scheduled = None;
-            self.current_position = 0;
-            self.evaluated_blocks = 0;
-            self.device_blocks.clear();
-            self.tokens_cached_from_device = 0;
-            self.tokens_cached_from_host = 0;
-            self.tokens_cached_from_disk = 0;
-            self.tokens_cached_from_g4 = 0;
-            self.performed_cache_lookup = false;
-            self.total_blocks_queried = 0;
-            // Skip G4 (remote) lookup on retry to prevent infinite loops
-            // when remote storage has stale registry entries (NoSuchKey errors)
-            self.skip_g4_on_retry = true;
-            // Mark that we've recovered - next apply_scheduler_output should ignore
-            // vLLM's stale num_computed_tokens
-            self.recovered_from_failed_transfer = true;
+                // Clean up any pending operations from the failed onboard
+                let _ = self.pending_operations.take();
+                // Reset slot state to allow retry
+                self.state = SlotState::Preempted;
+                self.iteration_first_scheduled = None;
+                self.current_position = 0;
+                self.evaluated_blocks = 0;
+                self.device_blocks.clear();
+                self.tokens_cached_from_device = 0;
+                self.tokens_cached_from_host = 0;
+                self.tokens_cached_from_disk = 0;
+                self.tokens_cached_from_g4 = 0;
+                self.performed_cache_lookup = false;
+                self.total_blocks_queried = 0;
+                // Mark that we've recovered - next apply_scheduler_output should ignore
+                // vLLM's stale num_computed_tokens
+                self.recovered_from_failed_transfer = true;
+            }
+            // If G4 state is Complete or Idle, we continue normally
         }
 
         if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted) {
@@ -1013,17 +1149,17 @@ impl Slot for VllmConnectorSlot {
 
         // Remote registry lookup with TP consensus (G4/object storage)
         let search_offset_g4 = search_offset + num_matched_disk_blocks;
-        let mut g4_hashes = if self.skip_g4_on_retry {
+        let mut g4_hashes = if self.g4_state.skip_on_retry() {
             tracing::info!(target: "kvbm-g4", request_id = %self.request_id, "skipping - previous failure");
             vec![]
-        } else if let Some(handle) = self.leader.remote_handle() {
+        } else if let Some(handle) = &self.g4_context.remote_handle {
             let remaining = &sequence_hashes[search_offset_g4..];
             if !remaining.is_empty() {
                 // TP-aware lookup: queries all workers, returns consensus
                 let matched = vllm_int::match_prefix_tp_blocking(
-                    &handle,
+                    handle,
                     remaining,
-                    self.leader.world_size(),
+                    self.g4_context.world_size,
                 );
                 if !matched.is_empty() {
                     tracing::debug!(target: "kvbm-g4", matched = matched.len(), remaining = remaining.len(), "cache hit");
@@ -1092,11 +1228,16 @@ impl Slot for VllmConnectorSlot {
         } else {
             None
         };
-        self.staging_from_g4 = if !g4_hashes.is_empty() {
-            Some(g4_hashes)
-        } else {
-            None
-        };
+
+        // Transition G4 state machine if we have hashes
+        if !g4_hashes.is_empty() {
+            let positions: Vec<u32> = (0..g4_hashes.len() as u32).collect();
+            let _ = self.g4_state.transition(G4OnboardEvent::StartLookup);
+            let _ = self.g4_state.transition(G4OnboardEvent::RegistryHit {
+                hashes: g4_hashes,
+                positions,
+            });
+        }
 
         self.state = SlotState::OnboardStaged(num_new_matched_tokens);
 
@@ -1167,35 +1308,49 @@ impl Slot for VllmConnectorSlot {
             self.evaluated_blocks += num_disk_blocks;
         }
 
-        if let Some(g4_hashes) = self.staging_from_g4.take() {
-            let num_g4_blocks = g4_hashes.len();
+        // G4 onboard from state machine
+        if self.g4_state.state() == G4OnboardState::Staged {
+            // Get hashes from state machine's attempted_hashes (set during RegistryHit)
+            if let Some(hashes_with_positions) = self.g4_state.attempted_hashes() {
+                let g4_hashes: Vec<u64> = hashes_with_positions.iter().map(|(h, _)| *h).collect();
+                let num_g4_blocks = g4_hashes.len();
 
-            // get device block ids
-            let dst_block_ids = self
-                .device_blocks
-                .iter()
-                .skip(self.evaluated_blocks)
-                .take(num_g4_blocks)
-                .copied()
-                .collect::<Vec<_>>();
-
-            debug_assert_eq!(dst_block_ids.len(), num_g4_blocks);
-
-            // Store hashes with positions for invalidation on failure
-            // Positions are 0, 1, 2... relative to the offloaded sequence (matching registration)
-            self.attempted_g4_hashes = Some(
-                g4_hashes
+                // get device block ids
+                let dst_block_ids = self
+                    .device_blocks
                     .iter()
-                    .enumerate()
-                    .map(|(pos, &hash)| (hash, pos as u32))
-                    .collect(),
-            );
+                    .skip(self.evaluated_blocks)
+                    .take(num_g4_blocks)
+                    .copied()
+                    .collect::<Vec<_>>();
 
-            // G4 onboard uses a different path - sends G4OnboardRequest to worker
-            self.onboard_from_g4(g4_hashes, dst_block_ids)?;
+                debug_assert_eq!(dst_block_ids.len(), num_g4_blocks);
 
-            // shift the evaluated blocks position to the end of the computed/cached blocks
-            self.evaluated_blocks += num_g4_blocks;
+                // Transition state machine: Staged -> Transferring
+                // IMPORTANT: This operation_id must be passed through to the actual transfer
+                // to ensure response correlation works correctly.
+                let operation_id = uuid::Uuid::new_v4();
+                if let Ok(result) = self
+                    .g4_state
+                    .transition(G4OnboardEvent::TriggerTransfer { operation_id })
+                {
+                    for action in &result.actions {
+                        if let G4Action::Log { message } = action {
+                            tracing::debug!(target: "kvbm-g4", "{}", message);
+                        }
+                    }
+                }
+
+                // G4 onboard uses a different path - sends G4OnboardRequest to worker
+                // Pass the same operation_id to ensure response matching works
+                self.onboard_from_g4(g4_hashes, dst_block_ids, operation_id)?;
+
+                // Mark request sent
+                let _ = self.g4_state.transition(G4OnboardEvent::RequestSent);
+
+                // shift the evaluated blocks position to the end of the computed/cached blocks
+                self.evaluated_blocks += num_g4_blocks;
+            }
         }
 
         self.state = SlotState::Onboarding(num_external_tokens);
@@ -1293,6 +1448,13 @@ impl VllmConnectorSlot {
 
         self.append_pending_operation(worker_req);
 
+        tracing::debug!(
+            request_id = self.request_id,
+            operation_id = %operation_id,
+            "offloading {} blocks to host",
+            block_ids.len()
+        );
+
         Ok(())
     }
 
@@ -1347,10 +1509,13 @@ impl VllmConnectorSlot {
     ///
     /// Unlike host/disk onboarding, G4 onboarding sends a G4OnboardRequest
     /// to the worker, which handles the G4->Host->Device transfer atomically.
+    ///
+    /// The `operation_id` must match the one used in the G4 state machine transition.
     fn onboard_from_g4(
         &mut self,
         sequence_hashes: Vec<u64>,
         device_block_ids: Vec<BlockId>,
+        operation_id: uuid::Uuid,
     ) -> Result<(), SlotError> {
         debug_assert_eq!(sequence_hashes.len(), device_block_ids.len());
 
@@ -1359,12 +1524,21 @@ impl VllmConnectorSlot {
             sequence_hashes,
             device_block_ids,
             self.block_size,
+            operation_id,
         );
 
-        let xfer_req = LocalTransferRequest::Remote(RemoteTransferRequest::from_g4_params(&params));
+        // Create OnceCell for this transfer - slot reads, transfer task writes
+        let response_cell = Arc::new(OnceCell::new());
+        self.g4_response = Some(response_cell.clone());
+
+        let xfer_req = LocalTransferRequest::Remote(
+            RemoteTransferRequest::from_g4_params(&params).with_g4_response(response_cell),
+        );
 
         self.xfer_tx.send(xfer_req).map_err(|e| {
             tracing::error!(target: "kvbm-g4", "failed to send request: {:?}", e);
+            // Clear the response cell on failure
+            self.g4_response = None;
             SlotError::InvalidOperation(format!("Transfer engine unavailable: {}", e))
         })?;
 
@@ -1454,6 +1628,9 @@ struct RemoteTransferRequest {
     /// after the transfer completes. This prevents host blocks from being
     /// evicted during transfers.
     pin_id: Option<uuid::Uuid>,
+    /// Lock-free cell for transfer response (set by transfer task, read by slot).
+    /// Only used for G4 onboard operations.
+    g4_response: Option<Arc<OnceCell<RemoteTransferResponse>>>,
 }
 
 impl RemoteTransferRequest {
@@ -1467,7 +1644,13 @@ impl RemoteTransferRequest {
             block_size: params.block_size,
             is_onboard: true,
             pin_id: None,
+            g4_response: None,
         }
+    }
+
+    pub fn with_g4_response(mut self, response: Arc<OnceCell<RemoteTransferResponse>>) -> Self {
+        self.g4_response = Some(response);
+        self
     }
 
     pub fn new_h2o(
@@ -1488,6 +1671,7 @@ impl RemoteTransferRequest {
             block_size,
             is_onboard: false,
             pin_id: Some(pin_id),
+            g4_response: None,
         }
     }
 
@@ -1825,7 +2009,7 @@ where
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "offload to {}",
+        "offload to {} stage 1 complete",
         storage_name
     );
 
@@ -1842,7 +2026,7 @@ where
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,
-        "offload to {}",
+        "offload to {} stage 2 complete",
         storage_name
     );
 
@@ -1867,7 +2051,15 @@ where
         sequence_hashes,
     };
     let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
+    
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload to {} - stage 3 complete",
+        storage_name
+    );
 
+    // 4. Wait for the offload request to complete
     match notify_receiver.await {
         Ok(_) => {
             tracing::debug!(
@@ -1882,6 +2074,14 @@ where
         }
     }
 
+    tracing::debug!(
+        request_id = request_id,
+        operation_id = %operation_id,
+        "offload to {} - stage 4 complete",
+        storage_name
+    );
+
+    // 5. Register immutable blocks
     let immutable_blocks = storage_pool.register_blocks(blocks_to_register).await?;
 
     tracing::debug!(
@@ -1986,14 +2186,17 @@ async fn process_onboard_request(
     let request_id = &onboard_req.request_id;
     let operation_id = &onboard_req.operation_id;
 
+    // extract source block ids
     let src_block_ids = onboard_req.src_blocks.block_ids();
 
+    // create block pairs
     let block_pairs = src_block_ids
         .iter()
         .zip(onboard_req.dst_block_ids.iter())
         .map(|(src, dst)| (*src, *dst))
         .collect::<Vec<_>>();
 
+    // create transfer request
     let block_xfer_req = BlockTransferRequest {
         from_pool: onboard_req.src_blocks.storage_pool(),
         to_pool: BlockTransferPool::Device,
@@ -2035,6 +2238,7 @@ async fn process_remote_transfer_request(
     let request_id = &req.request_id;
     let operation_id = &req.operation_id;
     let pin_id = req.pin_id;
+    let g4_response_cell = req.g4_response.clone();
 
     // Helper to release pin guard (called on all exit paths)
     let release_pin = |pin_registry: &PinRegistry, pin_id: Option<uuid::Uuid>| {
@@ -2115,10 +2319,17 @@ async fn process_remote_transfer_request(
 
     // Build transfer pipeline
     let hashes: Vec<u64> = hashes_with_positions.iter().map(|&(h, _)| h).collect();
+
+    // Keep host_blocks alive until the transfer completes to prevent buffers from
+    // being returned to the pool while the remote transfer is in flight.
+    // The Option is used to conditionally hold the blocks only for non-H2O transfers.
+    let _host_blocks_guard;
+
     let (bounce, device) = if req.is_h2o() {
         // H2O: use existing host blocks as bounce buffers
         let bounce = filtered_host_ids
             .ok_or_else(|| anyhow::anyhow!("H2O transfer requires host_block_ids"))?;
+        _host_blocks_guard = None;
         (bounce, vec![])
     } else {
         // Allocate bounce buffers from host pool
@@ -2128,6 +2339,8 @@ async fn process_remote_transfer_request(
         let host_blocks = host_pool.allocate_blocks(num_blocks).await?;
         let bounce = host_blocks.iter().map(|b| b.block_id()).collect();
         let device = req.device_block_ids.iter().copied().collect();
+        // Keep host_blocks alive until end of function
+        _host_blocks_guard = Some(host_blocks);
         (bounce, device)
     };
     let pipeline = vllm_int::create_transfer_pipeline(
@@ -2161,10 +2374,23 @@ async fn process_remote_transfer_request(
             },
         );
 
-    let notify_receiver = leader.remote_transfer_request(wire_req).await?;
+    // Send request and wait for structured response (timeout handled by leader)
+    let response = leader.remote_transfer_request(wire_req).await?;
 
-    let result = match tokio::time::timeout(*G4_TRANSFER_TIMEOUT, notify_receiver).await {
-        Ok(Ok(_)) => {
+    // Set response in OnceCell (lock-free write) for G4 onboard operations.
+    // Slot will read this when checking completion via check_g4_response.
+    if let Some(cell) = &g4_response_cell {
+        if cell.set(response.clone()).is_err() {
+            tracing::warn!(
+                target: "kvbm-g4",
+                request_id = %request_id,
+                "OnceCell already set (unexpected)"
+            );
+        }
+    }
+
+    let result = match response.status {
+        RemoteTransferStatus::Success => {
             tracing::debug!(
                 target = "kvbm-g4",
                 request_id = %request_id,
@@ -2196,12 +2422,18 @@ async fn process_remote_transfer_request(
 
             Ok(())
         }
-        Ok(Err(_)) => {
+        RemoteTransferStatus::Failure {
+            error,
+            failed_block_ids,
+        } => {
             tracing::error!(
+                target = "kvbm-g4",
                 request_id = %request_id,
                 operation_id = %operation_id,
                 num_blocks = num_blocks,
-                "Remote transfer completion notification failed"
+                failed_blocks = ?failed_block_ids,
+                "Remote transfer failed: {}",
+                error
             );
             // Track failure metrics
             if req.is_onboard {
@@ -2209,28 +2441,7 @@ async fn process_remote_transfer_request(
             } else {
                 kvbm_metrics.record_object_write_failure(num_blocks as u64);
             }
-            Err(anyhow::anyhow!(
-                "Remote transfer completion notification failed"
-            ))
-        }
-        Err(_elapsed) => {
-            tracing::warn!(
-                request_id = %request_id,
-                operation_id = %operation_id,
-                num_blocks = num_blocks,
-                timeout_secs = G4_TRANSFER_TIMEOUT.as_secs(),
-                "Remote transfer timed out (adjust with DYN_KVBM_G4_TRANSFER_TIMEOUT_SECS)"
-            );
-            // Track failure metrics
-            if req.is_onboard {
-                kvbm_metrics.record_object_read_failure(num_blocks as u64);
-            } else {
-                kvbm_metrics.record_object_write_failure(num_blocks as u64);
-            }
-            Err(anyhow::anyhow!(
-                "Remote transfer timed out after {} seconds",
-                G4_TRANSFER_TIMEOUT.as_secs()
-            ))
+            Err(anyhow::anyhow!("Remote transfer failed: {}", error))
         }
     };
 
@@ -2333,6 +2544,7 @@ mod tests {
         assert_eq!(req.block_size, block_size);
         assert_eq!(req.request_id, request_id);
         assert_eq!(req.pin_id, Some(pin_id));
+        assert!(req.g4_response.is_none()); // H2O doesn't use g4_response
     }
 
     /// Test that H2O pipeline uses offload_with_bounce correctly.
@@ -2443,5 +2655,91 @@ mod tests {
 
         // This matches the logic in process_remote_transfer_request:
         // if can_offload_hashes.is_empty() { return Ok(()); }
+    }
+
+    /// Test that OnceCell can store and retrieve a success response.
+    #[test]
+    fn test_g4_response_oncecell_success() {
+        let cell: Arc<OnceCell<RemoteTransferResponse>> = Arc::new(OnceCell::new());
+
+        let response =
+            RemoteTransferResponse::success("test-req".to_string(), uuid::Uuid::new_v4());
+
+        // Simulate transfer task setting response
+        assert!(cell.set(response.clone()).is_ok());
+
+        // Simulate slot reading response (lock-free)
+        let received = cell.get().unwrap();
+        assert_eq!(received.request_id, "test-req");
+        assert!(received.is_success());
+    }
+
+    /// Test that OnceCell can store and retrieve a failure response.
+    #[test]
+    fn test_g4_response_oncecell_failure() {
+        let cell: Arc<OnceCell<RemoteTransferResponse>> = Arc::new(OnceCell::new());
+
+        let response = RemoteTransferResponse::failure(
+            "test-req".to_string(),
+            uuid::Uuid::new_v4(),
+            "S3 connection timeout",
+            vec![10, 11, 12],
+        );
+
+        // Simulate transfer task setting response
+        assert!(cell.set(response).is_ok());
+
+        // Simulate slot reading response (lock-free)
+        let received = cell.get().unwrap();
+        assert!(!received.is_success());
+        assert_eq!(received.error(), Some("S3 connection timeout"));
+        assert_eq!(received.failed_block_ids(), Some(&[10, 11, 12][..]));
+    }
+
+    /// Test that OnceCell returns None when not yet set.
+    #[test]
+    fn test_g4_response_oncecell_not_ready() {
+        let cell: Arc<OnceCell<RemoteTransferResponse>> = Arc::new(OnceCell::new());
+
+        // Cell not set yet
+        assert!(cell.get().is_none());
+    }
+
+    /// Test that OnceCell enforces set-once semantics.
+    #[test]
+    fn test_g4_response_oncecell_set_once() {
+        let cell: Arc<OnceCell<RemoteTransferResponse>> = Arc::new(OnceCell::new());
+
+        let response1 = RemoteTransferResponse::success("req-1".to_string(), uuid::Uuid::new_v4());
+        let response2 = RemoteTransferResponse::success("req-2".to_string(), uuid::Uuid::new_v4());
+
+        // First set succeeds
+        assert!(cell.set(response1).is_ok());
+
+        // Second set fails (set-once semantics)
+        assert!(cell.set(response2).is_err());
+
+        // Original value preserved
+        assert_eq!(cell.get().unwrap().request_id, "req-1");
+    }
+
+    /// Test that with_g4_response builder method works correctly.
+    #[test]
+    fn test_remote_transfer_request_with_g4_response() {
+        use dynamo_llm::block_manager::distributed::vllm::G4OnboardParams;
+
+        let params = G4OnboardParams {
+            request_id: "test-req".to_string(),
+            sequence_hashes: vec![0x1234],
+            device_block_ids: vec![0],
+            operation_id: uuid::Uuid::new_v4(),
+            block_size: 16,
+        };
+
+        let cell = Arc::new(OnceCell::new());
+        let req = RemoteTransferRequest::from_g4_params(&params).with_g4_response(cell.clone());
+
+        assert!(req.g4_response.is_some());
+        assert!(Arc::ptr_eq(&req.g4_response.unwrap(), &cell));
     }
 }

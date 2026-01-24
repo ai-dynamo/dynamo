@@ -388,6 +388,14 @@ impl DiskStorage {
         if create {
             allocate_file(raw_fd, size as u64).map_err(|e| {
                 unsafe { nix::libc::close(raw_fd) };
+                // Also remove the newly created file to avoid leaving orphaned files
+                if let Err(unlink_err) = nix::unistd::unlink(path) {
+                    tracing::warn!(
+                        "Failed to unlink file {} after allocation failure: {}",
+                        path,
+                        unlink_err
+                    );
+                }
                 StorageError::AllocationFailed(format!("Failed to allocate file {}: {}", path, e))
             })?;
         }

@@ -204,6 +204,7 @@ pub fn create_descriptors(
 /// Returns `(hashes_with_positions, filtered_host_ids)` preserving original positions.
 ///
 /// Returns `None` if nothing can be offloaded (all already stored).
+#[allow(clippy::type_complexity)]
 pub fn filter_offload_hashes(
     sequence_hashes: &[SequenceHash],
     can_offload_hashes: &[SequenceHash],
@@ -366,15 +367,18 @@ pub struct G4OnboardParams {
 /// - Sending via the transfer channel
 /// - Appending worker_req to pending operations
 ///
+/// The `operation_id` must match the one used in the G4 state machine transition
+/// to ensure response correlation.
+///
 /// Returns (G4OnboardParams, WorkerTransferRequest).
 pub fn onboard_from_g4(
     request_id: String,
     sequence_hashes: Vec<u64>,
     device_block_ids: Vec<usize>,
     block_size: usize,
+    operation_id: uuid::Uuid,
 ) -> (G4OnboardParams, WorkerTransferRequest) {
     let num_blocks = sequence_hashes.len();
-    let operation_id = uuid::Uuid::new_v4();
 
     tracing::debug!(
         target: "kvbm-g4",

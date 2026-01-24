@@ -363,6 +363,10 @@ where
         last.map(|t| (t, count))
     }
 
+    /// Evict entries until storage is at or below capacity.
+    /// Note: Currently unused as insert() evicts proactively before adding new entries,
+    /// but kept for potential external use (e.g., manual/scheduled eviction).
+    #[allow(dead_code)]
     fn maybe_evict(&self) {
         while self.inner.len() > self.capacity {
             if self.evict_one().is_none() {
@@ -443,6 +447,15 @@ where
     fn insert(&self, key: K, value: V) {
         let position = key.position();
 
+        // Evict entries before inserting to ensure we have room and avoid
+        // the freshly inserted key being immediately evicted by evict_one()
+        while self.inner.len() >= self.capacity {
+            if self.evict_one().is_none() {
+                // No more entries to evict, break to avoid infinite loop
+                break;
+            }
+        }
+
         {
             let mut positions = self.positions.write();
             let mut insertion_order = self.insertion_order.write();
@@ -452,7 +465,7 @@ where
         }
 
         self.inner.insert(key, value);
-        self.maybe_evict();
+        // Note: maybe_evict() removed since we already evicted above before insert
     }
 
     fn get(&self, key: &K) -> Option<V> {

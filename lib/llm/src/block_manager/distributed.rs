@@ -25,8 +25,9 @@ pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
 pub use transfer::BlockTransferHandler;
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
-    RemoteTransferRequest, SerializableRemoteBlockDescriptor, SerializableRemoteTransferPipeline,
-    SerializableStorageType, SerializableTransferDirection, ZMQ_REMOTE_TRANSFER_MESSAGE,
+    RemoteTransferRequest, RemoteTransferResponse, RemoteTransferStatus,
+    SerializableRemoteBlockDescriptor, SerializableRemoteTransferPipeline, SerializableStorageType,
+    SerializableTransferDirection, ZMQ_REMOTE_TRANSFER_MESSAGE, ZMQ_REMOTE_TRANSFER_RESPONSE,
 };
 pub use worker::{KvbmWorker, KvbmWorkerConfig};
 pub use zmq::Handler;

@@ -18,7 +18,7 @@
 //! ```
 
 use std::future::Future;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -26,52 +26,6 @@ use tokio::sync::{mpsc, oneshot};
 use crate::block_manager::distributed::registry::{
     Registry, RegistryKey, RegistryMetadata, RegistryValue,
 };
-
-/// Fallback runtime for sync operations when not in a Tokio context.
-/// This is used when `_blocking` methods are called from threads without a runtime
-/// (e.g., Python multiprocessing processes via PyO3).
-static FALLBACK_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-fn get_fallback_runtime() -> &'static tokio::runtime::Runtime {
-    FALLBACK_RUNTIME.get_or_init(|| {
-        tracing::info!(
-            "RemoteHandle: creating fallback Tokio runtime (2 worker threads) for sync operations"
-        );
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("remote-handle-fallback")
-            .enable_all()
-            .build()
-            .expect("Failed to create fallback runtime for RemoteHandle")
-    })
-}
-
-/// Execute a future from synchronous code, using the current runtime if available,
-/// or a fallback runtime if not.
-fn block_on_with_fallback<F, R>(future: F) -> R
-where
-    F: Future<Output = R> + Send,
-    R: Send,
-{
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => {
-            // We're in a Tokio context - use block_in_place to avoid blocking worker threads
-            tracing::debug!(
-                "RemoteHandle: using current Tokio runtime (thread: {:?})",
-                std::thread::current().name()
-            );
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
-        Err(_) => {
-            // No runtime on this thread - use the fallback runtime
-            tracing::debug!(
-                "RemoteHandle: using fallback runtime (thread: {:?})",
-                std::thread::current().name()
-            );
-            get_fallback_runtime().block_on(future)
-        }
-    }
-}
 
 /// Default timeout for registry operations.
 const REGISTRY_TIMEOUT: Duration = Duration::from_secs(1);
@@ -159,6 +113,9 @@ where
     M: RegistryMetadata,
 {
     tx: mpsc::Sender<RemoteOperation<K, V, M>>,
+    /// Runtime handle captured at spawn time.
+    /// Used by blocking methods to execute futures without creating a fallback runtime.
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl<K, V, M> RemoteHandle<K, V, M>
@@ -170,12 +127,43 @@ where
     /// Spawn the registry task and return a handle.
     ///
     /// The spawned task will process registry commands until all handles are dropped.
+    ///
+    /// # Panics
+    /// Panics if called from outside a Tokio runtime context.
     pub fn spawn(registry: Arc<dyn Registry<K, V, M> + Send + Sync>) -> Self {
         let (tx, rx) = mpsc::channel::<RemoteOperation<K, V, M>>(CHANNEL_BUFFER_SIZE);
 
+        // Capture the current runtime handle (e.g., KVBM runtime).
+        // This handle is used later by blocking methods when called from non-tokio threads.
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .expect("RemoteHandle::spawn() must be called from within a Tokio runtime context");
+
         tokio::spawn(Self::run_task(registry, rx));
 
-        Self { tx }
+        Self { tx, runtime_handle }
+    }
+
+    /// Execute a future synchronously using the stored runtime handle.
+    ///
+    /// Handles two scenarios:
+    /// - Called from non-tokio thread (e.g., vLLM scheduler): use stored handle directly
+    /// - Called from tokio worker thread: use block_in_place to avoid blocking workers
+    fn block_on<F, R>(&self, future: F) -> R
+    where
+        F: Future<Output = R> + Send,
+        R: Send,
+    {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // We're on a tokio worker thread - use block_in_place to avoid blocking
+            tokio::task::block_in_place(|| self.runtime_handle.block_on(future))
+        } else {
+            // Not on a tokio thread (e.g., vLLM scheduler) - use stored handle directly
+            tracing::trace!(
+                "RemoteHandle: block_on using stored runtime handle (thread: {:?})",
+                std::thread::current().name()
+            );
+            self.runtime_handle.block_on(future)
+        }
     }
 
     /// The main task loop that processes registry commands.
@@ -722,7 +710,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hashes_to_positional_keys(hashes, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle
                 .match_prefix(keys)
                 .await
@@ -751,7 +739,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
 
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle.register(reg_entries).await;
         });
     }
@@ -768,7 +756,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hashes_to_positional_keys(hashes, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             let result = handle.can_offload(keys).await;
             (
                 result.can_offload.iter().map(|k| k.sequence_hash).collect(),
@@ -790,7 +778,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hashes_to_positional_keys(hashes, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle.remove(keys).await;
         });
     }
@@ -803,7 +791,7 @@ impl RemoteHashOperationsSync for PositionalRemoteHandle {
         let keys = hash_position_pairs_to_keys(pairs, worker_id);
         let handle = self.clone();
 
-        block_on_with_fallback(async move {
+        self.block_on(async move {
             handle.remove(keys).await;
         });
     }

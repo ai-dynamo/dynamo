@@ -296,15 +296,20 @@ where
     LB: ReadableBlock + WritableBlock + Local,
     <LB as StorageTypeProvider>::StorageType: NixlDescriptor,
 {
+    // Only capture start time when debug logging is enabled (avoid syscall overhead)
+    let start_time =
+        tracing::enabled!(target: "kvbm-g4", tracing::Level::DEBUG).then(std::time::Instant::now);
     let num_blocks = descriptors.len();
     let _default_bucket = ctx.default_bucket().unwrap_or("default");
 
+    // Declare registration handles and obj_storages in parent scope so they remain alive
+    // until the transfer completes. NIXL transfers may still be in progress after the
+    // scope block ends, so these must outlive the await points below.
+    let mut _registration_handles = Vec::with_capacity(num_blocks);
+    let mut _obj_storages = Vec::with_capacity(num_blocks);
+
     // Use a scope block to ensure all non-Send types are dropped before await
     let (xfer_req, still_pending) = {
-        // Register ALL object storage regions with NIXL
-        let mut obj_storages = Vec::with_capacity(num_blocks);
-        let mut _registration_handles = Vec::with_capacity(num_blocks);
-
         // TODO: Add support for string-based object keys via metadata in nixl-sys Rust bindings.
         // For now, we pass the sequence hash (u64) directly as device_id.
 
@@ -334,7 +339,7 @@ where
                 TransferError::ExecutionError(format!("Failed to register object storage: {:?}", e))
             })?;
 
-            obj_storages.push(obj_storage);
+            _obj_storages.push(obj_storage);
             _registration_handles.push(handle);
         }
 
@@ -396,11 +401,36 @@ where
         }
     }
 
-    tracing::debug!(
-        "Object transfer complete: {} blocks, direction={:?}",
-        num_blocks,
-        direction
-    );
+    // Log throughput metrics only when debug logging is enabled
+    if let Some(start) = start_time {
+        let end_time = std::time::Instant::now();
+        let elapsed = end_time.duration_since(start);
+        let total_bytes = num_blocks * block_size;
+        let throughput_mb_s = (total_bytes as f64 / (1024.0 * 1024.0)) / elapsed.as_secs_f64();
+        let throughput_gb_s = throughput_mb_s / 1024.0;
+
+        // Get wall-clock timestamps for correlation with other logs
+        let now = std::time::SystemTime::now();
+        let finish_ts = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let start_ts = finish_ts.saturating_sub(elapsed.as_millis() as u64);
+
+        tracing::debug!(
+            target: "kvbm-g4",
+            num_blocks,
+            block_size,
+            total_bytes,
+            start_ts,
+            finish_ts,
+            elapsed_ms = elapsed.as_millis() as u64,
+            throughput_mb_s = format!("{:.2}", throughput_mb_s),
+            throughput_gb_s = format!("{:.3}", throughput_gb_s),
+            direction = ?direction,
+            "Object storage transfer complete"
+        );
+    }
 
     Ok(())
 }
@@ -479,11 +509,11 @@ where
             let addr = unsafe { block_view.as_ptr() as usize };
 
             // Add DRAM source descriptor
-            let _ = src_dl.add_desc(addr, block_size, 0);
+            src_dl.add_desc(addr, block_size, 0);
 
             // Add FILE destination descriptor using the actual file descriptor
             let fd = disk_storage.fd();
-            let _ = dst_dl.add_desc(0, block_size, fd);
+            dst_dl.add_desc(0, block_size, fd);
         }
 
         // Determine the transfer operation

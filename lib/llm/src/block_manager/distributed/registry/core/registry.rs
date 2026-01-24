@@ -239,6 +239,14 @@ where
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
+                // Validate that statuses length matches keys length to avoid silently dropping keys
+                if statuses.len() != keys.len() {
+                    return Err(anyhow::anyhow!(
+                        "CanOffload response length mismatch: got {} statuses but expected {} (keys.len())",
+                        statuses.len(),
+                        keys.len()
+                    ));
+                }
                 let mut result = OffloadResult::default();
                 for (key, status) in keys.iter().zip(statuses.iter()) {
                     match status {

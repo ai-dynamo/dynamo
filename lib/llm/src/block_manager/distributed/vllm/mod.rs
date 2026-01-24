@@ -7,7 +7,10 @@
 //! - TP-aware registry operations (consensus lookup, multi-rank registration)
 //! - Offload flow orchestration (D2H, H2O)
 //! - Transfer pipeline construction
+//! - G4 state machine for remote storage operations
 
 mod integration;
+mod state;
 
 pub use integration::*;
+pub use state::*;

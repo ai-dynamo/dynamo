@@ -330,7 +330,7 @@ mod tests {
         let checker_for_notification = checker.clone();
         let checker_for_task = checker.clone();
 
-        let (done_tx, _done_rx) = oneshot::channel();
+        let (done_tx, done_rx) = oneshot::channel();
         let notification = RegisterTransferNotification {
             uuid: Uuid::new_v4(),
             checker: checker_for_notification,
@@ -345,8 +345,16 @@ mod tests {
             checker_for_task.set_complete();
         });
 
-        // Give time for completion
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Await the completion notification with timeout
+        let result = tokio::time::timeout(Duration::from_millis(100), done_rx).await;
+        assert!(
+            result.is_ok(),
+            "Notification should complete within timeout"
+        );
+        assert!(
+            result.unwrap().unwrap().is_ok(),
+            "Notification should signal success"
+        );
 
         drop(tx);
         handler.await.unwrap();
