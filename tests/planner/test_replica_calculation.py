@@ -36,9 +36,120 @@ sys.modules["dynamo.runtime"] = mock_runtime
 sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
 
 # Now import after mocking
-from dynamo.planner.utils.planner_core import Metrics, Planner  # noqa: E402
+from dynamo.planner.utils.planner_core import (  # noqa: E402
+    Metrics,
+    PrefillPlanner,
+    DecodePlanner,
+    PlannerSharedState,
+    _apply_global_gpu_budget,
+)
 
 pytestmark = [pytest.mark.pre_merge, pytest.mark.gpu_0]
+
+
+class PlannerHarness:
+    def __init__(self, prefill_planner, decode_planner, shared_state):
+        self.prefill_planner = prefill_planner
+        self.decode_planner = decode_planner
+        self.shared_state = shared_state
+
+    async def make_adjustments(self):
+        if not self.shared_state.last_metrics.is_valid():
+            return
+
+        p_endpoints, d_endpoints = await self.prefill_planner.get_workers_info()
+        self.shared_state.p_endpoints = p_endpoints
+        self.shared_state.d_endpoints = d_endpoints
+
+        next_num_p = self.prefill_planner.plan_adjustment()
+        next_num_d = self.decode_planner.plan_adjustment()
+        if next_num_p is None or next_num_d is None:
+            return
+
+        next_num_p, next_num_d = _apply_global_gpu_budget(
+            next_num_p, next_num_d, self.prefill_planner.args
+        )
+        self.prefill_planner.update_predicted_replicas_metric(next_num_p)
+        self.decode_planner.update_predicted_replicas_metric(next_num_d)
+
+        if not self.prefill_planner.args.no_operation:
+            target_replicas = [
+                {
+                    "sub_component_type": "prefill",
+                    "component_name": self.prefill_planner.prefill_component_name,
+                    "desired_replicas": next_num_p,
+                },
+                {
+                    "sub_component_type": "decode",
+                    "component_name": self.prefill_planner.decode_component_name,
+                    "desired_replicas": next_num_d,
+                },
+            ]
+            await self.prefill_planner.connector.set_component_replicas(
+                target_replicas, blocking=False
+            )
+
+    def __getattr__(self, name):
+        shared_attrs = {
+            "num_req_predictor",
+            "isl_predictor",
+            "osl_predictor",
+            "connector",
+            "prometheus_api_client",
+            "args",
+        }
+        prefill_attrs = {
+            "prefill_interpolator",
+            "prefill_component_name",
+            "p_correction_factor",
+        }
+        decode_attrs = {
+            "decode_interpolator",
+            "decode_component_name",
+            "d_correction_factor",
+        }
+        if name == "last_metrics":
+            return self.shared_state.last_metrics
+        if name == "get_workers_info":
+            return self.prefill_planner.get_workers_info
+        if name in shared_attrs:
+            return getattr(self.prefill_planner, name)
+        if name in prefill_attrs:
+            return getattr(self.prefill_planner, name)
+        if name in decode_attrs:
+            return getattr(self.decode_planner, name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name in {"prefill_planner", "decode_planner", "shared_state"}:
+            return super().__setattr__(name, value)
+        shared_attrs = {
+            "num_req_predictor",
+            "isl_predictor",
+            "osl_predictor",
+            "connector",
+            "prometheus_api_client",
+            "args",
+            "get_workers_info",
+        }
+        prefill_attrs = {"prefill_interpolator", "p_correction_factor"}
+        decode_attrs = {"decode_interpolator", "d_correction_factor"}
+        if name == "last_metrics":
+            self.shared_state.last_metrics = value
+            return None
+        if name in shared_attrs:
+            # Store locally to support patch.object lifecycle (set/del).
+            object.__setattr__(self, name, value)
+            setattr(self.prefill_planner, name, value)
+            setattr(self.decode_planner, name, value)
+            return None
+        if name in prefill_attrs:
+            setattr(self.prefill_planner, name, value)
+            return None
+        if name in decode_attrs:
+            setattr(self.decode_planner, name, value)
+            return None
+        return super().__setattr__(name, value)
 
 
 @pytest.fixture
@@ -75,8 +186,10 @@ def planner():
     with patch("dynamo.planner.utils.planner_core.Gauge") as mock_gauge:
         mock_gauge.return_value = Mock()
 
-        # Create planner instance
-        planner = Planner(mock_runtime, args)
+        shared_state = PlannerSharedState()
+        prefill_planner = PrefillPlanner(mock_runtime, args, shared_state=shared_state)
+        decode_planner = DecodePlanner(mock_runtime, args, shared_state=shared_state)
+        planner = PlannerHarness(prefill_planner, decode_planner, shared_state)
 
         # Mock the interpolators to return fixed values for testing
         planner.prefill_interpolator = Mock()
