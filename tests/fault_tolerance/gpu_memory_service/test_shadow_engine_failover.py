@@ -1017,129 +1017,121 @@ def test_gms_basic_sleep_wake(
         # Start frontend (serves OpenAI-compatible API)
         logger.info("Starting frontend")
         with DynamoFrontendProcess(request, frontend_port=frontend_port):
-                logger.info(f"Frontend started on port {frontend_port}")
+            logger.info(f"Frontend started on port {frontend_port}")
 
-                # Create ports dict for the factory function
-                ports = {
-                    "shadow_system_port": system_port,
-                    "primary_system_port": system_port,
-                    "primary_nixl_port": 5600,
-                    "primary_kv_event_port": 20080,
-                    "shadow_sglang_port": extra_ports[0] if extra_ports else 30000,
-                    "shadow_bootstrap_port": extra_ports[1]
-                    if len(extra_ports) > 1
-                    else 8998,
-                    "primary_sglang_port": extra_ports[0] if extra_ports else 30000,
-                    "primary_bootstrap_port": extra_ports[1]
-                    if len(extra_ports) > 1
-                    else 8998,
-                }
+            # Create ports dict for the factory function
+            ports = {
+                "shadow_system_port": system_port,
+                "primary_system_port": system_port,
+                "primary_nixl_port": 5600,
+                "primary_kv_event_port": 20080,
+                "shadow_sglang_port": extra_ports[0] if extra_ports else 30000,
+                "shadow_bootstrap_port": (
+                    extra_ports[1] if len(extra_ports) > 1 else 8998
+                ),
+                "primary_sglang_port": extra_ports[0] if extra_ports else 30000,
+                "primary_bootstrap_port": (
+                    extra_ports[1] if len(extra_ports) > 1 else 8998
+                ),
+            }
 
-                # Start engine with GPU Memory Service
-                logger.info(f"Starting {backend.value} engine with GPU Memory Service")
-                engine = create_engine_process(
-                    backend=backend,
-                    request=request,
-                    engine_id="test_engine",
-                    socket_path_template=socket_path_template,
-                    system_port=system_port,
-                    ports=ports,
-                    is_primary=False,
-                    tp=GPU_MEMORY_SERVICE_TP,
+            # Start engine with GPU Memory Service
+            logger.info(f"Starting {backend.value} engine with GPU Memory Service")
+            engine = create_engine_process(
+                backend=backend,
+                request=request,
+                engine_id="test_engine",
+                socket_path_template=socket_path_template,
+                system_port=system_port,
+                ports=ports,
+                is_primary=False,
+                tp=GPU_MEMORY_SERVICE_TP,
+            )
+            with engine:
+                logger.info("Engine started")
+
+                # Wait for frontend to discover the engine
+                time.sleep(7)
+
+                # Test 1: Initial inference
+                logger.info("Test 1: Initial inference")
+                result = send_completion_request(frontend_port, prompt="Hello, I am")
+                assert result["choices"], "Initial inference failed"
+
+                # Measure memory before sleep
+                memory_before_sleep, _, _ = get_gpu_memory_usage(device=0)
+                logger.info(
+                    f"GPU memory before sleep: {bytes_to_mb(memory_before_sleep):.1f} MB "
+                    f"({bytes_to_gb(memory_before_sleep):.2f} GB)"
                 )
-                with engine:
-                    logger.info("Engine started")
 
-                    # Wait for frontend to discover the engine
-                    time.sleep(7)
+                # Test 2: Sleep
+                logger.info("Test 2: Sleep engine")
+                sleep_result = engine.sleep()
+                assert (
+                    sleep_result.get("status") == "ok"
+                ), f"Sleep failed: {sleep_result}"
+                time.sleep(2)  # Give time for memory to be released
 
-                    # Test 1: Initial inference
-                    logger.info("Test 1: Initial inference")
-                    result = send_completion_request(
-                        frontend_port, prompt="Hello, I am"
-                    )
-                    assert result["choices"], "Initial inference failed"
+                # Measure memory after sleep
+                memory_after_sleep, _, _ = get_gpu_memory_usage(device=0)
+                logger.info(
+                    f"GPU memory after sleep: {bytes_to_mb(memory_after_sleep):.1f} MB "
+                    f"({bytes_to_gb(memory_after_sleep):.2f} GB)"
+                )
 
-                    # Measure memory before sleep
-                    memory_before_sleep, _, _ = get_gpu_memory_usage(device=0)
-                    logger.info(
-                        f"GPU memory before sleep: {bytes_to_mb(memory_before_sleep):.1f} MB "
-                        f"({bytes_to_gb(memory_before_sleep):.2f} GB)"
-                    )
+                # CRITICAL ASSERTION: Sleep should reduce GPU memory usage
+                memory_freed = memory_before_sleep - memory_after_sleep
+                logger.info(
+                    f"Memory freed by sleep: {bytes_to_mb(memory_freed):.1f} MB "
+                    f"({bytes_to_gb(memory_freed):.2f} GB)"
+                )
+                assert memory_after_sleep < memory_before_sleep, (
+                    f"Sleep should reduce GPU memory usage! "
+                    f"Before: {bytes_to_mb(memory_before_sleep):.1f} MB, "
+                    f"After: {bytes_to_mb(memory_after_sleep):.1f} MB"
+                )
 
-                    # Test 2: Sleep
-                    logger.info("Test 2: Sleep engine")
-                    sleep_result = engine.sleep()
-                    assert (
-                        sleep_result.get("status") == "ok"
-                    ), f"Sleep failed: {sleep_result}"
-                    time.sleep(2)  # Give time for memory to be released
+                # Test 3: Wake
+                logger.info("Test 3: Wake engine")
+                wake_result = engine.wake()
+                assert wake_result.get("status") == "ok", f"Wake failed: {wake_result}"
+                time.sleep(2)
 
-                    # Measure memory after sleep
-                    memory_after_sleep, _, _ = get_gpu_memory_usage(device=0)
-                    logger.info(
-                        f"GPU memory after sleep: {bytes_to_mb(memory_after_sleep):.1f} MB "
-                        f"({bytes_to_gb(memory_after_sleep):.2f} GB)"
-                    )
+                # Measure memory after wake
+                memory_after_wake, _, _ = get_gpu_memory_usage(device=0)
+                logger.info(
+                    f"GPU memory after wake: {bytes_to_mb(memory_after_wake):.1f} MB "
+                    f"({bytes_to_gb(memory_after_wake):.2f} GB)"
+                )
 
-                    # CRITICAL ASSERTION: Sleep should reduce GPU memory usage
-                    memory_freed = memory_before_sleep - memory_after_sleep
-                    logger.info(
-                        f"Memory freed by sleep: {bytes_to_mb(memory_freed):.1f} MB "
-                        f"({bytes_to_gb(memory_freed):.2f} GB)"
-                    )
-                    assert memory_after_sleep < memory_before_sleep, (
-                        f"Sleep should reduce GPU memory usage! "
-                        f"Before: {bytes_to_mb(memory_before_sleep):.1f} MB, "
-                        f"After: {bytes_to_mb(memory_after_sleep):.1f} MB"
-                    )
+                # Memory after wake should be similar to before sleep
+                # (weights are restored)
+                logger.info(
+                    f"Memory restored by wake: {bytes_to_mb(memory_after_wake - memory_after_sleep):.1f} MB"
+                )
 
-                    # Test 3: Wake
-                    logger.info("Test 3: Wake engine")
-                    wake_result = engine.wake()
-                    assert (
-                        wake_result.get("status") == "ok"
-                    ), f"Wake failed: {wake_result}"
-                    time.sleep(2)
+                # Test 4: Inference after wake
+                logger.info("Test 4: Inference after wake")
+                result = send_completion_request(
+                    frontend_port, prompt="Goodbye, I will"
+                )
+                assert result["choices"], "Inference after wake failed"
 
-                    # Measure memory after wake
-                    memory_after_wake, _, _ = get_gpu_memory_usage(device=0)
-                    logger.info(
-                        f"GPU memory after wake: {bytes_to_mb(memory_after_wake):.1f} MB "
-                        f"({bytes_to_gb(memory_after_wake):.2f} GB)"
-                    )
+                # Summary
+                logger.info("=" * 60)
+                logger.info(f"GPU MEMORY ACCOUNTING SUMMARY ({backend.value}):")
+                logger.info(
+                    f"  Before sleep: {bytes_to_mb(memory_before_sleep):.1f} MB"
+                )
+                logger.info(f"  After sleep:  {bytes_to_mb(memory_after_sleep):.1f} MB")
+                logger.info(f"  After wake:   {bytes_to_mb(memory_after_wake):.1f} MB")
+                logger.info(
+                    f"  Memory freed by sleep: {bytes_to_mb(memory_freed):.1f} MB"
+                )
+                logger.info("=" * 60)
 
-                    # Memory after wake should be similar to before sleep
-                    # (weights are restored)
-                    logger.info(
-                        f"Memory restored by wake: {bytes_to_mb(memory_after_wake - memory_after_sleep):.1f} MB"
-                    )
-
-                    # Test 4: Inference after wake
-                    logger.info("Test 4: Inference after wake")
-                    result = send_completion_request(
-                        frontend_port, prompt="Goodbye, I will"
-                    )
-                    assert result["choices"], "Inference after wake failed"
-
-                    # Summary
-                    logger.info("=" * 60)
-                    logger.info(f"GPU MEMORY ACCOUNTING SUMMARY ({backend.value}):")
-                    logger.info(
-                        f"  Before sleep: {bytes_to_mb(memory_before_sleep):.1f} MB"
-                    )
-                    logger.info(
-                        f"  After sleep:  {bytes_to_mb(memory_after_sleep):.1f} MB"
-                    )
-                    logger.info(
-                        f"  After wake:   {bytes_to_mb(memory_after_wake):.1f} MB"
-                    )
-                    logger.info(
-                        f"  Memory freed by sleep: {bytes_to_mb(memory_freed):.1f} MB"
-                    )
-                    logger.info("=" * 60)
-
-                    logger.info(f"All basic sleep/wake tests passed ({backend.value})!")
+                logger.info(f"All basic sleep/wake tests passed ({backend.value})!")
 
     finally:
         # Cleanup: Stop all GPU Memory Service instances
