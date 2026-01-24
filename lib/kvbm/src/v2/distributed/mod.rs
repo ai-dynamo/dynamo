@@ -17,3 +17,4 @@ pub mod workers;
 
 pub mod object;
 pub mod offload;
+pub mod pubsub;

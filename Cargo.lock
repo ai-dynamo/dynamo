@@ -3218,6 +3218,7 @@ version = "0.8.0"
 dependencies = [
  "aligned-vec",
  "anyhow",
+ "async-nats 0.45.0",
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
@@ -3240,6 +3241,7 @@ dependencies = [
  "dynamo-nova-backend",
  "dynamo-tokens",
  "figment",
+ "flume",
  "futures",
  "indicatif 0.18.3",
  "lru",
@@ -3255,6 +3257,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rayon",
+ "tokio-stream",
  "tokio-util",
  "tracing",
  "tracing-subscriber",

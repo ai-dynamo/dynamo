@@ -7,7 +7,9 @@
 //! using a local [`TransferManager`]. It serves as the foundation for both standalone
 //! worker scenarios and as a building block for parallel worker implementations.
 
+#[cfg(feature = "collectives")]
 mod replicated;
+#[cfg(feature = "collectives")]
 pub use replicated::ReplicatedDataWorker;
 
 use std::collections::HashMap;
