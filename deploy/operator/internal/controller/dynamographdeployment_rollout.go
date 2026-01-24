@@ -210,7 +210,9 @@ func (r *DynamoGraphDeploymentReconciler) reconcileRollingUpdate(
 		return r.continueRollingUpdate(ctx, dgd, rolloutStatus, oldNamespace, newNamespace)
 
 	case nvidiacomv1alpha1.RolloutPhaseCompleted:
-		return r.finalizeRollingUpdate(ctx, dgd, newWorkerHash)
+		// Cleanup is now done atomically in completeRollout, nothing to do here
+		logger.Info("Rolling update already completed")
+		return nil
 
 	case nvidiacomv1alpha1.RolloutPhaseFailed:
 		logger.Info("Rolling update in failed state, manual intervention may be required")
@@ -267,7 +269,7 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	workerServices := r.getWorkerServices(dgd)
 	if len(workerServices) == 0 {
 		logger.Info("No worker services found, completing rollout")
-		return r.completeRollout(ctx, dgd, rolloutStatus, newNamespace)
+		return r.completeRollout(ctx, dgd, rolloutStatus, oldNamespace, newNamespace)
 	}
 
 	oldInfo, err := r.getWorkerInfoForDynamoNamespace(ctx, dgd, oldNamespace)
@@ -294,7 +296,7 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 
 	// Check if rollout is complete
 	if newInfo.TotalReadyWorkers() >= desiredReplicas && oldInfo.TotalReadyWorkers() == 0 {
-		return r.completeRollout(ctx, dgd, rolloutStatus, newNamespace)
+		return r.completeRollout(ctx, dgd, rolloutStatus, oldNamespace, newNamespace)
 	}
 
 	allGroupsReady, notReadyServices := newInfo.AllServicesHaveMinimumReady(1)
@@ -350,23 +352,49 @@ func (r *DynamoGraphDeploymentReconciler) continueRollingUpdate(
 	return nil
 }
 
-// completeRollout marks the rollout as completed and updates status.
+// completeRollout marks the rollout as completed, cleans up old resources, and updates status.
+// This performs all cleanup atomically to avoid race conditions with subsequent reconciles.
 func (r *DynamoGraphDeploymentReconciler) completeRollout(
 	ctx context.Context,
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 	rolloutStatus *nvidiacomv1alpha1.RolloutStatus,
-	newNamespace string,
+	oldNamespace, newNamespace string,
 ) error {
+	logger := log.FromContext(ctx)
+
+	// Ensure HAProxy has 100% traffic to new
+	if err := r.updateProxyWeights(ctx, dgd, 0, 100); err != nil {
+		logger.Error(err, "Failed to set final proxy weights")
+	}
+
+	// Get the old and new worker hashes
+	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
+	newWorkerHash := dynamo.ComputeWorkerSpecHash(dgd)
+
+	// Delete old DCDs from the old namespace
+	if oldWorkerHash != "" && oldWorkerHash != newWorkerHash {
+		if err := r.deleteOldDCDs(ctx, dgd, oldNamespace); err != nil {
+			logger.Error(err, "Failed to delete old DCDs", "oldNamespace", oldNamespace)
+			r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
+				"Failed to delete some old resources from namespace %s: %v", oldNamespace, err)
+			// Continue anyway - we don't want cleanup failures to block the rollout completion
+		} else {
+			logger.Info("Old resources cleaned up", "oldNamespace", oldNamespace, "oldWorkerHash", oldWorkerHash)
+		}
+	}
+
+	// Update the active worker hash to the new hash
+	r.setActiveWorkerHash(dgd, newWorkerHash)
+	if err := r.Update(ctx, dgd); err != nil {
+		return fmt.Errorf("failed to update active worker hash: %w", err)
+	}
+
+	// Update rollout status to Completed
 	rolloutStatus.Phase = nvidiacomv1alpha1.RolloutPhaseCompleted
 	rolloutStatus.TrafficWeightOld = 0
 	rolloutStatus.TrafficWeightNew = 100
 	now := metav1.Now()
 	rolloutStatus.EndTime = &now
-
-	// Ensure HAProxy has 100% traffic to new
-	if err := r.updateProxyWeights(ctx, dgd, 0, 100); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to set final proxy weights")
-	}
 
 	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCompleted",
 		"Rolling update completed, traffic shifted to namespace %s", newNamespace)
@@ -374,6 +402,8 @@ func (r *DynamoGraphDeploymentReconciler) completeRollout(
 	if err := r.Status().Update(ctx, dgd); err != nil {
 		return fmt.Errorf("failed to update rollout status: %w", err)
 	}
+
+	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
 	return nil
 }
@@ -483,7 +513,7 @@ func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 ) error {
 	// Get the HAProxy service address
 	// The proxy service is named <dgd-name>-traffic-proxy in the same namespace
-	proxyServiceName := fmt.Sprintf("%s-traffic-proxy", dgd.Name)
+	proxyServiceName := fmt.Sprintf("%s-traffic-proxy-runtime", dgd.Name)
 	proxyHost := fmt.Sprintf("%s.%s.svc.cluster.local", proxyServiceName, dgd.Namespace)
 
 	// Create HAProxy client connecting to the runtime API port
@@ -493,72 +523,6 @@ func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 	if err := haproxyClient.UpdateWeights(ctx, oldWeight, newWeight); err != nil {
 		return fmt.Errorf("failed to update HAProxy weights: %w", err)
 	}
-
-	return nil
-}
-
-// finalizeRollingUpdate cleans up after a completed rolling update.
-// This deletes old DCDs from the old namespace, removes -new/-old suffixed DCDs,
-// and updates the active worker hash.
-func (r *DynamoGraphDeploymentReconciler) finalizeRollingUpdate(
-	ctx context.Context,
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	newWorkerHash string,
-) error {
-	logger := log.FromContext(ctx)
-
-	// Get the old worker hash to identify old resources
-	oldWorkerHash := r.getCurrentActiveWorkerHash(dgd)
-	if oldWorkerHash == "" {
-		// No old hash means this is likely a first deployment, nothing to clean up
-		logger.Info("No old worker hash found, skipping cleanup")
-		return r.completeFinalization(ctx, dgd, newWorkerHash)
-	}
-
-	if oldWorkerHash == newWorkerHash {
-		// Hashes are the same, nothing to clean up
-		logger.Info("Old and new worker hashes are the same, skipping cleanup")
-		return r.completeFinalization(ctx, dgd, newWorkerHash)
-	}
-
-	oldNamespace := dynamo.ComputeHashedDynamoNamespaceWithHash(dgd, oldWorkerHash)
-
-	// Delete old DCDs from the old namespace (old workers and old frontend)
-	// With hash-based naming, this cleans up all resources with the old namespace label
-	if err := r.deleteOldDCDs(ctx, dgd, oldNamespace); err != nil {
-		logger.Error(err, "Failed to delete old DCDs", "oldNamespace", oldNamespace)
-		r.Recorder.Eventf(dgd, corev1.EventTypeWarning, "CleanupPartialFailure",
-			"Failed to delete some old resources from namespace %s: %v", oldNamespace, err)
-	}
-
-	logger.Info("Old resources cleaned up", "oldNamespace", oldNamespace, "oldWorkerHash", oldWorkerHash)
-	r.Recorder.Eventf(dgd, corev1.EventTypeNormal, "RollingUpdateCleanup",
-		"Cleaned up old resources from namespace %s", oldNamespace)
-
-	return r.completeFinalization(ctx, dgd, newWorkerHash)
-}
-
-// completeFinalization updates the active worker hash after cleanup.
-// The rollout status is preserved (not cleared) so users can see completion info.
-// It will be reset when a new rollout starts.
-func (r *DynamoGraphDeploymentReconciler) completeFinalization(
-	ctx context.Context,
-	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
-	newWorkerHash string,
-) error {
-	logger := log.FromContext(ctx)
-
-	// Update the active worker hash to the new hash
-	r.setActiveWorkerHash(dgd, newWorkerHash)
-	if err := r.Update(ctx, dgd); err != nil {
-		return fmt.Errorf("failed to update active worker hash: %w", err)
-	}
-
-	// Note: We intentionally keep the rollout status with Phase=Completed
-	// so users can see when the rollout finished and the final state.
-	// The status will be reset when a new rollout starts.
-
-	logger.Info("Rolling update finalized", "newWorkerHash", newWorkerHash)
 
 	return nil
 }
