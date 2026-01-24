@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """vLLM integration for GPU Memory Service.
@@ -57,5 +57,6 @@ def __getattr__(name):
     """Lazy import for GMSWorker to avoid circular imports."""
     if name == "GMSWorker":
         from gpu_memory_service.client.vllm_integration.worker import GMSWorker
+
         return GMSWorker
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

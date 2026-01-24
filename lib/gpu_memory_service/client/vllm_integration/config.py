@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Configuration constants and environment handling for GPU Memory Service vLLM integration."""
@@ -9,17 +9,21 @@ import os
 from typing import Any, Optional
 
 # Single source of truth for environment variable checks
-GMS_ENABLED = os.environ.get(
-    "GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER", ""
-).lower() in ("1", "true", "yes")
+GMS_ENABLED = os.environ.get("GPU_MEMORY_SERVICE_VLLM_AUTO_REGISTER", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 DEFAULT_SOCKET_PATH_TEMPLATE = "/tmp/gpu_memory_service_{device}.sock"
 
 # Keys that GPU Memory Service adds to model_loader_extra_config - must be stripped
 # before passing to DefaultModelLoader which may validate unknown keys
-GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS = frozenset({
-    "gpu_memory_service_socket_path",
-})
+GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS = frozenset(
+    {
+        "gpu_memory_service_socket_path",
+    }
+)
 
 
 def get_local_rank() -> int:
@@ -45,6 +49,7 @@ def get_local_rank() -> int:
     # Try vLLM's distributed group
     try:
         from vllm.distributed import get_world_group
+
         return int(get_world_group().local_rank)
     except Exception:
         pass
@@ -53,7 +58,9 @@ def get_local_rank() -> int:
     return int(os.environ.get("LOCAL_RANK", "0"))
 
 
-def resolve_socket_path(load_config: Optional[Any] = None, device_index: Optional[int] = None) -> str:
+def resolve_socket_path(
+    load_config: Optional[Any] = None, device_index: Optional[int] = None
+) -> str:
     """Get socket path from model_loader_extra_config (falls back to default).
 
     Args:
@@ -74,8 +81,7 @@ def resolve_socket_path(load_config: Optional[Any] = None, device_index: Optiona
     # Fallback to environment variable or default
     if not socket_path:
         socket_path = os.environ.get(
-            "GPU_MEMORY_SERVICE_SOCKET_PATH",
-            DEFAULT_SOCKET_PATH_TEMPLATE
+            "GPU_MEMORY_SERVICE_SOCKET_PATH", DEFAULT_SOCKET_PATH_TEMPLATE
         )
 
     # Use explicit device_index if provided, otherwise fall back to get_local_rank()
@@ -107,7 +113,8 @@ def strip_gms_extra_config(load_config: Any) -> Any:
 
     # Remove GPU Memory Service keys
     cleaned = {
-        k: v for k, v in extra_config.items()
+        k: v
+        for k, v in extra_config.items()
         if k not in GPU_MEMORY_SERVICE_EXTRA_CONFIG_KEYS
     }
 

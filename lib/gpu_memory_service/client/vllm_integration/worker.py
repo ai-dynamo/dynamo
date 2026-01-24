@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """GPU Memory Service Worker subclass for vLLM integration.
@@ -40,7 +40,9 @@ register_gms_loader()
 patch_empty_cache()
 patch_memory_snapshot()
 
-logger.info("[GMS] Worker module loaded - model loader registered, utility patches applied")
+logger.info(
+    "[GMS] Worker module loaded - model loader registered, utility patches applied"
+)
 
 
 # Import Worker after patches are applied
@@ -64,11 +66,10 @@ class GMSWorker(Worker):
         check runs, so that MemorySnapshot.measure can query committed bytes
         and adjust free_memory accordingly.
         """
-        from vllm.platforms import current_platform
-
         from gpu_memory_service.client.vllm_integration.memory_ops import (
             establish_early_gms_connection,
         )
+        from vllm.platforms import current_platform
 
         # Compute device index using vLLM's exact logic
         local_rank = self.local_rank
@@ -176,9 +177,9 @@ class GMSWorker(Worker):
         We do NOT call super().wake_up() - we manage allocators directly.
         """
         from gpu_memory_service.client.vllm_integration.memory_ops import (
+            reinit_fp8_kv_scales,
             wake_gms_weights,
             wake_kv_cache,
-            reinit_fp8_kv_scales,
         )
 
         if tags is None:

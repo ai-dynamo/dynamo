@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """GPU Memory Service memory operations for vLLM integration.
@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 def get_gms_memory_manager() -> Optional["GMSClientMemoryManager"]:
     """Get the GMS client memory manager singleton."""
     from gpu_memory_service import get_gms_client_memory_manager
+
     return get_gms_client_memory_manager()
 
 
@@ -68,6 +69,7 @@ def safe_empty_cache() -> None:
 # =============================================================================
 # GPU Memory Service weight operations
 # =============================================================================
+
 
 def sleep_gms_weights() -> bool:
     """Sleep GPU Memory Service weights (VA-stable).
@@ -128,6 +130,7 @@ def wake_gms_weights() -> bool:
 # KV cache operations via CuMemAllocator
 # =============================================================================
 
+
 def sleep_kv_cache() -> bool:
     """Sleep KV cache via CuMemAllocator.
 
@@ -173,6 +176,7 @@ def wake_kv_cache() -> bool:
 # =============================================================================
 # Combined sleep/wake operations (called by patched Worker methods)
 # =============================================================================
+
 
 def worker_sleep_impl(level: int = 1) -> None:
     """Implementation of Worker.sleep() for GPU Memory Service integration.
@@ -264,6 +268,7 @@ def reinit_fp8_kv_scales(worker) -> None:
 # GMS connection and query operations
 # =============================================================================
 
+
 def establish_early_gms_connection() -> bool:
     """Establish GMS connection early, before model loading.
 
@@ -277,14 +282,16 @@ def establish_early_gms_connection() -> bool:
         True if connection was established successfully.
     """
     import os
+
     from gpu_memory_service.common.types import RequestedLockType
 
     try:
         from gpu_memory_service.client.torch.allocator import (
-            get_or_create_gms_client_memory_manager
+            get_or_create_gms_client_memory_manager,
         )
-
-        from gpu_memory_service.client.vllm_integration.config import resolve_socket_path
+        from gpu_memory_service.client.vllm_integration.config import (
+            resolve_socket_path,
+        )
 
         socket_path = resolve_socket_path()
         device = torch.cuda.current_device() if torch.cuda.is_available() else 0
@@ -296,11 +303,15 @@ def establish_early_gms_connection() -> bool:
 
         logger.debug(
             "[GMS] Early connection established (socket=%s, device=%d, mode=%s)",
-            socket_path, device, granted_mode
+            socket_path,
+            device,
+            granted_mode,
         )
         return True
     except TimeoutError:
-        logger.debug("[GMS] Early connection timed out - will retry during model loading")
+        logger.debug(
+            "[GMS] Early connection timed out - will retry during model loading"
+        )
         return False
     except ConnectionError as e:
         logger.debug("[GMS] Early connection failed (server not ready): %s", e)
@@ -340,7 +351,8 @@ def get_gms_committed_bytes() -> int:
         if total_bytes > 0:
             logger.debug(
                 "[GMS] Queried committed bytes: %.2f GiB (%d allocations)",
-                total_bytes / (1 << 30), len(allocations)
+                total_bytes / (1 << 30),
+                len(allocations),
             )
         return total_bytes
     except Exception as e:

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """vLLM model loader for GPU Memory Service integration.
@@ -15,7 +15,6 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
-
 from gpu_memory_service import get_or_create_gms_client_memory_manager
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
@@ -62,22 +61,36 @@ def register_gms_loader(load_format: str = "gms") -> None:
             DefaultModelLoader(self.stripped_load_config).download_model(model_config)
 
         def load_weights(self, model: torch.nn.Module, model_config) -> None:
-            DefaultModelLoader(self.stripped_load_config).load_weights(model, model_config)
+            DefaultModelLoader(self.stripped_load_config).load_weights(
+                model, model_config
+            )
 
         def load_model(self, vllm_config, model_config) -> torch.nn.Module:
             device_index, target_device = _resolve_device(vllm_config)
-            socket_path = resolve_socket_path(self.load_config, device_index=device_index)
+            socket_path = resolve_socket_path(
+                self.load_config, device_index=device_index
+            )
 
             gms_client, pool = get_or_create_gms_client_memory_manager(
-                socket_path, device_index, mode=RequestedLockType.RW_OR_RO, tag="weights"
+                socket_path,
+                device_index,
+                mode=RequestedLockType.RW_OR_RO,
+                tag="weights",
             )
             logger.info("[GMS] Connected, mode=%s", gms_client.mode)
 
             if gms_client.mode == GrantedLockType.RO:
-                return _load_read_mode(gms_client, vllm_config, model_config, device_index)
+                return _load_read_mode(
+                    gms_client, vllm_config, model_config, device_index
+                )
             else:
                 return _load_write_mode(
-                    gms_client, pool, vllm_config, model_config, self.stripped_load_config, target_device
+                    gms_client,
+                    pool,
+                    vllm_config,
+                    model_config,
+                    self.stripped_load_config,
+                    target_device,
                 )
 
 
@@ -91,7 +104,9 @@ def _resolve_device(vllm_config) -> tuple[int, torch.device]:
     device_config = vllm_config.device_config
     load_config = vllm_config.load_config
 
-    load_device = device_config.device if load_config.device is None else load_config.device
+    load_device = (
+        device_config.device if load_config.device is None else load_config.device
+    )
     target_device = torch.device(load_device)
 
     if target_device.type == "cuda" and target_device.index is None:
@@ -140,7 +155,10 @@ def _load_write_mode(
 
     from torch.cuda.memory import use_mem_pool
     from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-    from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
+    from vllm.model_executor.model_loader.utils import (
+        initialize_model,
+        process_weights_after_loading,
+    )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     gms_client.clear_all()
@@ -148,7 +166,9 @@ def _load_write_mode(
     with set_default_torch_dtype(model_config.dtype):
         with use_mem_pool(pool, device=target_device):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config, model_config=model_config)
+                model = initialize_model(
+                    vllm_config=vllm_config, model_config=model_config
+                )
 
             DefaultModelLoader(stripped_load_config).load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
@@ -174,7 +194,10 @@ def _load_write_mode(
 
 def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     """Create model on meta device for RO mode materialization."""
-    from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
+    from vllm.model_executor.model_loader.utils import (
+        initialize_model,
+        process_weights_after_loading,
+    )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
     meta_device = torch.device("meta")
@@ -182,6 +205,7 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     # Enable meta tensor workaround for torch.nonzero() etc.
     try:
         import torch.fx.experimental._config as fx_config
+
         fx_config.meta_nonzero_assume_all_nonzero = True
     except (ImportError, AttributeError):
         pass
