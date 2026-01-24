@@ -7,8 +7,8 @@
 //! using a local [`TransferManager`]. It serves as the foundation for both standalone
 //! worker scenarios and as a building block for parallel worker implementations.
 
-// mod replicated;
-// pub use replicated::ReplicatedDataWorker;
+mod replicated;
+pub use replicated::ReplicatedDataWorker;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

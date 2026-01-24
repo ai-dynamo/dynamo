@@ -26,38 +26,10 @@
 use super::*;
 
 use crate::KvbmRuntime;
+use crate::v2::distributed::collectives::CollectiveOps;
 use anyhow::Result;
 
-use std::{ops::Range, sync::Arc};
-
-// todo: re-house this in distributed::collectives
-/// Collective communication operations for distributed workers.
-///
-/// This trait defines the collective operations needed by replicated data workers
-/// to broadcast data across ranks. Implementations may use NCCL, NIXL, or other
-/// collective communication libraries.
-pub trait CollectiveOps: Send + Sync {
-    /// Broadcast G1 blocks from rank 0 to all other ranks.
-    ///
-    /// This operation transfers the specified blocks in the G1 (GPU) tier from
-    /// rank 0 to all other ranks. Optionally, a layer range can be specified
-    /// to transfer only a subset of layers (for pipelined loading).
-    ///
-    /// # Arguments
-    /// * `block_ids` - The block IDs to broadcast
-    /// * `layer_range` - Optional range of layers to transfer. If None, all layers are transferred.
-    ///
-    /// # Returns
-    /// A notification that completes when the broadcast is done on all ranks.
-    fn broadcast(
-        &self,
-        src: LogicalLayoutHandle,
-        dst: LogicalLayoutHandle,
-        src_block_ids: &[BlockId],
-        dst_block_ids: &[BlockId],
-        layer_range: Option<Range<usize>>,
-    ) -> Result<TransferCompleteNotification>;
-}
+use std::sync::Arc;
 
 /// Replicated data worker for MLA scenarios.
 ///

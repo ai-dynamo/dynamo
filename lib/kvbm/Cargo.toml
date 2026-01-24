@@ -60,12 +60,13 @@ chrono = { version = "0.4", optional = true }
 nvtx = { version = "1.3", optional = true }
 
 [features]
-default = ["testing", "s3"]
+default = ["testing", "s3", "collectives"]
 console = []
 testing = ["dynamo-nova-backend"]
 kvbm-bench = ["testing", "dep:clap", "dep:indicatif"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 nvtx = ["dep:nvtx", "dynamo-kvbm-config/nvtx"]
+collectives = []  # Enable NCCL collective support
 
 [dev-dependencies]
 dynamo-memory = {workspace=true, features = ["unsafe-slices"]}

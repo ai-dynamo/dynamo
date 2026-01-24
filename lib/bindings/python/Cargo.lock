@@ -1208,9 +1208,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.18.2"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aa12038120eb13347a6ae2ffab1d34efe78150125108627fd85044dd4d6ff1e"
+checksum = "4d5be1e9776a20360ca270df637b391c85d48ea57508140f30a4e8f6da91884a"
 dependencies = [
  "libloading",
 ]
@@ -1741,7 +1741,7 @@ name = "dynamo-memory"
 version = "0.8.0"
 dependencies = [
  "anyhow",
- "cudarc 0.18.2",
+ "cudarc 0.19.0",
  "dynamo-config",
  "libc",
  "nix 0.30.1",

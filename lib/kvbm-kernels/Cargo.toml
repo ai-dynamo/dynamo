@@ -37,7 +37,7 @@ generate-prebuilt = []
 [dependencies]
 # Note: Not using workspace = true so this crate can be built from standalone
 # workspaces (like lib/bindings/kvbm) that don't inherit main workspace deps
-cudarc = { version = "0.18.2", features = ["cuda-12020"] }
+cudarc = { workspace = true }
 once_cell = "1.19"
 
 [build-dependencies]

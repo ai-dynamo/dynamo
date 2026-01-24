@@ -8,6 +8,9 @@
 
 // pub mod cohort;
 
+#[cfg(feature = "collectives")]
+pub mod collectives;
+
 pub mod leader;
 pub mod worker;
 pub mod workers;
