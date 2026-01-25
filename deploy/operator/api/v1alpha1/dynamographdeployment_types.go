@@ -22,6 +22,8 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -187,6 +189,14 @@ func (s *DynamoGraphDeployment) SetState(state string) {
 	s.Status.State = state
 }
 
+// GetState returns the current lifecycle state
+func (d *DynamoGraphDeployment) GetState() string {
+	if d.Status.State == "" {
+		return consts.ResourceStateUnknown
+	}
+	return d.Status.State
+}
+
 // +kubebuilder:object:root=true
 
 // DynamoGraphDeploymentList contains a list of DynamoGraphDeployment.
@@ -232,4 +242,9 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 		}
 	}
 	return false
+}
+
+// GetDynamoNamespaceForService returns the Dynamo namespace for a given service.
+func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
+	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
 }

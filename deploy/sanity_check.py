@@ -8,14 +8,21 @@ Dynamo System Information Checker
 Diagnostic tool that displays system configuration and Dynamo project status
 in a hierarchical tree format. This script checks for:
 
+Default checks:
 - System resources (OS, CPU, memory, GPU)
 - Container/host context (execution context, /dev/shm sizing, selected env)
 - Development tools (Cargo/Rust, Maturin, Python)
 - LLM frameworks (vllm, sglang, tensorrt_llm)
 - Dynamo runtime and framework components
-- File system (permissions and disk space, more detail with --thorough-check)
-- HuggingFace model cache (more detail with --thorough-check)
 - Installation status and component availability
+
+Additional checks with --thorough-check:
+- File system permissions (file-level analysis)
+- Directory sizes and disk space
+- Ulimits (resource limits)
+- CUDA/NVIDIA information (nvidia-smi, nvcc, env vars, dpkg, pip packages)
+- DYN_* environment variables
+- HuggingFace model cache details
 
 IMPORTANT: This script is STANDALONE and uses only Python stdlib (no Dynamo components).
 
@@ -31,10 +38,6 @@ The output uses status indicators:
 - ⚠️ Warning condition
 - ❓ Component not found (for optional items)
 
-By default, the tool runs quickly by checking only directory permissions and skipping
-size calculations. Use --thorough-check for detailed file-level permission analysis,
-directory size information, disk space checking, ulimit information, and DYN_* env.
-
 `--json-output` prints a minified JSON tree (terse subset) for copy/paste into issues.
 
 Exit codes:
@@ -49,7 +52,9 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ DYNAMO_COMMIT_SHA: <sha or "not set">
 │  └─ Shared memory (/dev/shm): <used/total/avail>
 ├─ User info: user=ubuntu, uid=1000, gid=1000
-├─ ✅ NVIDIA GPU NVIDIA RTX 6000 Ada Generation, driver 570.133.07, CUDA 12.8, Power=26.14/300.00 W, Memory=289/49140 MiB
+├─ ✅ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation, Power=23.25/300.00 W, Memory=289/49140 MiB
+│  ├─ Driver version: 570.133.07
+│  └─ nvidia-smi CUDA: 12.8 (driver max supported)
 ├─ 🤖Framework
 │  ├─ ✅ vLLM: 0.10.1.1, module=/opt/vllm/vllm/__init__.py, exec=/opt/dynamo/venv/bin/vllm
 │  └─ ✅ Sglang: 0.3.0, module=/opt/sglang/sglang/__init__.py
@@ -60,49 +65,86 @@ System info (hostname=jensen-linux, IP=10.111.122.133)
 │  ├─ ✅ Cargo home ($HOME/.cargo) writable
 │  ├─ ✅ Cargo target ($HOME/dynamo/.build/target) writable
 │  └─ ✅ Python site-packages ($HOME/dynamo/venv/lib/python3.12/site-packages) writable
-├─ ✅ Hugging Face Cache 3 models in ~/.cache/huggingface/hub
-├─ ✅ Cargo $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
-│  ├─ Cargo home directory CARGO_HOME=$HOME/.cargo
-│  └─ Cargo target directory CARGO_TARGET_DIR=$HOME/dynamo/.build/target
-│     ├─ Debug $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
-│     ├─ Release $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
-│     └─ Binary $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
-├─ ✅ Maturin /opt/dynamo/venv/bin/maturin, maturin 1.9.3
-├─ ✅ Python 3.12.3, /opt/dynamo/venv/bin/python
-│  ├─ ✅ PyTorch 2.7.1+cu128, ✅torch.cuda.is_available
-│  └─ PYTHONPATH not set
-└─ Dynamo $HOME/dynamo
+├─ ✅ Hugging Face Cache: 3 models in ~/.cache/huggingface/hub (host mount)
+├─ ✅ Cargo: $HOME/.cargo/bin/cargo, cargo 1.89.0 (c24e10642 2025-06-23)
+│  ├─ Cargo home directory: CARGO_HOME=$HOME/.cargo
+│  └─ Cargo target directory: CARGO_TARGET_DIR=$HOME/dynamo/.build/target
+│     ├─ Debug: $HOME/dynamo/.build/target/debug, modified=2025-08-30 16:26:49 PDT
+│     ├─ Release: $HOME/dynamo/.build/target/release, modified=2025-08-30 18:21:12 PDT
+│     └─ Binary: $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so, modified=2025-08-30 16:25:37 PDT
+├─ ✅ Maturin: /opt/dynamo/venv/bin/maturin, maturin 1.9.3
+├─ ✅ Python: 3.12.3, /opt/dynamo/venv/bin/python
+│  ├─ ✅ PyTorch: 2.7.1+cu128, ✅torch.cuda.is_available
+│  └─ PYTHONPATH: not set
+└─ Dynamo: $HOME/dynamo
    ├─ Git HEAD: a03d29066, branch=main, Date: 2025-08-30 16:22:29 PDT
-   ├─ ✅ Runtime components ai-dynamo-runtime 0.4.1
-   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.1.dist-info: created=2025-08-30 19:14:29 PDT
-   │  │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth: modified=2025-08-30 19:14:29 PDT
-   │  │  └─ →: $HOME/dynamo/lib/bindings/python/src
-   │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so, modified=2025-08-30 19:14:29 PDT
+   ├─ ✅ Runtime components: ai-dynamo-runtime 0.4.1
+   │  ├─ ✅ dynamo._core             $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so
    │  ├─ ✅ dynamo.logits_processing $HOME/dynamo/lib/bindings/python/src/dynamo/logits_processing/__init__.py
    │  ├─ ✅ dynamo.nixl_connect      $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
    │  ├─ ✅ dynamo.llm               $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
    │  └─ ✅ dynamo.runtime           $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
-   └─ ✅ Framework components ai-dynamo 0.5.0
-      │  /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.5.0.dist-info: created=2025-09-05 16:20:35 PDT
+   └─ ✅ Framework components: ai-dynamo 0.5.0
       ├─ ✅ dynamo.frontend  $HOME/dynamo/components/src/dynamo/frontend/__init__.py
       ├─ ✅ dynamo.llama_cpp $HOME/dynamo/components/src/dynamo/llama_cpp/__init__.py
-      ├─ ✅ dynamo.mocker    $HOME/dynamo/components/src/dynamo/mocker/__init__.py
-      ├─ ✅ dynamo.planner   $HOME/dynamo/components/src/dynamo/planner/__init__.py
       ├─ ✅ dynamo.sglang    $HOME/dynamo/components/src/dynamo/sglang/__init__.py
       ├─ ✅ dynamo.trtllm    $HOME/dynamo/components/src/dynamo/trtllm/__init__.py
       └─ ✅ dynamo.vllm      $HOME/dynamo/components/src/dynamo/vllm/__init__.py
 
+Additional output with --thorough-check:
+
+├─ File System
+│  ├─ ✅ Dynamo workspace ($HOME/dynamo) writable, size=1.2 GiB, disk=500 GiB free
+│  │  ├─ Total files: 1234, Total dirs: 567
+│  │  └─ Writable files: 1234, Writable dirs: 567
+│  └─ ... (similar detail for other directories)
+├─ ✅ Hugging Face Cache: 3 models in ~/.cache/huggingface/hub (host mount)
+│  ├─ Model 1: meta-llama/Llama-2-7b-hf, downloaded=2025-01-05, size=13.5 GiB
+│  ├─ Model 2: meta-llama/Llama-2-13b-hf, downloaded=2025-01-06, size=26.0 GiB
+│  └─ Model 3: mistralai/Mistral-7B-v0.1, downloaded=2025-01-07, size=14.5 GiB
+├─ ✅ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation, Power=23.25/300.00 W, Memory=289/49140 MiB
+│  ├─ Driver version: 570.133.07
+│  ├─ nvidia-smi CUDA: 12.8 (driver max supported)
+│  ├─ nvcc CUDA: 12.9 (installed toolkit)
+│  └─ CUDA/NVIDIA Information (with --thorough)
+│     ├─ nvidia-smi: NVIDIA-SMI 570.133.07, Driver 570.133.07, CUDA 12.8
+│     ├─ nvcc: Cuda compilation tools, release 12.9, V12.9.41
+│     ├─ CUDA_VERSION: CUDA_VERSION=12.9.0
+│     ├─ NV_CUDA_CUDART_VERSION: NV_CUDA_CUDART_VERSION=12.9.37-1
+│     ├─ NV_CUDA_LIB_VERSION: NV_CUDA_LIB_VERSION=12.9.0-1
+│     ├─ NV_LIBNCCL_PACKAGE: NV_LIBNCCL_PACKAGE=libnccl2=2.26.5-1+cuda12.9
+│     ├─ NVIDIA_REQUIRE_CUDA: NVIDIA_REQUIRE_CUDA=cuda>=12.9 brand=unknown,driver>=535...
+│     ├─ dpkg:cuda-*
+│     │  ├─ ii  cuda-command-line-tools-12-9    12.9.1-1
+│     │  ├─ ii  cuda-cudart-12-9                12.9.37-1
+│     │  └─ ... (more packages)
+│     ├─ dpkg:libcublas/libnccl
+│     │  └─ hi  libcublas-12-9                  12.9.0.13-1
+│     └─ pip:cuda-related
+│        ├─ nvidia-cublas-cu12==12.9.1.4
+│        ├─ nvidia-cudnn-cu12==9.10.2.21
+│        ├─ torch==2.9.0+cu129
+│        └─ ... (more packages)
+├─ Ulimits
+│  ├─ Max open files: 1048576
+│  ├─ Max processes: 257698
+│  ├─ Stack size: 8388608 bytes
+│  └─ Core file size: unlimited
+└─ DYN_* environment variables
+   ├─ DYN_VAR1=value1
+   └─ DYN_VAR2=value2
+
 Usage:
-    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check] [--json-output]
+    python deploy/sanity_check.py [--thorough-check] [--terse] [--runtime-check-only] [--json-output]
 
 Options:
-    --thorough-check  Enable thorough checking (file permissions, directory sizes, disk space, ulimits, DYN_* env, HuggingFace model details)
-    --terse           Enable terse output mode (show only essential info and errors)
-    --json-output     Output a JSON representation (terse subset) suitable for copy/paste
-    --runtime-check   Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
-                      and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
-    --no-gpu-check    Skip GPU detection and information collection (useful for environments without GPU access)
-    --no-framework-check Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
+    --thorough-check              Enable thorough checking (file permissions, directory sizes, disk space, ulimits, CUDA/NVIDIA info, DYN_* env, HuggingFace model details)
+    --terse                       Enable terse output mode (show only essential info and errors)
+    --json-output                 Output a JSON representation (terse subset) suitable for copy/paste
+    --runtime-check-only          Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers
+                                  and validate ai-dynamo packages (ai-dynamo-runtime and ai-dynamo)
+    --no-gpu-check                Skip GPU detection and information collection (useful for environments without GPU access)
+    --no-framework-check          Skip LLM framework package checks (vllm, sglang, tensorrt_llm)
 """
 
 import datetime
@@ -418,9 +460,10 @@ class SystemInfo(NodeInfo):
         self.add_child(os_info)
         self.add_child(UserInfo())
 
-        # Add GPU info (always show, even if not found) unless --no-gpu-check
-        if not self.no_gpu_check:
-            gpu_info = GPUInfo()
+        # Add GPU info (always show, even if not found) unless --no-gpu-check or --no-framework-check
+        # (GPU is primarily for framework usage, so skip if frameworks are skipped)
+        if not self.no_gpu_check and not self.no_framework_check:
+            gpu_info = GPUInfo(thorough_check=self.thorough_check)
             self.add_child(gpu_info)
 
         # Add Framework info (vllm, sglang, tensorrt_llm)
@@ -747,9 +790,15 @@ class OSInfo(NodeInfo):
 
 
 class GPUInfo(NodeInfo):
-    """NVIDIA GPU information"""
+    """NVIDIA GPU information.
 
-    def __init__(self):
+    Displays GPU model, driver version, power/memory stats, and CUDA versions.
+    In thorough mode (--thorough-check), also collects detailed CUDA/NVIDIA
+    environment information (nvcc, env vars, dpkg packages, pip packages).
+    """
+
+    def __init__(self, thorough_check: bool = False):
+        self.thorough_check = thorough_check
         # Find nvidia-smi executable (check multiple paths)
         nvidia_smi = shutil.which("nvidia-smi")
         if not nvidia_smi:
@@ -832,16 +881,8 @@ class GPUInfo(NodeInfo):
 
             # Handle single vs multiple GPUs
             if len(gpu_names) == 1:
-                # Single GPU - concise format
+                # Single GPU - just show GPU name in main label
                 value = gpu_names[0]
-                if driver or cuda:
-                    driver_cuda = []
-                    if driver:
-                        driver_cuda.append(f"driver {driver}")
-                    if cuda:
-                        driver_cuda.append(f"CUDA {cuda}")
-                    value += f", {', '.join(driver_cuda)}"
-
                 super().__init__(label="NVIDIA GPU", desc=value, status=NodeStatus.OK)
 
                 # Add power and memory metadata for single GPU
@@ -849,14 +890,6 @@ class GPUInfo(NodeInfo):
             else:
                 # Multiple GPUs - show count in main label
                 value = f"{len(gpu_names)} GPUs"
-                if driver or cuda:
-                    driver_cuda = []
-                    if driver:
-                        driver_cuda.append(f"driver {driver}")
-                    if cuda:
-                        driver_cuda.append(f"CUDA {cuda}")
-                    value += f", {', '.join(driver_cuda)}"
-
                 super().__init__(label="NVIDIA GPU", desc=value, status=NodeStatus.OK)
 
                 # Add each GPU as a child node
@@ -869,6 +902,14 @@ class GPUInfo(NodeInfo):
                     if power_mem:
                         gpu_child.add_metadata("Stats", power_mem)
                     self.add_child(gpu_child)
+
+            # Add nvidia-smi (driver max CUDA) and nvcc (installed toolkit) info
+            self._add_cuda_version_children(cuda, driver)
+
+            # Add CUDA/NVIDIA info in thorough mode
+            if self.thorough_check:
+                cuda_info = self._collect_cuda_info()
+                self.add_child(cuda_info)
 
         except Exception:
             super().__init__(
@@ -904,6 +945,67 @@ class GPUInfo(NodeInfo):
         except Exception:
             pass
         return driver, cuda
+
+    def _add_cuda_version_children(
+        self, driver_cuda: Optional[str], driver_version: Optional[str]
+    ):
+        """Add child nodes showing driver, nvidia-smi (driver max) and nvcc (installed toolkit) versions."""
+        import re
+
+        # Add driver version
+        if driver_version:
+            driver_node = NodeInfo(
+                label="Driver version",
+                desc=driver_version,
+                status=NodeStatus.INFO,
+            )
+            self.add_child(driver_node)
+
+        # Add nvidia-smi CUDA version (driver's max supported version)
+        if driver_cuda:
+            smi_node = NodeInfo(
+                label="nvidia-smi CUDA",
+                desc=f"{driver_cuda} (driver max supported)",
+                status=NodeStatus.INFO,
+            )
+            self.add_child(smi_node)
+
+        # Add nvcc version (installed CUDA toolkit)
+        try:
+            result = subprocess.run(
+                ["nvcc", "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                # Extract version from output like "release 12.9, V12.9.41"
+                m = re.search(r"release\s+([0-9.]+)", result.stdout, re.IGNORECASE)
+                if m:
+                    nvcc_version = m.group(1)
+                    nvcc_node = NodeInfo(
+                        label="nvcc CUDA",
+                        desc=f"{nvcc_version} (installed toolkit)",
+                        status=NodeStatus.INFO,
+                    )
+                    self.add_child(nvcc_node)
+                else:
+                    nvcc_node = NodeInfo(
+                        label="nvcc CUDA",
+                        desc="version not detected",
+                        status=NodeStatus.WARNING,
+                    )
+                    self.add_child(nvcc_node)
+            else:
+                nvcc_node = NodeInfo(
+                    label="nvcc CUDA",
+                    desc="nvcc not found",
+                    status=NodeStatus.INFO,
+                )
+                self.add_child(nvcc_node)
+        except Exception:
+            # nvcc not available (not an error, just info)
+            pass
 
     def _add_power_memory_info(self, nvidia_smi: str, gpu_index: int = 0):
         """Add power and memory metadata for a specific GPU."""
@@ -964,6 +1066,123 @@ class GPUInfo(NodeInfo):
         except Exception:
             pass
         return None
+
+    def _collect_cuda_info(self) -> NodeInfo:
+        """
+        Collect and display CUDA/NVIDIA environment and package information.
+
+        This function gathers diagnostic information from multiple sources:
+        - nvidia-smi: Driver version and maximum supported CUDA version
+        - nvcc: Installed CUDA toolkit version
+        - Environment variables: CUDA_VERSION, NV_CUDA_*, NVIDIA_REQUIRE_CUDA
+        - dpkg: Installed CUDA packages (cuda-*, libcublas*, libnccl*)
+        - pip: CUDA-related Python packages (torch, nvidia-*, etc.)
+
+        Returns:
+            NodeInfo with collected CUDA/NVIDIA information (INFO status, no validation)
+        """
+        import re
+
+        def sh(cmd: str) -> str:
+            """Run command and return stdout only."""
+            try:
+                p = subprocess.run(
+                    ["bash", "-c", f"{cmd} 2>/dev/null"],
+                    stdout=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                return (p.stdout or "").strip()
+            except Exception:
+                return ""
+
+        # Define signals to collect
+        signals = [
+            ("nvidia-smi", "nvidia-smi | grep 'CUDA Version'"),
+            ("nvcc", "nvcc --version | grep -i 'release' || nvcc --version"),
+            ("CUDA_VERSION", "env | grep -i '^CUDA_VERSION='"),
+            ("NV_CUDA_CUDART_VERSION", "env | grep -i '^NV_CUDA_CUDART_VERSION='"),
+            ("NV_CUDA_LIB_VERSION", "env | grep -i '^NV_CUDA_LIB_VERSION='"),
+            ("NV_LIBNCCL_PACKAGE", "env | grep -i '^NV_LIBNCCL_PACKAGE='"),
+            ("NVIDIA_REQUIRE_CUDA", "env | grep -i '^NVIDIA_REQUIRE_CUDA='"),
+            ("dpkg:cuda-*", "dpkg -l | grep -E '^(ii|hi)\\s+cuda-.*-[1-9][0-9]-'"),
+            (
+                "dpkg:libcublas/libnccl",
+                "dpkg -l | grep -E '^(ii|hi)\\s+lib(cublas|nccl).*-[1-9][0-9]-'",
+            ),
+            (
+                "pip:cuda-related",
+                "python -m pip list --format=freeze | grep -Ei '(cuda|cudnn|nccl|nvshmem|\\+cu[1-9][0-9]|-cu[1-9][0-9]|^(torch|torchaudio|torchvision)==)'",
+            ),
+        ]
+
+        node = NodeInfo(
+            label="CUDA/NVIDIA Information",
+            desc="",
+            status=NodeStatus.INFO,
+        )
+
+        has_any_output = False
+        for label, cmd in signals:
+            out = sh(cmd)
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+
+            if not lines:
+                continue
+
+            has_any_output = True
+
+            # Special handling for nvidia-smi: extract key info
+            if label == "nvidia-smi":
+                ln = lines[0]
+                parts = []
+                if m := re.search(r"NVIDIA-SMI\s+([\d.]+)", ln):
+                    parts.append(f"NVIDIA-SMI {m.group(1)}")
+                if m := re.search(r"Driver Version:\s+([\d.]+)", ln):
+                    parts.append(f"Driver {m.group(1)}")
+                if m := re.search(r"CUDA Version:\s+([\d.]+)", ln):
+                    parts.append(f"CUDA {m.group(1)}")
+                desc = ", ".join(parts) if parts else ln.strip("|").strip()
+                signal_node = NodeInfo(label=label, desc=desc, status=NodeStatus.INFO)
+                node.add_child(signal_node)
+            # Single-line outputs (nvcc and env vars)
+            elif label in (
+                "nvcc",
+                "CUDA_VERSION",
+                "NV_CUDA_CUDART_VERSION",
+                "NV_CUDA_LIB_VERSION",
+                "NV_LIBNCCL_PACKAGE",
+            ):
+                signal_node = NodeInfo(
+                    label=label, desc=lines[0], status=NodeStatus.INFO
+                )
+                node.add_child(signal_node)
+            # Multi-line outputs with truncation
+            elif label == "NVIDIA_REQUIRE_CUDA":
+                ln = lines[0]
+                if len(ln) > 200 and "cuda>=" in ln.lower():
+                    m = re.search(r"(cuda>=[\d.]+)", ln, re.IGNORECASE)
+                    if m:
+                        ln = f"{ln.split('=')[0]}={m.group(1)} ..."
+                    else:
+                        ln = ln[:200] + "..."
+                signal_node = NodeInfo(label=label, desc=ln, status=NodeStatus.INFO)
+                node.add_child(signal_node)
+            # Multi-line outputs (dpkg, pip)
+            else:
+                signal_node = NodeInfo(label=label, desc="", status=NodeStatus.INFO)
+                for ln in lines:
+                    line_node = NodeInfo(
+                        label=ln, status=NodeStatus.NONE, show_symbol=False
+                    )
+                    signal_node.add_child(line_node)
+                node.add_child(signal_node)
+
+        if not has_any_output:
+            node.desc = "no CUDA/NVIDIA information detected"
+
+        return node
 
 
 class FilePermissionsInfo(NodeInfo):
@@ -1586,9 +1805,17 @@ class HuggingFaceInfo(NodeInfo):
         """Initialize when models are found in cache."""
         model_count = len(models)
         display_path = self._replace_home_with_var(hf_cache_path)
+
+        # Check if cache is on NFS or host mount
+        mount_type = self._get_mount_type(hf_cache_path)
+
+        desc = f"{model_count} models in {display_path}"
+        if mount_type:
+            desc += f" ({mount_type})"
+
         super().__init__(
             label="Hugging Face Cache",
-            desc=f"{model_count} models in {display_path}",
+            desc=desc,
             status=NodeStatus.OK,
         )
 
@@ -1634,6 +1861,61 @@ class HuggingFaceInfo(NodeInfo):
                 status=NodeStatus.INFO,
             )
             self.add_child(token_node)
+
+    def _get_mount_type(self, path: str) -> Optional[str]:
+        """Determine if path is on NFS or a host mount (bind mount).
+
+        Returns:
+            String describing mount type (e.g., "NFS", "host mount") or None if local
+        """
+        try:
+            # Read /proc/mounts to find mount info
+            with open("/proc/mounts", "r") as f:
+                mounts = f.readlines()
+
+            # Find the longest matching mount point (most specific)
+            abs_path = os.path.abspath(path)
+            best_match = None
+            best_match_len = 0
+
+            for line in mounts:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point = parts[1]
+                fs_type = parts[2]
+
+                # Check if our path is under this mount point
+                if (
+                    abs_path.startswith(mount_point)
+                    and len(mount_point) > best_match_len
+                ):
+                    best_match = (mount_point, fs_type)
+                    best_match_len = len(mount_point)
+
+            if best_match:
+                mount_point, fs_type = best_match
+
+                # Check for NFS
+                if fs_type in ("nfs", "nfs4"):
+                    return "NFS"
+
+                # Check for bind mount (host mount in Docker)
+                # In Docker, bind mounts typically show up with device paths or overlay
+                if fs_type in ("ext4", "xfs", "btrfs") and mount_point != "/":
+                    # This could be a bind mount from host
+                    # Additional heuristic: check if device is different from root
+                    try:
+                        root_stat = os.stat("/")
+                        path_stat = os.stat(abs_path)
+                        if root_stat.st_dev != path_stat.st_dev:
+                            return "host mount"
+                    except Exception:
+                        pass
+
+            return None
+        except Exception:
+            return None
 
     def _get_cached_models(self, cache_path: str, compute_sizes: bool) -> List[tuple]:
         """Get list of cached Hugging Face models with metadata.
@@ -2020,7 +2302,7 @@ class MaturinInfo(NodeInfo):
 class PythonInfo(NodeInfo):
     """Python installation information.
 
-    In `--runtime-check` mode, Python is still useful to report, but failures should not
+    In `--runtime-check-only` mode, Python is still useful to report, but failures should not
     block the container sanity check, so missing/broken Python is downgraded to WARNING.
     """
 
@@ -2975,7 +3257,7 @@ def main():
     parser.add_argument(
         "--thorough-check",
         action="store_true",
-        help="Enable thorough checking (file permissions, directory sizes, disk space, etc.)",
+        help="Enable thorough checking (file permissions, directory sizes, disk space, CUDA/NVIDIA info, etc.)",
     )
     parser.add_argument(
         "--terse",
@@ -2990,8 +3272,10 @@ def main():
         help="Output a JSON representation (terse subset) suitable for copy/paste",
     )
     parser.add_argument(
+        "--runtime-check-only",
         "--runtime-check",
         "--runtime",
+        dest="runtime_check",
         action="store_true",
         help="Skip compile-time dependency checks (Rust, Cargo, Maturin) for runtime containers and validate ai-dynamo packages",
     )
@@ -3017,6 +3301,7 @@ def main():
         parser.error(
             "--json-output and --terse cannot be used together (json-output is already terse)"
         )
+
     # Keep `--json-output` output JSON-only for copy/paste (no Python warnings noise).
     if args.json_output:
         import warnings

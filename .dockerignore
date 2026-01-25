@@ -19,6 +19,8 @@
 **/*.plan
 **/*.etcd
 **/.cache/*
+**/__pycache__
+**/*.pyc
 **/*onnx*
 # Engine must be allowed because code contains dynamo_engine.py
 **/*tensorrtllm_engines*
@@ -43,3 +45,42 @@ container/Dockerfile*
 container/*.Dockerfile
 .venv
 .venv-docs
+
+# GPU Memory Service build artifacts
+lib/gpu_memory_service/build/
+lib/gpu_memory_service/*.egg-info/
+lib/gpu_memory_service/**/*.so
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.egg
+
+# Rust
+target/
+
+# IDE/Editor
+.idea/
+*.swp
+*.swo
+.vscode/
+.build/
+
+# Tests & Linters
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.ruff_cache/
+.mypy_cache/
+
+# Docs
+docs/_build/
+
+# AI
+.cursor/
+.claude/

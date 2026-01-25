@@ -34,7 +34,7 @@ from dynamo.vllm.multimodal_handlers import (
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
-    ProcessorHandler,
+    PreprocessedHandler,
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
@@ -46,6 +46,19 @@ from .publisher import StatLoggerFactory
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+
+async def _handle_non_leader_node(dp_rank: int) -> None:
+    """
+    Handle non-leader node (data_parallel_rank >= 1) in multi-node deployments.
+    Non-leader nodes run vLLM workers but don't serve Dynamo endpoints.
+    """
+    logger.info(
+        f"Non-leader node detected (data_parallel_rank={dp_rank}). "
+        "Skipping endpoint serving."
+    )
+    # Wait indefinitely - process terminated via signal handlers
+    await asyncio.Event().wait()
 
 
 async def graceful_shutdown(runtime):
@@ -447,20 +460,27 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
+    # Register sleep/wake engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake", handler.wake)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
     # Register prefill model with ModelType.Prefill
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-        await register_vllm_model(
-            model_input,
-            ModelType.Prefill,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=0,  # Prefill doesn't support migration
-        )
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+    await register_vllm_model(
+        model_input,
+        ModelType.Prefill,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=0,  # Prefill doesn't support migration
+    )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -521,7 +541,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # TODO Hack to get data, move this to registering in TBD
     factory.set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
-    factory.set_request_total_slots_all(vllm_config.scheduler_config.max_num_seqs)
     factory.init_publish()
 
     handler = DecodeWorkerHandler(
@@ -566,33 +585,38 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        # Parse endpoint types from --dyn-endpoint-types flag
-        model_type = parse_endpoint_types(config.dyn_endpoint_types)
-        logger.info(
-            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+    # Register sleep/wake engine routes
+    runtime.register_engine_route("sleep", handler.sleep)
+    runtime.register_engine_route("wake", handler.wake)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # Parse endpoint types from --dyn-endpoint-types flag
+    model_type = parse_endpoint_types(config.dyn_endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+
+    # Warn if custom template provided but chat endpoint not enabled
+    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+        logger.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-
-        # Warn if custom template provided but chat endpoint not enabled
-        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
-            logger.warning(
-                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
-                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
-            )
-
-        await register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=config.migration_limit,
-        )
+    await register_vllm_model(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=config.migration_limit,
+    )
 
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -676,13 +700,17 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
         .client()
     )
 
-    # Get prompt template from args (must be passed via environment or command line)
-    mm_prompt_template = config.mm_prompt_template
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
 
-    handler = ProcessorHandler(
+    handler = PreprocessedHandler(
         config.engine_args,
         encode_worker_client,
-        mm_prompt_template,
+        pd_worker_client,
     )
 
     logger.info("Waiting for Encoder Worker Instances ...")
@@ -690,7 +718,7 @@ async def init_multimodal_processor(runtime: DistributedRuntime, config: Config)
 
     # Register the endpoint as entrypoint to a model
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,
         ModelType.Chat,
         generate_endpoint,
         config.model,
@@ -857,9 +885,9 @@ async def init_ec_processor(runtime: DistributedRuntime, config: Config):
     await encoder_client.wait_for_instances()
     await pd_client.wait_for_instances()
 
-    # Register the endpoint as entrypoint to a model (same as regular processor)
+    # Register the endpoint as entrypoint to a model (same as preprocessed_handler)
     await register_llm(
-        ModelInput.Text,  # Custom processor is used and this type bypasses SDK processor
+        ModelInput.Tokens,  # Use Rust tokenization for better performance and multi-image support
         ModelType.Chat,
         generate_endpoint,
         config.model,

@@ -41,6 +41,7 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
+use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -224,7 +225,7 @@ pub async fn smart_json_error_middleware(request: Request<Body>, next: Next) -> 
 
     if response.status() == StatusCode::UNPROCESSABLE_ENTITY {
         let (_parts, body) = response.into_parts();
-        let body_bytes = axum::body::to_bytes(body, usize::MAX)
+        let body_bytes = axum::body::to_bytes(body, get_body_limit())
             .await
             .unwrap_or_default();
         let error_message = String::from_utf8_lossy(&body_bytes).to_string();
@@ -287,10 +288,12 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
+    Json(mut request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -707,10 +710,12 @@ async fn embeddings(
 async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateChatCompletionRequest>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -1137,10 +1142,12 @@ pub fn validate_completion_fields_generic(
 async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateResponse>,
+    Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);

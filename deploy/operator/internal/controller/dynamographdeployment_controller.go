@@ -51,6 +51,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
@@ -154,6 +155,17 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Info("Reconciliation done")
 	}()
 
+	// Handle finalizer
+	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
+	if err != nil {
+		logger.Error(err, "failed to handle the finalizer")
+		reason = "failed_to_handle_the_finalizer"
+		return ctrl.Result{}, err
+	}
+	if deleted {
+		return ctrl.Result{}, nil
+	}
+
 	// Validate the DynamoGraphDeployment spec (defense in depth - only when webhooks are disabled)
 	if !r.Config.WebhooksEnabled {
 		validator := webhookvalidation.NewDynamoGraphDeploymentValidator(dynamoDeployment)
@@ -176,15 +188,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 	}
 
-	deleted, err := commoncontroller.HandleFinalizer(ctx, dynamoDeployment, r.Client, r)
-	if err != nil {
-		logger.Error(err, "failed to handle the finalizer")
-		reason = "failed_to_handle_the_finalizer"
-		return ctrl.Result{}, err
-	}
-	if deleted {
-		return ctrl.Result{}, nil
-	}
 	reconcileResult, err := r.reconcileResources(ctx, dynamoDeployment)
 
 	state = reconcileResult.State
@@ -1172,7 +1175,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&nvidiacomv1alpha1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
-		Named("dynamographdeployment").
+		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Owns(&nvidiacomv1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1227,7 +1230,9 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 				}),
 			)
 	}
-	return ctrlBuilder.Complete(r)
+	// Wrap with metrics collection
+	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
+	return ctrlBuilder.Complete(observedReconciler)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
