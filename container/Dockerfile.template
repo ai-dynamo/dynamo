@@ -4,15 +4,20 @@
 
 {% include "templates/args.Dockerfile" %}
 
-### Base Image Stages
+# --- Base Image Stages
 {% if framework != "dynamo" %}
     {% include "templates/dynamo_base.Dockerfile" %}
     {% include "templates/wheel_builder.Dockerfile" %}
 {% elif framework == "dynamo" %}
-    {% if target == "dev" %}
+    {% if target == "frontend" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
-        {% include "templates/dynamo_dev.Dockerfile" %}
+        {% include "templates/dynamo_runtime.Dockerfile" %}
+        {% include "templates/frontend.Dockerfile" %}
+    {% elif target == "runtime" %}
+        {% include "templates/dynamo_base.Dockerfile" %}
+        {% include "templates/wheel_builder.Dockerfile" %}
+        {% include "templates/dynamo_runtime.Dockerfile" %}
     {% elif target == "wheel_builder" %}
         {% include "templates/dynamo_base.Dockerfile" %}
         {% include "templates/wheel_builder.Dockerfile" %}
@@ -21,13 +26,28 @@
     {% endif %}
 {% endif %}
 
-### Framework Stages
-# SGLang is the only framework without a `framework` target currently, needs special treatment
+# --- Framework Stages
 {% if framework == "sglang" %}
+    # SGLang is the only framework without a `framework` target currently, needs special treatment
     {% include "templates/sglang_runtime.Dockerfile" %}
-{% elif target == "framework" and framework != "none" %}
+{% elif target == "framework" and framework != "dynamo" %}
     {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
-{% elif target == "runtime" and framework != "none" %}
+{% elif ( target == "runtime" or target == "dev" or target == "local-dev" ) and framework != "dynamo" %}
     {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
     {% include "templates/" ~ framework ~ "_runtime.Dockerfile" %}
+{% endif %}
+
+{% if make_efa == true and target == "runtime" %}
+    {% include "templates/aws.Dockerfile" %}
+{% endif %}
+
+# --- Development Stages
+{% if target == "dev" or target == "local-dev" %}
+    {% include "templates/dev.Dockerfile" %}
+    {% if make_efa == true %}
+        {% include "templates/aws.Dockerfile" %}
+    {% endif %}
+    {% if target == "local-dev" %}
+        {% include "templates/local_dev.Dockerfile" %}
+    {% endif %}
 {% endif %}

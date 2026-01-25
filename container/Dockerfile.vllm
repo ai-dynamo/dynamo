@@ -75,7 +75,7 @@ ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.13.0"
+ARG VLLM_REF="v0.14.0"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
 ARG FLASHINF_REF="v0.5.3"
 
@@ -671,6 +671,8 @@ RUN apt-get update && \
         g++ \
         # prometheus dependencies
         ca-certificates \
+        # opencv-python-headless (vLLM dependency) requires libxcb for some functions
+        libxcb1 \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
     rm -rf /var/lib/apt/lists/*

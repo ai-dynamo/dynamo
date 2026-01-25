@@ -1,6 +1,6 @@
-##################################
-########## Build Arguments ########
-##################################
+##########################
+#### Build Arguments #####
+##########################
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
 #   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
@@ -17,15 +17,12 @@ ARG ARCH_ALT={{ "x86_64" if platform == "amd64" else "aarch64" }}
 # Python/CUDA configuration
 ARG PYTHON_VERSION={{ context.dynamo.python_version }}
 ARG CUDA_VERSION={{ cuda_version }}
+ARG CUDA_MAJOR=${CUDA_VERSION%%.*}
 
 {% if framework == "vllm" -%}
 {% set cuda_context_key = "cuda" + cuda_version %}
 # Base image configuration
 ARG BASE_IMAGE={{ context[framework].base_image }}
-# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
-# Please check https://github.com/ai-dynamo/dynamo/pull/1065
-# for details and reproducer to manually test if the image
-# can be updated to later versions.
 ARG BASE_IMAGE_TAG={{ context[framework][cuda_context_key].base_image_tag }}
 {% elif framework != "vllm" -%}
 ARG BASE_IMAGE={{ context[framework].base_image }}
@@ -44,9 +41,10 @@ ARG CARGO_BUILD_JOBS
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
 ARG ETCD_VERSION={{ context.dynamo.etcd_version }}
 
-ARG ENABLE_MEDIA_NIXL={{ context.dynamo.enable_media_nixl }}
+ARG ENABLE_MEDIA_NIXL={{ context[framework].enable_media_nixl }}
 ARG ENABLE_MEDIA_FFMPEG={{ context[framework].enable_media_ffmpeg }}
 ARG FFMPEG_VERSION={{ context.dynamo.ffmpeg_version }}
+ARG ENABLE_GPU_MEMORY_SERVICE={{ context[framework].enable_gpu_memory_service }}
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -58,6 +56,14 @@ ARG NIXL_UCX_REF={{ context.dynamo.nixl_ucx_ref }}
 ARG NIXL_REF={{ context.dynamo.nixl_ref }}
 ARG NIXL_GDRCOPY_REF={{ context.dynamo.nixl_gdrcopy_ref }}
 ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
+
+{% if target == "dev" or target == "local-dev" %}
+ARG FRAMEWORK={{ framework }}
+{% endif %}
+
+{% if target == "frontend" %}
+ARG EPP_IMAGE={{ context.dynamo.epp_image }}
+{% endif %}
 
 {% if framework == "vllm" -%}
 # Make sure to update the dependency version in pyproject.toml when updating this
@@ -88,4 +94,9 @@ ARG FLASH_ATTN_VER={{ context.trtllm.flash_attn_version }}
 
 # Python configuration
 ARG TRTLLM_PYTHON_VERSION={{ context[framework].python_version }}
+{%- endif -%}
+
+{% if make_efa == true %}
+ARG EFA_VERSION={{ context.dynamo.efa_version }}
+ARG EFA_BASE_IMAGE={{ "runtime" if target=="runtime" else "dev" }}
 {%- endif -%}

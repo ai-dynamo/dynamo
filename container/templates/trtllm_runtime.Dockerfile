@@ -104,6 +104,8 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         ninja-build \
         git \
         git-lfs \
+        # required for verification of GPG keys
+        gnupg2 \
         # Python runtime - CRITICAL for virtual environment to work
         python${PYTHON_VERSION}-dev \
         python3-pip \
@@ -120,6 +122,7 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         libibumad3 \
         libibverbs1 \
         libnuma1 \
+        numactl \
         librdmacm1 \
         rdma-core \
         # OpenMPI dependencies
@@ -180,6 +183,8 @@ $NIXL_PLUGIN_DIR:\
 $TENSORRT_LIB_DIR:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch/lib:\
 /opt/dynamo/venv/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt/lib:\
+/usr/local/cuda/lib:\
+/usr/local/cuda/lib64:\
 $LD_LIBRARY_PATH
 ENV NVIDIA_DRIVER_CAPABILITIES=video,compute,utility
 ENV OPAL_PREFIX=/opt/hpcx/ompi
@@ -190,12 +195,21 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       --no-cache \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install --no-cache "$GMS_WHEEL"; \
+    fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \

@@ -70,8 +70,8 @@ ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
 ARG GITHUB_TRTLLM_COMMIT
 
-# Copy only wheel files and commit info from trtllm_wheel stage from build_context
 {% if context.trtllm.has_trtllm_context == "1" %}
+# Copy only wheel files and commit info from trtllm_wheel stage from build_context
 COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
 COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
 {%- endif -%}
@@ -110,7 +110,7 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
         sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
         bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        # TRTLLM 1.2.0rc6 has issues installing from pypi with uv, installing from direct wheel link works best
+        # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
