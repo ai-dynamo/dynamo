@@ -2,6 +2,7 @@
 .vs/
 .vscode/
 .helix
+*rendered.Dockerfile
 [Bb]inlog/
 [Bb][Uu][Ii][Ll][Dd]/
 [Oo][Bb][Jj]/
