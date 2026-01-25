@@ -460,10 +460,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    # Register sleep/wake engine routes
+    # Register sleep/wake_up engine routes
     runtime.register_engine_route("sleep", handler.sleep)
-    runtime.register_engine_route("wake", handler.wake)
-    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
 
     # Handle non-leader nodes - don't serve endpoints
     if config.engine_args.data_parallel_rank:
@@ -585,10 +585,10 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    # Register sleep/wake engine routes
+    # Register sleep/wake_up engine routes
     runtime.register_engine_route("sleep", handler.sleep)
-    runtime.register_engine_route("wake", handler.wake)
-    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
 
     # Handle non-leader nodes - don't serve endpoints
     if config.engine_args.data_parallel_rank:
