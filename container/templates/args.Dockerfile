@@ -63,6 +63,7 @@ ARG FRAMEWORK={{ framework }}
 
 {% if target == "frontend" %}
 ARG EPP_IMAGE={{ context.dynamo.epp_image }}
+ARG FRONTEND_IMAGE={{ context.dynamo.frontend_image }}
 {% endif %}
 
 {% if framework == "vllm" -%}

@@ -2,7 +2,7 @@
 ########## Base Image ############
 ##################################
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS dynamo_base
 
 ARG ARCH
 ARG ARCH_ALT
