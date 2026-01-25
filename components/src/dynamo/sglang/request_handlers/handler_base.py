@@ -169,8 +169,30 @@ class BaseWorkerHandler(ABC):
             "resume_memory_occupation", self.resume_memory_occupation
         )
 
-    @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):
+        """Generate response from request with cancellation handling.
+
+        This is a wrapper around _internal_generate that provides cancellation
+        handling for the generation process. It monitors for local cancellation
+        events (e.g., SIGINT, SIGTERM) that cause the local process to be terminated,
+        not remote client request cancellations.
+
+        When a local cancellation is detected via the context, it logs the cancellation
+        and raises GeneratorExit to gracefully terminate the generation.
+
+
+        Raises:
+            GeneratorExit: When the request is cancelled due to local cancellation.
+        """
+        try:
+            async for item in self._internal_generate(request, context):
+                yield item
+        except asyncio.CancelledError:
+            logging.info(f"Request {context.id()} cancelled")
+            raise GeneratorExit("Request cancelled")
+
+    @abstractmethod
+    async def _internal_generate(self, request: Dict[str, Any], context: Context):
         """Generate response from request.
 
         Args:

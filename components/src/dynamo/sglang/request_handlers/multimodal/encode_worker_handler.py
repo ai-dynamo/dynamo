@@ -91,7 +91,7 @@ class MultimodalEncodeWorkerHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def generate(
+    async def _internal_generate(
         self, request: SglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:
         """

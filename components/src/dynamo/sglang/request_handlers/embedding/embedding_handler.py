@@ -29,7 +29,7 @@ class EmbeddingWorkerHandler(BaseWorkerHandler):
         logging.info("Engine shutdown")
         super().cleanup()
 
-    async def generate(self, request: dict, context: Context):
+    async def _internal_generate(self, request: dict, context: Context):
         """
         Generate embeddings for the given input.
 

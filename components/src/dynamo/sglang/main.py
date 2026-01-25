@@ -4,7 +4,6 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
 
 import sglang as sgl
@@ -79,31 +78,26 @@ async def worker():
         config.dynamo_args.use_kv_events,
     )
 
-    def signal_handler():
-        asyncio.create_task(graceful_shutdown(runtime))
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
-
-    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
-
-    if config.dynamo_args.embedding_worker:
-        await init_embedding(runtime, config)
-    elif config.dynamo_args.multimodal_processor:
-        await init_multimodal_processor(runtime, config)
-    elif config.dynamo_args.multimodal_encode_worker:
-        await init_multimodal_encode_worker(runtime, config)
-    elif config.dynamo_args.multimodal_worker:
-        if config.serving_mode != DisaggregationMode.PREFILL:
-            await init_multimodal_worker(runtime, config)
+    try:
+        if config.dynamo_args.embedding_worker:
+            await init_embedding(runtime, config)
+        elif config.dynamo_args.multimodal_processor:
+            await init_multimodal_processor(runtime, config)
+        elif config.dynamo_args.multimodal_encode_worker:
+            await init_multimodal_encode_worker(runtime, config)
+        elif config.dynamo_args.multimodal_worker:
+            if config.serving_mode != DisaggregationMode.PREFILL:
+                await init_multimodal_worker(runtime, config)
+            else:
+                await init_multimodal_prefill_worker(runtime, config)
+        elif config.dynamo_args.diffusion_worker:
+            await init_diffusion(runtime, config)
+        elif config.serving_mode != DisaggregationMode.PREFILL:
+            await init(runtime, config)
         else:
-            await init_multimodal_prefill_worker(runtime, config)
-    elif config.dynamo_args.diffusion_worker:
-        await init_diffusion(runtime, config)
-    elif config.serving_mode != DisaggregationMode.PREFILL:
-        await init(runtime, config)
-    else:
-        await init_prefill(runtime, config)
+            await init_prefill(runtime, config)
+    finally:
+        runtime.shutdown()
 
 
 async def init(runtime: DistributedRuntime, config: Config):
@@ -180,10 +174,14 @@ async def init(runtime: DistributedRuntime, config: Config):
                 readiness_gate=ready_event,
             ),
         )
+    except asyncio.CancelledError:
+        logging.info("Request cancelled")
+        raise
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
+        logging.info("Finally block reached")
         metrics_task.cancel()
         try:
             await metrics_task
@@ -638,12 +636,6 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
         logging.warning("Prefill warmup timed out after 1800s")
     except Exception as e:
         logging.warning(f"Prefill warmup failed: {e}")
-
-
-async def graceful_shutdown(runtime):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 def main():
