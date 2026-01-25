@@ -132,10 +132,9 @@ runs:
           --secret id=aws-key-id,env=AWS_ACCESS_KEY_ID \
           --secret id=aws-secret-id,env=AWS_SECRET_ACCESS_KEY \
           --progress=plain \
-          --f ./container/rendered.Dockerfile \
           --tag "$IMAGE_TAG" \
-          --progress=plain \
           --load \
+          -f ./container/rendered.Dockerfile \
           $CACHE_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
