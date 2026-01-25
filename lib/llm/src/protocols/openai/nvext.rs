@@ -1,12 +1,50 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use axum::http::HeaderMap;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::{Validate, ValidationError};
 
 pub use crate::protocols::common::timing::TimingInfo;
+
+pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
+pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
+
+/// Apply routing overrides from HTTP headers to nvext.
+///
+/// Header mappings:
+/// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
+/// - `x-prefill-instance-id` -> `prefill_worker_id`
+///
+/// Headers take priority over existing nvext values when present.
+/// If no headers are present, returns the original nvext unchanged.
+pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
+    let worker_id = headers
+        .get(HEADER_WORKER_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    let prefill_id = headers
+        .get(HEADER_PREFILL_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    if worker_id.is_none() && prefill_id.is_none() {
+        return nvext;
+    }
+
+    let mut ext = nvext.unwrap_or_default();
+    if let Some(id) = worker_id {
+        ext.backend_instance_id = Some(id);
+        ext.decode_worker_id = Some(id);
+    }
+    if let Some(id) = prefill_id {
+        ext.prefill_worker_id = Some(id);
+    }
+    Some(ext)
+}
 
 pub trait NvExtProvider {
     fn nvext(&self) -> Option<&NvExt>;
@@ -209,5 +247,31 @@ mod tests {
         assert_eq!(nv_ext.prefill_worker_id, Some(100));
         assert_eq!(nv_ext.decode_worker_id, Some(200));
         assert!(nv_ext.validate().is_ok());
+    }
+
+    // Test apply_header_routing_overrides - worker header present, prefill header absent
+    #[test]
+    fn test_apply_header_routing_overrides() {
+        use axum::http::HeaderMap;
+
+        // Only HEADER_WORKER_INSTANCE_ID is in the header
+        let mut headers = HeaderMap::new();
+        headers.insert(HEADER_WORKER_INSTANCE_ID, "123".parse().unwrap());
+        // Note: HEADER_PREFILL_INSTANCE_ID is NOT in the header
+
+        let nvext = NvExt::builder()
+            .backend_instance_id(999)
+            .decode_worker_id(888)
+            .prefill_worker_id(777)
+            .build()
+            .unwrap();
+
+        let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
+
+        // Header should override backend_instance_id and decode_worker_id
+        assert_eq!(result.backend_instance_id, Some(123));
+        assert_eq!(result.decode_worker_id, Some(123));
+        // prefill_worker_id should remain from original nvext (not overwritten by header)
+        assert_eq!(result.prefill_worker_id, Some(777));
     }
 }

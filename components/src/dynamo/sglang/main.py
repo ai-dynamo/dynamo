@@ -24,6 +24,7 @@ from dynamo.sglang.publisher import setup_prometheus_registry, setup_sgl_metrics
 from dynamo.sglang.register import register_llm_with_readiness_gate
 from dynamo.sglang.request_handlers import (
     DecodeWorkerHandler,
+    DiffusionWorkerHandler,
     EmbeddingWorkerHandler,
     MultimodalEncodeWorkerHandler,
     MultimodalPrefillWorkerHandler,
@@ -97,6 +98,8 @@ async def worker():
             await init_multimodal_worker(runtime, config)
         else:
             await init_multimodal_prefill_worker(runtime, config)
+    elif config.dynamo_args.diffusion_worker:
+        await init_diffusion(runtime, config)
     elif config.serving_mode != DisaggregationMode.PREFILL:
         await init(runtime, config)
     else:
@@ -256,6 +259,91 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        metrics_task.cancel()
+        try:
+            await metrics_task
+        except asyncio.CancelledError:
+            logging.info("Metrics task successfully cancelled")
+            pass
+        handler.cleanup()
+
+
+async def init_diffusion(runtime: DistributedRuntime, config: Config):
+    """Initialize diffusion language model worker component"""
+    server_args, dynamo_args = config.server_args, config.dynamo_args
+
+    logging.info(
+        f"Initializing diffusion worker with algorithm: {server_args.dllm_algorithm}"
+    )
+    if server_args.dllm_algorithm_config:
+        logging.info(
+            f"Using diffusion algorithm config: {server_args.dllm_algorithm_config}"
+        )
+
+    # Prevent SGLang from blocking on non-leader nodes
+    if server_args.node_rank >= 1:
+        os.environ["SGLANG_BLOCK_NONZERO_RANK_CHILDREN"] = "0"
+
+    engine = sgl.Engine(server_args=server_args)
+
+    component = runtime.namespace(dynamo_args.namespace).component(
+        dynamo_args.component
+    )
+
+    generate_endpoint = component.endpoint(dynamo_args.endpoint)
+
+    # Handle non-leader nodes (multi-node parallelism)
+    if server_args.node_rank >= 1:
+        await _handle_non_leader_node(engine, generate_endpoint)
+        return
+
+    # Setup metrics publisher
+    publisher, metrics_task, metrics_labels = await setup_sgl_metrics(
+        engine, config, component, generate_endpoint
+    )
+
+    # Register Prometheus metrics callback if enabled
+    if engine.server_args.enable_metrics:
+        setup_prometheus_registry(engine, generate_endpoint)
+
+    # Readiness gate: requests wait until model is registered
+    ready_event = asyncio.Event()
+
+    handler = DiffusionWorkerHandler(
+        component, engine, config, publisher, generate_endpoint
+    )
+    handler.register_engine_routes(runtime)
+
+    health_check_payload = SglangHealthCheckPayload(
+        engine, use_text_input=dynamo_args.use_sglang_tokenizer
+    ).to_dict()
+
+    logging.info(
+        f"Registering diffusion model with endpoint types: {dynamo_args.dyn_endpoint_types}"
+    )
+
+    try:
+        # Start endpoint and register model
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=metrics_labels,
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                output_type=parse_endpoint_types(dynamo_args.dyn_endpoint_types),
+                readiness_gate=ready_event,
+            ),
+        )
+    except Exception as e:
+        logging.error(f"Failed to serve diffusion endpoints: {e}")
         raise
     finally:
         metrics_task.cancel()

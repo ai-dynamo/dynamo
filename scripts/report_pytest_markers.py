@@ -90,6 +90,8 @@ STUB_MODULES = [
     "matplotlib.pyplot",
     "pmdarima",
     "prophet",
+    "filterpy",
+    "filterpy.kalman",
     "scipy",
     "scipy.interpolate",
     "nats",
