@@ -174,9 +174,6 @@ async def init(runtime: DistributedRuntime, config: Config):
                 readiness_gate=ready_event,
             ),
         )
-    except asyncio.CancelledError:
-        logging.info("Request cancelled")
-        raise
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
