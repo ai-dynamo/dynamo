@@ -356,7 +356,7 @@ listen stats
 listen runtime_api
     bind *:%d
     mode tcp
-    server runtime_sock unix@%s send-proxy-v2
+    server runtime_sock unix@%s
 
 # Metrics endpoint
 listen metrics
