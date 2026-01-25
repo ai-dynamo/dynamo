@@ -15,8 +15,8 @@ import time
 
 import pynvml
 import requests
-
 from gpu_memory_service.common.utils import get_socket_path
+
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import ManagedProcess
 

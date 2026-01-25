@@ -17,16 +17,20 @@ from contextlib import nullcontext
 from typing import List, Optional
 
 import torch
-
-from gpu_memory_service import get_gms_client_memory_manager, get_or_create_gms_client_memory_manager
-from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service import (
+    get_gms_client_memory_manager,
+    get_or_create_gms_client_memory_manager,
+)
 from gpu_memory_service.common.types import RequestedLockType
+from gpu_memory_service.common.utils import get_socket_path
 
 logger = logging.getLogger(__name__)
 
 
 # Trigger model loader registration and utility patches on import
-from gpu_memory_service.vllm_integration.model_loader import register_gms_loader  # noqa: E402
+from gpu_memory_service.vllm_integration.model_loader import (  # noqa: E402
+    register_gms_loader,
+)
 from gpu_memory_service.vllm_integration.patches import (  # noqa: E402
     patch_empty_cache,
     patch_memory_snapshot,
@@ -152,9 +156,8 @@ class GMSWorker(Worker):
             allocator.wake_up(tags=["kv_cache"])
 
             # Reinitialize FP8 KV scales if needed
-            if (
-                self.cache_config.cache_dtype.startswith("fp8")
-                and hasattr(self.model_runner, "init_fp8_kv_scales")
+            if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
+                self.model_runner, "init_fp8_kv_scales"
             ):
                 self.model_runner.init_fp8_kv_scales()
 

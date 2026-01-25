@@ -15,14 +15,13 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import torch
-
 from gpu_memory_service import get_or_create_gms_client_memory_manager
-from gpu_memory_service.common.utils import get_socket_path
 from gpu_memory_service.client.torch.module import (
     materialize_module_from_gms,
     register_module_tensors,
 )
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
+from gpu_memory_service.common.utils import get_socket_path
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager

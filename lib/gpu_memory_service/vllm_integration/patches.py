@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import logging
 
+import torch
 from gpu_memory_service import get_gms_client_memory_manager
 from gpu_memory_service.common.types import GrantedLockType
-
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +90,7 @@ def patch_memory_snapshot() -> None:
             # weights for the first time, so we don't make an adjustment.
             committed_bytes = 0
             logger.info("[GMS] RW mode - skipping committed memory adjustment")
-        
+
         original_free = self.free_memory
         self.free_memory += committed_bytes
 

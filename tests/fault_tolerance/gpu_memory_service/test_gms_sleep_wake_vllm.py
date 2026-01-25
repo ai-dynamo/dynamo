@@ -9,7 +9,6 @@ Service for VA-stable weight offloading.
 """
 
 import logging
-import os
 
 import pytest
 
@@ -20,7 +19,6 @@ from .utils.common import (
     GMSServerProcess,
     bytes_to_mb,
     get_gpu_memory_used,
-    get_socket_path,
     send_completion,
 )
 from .utils.vllm import VLLMWithGMSProcess

@@ -9,7 +9,6 @@ wake up and take over when the primary engine fails.
 """
 
 import logging
-import os
 
 import pytest
 
