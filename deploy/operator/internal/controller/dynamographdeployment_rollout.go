@@ -779,13 +779,21 @@ func (r *DynamoGraphDeploymentReconciler) buildProxyConfig(
 			Weight:      dgd.Status.Rollout.TrafficWeightNew,
 		}
 	} else {
-		// Normal operation - single backend at 100%
-		// Include hash suffix since DCD names now always include the worker hash
+		// Normal operation - both backends point to the same service
+		// old_frontend carries 100% of traffic, new_frontend is at 0 (standby)
+		// This ensures both servers exist in HAProxy config for dynamic updates during rollout
 		currentHash := dynamo.ComputeWorkerSpecHash(dgd)[:8]
+		serviceName := frontendServiceName + "-" + currentHash
+
 		oldBackend = &dynamo.BackendConfig{
-			ServiceName: frontendServiceName + "-" + currentHash,
+			ServiceName: serviceName,
 			ServicePort: consts.DynamoServicePort,
 			Weight:      100,
+		}
+		newBackend = &dynamo.BackendConfig{
+			ServiceName: serviceName,
+			ServicePort: consts.DynamoServicePort,
+			Weight:      0,
 		}
 	}
 
