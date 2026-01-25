@@ -15,16 +15,16 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 
 ## Current Release: Dynamo v0.8.1
 
-**GitHub Release:** [v0.8.1](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1)
-**Docs:** [v0.8.1](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html)
-**NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
+- **GitHub Release:** [v0.8.1](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1)
+- **Docs:** [v0.8.1](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html)
+- **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
 ### Container Images
 
 | Image:Tag | Description | Backend | CUDA | Arch | NGC | Notes |
 |-----------|-------------|---------|------|------|-----|-------|
 | `vllm-runtime:0.8.1` | Runtime container for vLLM backend | vLLM `v0.12.0` | `v12.9` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime?version=0.8.1) | |
-| `vllm-runtime:0.8.1-cuda13` | Runtime container for vLLM backend (CUDA 13) | vLLM `v0.12.0` | `v13.0` | AMD64/ARM64* | — | Not published yet |
+| `vllm-runtime:0.8.1-cuda13` | Runtime container for vLLM backend (CUDA 13) | vLLM `v0.12.0` | `v13.0` | AMD64/ARM64* | — | Fails to launch |
 | `sglang-runtime:0.8.1` | Runtime container for SGLang backend | SGLang `v0.5.6.post2` | `v12.9` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=0.8.1) | |
 | `sglang-runtime:0.8.1-cuda13` | Runtime container for SGLang backend (CUDA 13) | SGLang `v0.5.6.post2` | `v13.0` | AMD64/ARM64* | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/sglang-runtime?version=0.8.1-cuda13) | Experimental |
 | `tensorrtllm-runtime:0.8.1` | Runtime container for TensorRT-LLM backend | TRT-LLM `v1.2.0rc6.post1` | `v13.0` | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=0.8.1) | |
@@ -32,7 +32,7 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 | `kubernetes-operator:0.8.1` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=0.8.1) | |
 
 > [!Note]
-> \* Multimodality is not expected to work on ARM64 for CUDA 13 images. Multimodal inference works on AMD64 for these images.
+> \* Multimodality is not expected to work on ARM64 for CUDA 13 images (`vllm-runtime:*-cuda13`, `sglang-runtime:*-cuda13`). Multimodal inference works on AMD64 for these images.
 
 ### Python Wheels
 
@@ -77,7 +77,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
 docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
 
 # CUDA 13 variants (experimental)
-# vLLM CUDA 13 image is not published yet
+# vLLM CUDA 13 image fails to launch (known issue)
 # docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1-cuda13
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1-cuda13
 
@@ -129,40 +129,9 @@ cargo add dynamo-config@0.8.1
 
 ## CUDA and Driver Requirements
 
-Dynamo container images include CUDA toolkit libraries. The host machine must have a compatible NVIDIA GPU driver installed. The table below shows the minimum required driver version for each container image.
+For detailed CUDA toolkit versions and minimum driver requirements for each container image, see the [Support Matrix](support-matrix.md#cuda-and-driver-requirements).
 
-| Image:Tag | CUDA Toolkit | Min Driver (Linux) | Min Driver (Windows) |
-|-----------|--------------|--------------------|--------------------|
-| `vllm-runtime:0.8.1` | `v12.9` | `v560.28+` | `v560.94+` |
-| `vllm-runtime:0.8.1-cuda13` | `v13.0` | `v575.51+` | `v576.02+` |
-| `sglang-runtime:0.8.1` | `v12.9` | `v560.28+` | `v560.94+` |
-| `sglang-runtime:0.8.1-cuda13` | `v13.0` | `v575.51+` | `v576.02+` |
-| `tensorrtllm-runtime:0.8.1` | `v13.0` | `v575.51+` | `v576.02+` |
-| `dynamo-frontend:0.8.1` | — | — | — |
-| `kubernetes-operator:0.8.1` | — | — | — |
-
-> [!Note]
-> `vllm-runtime:0.8.1-cuda13` is a placeholder tag and is not published yet.
-
-### CUDA Compatibility Resources
-
-For detailed information on CUDA driver compatibility, forward compatibility, and troubleshooting:
-
-- [CUDA Compatibility Overview](https://docs.nvidia.com/deploy/cuda-compatibility/)
-- [Why CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/why-cuda-compatibility.html)
-- [Minor Version Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)
-- [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
-- [FAQ](https://docs.nvidia.com/deploy/cuda-compatibility/frequently-asked-questions.html)
-
-> [!Tip]
-> For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
-
-**Related Support Matrices:**
-
-- [Deep Learning Frameworks Support Matrix](https://docs.nvidia.com/deeplearning/frameworks/support-matrix/index.html)
-- [cuDNN Support Matrix](https://docs.nvidia.com/deeplearning/cudnn/backend/latest/reference/support-matrix.html)
-
-## Known Issues (Dynamo v0.8.x)
+## Known Issues
 
 For a complete list of known issues, refer to the release notes for each patch:
 - [v0.8.0 Release Notes](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0)
@@ -172,22 +141,17 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 | Version | Artifact | Issue | Status |
 |---------|----------|-------|--------|
+| v0.8.1 | `vllm-runtime:0.8.1-cuda13` | Container fails to launch. | Known issue |
 | v0.8.1 | `sglang-runtime:0.8.1-cuda13`, `vllm-runtime:0.8.1-cuda13` | Multimodality not expected to work on ARM64. Works on AMD64. | Known limitation |
 | v0.8.0 | `sglang-runtime:0.8.0-cuda13` | CuDNN installation issue caused PyTorch `v2.9.1` compatibility problems with `nn.Conv3d`, resulting in performance degradation and excessive memory usage in multimodal workloads. | Fixed in v0.8.1 ([#5461](https://github.com/ai-dynamo/dynamo/pull/5461)) |
-
-## What's New in Dynamo v0.8.0
-
-For detailed release notes, see the [GitHub Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0).
-
-**Highlights (Release Assets):**
-
-- **New container image**: `dynamo-frontend` added to NGC
-- **CUDA 13 variants**: Experimental runtime tags for vLLM and SGLang
-- **New Rust crates**: `dynamo-memory` and `dynamo-config` published to crates.io
 
 ---
 
 ## Release History
+
+- **Standalone Frontend Container**: `dynamo-frontend` added in v0.8.0
+- **CUDA 13 Runtimes**: Experimental CUDA 13 runtime for vLLM and SGLang in v0.8.0
+- **New Rust Crates**: `dynamo-memory` and `dynamo-config` added in v0.8.0
 
 ### GitHub Releases
 
