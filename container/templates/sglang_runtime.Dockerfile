@@ -30,7 +30,13 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
     # NOTE: Setting ENV UMASK=002 does NOT work - umask is a shell builtin, not an environment variable
     && mkdir -p /etc/profile.d && echo 'umask 002' > /etc/profile.d/00-umask.sh
 
-USER dynamo
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # required for verification of GPG keys
+        gnupg2 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy attribution files
 COPY --chmod=664 --chown=dynamo:0 ATTRIBUTION* LICENSE /workspace/
 
@@ -45,15 +51,28 @@ RUN --mount=type=bind,from=wheel_builder,source=/usr/local/,target=/tmp/usr/loca
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
+COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src/bindings/python/nixl-meta/nixl-*.whl /opt/dynamo/wheelhouse/nixl/
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
+# Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
+ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
-        sglang==${SGLANG_VERSION}
+        /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+        sglang==${SGLANG_VERSION} && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
+    fi
 
-# Install common and test dependencies
+# Install common and test dependencies as root
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         --requirement /mnt/local_src/container/deps/requirements.txt \
@@ -61,14 +80,30 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         sglang==${SGLANG_VERSION} && \
     cd /workspace/benchmarks && \
     pip install --break-system-packages --no-cache . && \
+    #TODO: Temporary change until upstream sglang runtime image is updated
+    pip install --no-cache-dir --break-system-packages "urllib3>=2.6.3" && \
     # pip/uv bypasses umask when creating .egg-info files, but chmod -R is fast here (small directory)
     chmod -R g+w /workspace/benchmarks && \
-    # Install NVIDIA packages that are needed for DeepEP to work properly
-    # This is done in the upstream runtime image too, but we overrode these packages earlier
-    pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
-        nvidia-nccl-cu12==2.28.3 \
-        nvidia-cudnn-cu12==9.16.0.29 \
-        nvidia-cutlass-dsl==4.3.0
+    # Install NVIDIA packages based on CUDA version
+    CUDA_MAJOR=$(nvcc --version | egrep -o 'cuda_[0-9]+' | cut -d_ -f2) && \
+    if [ "$CUDA_MAJOR" = "12" ]; then \
+        # Install NVIDIA packages that are needed for DeepEP to work properly
+        # This is done in the upstream runtime image too, but these packages are overridden in earlier commands
+        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+            nvidia-nccl-cu12==2.28.3 \
+            nvidia-cudnn-cu12==9.16.0.29 \
+            nvidia-cutlass-dsl==4.3.0; \
+    elif [ "$CUDA_MAJOR" = "13" ]; then \
+        # CUDA 13: Install CuDNN for PyTorch 2.9.1 compatibility
+        pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
+            nvidia-nccl-cu13==2.28.3 \
+            nvidia-cublas==13.1.0.3 \
+            nvidia-cutlass-dsl==4.3.1 \
+            nvidia-cudnn-cu13==9.16.0.29; \
+    fi
+
+# Switch back to dynamo user after package installations
+USER dynamo
 
 # Copy tests, deploy and components for CI with correct ownership
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
@@ -92,14 +127,12 @@ USER root
 
 # Fix directory permissions: COPY --chmod only affects contents, not the directory itself
 RUN chmod 755 /opt/dynamo/.launch_screen && \
-    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc
-
-RUN ln -s /workspace /sgl-workspace/dynamo
+    echo 'cat /opt/dynamo/.launch_screen' >> /etc/bash.bashrc && \
+    ln -s /workspace /sgl-workspace/dynamo
 
 USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=${DYNAMO_COMMIT_SHA}
 
-ENV PATH=/home/dynamo/.local/bin:$PATH
-# PYTHONPATH for root user access to dynamo packages (NVBug 5762058)
-ENV PYTHONPATH=/home/dynamo/.local/lib/python3.12/site-packages:$PYTHONPATH
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []

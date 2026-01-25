@@ -5,6 +5,7 @@
 import sys
 import argparse
 import yaml
+import re
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
@@ -14,6 +15,7 @@ def parse_args():
     parser.add_argument("--target", type=str, default="runtime", help="Dockerfile target to use.")
     parser.add_argument("--platform", type=str, default="amd64", help="Dockerfile platform to use.")
     parser.add_argument("--cuda-version", type=str, default="12.9", help="CUDA version to use.")
+    parser.add_argument("--make-efa", action='store_true', help="Enable AWS EFA")
     parser.add_argument("--show-result", action='store_true', help="Prints the rendered Dockerfile to stdout.")
     args = parser.parse_args()
     return args
@@ -30,16 +32,20 @@ def render(args, context, script_dir):
         framework=args.framework,
         target=args.target,
         platform=args.platform,
-        cuda_version=args.cuda_version
+        cuda_version=args.cuda_version,
+        make_efa=args.make_efa
     )
+    # Replace all instances of 3+ newlines with 2 newlines
+    cleaned = re.sub(r'\n{3,}', '\n\n', rendered)
+
     with open(f"{script_dir}/rendered.Dockerfile", "w") as f:
-        f.write(rendered)
+        f.write(cleaned)
 
     if args.show_result == True:
         print("##############")
         print("# Dockerfile #")
         print("##############")
-        print(rendered)
+        print(cleaned)
         print("##############")
 
     return

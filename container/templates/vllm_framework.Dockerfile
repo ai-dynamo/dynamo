@@ -56,6 +56,7 @@ ARG ARCH
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
+ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 ARG LMCACHE_REF

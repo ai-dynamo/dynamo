@@ -35,6 +35,7 @@ COPY --from=dynamo_base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbin
 COPY --from=dynamo_base /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=dynamo_base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 COPY --from=dynamo_base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=dynamo_base /usr/local/cuda/lib64/stubs/ /usr/local/cuda/lib64/stubs/
 RUN CUDA_VERSION_MAJOR="${CUDA_VERSION%%.*}" &&\
     ln -s /usr/local/cuda/lib64/libcublas.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublas.so &&\
     ln -s /usr/local/cuda/lib64/libcublasLt.so.${CUDA_VERSION_MAJOR} /usr/local/cuda/lib64/libcublasLt.so
@@ -67,6 +68,7 @@ RUN userdel -r ubuntu > /dev/null 2>&1 || true \
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION
+ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 # Install Python, build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
@@ -80,6 +82,8 @@ RUN apt-get update && \
         jq \
         git \
         git-lfs \
+        # required for verification of GPG keys
+        gnupg2 \
         curl \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
@@ -89,6 +93,8 @@ RUN apt-get update && \
         g++ \
         # prometheus dependencies
         ca-certificates \
+        # opencv-python-headless (vLLM dependency) requires libxcb for some functions
+        libxcb1 \
         # DeepGemm uses 'cuobjdump' which does not come with CUDA image
         cuda-command-line-tools-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} && \
     rm -rf /var/lib/apt/lists/*
@@ -102,10 +108,31 @@ ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
 ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 
+# Site-packages path derived from PYTHON_VERSION ARG
+ARG SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
+
 ### VIRTUAL ENVIRONMENT SETUP ###
-# Copy entire virtual environment from framework container with correct ownership
-# Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
-COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+# Copy virtual environment from framework container, splitting large packages into separate layers
+# to enable parallel downloads. Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as
+# root because COPY --chmod only affects <path>/*, not <path>
+#
+# Layer sizes (uncompressed): nvidia=4.5GB, flashinfer_jit_cache=4.1GB, torch=2.1GB,
+#                             vllm=1.2GB, triton=592MB, flashinfer_cubin=437MB
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/nvidia ${SITE_PACKAGES}/nvidia
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_jit_cache ${SITE_PACKAGES}/flashinfer_jit_cache
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/torch ${SITE_PACKAGES}/torch
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/vllm ${SITE_PACKAGES}/vllm
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/triton ${SITE_PACKAGES}/triton
+COPY --chmod=775 --chown=dynamo:0 --from=framework ${SITE_PACKAGES}/flashinfer_cubin ${SITE_PACKAGES}/flashinfer_cubin
+# Remaining packages and venv structure (bin/, include/, share/, etc.)
+COPY --chmod=775 --chown=dynamo:0 --from=framework \
+    --exclude=lib/python*/site-packages/nvidia \
+    --exclude=lib/python*/site-packages/flashinfer_jit_cache \
+    --exclude=lib/python*/site-packages/torch \
+    --exclude=lib/python*/site-packages/vllm \
+    --exclude=lib/python*/site-packages/triton \
+    --exclude=lib/python*/site-packages/flashinfer_cubin \
+    ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Copy vllm with correct ownership (read-only, no group-write needed)
 COPY --chown=dynamo:0 --from=framework /opt/vllm /opt/vllm
@@ -150,11 +177,20 @@ COPY --chmod=775 --chown=dynamo:0 benchmarks/ /workspace/benchmarks/
 # Install dynamo, NIXL, and dynamo-specific dependencies
 # Pattern: COPY --chmod=775 <path>; chmod g+w <path> done later as root because COPY --chmod only affects <path>/*, not <path>
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 RUN uv pip install \
       /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
       /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
       /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$GMS_WHEEL"; \
+    fi && \
     if [ "${ENABLE_KVBM}" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -229,6 +265,7 @@ RUN cd /usr/local/lib && \
     ldconfig
 
 USER dynamo
+
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
