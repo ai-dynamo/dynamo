@@ -98,7 +98,7 @@ jobs:
           PLATFORMS: linux/${{ matrix.platform.arch }}
           TARGETARCH: ${{ matrix.platform.arch }}
         with:
-          framework: none
+          framework: dynamo
           target: frontend
           platform: ${{ env.PLATFORMS }}
           ci_token: ${{ secrets.CI_TOKEN }}

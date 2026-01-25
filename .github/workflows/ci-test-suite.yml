@@ -101,16 +101,14 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/amd64
-          base_image_tag: ''
-          runtime_image_tag: ''
           cuda_version: ''
+          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -164,16 +162,14 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/arm64
-          base_image_tag: ${{ matrix.base_image_tag }}
-          runtime_image_tag: ${{ matrix.runtime_image_tag }}
           cuda_version: ${{ matrix.cuda_version }}
+          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
       - name: Tag and Push Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -216,16 +212,14 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/amd64
-          base_image_tag: ''
-          runtime_image_tag: ''
           cuda_version: '13.0'
+          image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
       - name: Tag and Push CUDA 13 Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
@@ -267,16 +261,14 @@ jobs:
           framework: ${{ matrix.framework }}
           target: runtime
           platform: linux/arm64
-          base_image_tag: ''
-          runtime_image_tag: ''
           cuda_version: '13.0'
+          image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           sccache_s3_bucket: ${{ secrets.SCCACHE_S3_BUCKET }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
       - name: Tag and Push CUDA 13 Runtime Images
         uses: ./.github/actions/docker-tag-push
         with:
