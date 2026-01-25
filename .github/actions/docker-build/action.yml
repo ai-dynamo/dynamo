@@ -65,12 +65,13 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install jinja2 pyyaml
+        sudo apt install python3 python3-pip -y
+        python3 -m pip install jinja2 pyyaml
     - name: Generate Dockerfile
       shell: bash
       run: |
         echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
-        python ./container/render.py \
+        python3 ./container/render.py \
             --target=${{ inputs.target }} \
             --framework=${{ inputs.framework }} \
             --platform=${{ inputs.platform }} \
