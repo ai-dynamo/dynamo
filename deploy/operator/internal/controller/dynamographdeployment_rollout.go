@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -555,12 +556,27 @@ func (r *DynamoGraphDeploymentReconciler) updateProxyWeights(
 		"oldService", oldServiceName,
 		"newService", newServiceName)
 
-	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.OldServerName, oldServiceName, consts.DynamoServicePort); err != nil {
-		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.OldServerName, oldServiceName, err)
+	// Resolve service names to ClusterIPs (HAProxy requires IP addresses, not DNS names)
+	oldServiceIP, err := r.getServiceClusterIP(ctx, dgd.Namespace, oldServiceName)
+	if err != nil {
+		return fmt.Errorf("failed to get ClusterIP for %s: %w", oldServiceName, err)
 	}
 
-	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.NewServerName, newServiceName, consts.DynamoServicePort); err != nil {
-		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.NewServerName, newServiceName, err)
+	newServiceIP, err := r.getServiceClusterIP(ctx, dgd.Namespace, newServiceName)
+	if err != nil {
+		return fmt.Errorf("failed to get ClusterIP for %s: %w", newServiceName, err)
+	}
+
+	logger.V(1).Info("Resolved service IPs",
+		"oldServiceName", oldServiceName, "oldServiceIP", oldServiceIP,
+		"newServiceName", newServiceName, "newServiceIP", newServiceIP)
+
+	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.OldServerName, oldServiceIP, consts.DynamoServicePort); err != nil {
+		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.OldServerName, oldServiceIP, err)
+	}
+
+	if err := haproxyClient.SetServerAddr(ctx, proxy.BackendName, proxy.NewServerName, newServiceIP, consts.DynamoServicePort); err != nil {
+		return fmt.Errorf("failed to set %s addr to %s: %w", proxy.NewServerName, newServiceIP, err)
 	}
 
 	// Then update weights
@@ -828,14 +844,38 @@ func (r *DynamoGraphDeploymentReconciler) buildProxyConfig(
 	}
 }
 
+// getServiceClusterIP retrieves the ClusterIP for a Kubernetes service.
+// HAProxy's runtime API requires IP addresses, not DNS names.
+func (r *DynamoGraphDeploymentReconciler) getServiceClusterIP(
+	ctx context.Context,
+	namespace, serviceName string,
+) (string, error) {
+	svc := &corev1.Service{}
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      serviceName,
+	}, svc)
+	if err != nil {
+		return "", err
+	}
+
+	if svc.Spec.ClusterIP == "" {
+		return "", fmt.Errorf("service %s has no ClusterIP", serviceName)
+	}
+
+	return svc.Spec.ClusterIP, nil
+}
+
 // getFrontendServiceName returns the frontend service name for normal operation.
+// Service names are created with lowercase component names to match Kubernetes naming conventions.
 func (r *DynamoGraphDeploymentReconciler) getFrontendServiceName(
 	dgd *nvidiacomv1alpha1.DynamoGraphDeployment,
 ) string {
 	// Find the frontend service
 	for name, spec := range dgd.Spec.Services {
 		if spec != nil && spec.ComponentType == consts.ComponentTypeFrontend {
-			return fmt.Sprintf("%s-%s", dgd.Name, name)
+			// Use strings.ToLower to match how GetDynamoComponentName creates service names
+			return fmt.Sprintf("%s-%s", dgd.Name, strings.ToLower(name))
 		}
 	}
 	// Fallback to default frontend naming
