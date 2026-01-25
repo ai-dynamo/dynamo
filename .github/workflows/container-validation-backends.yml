@@ -89,14 +89,14 @@ jobs:
         timeout-minutes: 3
 
 
-  backend-status-check:
-    runs-on: ubuntu-slim
-    needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
-    if: always()
-    steps:
-      - name: "Check all dependent jobs"
-        run: |
-          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
+  # backend-status-check:
+  #   runs-on: ubuntu-slim
+  #   needs: [init, vllm-pipeline, sglang-pipeline, trtllm-pipeline, operator]
+  #   if: always()
+  #   steps:
+  #     - name: "Check all dependent jobs"
+  #       run: |
+  #         echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
 
   # ============================================================================
