@@ -175,7 +175,7 @@ jobs:
         with:
           framework: ${{ env.FRAMEWORK }}
           target: runtime
-          platform: 'linux/${{ matrix.platform.arch }}'
+          platform: ${{ matrix.platform.arch }}
           cuda_version: ${{ matrix.cuda_version.major_minor }}
           ci_token: ${{ secrets.CI_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}

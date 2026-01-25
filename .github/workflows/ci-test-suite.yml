@@ -100,7 +100,7 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/amd64
+          platform: amd64
           cuda_version: ''
           image_tag: runtime-${{ matrix.framework }}-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -161,7 +161,7 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/arm64
+          platform: arm64
           cuda_version: ${{ matrix.cuda_version }}
           image_tag: runtime-${{ matrix.framework }}-arm64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -211,7 +211,7 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/amd64
+          platform: amd64
           cuda_version: '13.0'
           image_tag: runtime-${{ matrix.framework }}-cuda13-amd64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
@@ -260,7 +260,7 @@ jobs:
         with:
           framework: ${{ matrix.framework }}
           target: runtime
-          platform: linux/arm64
+          platform: arm64
           cuda_version: '13.0'
           image_tag: runtime-${{ matrix.framework }}-cuda13-arm64:${{ github.run_id }}
           ci_token: ${{ secrets.CI_TOKEN }}
