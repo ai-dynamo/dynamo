@@ -61,17 +61,16 @@ runs:
       shell: bash
       run: |
         docker system prune -af
-    - name: Install requirements
-      shell: bash
-      run: |
-        set -euo pipefail
-        sudo apt install python3 python3-pip -y
-        python3 -m pip install jinja2 pyyaml
+    - name: Set up Python
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 #v6.2.0
+      with:
+        python-version: '3.12'
+        pip-install: jinja2 pyyaml
     - name: Generate Dockerfile
       shell: bash
       run: |
         echo "Generating Dockerfile for target: ${{ inputs.target }} and framework: ${{ inputs.framework }}"
-        python3 ./container/render.py \
+        python ./container/render.py \
             --target=${{ inputs.target }} \
             --framework=${{ inputs.framework }} \
             --platform=${{ inputs.platform }} \
