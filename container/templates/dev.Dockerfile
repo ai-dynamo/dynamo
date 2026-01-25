@@ -338,7 +338,6 @@ RUN if [ -f pyproject.toml ]; then \
     fi && \
     chmod -R g+w /root/.cache /home/dynamo/.cache 2>/dev/null || true
 
-# Set commit SHA for tests (passed via build.sh as --build-arg)
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
