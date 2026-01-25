@@ -172,47 +172,101 @@ class HandlerBase:
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
-    async def _handle_cancellation(
+    async def _handle_cancellation_and_shutdown(
         self, generation_result: GenerationResult, context: Context
     ):
-        """Background task to handle cancellation by monitoring context state."""
+        """
+        Background task to handle cancellation and shutdown by monitoring both signals.
+        Returns 'shutdown' if shutdown was triggered, 'cancelled' if cancelled, None otherwise.
+        """
         try:
-            # Wait asynchronously for cancellation signal instead of polling
-            await context.async_killed_or_stopped()
-            # Abort the generation
-            generation_result.abort()
-            logging.debug(f"Aborted Request ID: {context.id()}")
+            # Get the cancellation future (already a Future, not a coroutine)
+            cancellation_future = context.async_killed_or_stopped()
+
+            if self.shutdown_event:
+                # Create task for shutdown monitoring
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                # Wait for whichever happens first
+                # asyncio.wait() accepts both Futures and Tasks
+                done, pending = await asyncio.wait(
+                    [cancellation_future, shutdown_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                # Cancel the pending task/future
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Abort the generation
+                logging.info(f"Aborting request {context.id()}")
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
+
+                # Check which event triggered and return the reason
+                if shutdown_task in done:
+                    logging.info(f"Shutdown event detected for request {context.id()}")
+                    return "shutdown"
+                else:
+                    return "cancelled"
+            else:
+                # No shutdown event, just wait for cancellation
+                await cancellation_future
+                logging.info(f"Aborting request {context.id()}")
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
+                return "cancelled"
         except asyncio.CancelledError:
-            # Task was cancelled, which is expected when generation completes
-            pass
+            # Task was cancelled, which is expected when generation completes normally
+            return None
 
     @asynccontextmanager
     async def _cancellation_monitor(
         self, generation_result: GenerationResult, context: Context
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
-        Context manager for monitoring request cancellation.
+        Context manager for monitoring request cancellation and shutdown.
 
-        Automatically creates a background task to monitor for cancellation and
-        cleans it up when the context exits.
+        Automatically creates a background task to monitor for cancellation
+        and shutdown events, cleaning it up when the context exits.
+
+        If shutdown event was triggered, raises GeneratorExit on exit.
 
         Yields:
-            asyncio.Task: The cancellation monitoring task
+            asyncio.Task: The monitoring task
         """
-        cancellation_task = asyncio.create_task(
-            self._handle_cancellation(generation_result, context)
+        monitor_task = asyncio.create_task(
+            self._handle_cancellation_and_shutdown(generation_result, context)
         )
 
         try:
-            yield cancellation_task
+            yield monitor_task
         finally:
-            # Clean up the background cancellation task
-            if not cancellation_task.done():
-                cancellation_task.cancel()
+            # Clean up the background monitoring task
+            shutdown_triggered = False
+            if not monitor_task.done():
+                monitor_task.cancel()
                 try:
-                    await cancellation_task
+                    await monitor_task
                 except asyncio.CancelledError:
                     pass
+            else:
+                # Task completed, check if it was due to shutdown
+                try:
+                    result = monitor_task.result()
+                    if result == "shutdown":
+                        shutdown_triggered = True
+                except Exception:
+                    pass
+
+            # Raise GeneratorExit if shutdown was triggered
+            if shutdown_triggered:
+                raise GeneratorExit(
+                    "Decode engine was shut down during token generation"
+                )
 
     def _decode_disaggregated_params_from_prefill(
         self, prefill_result: dict
@@ -655,19 +709,9 @@ class HandlerBase:
                 trace_headers=trace_headers,
             )
 
-            # Use the context manager to handle cancellation monitoring
+            # Use the context manager to handle cancellation and shutdown monitoring
             async with self._cancellation_monitor(generation_result, context):
                 async for res in generation_result:
-                    # Check if shutdown has been triggered
-                    if self.shutdown_event and self.shutdown_event.is_set():
-                        logging.info(
-                            f"Shutdown event detected, aborting request {request_id}"
-                        )
-                        generation_result.abort()
-                        raise GeneratorExit(
-                            "Decode engine was shut down during token generation"
-                        )
-
                     # TRTLLM engine needs to start generating tokens first before stats
                     # can be retrieved.
                     if self.first_generation and self.publisher:
