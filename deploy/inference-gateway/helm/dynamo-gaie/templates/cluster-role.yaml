@@ -19,10 +19,10 @@ metadata:
 rules:
 # Gateway API inference resources
 - apiGroups: ["inference.networking.x-k8s.io"]
-  resources: ["inferencepools"]
+  resources: ["inferencepools", "inferenceobjectives", "inferencemodelrewrites"]
   verbs: ["get", "watch", "list"]
-- apiGroups: ["inference.networking.x-k8s.io"]
-  resources: ["inferencemodels"]
+- apiGroups: ["inference.networking.k8s.io"]
+  resources: ["inferencepools"]
   verbs: ["get", "watch", "list"]
 # Core resources for pod discovery
 - apiGroups: [""]

@@ -17,7 +17,6 @@ from dynamo._core import DistributedRuntime as DistributedRuntime
 from dynamo._core import Endpoint as Endpoint
 from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import Namespace as Namespace
-from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
 def dynamo_worker(enable_nats: bool = True):

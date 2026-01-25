@@ -59,6 +59,8 @@ class MultimodalRequestProcessor:
         self.allowed_local_media_path = allowed_local_media_path
         self.max_file_size_mb = max_file_size_mb
         self.max_file_size_bytes = max_file_size_mb * 1024 * 1024
+        # Used for streaming delta computation in create_response_chunk()
+        self.previous_decoded_text = ""
 
         # Initialize tokenizer ONCE at startup to avoid per-request overhead
         if tokenizer is not None:
@@ -163,27 +165,42 @@ class MultimodalRequestProcessor:
         return " ".join(text_parts), image_urls, embedding_paths
 
     async def process_openai_request(
-        self, request: Dict, embeddings: Any
+        self, request: Dict, embeddings: Any, ep_disaggregated_params: Any
     ) -> Optional[Any]:
         """Process OpenAI request and return with multimodal data."""
         # Extract messages - check extra_args first (from Rust preprocessor for multimodal)
         # Fall back to direct messages field for backward compatibility
+        self.previous_decoded_text = ""
         messages = request.get("extra_args", {}).get(
             "messages", request.get("messages", [])
         )
         text_prompt, image_urls, embedding_paths = self.extract_prompt_and_media(
             messages
         )
-
-        if not image_urls and not embedding_paths:
+        if not image_urls and not embedding_paths and not ep_disaggregated_params:
             logging.warning("No multimodal content, returning None")
             return None
 
+        processed_prompt_from_encoder = request.get("_epd_processed_prompt")
+
+        # Only use EPD flow if we actually have encoder data
+        # For PD flow (no encoder), fall through to embedding_paths handling
+        if processed_prompt_from_encoder is not None:
+            text_prompt = processed_prompt_from_encoder
+            result = {"prompt": text_prompt}
+            prompt_token_ids = request.get("_epd_prompt_token_ids")
+            if prompt_token_ids:
+                result["prompt_token_ids"] = prompt_token_ids
+            else:
+                logging.warning("MM PROCESSOR: No prompt_token_ids from encoder")
+            return result
         loader_kwargs = {}
         if embeddings is not None:
-            # EPD flow
+            # EPD flow - embeddings received from encode worker via NIXL
             loader_kwargs["mm_embeddings"] = [embeddings]
-            logging.debug(f"Using NIXL embeddings in prefill worker: {embeddings}")
+            logging.info(
+                f"Using NIXL embeddings: shape={embeddings.shape if hasattr(embeddings, 'shape') else 'N/A'}"
+            )
         elif image_urls:
             # Image-only flow
             loader_kwargs["media"] = [image_urls]
@@ -192,7 +209,7 @@ class MultimodalRequestProcessor:
             loader_kwargs["mm_embeddings"] = [
                 self.load_tensor_from_path_or_url(path) for path in embedding_paths
             ]
-            logging.debug(f"Using embedding paths in prefill worker: {embedding_paths}")
+            logging.info(f"Using embedding paths: {embedding_paths}")
 
         # Process with default_multimodal_input_loader
         # Pass self.tokenizer to reuse the pre-initialized tokenizer instead of
@@ -225,10 +242,20 @@ class MultimodalRequestProcessor:
         if self.tokenizer is None:
             raise ValueError("Tokenizer must be provided for creating response chunks.")
 
-        new_tokens = output.token_ids[num_output_tokens_so_far:]
-        # Decode the new token IDs into a string. This is the incremental piece
-        # of text to be sent to the client.
-        delta_text = self.tokenizer.decode(new_tokens)
+        all_tokens = output.token_ids
+        current_text = self.tokenizer.decode(
+            all_tokens, skip_special_tokens=True, clean_up_tokenization_spaces=True
+        )
+        if num_output_tokens_so_far == 0:
+            # First chunk: use all decoded text
+            delta_text = current_text
+            # Store for next iteration
+            self.previous_decoded_text = current_text
+        else:
+            # Incremental chunk: extract delta using cached previous text
+            delta_text = current_text[len(self.previous_decoded_text) :]
+            # Update cache for next iteration
+            self.previous_decoded_text = current_text
         # Assemble the delta payload for the response chunk.
         delta = {"content": delta_text if delta_text else ""}
         if num_output_tokens_so_far == 0:

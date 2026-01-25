@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::block_manager::BlockManagerBuilder;
+use dynamo_llm::block_manager::connector::protocol::RequestType;
 use dynamo_llm::block_manager::kv_consolidator::EventSource;
 use crate::block_manager::vllm::connector::leader::slot::{
     ConnectorSlotManager, SlotManager, SlotState,
@@ -310,23 +311,50 @@ impl Leader for KvConnectorLeader {
         //
         // This is kind of a nice abstraction as it keeps the events simplier; however, we now create the request-slot
         // once for onboarding (this loop), then again for prefill/decode (new_requests loop).
+        //
+        // TODO(krish): Consider a more deterministic way to count immediate ops.
+        // Currently we count by filtering pending_ops at runtime. A higher-level approach
+        // (e.g., tracking count when onboard_blocks is called, or deriving from architecture
+        // config) might be more robust against potential timing-related issues.
         for request_id in onboarding_slots.iter() {
             let shared_slot = self.slot_manager().get_slot(request_id)?;
             let mut slot = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-            md.create_slot(request_id.clone());
+            let pending_ops_opt = slot.take_pending_operations();
 
-            if let Some(pending_ops) = slot.take_pending_operations() {
-                tracing::debug!("adding {} pending onboarding operations", pending_ops.len());
+            if let Some(pending_ops) = pending_ops_opt {
+                // Count immediate (onboard) operations for this slot
+                let num_immediate = pending_ops
+                    .iter()
+                    .filter(|op| op.request_type == RequestType::Immediate)
+                    .count() as u64;
+
+                // Create slot with expected immediate ops BEFORE adding operations
+                md.create_slot(request_id.clone(), num_immediate);
                 md.add_operations(pending_ops);
+            } else {
+                md.create_slot(request_id.clone(), 0);
             }
         }
 
         // todo: update the code and abstraction to account for this two-phase lifecycle.
         for new_req in &scheduler_output.new_requests {
             let request_id = &new_req.request_id;
+
+            let already_created = md.new_slots.iter().any(|s| &s.request_id == request_id);
+
+            // Skip if this slot was already created in the onboarding_slots loop above.
+            // This prevents overwriting the slot with expected_immediate_ops=0 when it should have the correct count.
+            if already_created {
+                assert!(
+                    inflight_requests.remove(request_id),
+                    "request_id {request_id} not found in inflight_requests: "
+                );
+                continue;
+            }
+
             assert!(
                 inflight_requests.remove(request_id),
                 "request_id {request_id} not found in inflight_requests: "
@@ -336,9 +364,6 @@ impl Leader for KvConnectorLeader {
             let mut slot = shared_slot
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
-
-            // inform the worker that a new request-slot should be created
-            md.create_slot(new_req.request_id.clone());
 
             slot.record_start_iteration(iteration)?;
 
@@ -363,13 +388,27 @@ impl Leader for KvConnectorLeader {
                 scheduled_tokens,
             )?;
 
-            if let Some(pending_ops) = slot.take_pending_operations() {
+            let pending_ops_opt = slot.take_pending_operations();
+
+            if let Some(pending_ops) = pending_ops_opt {
+                // Count immediate (onboard) operations for this slot
+                let num_immediate = pending_ops
+                    .iter()
+                    .filter(|op| op.request_type == RequestType::Immediate)
+                    .count() as u64;
+
+                // Create slot with expected immediate ops BEFORE adding operations
+                md.create_slot(new_req.request_id.clone(), num_immediate);
+
                 tracing::debug!(
-                    "adding {} pending operations for slot {}",
+                    "adding {} pending operations for slot {} ({} immediate)",
                     pending_ops.len(),
-                    new_req.request_id
+                    new_req.request_id,
+                    num_immediate
                 );
                 md.add_operations(pending_ops);
+            } else {
+                md.create_slot(new_req.request_id.clone(), 0);
             }
         }
 

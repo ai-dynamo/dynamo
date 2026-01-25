@@ -256,6 +256,12 @@ impl CudaMemPool {
         unsafe { self.free_async_raw(ptr, stream.cu_stream()) }
     }
 
+    // NOTE: Unlike alloc_async_raw, this method does NOT acquire the pool mutex.
+    // The mutex in alloc_async_raw ensures each allocation returns a unique pointer.
+    // cuMemFreeAsync only enqueues a stream-ordered free operation for that unique
+    // pointer - multiple threads can safely enqueue frees for different unique pointers
+    // concurrently. The actual return-to-pool happens asynchronously on the GPU side.
+
     /// Free memory back to the pool asynchronously (raw stream handle variant).
     ///
     /// This is the unsafe variant for use when you have a raw `CUstream` handle.
