@@ -70,6 +70,8 @@ jobs:
     if: needs.changed-files.outputs.operator == 'true'
     name: Operator
     runs-on: prod-builder-v2
+    env:
+      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -90,64 +92,57 @@ jobs:
       - name: Linter
         shell: bash
         working-directory: ./deploy/operator
-        env:
-          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
           docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      # - name: Tester
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   env:
-      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      #   run: |
-      #     docker buildx build --platform linux/amd64,linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      # - name: Set up Go
-      #   uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-      #   with:
-      #     go-version: '1.25'
-      # - name: Check for uncommitted changes
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   env:
-      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      #   run: |
-      #     make check
-      # - name: Build and push Container
-      #   id: build-and-push-image
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   env:
-      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      #     IMAGE_REGISTRY: ai-dynamo
-      #     IMAGE_REPOSITORY: dynamo
-      #   run: |
-      #     DEFAULT_TAG=${{ github.sha }}-dynamo-operator
-      #     ECR_IMAGE_BASE=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}
-      #     ACR_IMAGE_BASE=${secrets.AZURE_ACR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}
-      #     NO_CACHE_FLAG=""
-      #     TAGS=(
-      #       "${ECR_IMAGE_BASE}:${DEFAULT_TAG}"
-      #       "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-      #     )
+      - name: Tester
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Set up Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version: '1.25'
+      - name: Check for uncommitted changes
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          make check
+      - name: Build and push Container
+        id: build-and-push-image
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          IMAGE_REGISTRY: ai-dynamo
+          IMAGE_REPOSITORY: dynamo
+        run: |
+          DEFAULT_TAG=${{ github.sha }}-dynamo-operator
+          ECR_IMAGE_BASE=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}
+          ACR_IMAGE_BASE=${secrets.AZURE_ACR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}
+          NO_CACHE_FLAG=""
+          TAGS=(
+            "${ECR_IMAGE_BASE}:${DEFAULT_TAG}"
+            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+          )
 
-      #     if [[ "${{ github.ref_name }}" == "main" ]]; then
-      #       NO_CACHE_FLAG="--no-cache"
-      #       TAGS+=(
-      #         "${ECR_IMAGE_BASE}:main-dynamo-operator"
-      #         "${ECR_IMAGE_BASE}:main-${DEFAULT_TAG}"
-      #         "${ACR_IMAGE_BASE}:main-dynamo-operator"
-      #         "${ACR_IMAGE_BASE}:main-${DEFAULT_TAG}"
-      #       )
-      #     fi
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            NO_CACHE_FLAG="--no-cache"
+            TAGS+=(
+              "${ECR_IMAGE_BASE}:main-dynamo-operator"
+              "${ECR_IMAGE_BASE}:main-${DEFAULT_TAG}"
+              "${ACR_IMAGE_BASE}:main-dynamo-operator"
+              "${ACR_IMAGE_BASE}:main-${DEFAULT_TAG}"
+            )
+          fi
 
-      #     if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
-      #       NO_CACHE_FLAG="--no-cache"
-      #     fi
-      #     docker buildx build --push \
-      #         --platform linux/amd64,linux/arm64 \
-      #         --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-      #         $(printf -- '-t %s ' "${TAGS[@]}") \ 
-      #         ${NO_CACHE_FLAG} -f Dockerfile  .
+          if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
+            NO_CACHE_FLAG="--no-cache"
+          fi
+          docker buildx build --push \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              $(printf -- '-t %s ' "${TAGS[@]}") \ 
+              ${NO_CACHE_FLAG} -f Dockerfile  .
 
 
   # vllm:
