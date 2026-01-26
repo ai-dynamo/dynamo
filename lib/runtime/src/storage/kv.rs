@@ -12,9 +12,11 @@ use std::time::Duration;
 use std::{collections::HashMap, path::PathBuf};
 use std::{env, fmt};
 
-use crate::CancellationToken;
+use crate::{CancellationToken, Runtime};
 use crate::transports::etcd as etcd_transport;
 use async_trait::async_trait;
+use once_cell::sync::OnceCell;
+use oneshot;
 use futures::StreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use serde::{Deserialize, Serialize};
@@ -132,11 +134,40 @@ pub trait Store: Send + Sync {
 #[derive(Clone, Debug, Default)]
 pub enum Selector {
     // Box it because it is significantly bigger than the other variants
-    Etcd(Box<etcd_transport::ClientOptions>),
+    Etcd(etcd_transport::ClientOptions),
     File(PathBuf),
     #[default]
     Memory,
     // Nats not listed because likely we want to remove that impl. It is not currently used and not well tested.
+}
+
+impl Selector {
+    fn build(self, runtime: Option<Runtime>) -> Result<KeyValueStoreEnum, StoreError> {
+        match self {
+            Selector::Etcd(opts) => {
+                if let Some(runtime) = runtime {
+                    let (tx, rx) = oneshot::channel();
+                    runtime.primary().spawn(async move {
+                        let etcd_client = etcd_transport::Client::new(opts.clone(), runtime.clone()).await.map_err(StoreError::from);
+                        tx.send(etcd_client).unwrap();
+                    });
+                    
+                    // We block our async task a tiny bit here, but not a big deal since we only ever do this once.
+                    Ok(KeyValueStoreEnum::Etcd(EtcdStore::new(rx.recv().map_err(|x| StoreError::from(anyhow::anyhow!(x)))??)))
+                } else {
+                    Err(StoreError::BuildError(anyhow::anyhow!("Runtime is required for Etcd selector")))
+                }
+            }
+            Selector::File(path) => {
+                if let Some(runtime) = runtime {
+                    Ok(KeyValueStoreEnum::File(FileStore::new(runtime.primary_token(), path)))
+                } else {
+                    Err(StoreError::BuildError(anyhow::anyhow!("Runtime is required for File selector")))
+                }
+            },
+            Selector::Memory => Ok(KeyValueStoreEnum::Memory(MemoryStore::new())),
+        }
+    }
 }
 
 impl fmt::Display for Selector {
@@ -157,7 +188,7 @@ impl FromStr for Selector {
 
     fn from_str(s: &str) -> anyhow::Result<Selector> {
         match s {
-            "etcd" => Ok(Self::Etcd(Box::default())),
+            "etcd" => Ok(Self::Etcd(etcd_transport::ClientOptions::default())),
             "file" => {
                 let root = env::var("DYN_FILE_KV")
                     .map(PathBuf::from)
@@ -247,30 +278,27 @@ impl KeyValueStoreEnum {
 }
 
 #[derive(Clone)]
-pub struct Manager(Arc<KeyValueStoreEnum>);
+pub struct Manager {
+    selector: Selector,
+    kv_store: Arc<OnceCell<KeyValueStoreEnum>>,
+    runtime: Option<Runtime>
+}
 
 impl Default for Manager {
     fn default() -> Self {
-        Manager::memory()
+        Manager::new(Selector::Memory, None)
     }
 }
 
 impl Manager {
-    /// In-memory KeyValueStoreManager for testing
-    pub fn memory() -> Self {
-        Self::new(KeyValueStoreEnum::Memory(MemoryStore::new()))
+
+    pub fn new(s: Selector, runtime: Option<Runtime>) -> Manager {
+        Manager { selector: s, kv_store: Arc::new(OnceCell::new()), runtime }
     }
 
-    pub fn etcd(etcd_client: crate::transports::etcd::Client) -> Self {
-        Self::new(KeyValueStoreEnum::Etcd(EtcdStore::new(etcd_client)))
-    }
-
-    pub fn file<P: Into<PathBuf>>(cancel_token: CancellationToken, root: P) -> Self {
-        Self::new(KeyValueStoreEnum::File(FileStore::new(cancel_token, root)))
-    }
-
-    fn new(s: KeyValueStoreEnum) -> Manager {
-        Manager(Arc::new(s))
+    fn get_kv_store(&self) -> Result<&KeyValueStoreEnum, StoreError> {
+        let selector = self.selector.clone();
+        self.kv_store.get_or_try_init(|| { selector.build(self.runtime.clone()).map_err(StoreError::from) })
     }
 
     pub async fn get_or_create_bucket(
@@ -279,18 +307,18 @@ impl Manager {
         // auto-delete items older than this
         ttl: Option<Duration>,
     ) -> Result<Box<dyn Bucket>, StoreError> {
-        self.0.get_or_create_bucket(bucket_name, ttl).await
+        self.get_kv_store()?.get_or_create_bucket(bucket_name, ttl).await
     }
 
     pub async fn get_bucket(
         &self,
         bucket_name: &str,
     ) -> Result<Option<Box<dyn Bucket>>, StoreError> {
-        self.0.get_bucket(bucket_name).await
+        self.get_kv_store()?.get_bucket(bucket_name).await
     }
 
     pub fn connection_id(&self) -> u64 {
-        self.0.connection_id()
+        self.get_kv_store().unwrap().connection_id()
     }
 
     pub async fn load<T: for<'a> Deserialize<'a>>(
@@ -298,7 +326,7 @@ impl Manager {
         bucket: &str,
         key: &Key,
     ) -> Result<Option<T>, StoreError> {
-        let Some(bucket) = self.0.get_bucket(bucket).await? else {
+        let Some(bucket) = self.get_kv_store()?.get_bucket(bucket).await? else {
             // No bucket means no cards
             return Ok(None);
         };
@@ -328,7 +356,7 @@ impl Manager {
         let watch_task = tokio::spawn(async move {
             // Start listening for changes but don't poll this yet
             let bucket = self
-                .0
+                .get_kv_store()?
                 .get_or_create_bucket(&bucket_name, bucket_ttl)
                 .await?;
             let mut stream = bucket.watch().await?;
@@ -373,7 +401,7 @@ impl Manager {
         obj: &mut T,
     ) -> anyhow::Result<StoreOutcome> {
         let obj_json = serde_json::to_vec(obj)?;
-        let bucket = self.0.get_or_create_bucket(bucket_name, bucket_ttl).await?;
+        let bucket = self.get_kv_store()?.get_or_create_bucket(bucket_name, bucket_ttl).await?;
 
         let outcome = bucket.insert(key, obj_json.into(), obj.revision()).await?;
 
@@ -388,7 +416,7 @@ impl Manager {
     /// Cleanup any temporary state.
     /// TODO: Should this be async? Take &mut self?
     pub fn shutdown(&self) {
-        self.0.shutdown()
+        self.get_kv_store().unwrap().shutdown()
     }
 }
 
@@ -471,6 +499,9 @@ pub enum StoreError {
 
     #[error("Race condition, retry the call")]
     Retry,
+
+    #[error("Error building key-value store: {0}")]
+    BuildError(#[from] anyhow::Error),
 }
 
 /// A trait allowing to get/set a revision on an object.
