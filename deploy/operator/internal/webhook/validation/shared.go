@@ -179,23 +179,25 @@ func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 		return fmt.Errorf("%s: EPP component must have exactly 1 replica (found %d replicas)", v.fieldPath, *v.spec.Replicas)
 	}
 
-	// Validate EPPConfig if provided
-	if v.spec.EPPConfig != nil {
-		// Either ConfigMapRef or Config must be specified (no default)
-		if v.spec.EPPConfig.ConfigMapRef == nil && v.spec.EPPConfig.Config == nil {
-			return fmt.Errorf("%s.eppConfig: either configMapRef or config must be specified (no default configuration provided)", v.fieldPath)
-		}
+	// EPP components MUST have EPPConfig
+	if v.spec.EPPConfig == nil {
+		return fmt.Errorf("%s.eppConfig is required for EPP components", v.fieldPath)
+	}
 
-		// ConfigMapRef and Config are mutually exclusive
-		if v.spec.EPPConfig.ConfigMapRef != nil && v.spec.EPPConfig.Config != nil {
-			return fmt.Errorf("%s.eppConfig: configMapRef and config are mutually exclusive, only one can be specified", v.fieldPath)
-		}
+	// Either ConfigMapRef or Config must be specified (no default)
+	if v.spec.EPPConfig.ConfigMapRef == nil && v.spec.EPPConfig.Config == nil {
+		return fmt.Errorf("%s.eppConfig: either configMapRef or config must be specified (no default configuration provided)", v.fieldPath)
+	}
 
-		// If ConfigMapRef is provided, validate it
-		if v.spec.EPPConfig.ConfigMapRef != nil {
-			if v.spec.EPPConfig.ConfigMapRef.Name == "" {
-				return fmt.Errorf("%s.eppConfig.configMapRef.name is required", v.fieldPath)
-			}
+	// ConfigMapRef and Config are mutually exclusive
+	if v.spec.EPPConfig.ConfigMapRef != nil && v.spec.EPPConfig.Config != nil {
+		return fmt.Errorf("%s.eppConfig: configMapRef and config are mutually exclusive, only one can be specified", v.fieldPath)
+	}
+
+	// If ConfigMapRef is provided, validate it
+	if v.spec.EPPConfig.ConfigMapRef != nil {
+		if v.spec.EPPConfig.ConfigMapRef.Name == "" {
+			return fmt.Errorf("%s.eppConfig.configMapRef.name is required", v.fieldPath)
 		}
 	}
 

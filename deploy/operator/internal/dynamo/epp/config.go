@@ -55,11 +55,11 @@ func GenerateConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      configMapName,
 			Namespace: dgd.Namespace,
-		Labels: map[string]string{
-			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-			consts.KubeLabelDynamoComponent:           componentName,
-			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
-		},
+			Labels: map[string]string{
+				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+				consts.KubeLabelDynamoComponent:           componentName,
+				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
+			},
 		},
 		Data: map[string]string{
 			ConfigKey: configYAML,
