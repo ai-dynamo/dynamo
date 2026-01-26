@@ -15,11 +15,7 @@ import pytest
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess
 
-from .utils.common import (
-    GMSServerProcess,
-    get_gpu_memory_used,
-    send_completion,
-)
+from .utils.common import GMSServerProcess, get_gpu_memory_used, send_completion
 from .utils.vllm import VLLMWithGMSProcess
 
 logger = logging.getLogger(__name__)
@@ -65,9 +61,7 @@ def test_gms_basic_sleep_wake(request, runtime_services, gms_ports, predownload_
                 assert sleep_result["status"] == "ok"
 
                 mem_after_sleep = get_gpu_memory_used()
-                logger.info(
-                    f"Memory after sleep: {mem_after_sleep / (1 << 20):.0f} MB"
-                )
+                logger.info(f"Memory after sleep: {mem_after_sleep / (1 << 20):.0f} MB")
                 assert mem_after_sleep < mem_before, "Sleep should reduce memory"
 
                 # Wake

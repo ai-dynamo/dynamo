@@ -15,11 +15,7 @@ import pytest
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
 from tests.utils.managed_process import DynamoFrontendProcess
 
-from .utils.common import (
-    GMSServerProcess,
-    get_gpu_memory_used,
-    send_completion,
-)
+from .utils.common import GMSServerProcess, get_gpu_memory_used, send_completion
 from .utils.vllm import VLLMWithGMSProcess
 
 logger = logging.getLogger(__name__)
