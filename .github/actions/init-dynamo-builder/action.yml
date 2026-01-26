@@ -100,8 +100,10 @@ runs:
           CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
         fi
         if [[ "${{ inputs.all_arch }}" == "true" ]]; then
+           echo "running with --arch all --flavor ${{ inputs.flavor }} $CUDA_ARG"
           .github/scripts/route_buildkit.sh --arch all --flavor ${{ inputs.flavor }} $CUDA_ARG
         else
+          echo "running with --arch ${{ inputs.arch }} --flavor ${{ inputs.flavor }} $CUDA_ARG"
           .github/scripts/route_buildkit.sh --arch ${{ inputs.arch }} --flavor ${{ inputs.flavor }} $CUDA_ARG
         fi
 

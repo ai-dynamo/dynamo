@@ -65,98 +65,98 @@ jobs:
   #       run: |
   #         echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
-  operator:
-    needs: changed-files
-    if: needs.changed-files.outputs.operator == 'true'
-    name: Operator
-    runs-on: prod-builder-v2
-    env:
-      ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    outputs:
-      operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Initialize Dynamo Builder
-        uses: ./.github/actions/init-dynamo-builder
-        with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          flavor: general
-          all_arch: 'true'
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Linter
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Tester
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          docker buildx build --platform linux/amd64,linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
-      - name: Set up Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-        with:
-          go-version: '1.25'
-      # - name: Check for uncommitted changes #todo: enable on merge
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   run: |
-      #     make check
-      - name: Build and push Container
-        id: build-and-push-image
-        shell: bash
-        working-directory: ./deploy/operator
-        env:
-          IMAGE_REGISTRY: ai-dynamo
-          IMAGE_REPOSITORY: dynamo
-        run: |
-          DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
-          ECR_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
-          NO_CACHE_FLAG=""
-          IMAGE_URIS=(
-            "${ECR_IMAGE_BASE}:${DEFAULT_TAG}"
-            "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
-          )
+  # operator:
+  #   needs: changed-files
+  #   if: needs.changed-files.outputs.operator == 'true'
+  #   name: Operator
+  #   runs-on: prod-builder-v2
+  #   env:
+  #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+  #   outputs:
+  #     operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+  #     - name: Initialize Dynamo Builder
+  #       uses: ./.github/actions/init-dynamo-builder
+  #       with:
+  #         builder_name: ${{ needs.changed-files.outputs.builder_name }}
+  #         flavor: general
+  #         all_arch: 'true'
+  #     - name: Docker Login
+  #       uses: ./.github/actions/docker-login
+  #       with:
+  #         aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+  #         aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+  #         azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+  #         azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+  #         azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+  #     - name: Linter
+  #       shell: bash
+  #       working-directory: ./deploy/operator
+  #       run: |
+  #         docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+  #     - name: Tester
+  #       shell: bash
+  #       working-directory: ./deploy/operator
+  #       run: |
+  #         docker buildx build --platform linux/amd64,linux/arm64 --target tester --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+  #     - name: Set up Go
+  #       uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+  #       with:
+  #         go-version: '1.25'
+  #     # - name: Check for uncommitted changes #todo: enable on merge
+  #     #   shell: bash
+  #     #   working-directory: ./deploy/operator
+  #     #   run: |
+  #     #     make check
+  #     - name: Build and push Container
+  #       id: build-and-push-image
+  #       shell: bash
+  #       working-directory: ./deploy/operator
+  #       env:
+  #         IMAGE_REGISTRY: ai-dynamo
+  #         IMAGE_REPOSITORY: dynamo
+  #       run: |
+  #         DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
+  #         ECR_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+  #         ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+  #         NO_CACHE_FLAG=""
+  #         IMAGE_URIS=(
+  #           "${ECR_IMAGE_BASE}:${DEFAULT_TAG}"
+  #           "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
+  #         )
 
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            NO_CACHE_FLAG="--no-cache"
-            IMAGE_URIS+=(
-              "${ECR_IMAGE_BASE}:main-dynamo-operator"
-              "${ECR_IMAGE_BASE}:main-${DEFAULT_TAG}"
-              "${ACR_IMAGE_BASE}:main-dynamo-operator"
-              "${ACR_IMAGE_BASE}:main-${DEFAULT_TAG}"
-            )
-          fi
+  #         if [[ "${{ github.ref_name }}" == "main" ]]; then
+  #           NO_CACHE_FLAG="--no-cache"
+  #           IMAGE_URIS+=(
+  #             "${ECR_IMAGE_BASE}:main-dynamo-operator"
+  #             "${ECR_IMAGE_BASE}:main-${DEFAULT_TAG}"
+  #             "${ACR_IMAGE_BASE}:main-dynamo-operator"
+  #             "${ACR_IMAGE_BASE}:main-${DEFAULT_TAG}"
+  #           )
+  #         fi
 
-          echo "operator_default_image_name=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
-          echo "flags for docker buildx: ${TAGGING_FLAGS}"
+  #         echo "operator_default_image_name=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
+  #         TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
+  #         echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
-          if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
-            NO_CACHE_FLAG="--no-cache"
-          fi
-          docker buildx build --push \
-              --platform linux/amd64,linux/arm64 \
-              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              ${TAGGING_FLAGS} \
-              ${NO_CACHE_FLAG} -f Dockerfile .
+  #         if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
+  #           NO_CACHE_FLAG="--no-cache"
+  #         fi
+  #         docker buildx build --push \
+  #             --platform linux/amd64,linux/arm64 \
+  #             --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+  #             ${TAGGING_FLAGS} \
+  #             ${NO_CACHE_FLAG} -f Dockerfile .
 
-          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${IMAGE_URIS[@]}"; do
-            echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
-          done
+  #         echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
+  #         echo "" >> $GITHUB_STEP_SUMMARY
+  #         echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+  #         echo "|-----|" >> $GITHUB_STEP_SUMMARY
+  #         for image_uri in "${IMAGE_URIS[@]}"; do
+  #           echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+  #         done
 
 
 # ============================================================================
@@ -168,8 +168,10 @@ jobs:
     # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
     with:
       framework: vllm
-      platforms: '["amd64", "arm64"]'
-      cuda_versions: '["12.9", "13.0"]'
+      # platforms: '["amd64", "arm64"]'
+      # cuda_versions: '["12.9", "13.0"]'
+      platforms: '["amd64"]'
+      cuda_versions: '["12.9"]'
       extra_tags: |
         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
