@@ -303,7 +303,7 @@ class BaseWorkerHandler(ABC):
             logger.error(f"Failed to sleep engine: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def wake(self, body: dict) -> dict:
+    async def wake_up(self, body: dict) -> dict:
         """Wake the engine to restore GPU memory and re-register to discovery.
 
         Args:
@@ -331,7 +331,7 @@ class BaseWorkerHandler(ABC):
 
             return {"status": "ok", "message": f"Engine woke (tags={tags})"}
         except Exception as e:
-            logger.error(f"Failed to wake engine: {e}")
+            logger.error(f"Failed to wake up engine: {e}")
             return {"status": "error", "message": str(e)}
 
     @abstractmethod

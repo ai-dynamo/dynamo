@@ -70,6 +70,11 @@ class BaseWorkerHandler(ABC):
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
         tags = body.get("tags", body.get("tag", None))
         if tags is None:
             tags = ["kv_cache", "weights", "cuda_graph"]
@@ -84,10 +89,14 @@ class BaseWorkerHandler(ABC):
                 )
 
             # Step 2: Pause generation to drain in-flight requests
-            await self.engine.async_pause_generation()
+            pause_req = PauseGenerationReqInput()
+            await self.engine.tokenizer_manager.pause_generation(pause_req)
 
             # Step 3: Release memory now that it's safe
-            await self.engine.async_release_memory_occupation(tags)
+            release_req = ReleaseMemoryOccupationReqInput(tags=tags)
+            await self.engine.tokenizer_manager.release_memory_occupation(
+                release_req, None
+            )
 
             return {
                 "status": "ok",
@@ -109,16 +118,25 @@ class BaseWorkerHandler(ABC):
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
         tags = body.get("tags", body.get("tag", None))
         if tags is None:
             tags = ["kv_cache", "weights", "cuda_graph"]
 
         try:
             # Step 1: Resume memory first - must be ready before accepting requests
-            await self.engine.async_resume_memory_occupation(tags)
+            resume_req = ResumeMemoryOccupationReqInput(tags=tags)
+            await self.engine.tokenizer_manager.resume_memory_occupation(
+                resume_req, None
+            )
 
             # Step 2: Continue generation
-            await self.engine.async_continue_generation()
+            continue_req = ContinueGenerationReqInput()
+            await self.engine.tokenizer_manager.continue_generation(continue_req)
 
             # Step 3: Re-register to discovery so frontend can route to us
             try:
