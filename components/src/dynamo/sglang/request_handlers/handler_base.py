@@ -70,11 +70,6 @@ class BaseWorkerHandler(ABC):
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
-        from sglang.srt.managers.io_struct import (
-            PauseGenerationReqInput,
-            ReleaseMemoryOccupationReqInput,
-        )
-
         tags = body.get("tags", body.get("tag", None))
         if tags is None:
             tags = ["kv_cache", "weights", "cuda_graph"]
@@ -89,14 +84,10 @@ class BaseWorkerHandler(ABC):
                 )
 
             # Step 2: Pause generation to drain in-flight requests
-            pause_req = PauseGenerationReqInput()
-            await self.engine.tokenizer_manager.pause_generation(pause_req)
+            await self.engine.async_pause_generation()
 
             # Step 3: Release memory now that it's safe
-            release_req = ReleaseMemoryOccupationReqInput(tags=tags)
-            await self.engine.tokenizer_manager.release_memory_occupation(
-                release_req, None
-            )
+            await self.engine.async_release_memory_occupation(tags)
 
             return {
                 "status": "ok",
@@ -118,25 +109,16 @@ class BaseWorkerHandler(ABC):
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
-        from sglang.srt.managers.io_struct import (
-            ContinueGenerationReqInput,
-            ResumeMemoryOccupationReqInput,
-        )
-
         tags = body.get("tags", body.get("tag", None))
         if tags is None:
             tags = ["kv_cache", "weights", "cuda_graph"]
 
         try:
             # Step 1: Resume memory first - must be ready before accepting requests
-            resume_req = ResumeMemoryOccupationReqInput(tags=tags)
-            await self.engine.tokenizer_manager.resume_memory_occupation(
-                resume_req, None
-            )
+            await self.engine.async_resume_memory_occupation(tags)
 
             # Step 2: Continue generation
-            continue_req = ContinueGenerationReqInput()
-            await self.engine.tokenizer_manager.continue_generation(continue_req)
+            await self.engine.async_continue_generation()
 
             # Step 3: Re-register to discovery so frontend can route to us
             try:
@@ -187,30 +169,8 @@ class BaseWorkerHandler(ABC):
             "resume_memory_occupation", self.resume_memory_occupation
         )
 
-    async def generate(self, request: Dict[str, Any], context: Context):
-        """Generate response from request with cancellation handling.
-
-        This is a wrapper around _internal_generate that provides cancellation
-        handling for the generation process. It monitors for local cancellation
-        events (e.g., SIGINT, SIGTERM) that cause the local process to be terminated,
-        not remote client request cancellations.
-
-        When a local cancellation is detected via the context, it logs the cancellation
-        and raises GeneratorExit to gracefully terminate the generation.
-
-
-        Raises:
-            GeneratorExit: When the request is cancelled due to local cancellation.
-        """
-        try:
-            async for item in self._internal_generate(request, context):
-                yield item
-        except asyncio.CancelledError:
-            logging.info(f"Request {context.id()} cancelled")
-            raise GeneratorExit("Request cancelled")
-
     @abstractmethod
-    async def _internal_generate(self, request: Dict[str, Any], context: Context):
+    async def generate(self, request: Dict[str, Any], context: Context):
         """Generate response from request.
 
         Args:

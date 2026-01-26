@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import os
+import signal
 import sys
 
 import sglang as sgl
@@ -78,26 +79,31 @@ async def worker():
         config.dynamo_args.use_kv_events,
     )
 
-    try:
-        if config.dynamo_args.embedding_worker:
-            await init_embedding(runtime, config)
-        elif config.dynamo_args.multimodal_processor:
-            await init_multimodal_processor(runtime, config)
-        elif config.dynamo_args.multimodal_encode_worker:
-            await init_multimodal_encode_worker(runtime, config)
-        elif config.dynamo_args.multimodal_worker:
-            if config.serving_mode != DisaggregationMode.PREFILL:
-                await init_multimodal_worker(runtime, config)
-            else:
-                await init_multimodal_prefill_worker(runtime, config)
-        elif config.dynamo_args.diffusion_worker:
-            await init_diffusion(runtime, config)
-        elif config.serving_mode != DisaggregationMode.PREFILL:
-            await init(runtime, config)
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers will trigger a graceful shutdown of the runtime")
+
+    if config.dynamo_args.embedding_worker:
+        await init_embedding(runtime, config)
+    elif config.dynamo_args.multimodal_processor:
+        await init_multimodal_processor(runtime, config)
+    elif config.dynamo_args.multimodal_encode_worker:
+        await init_multimodal_encode_worker(runtime, config)
+    elif config.dynamo_args.multimodal_worker:
+        if config.serving_mode != DisaggregationMode.PREFILL:
+            await init_multimodal_worker(runtime, config)
         else:
-            await init_prefill(runtime, config)
-    finally:
-        runtime.shutdown()
+            await init_multimodal_prefill_worker(runtime, config)
+    elif config.dynamo_args.diffusion_worker:
+        await init_diffusion(runtime, config)
+    elif config.serving_mode != DisaggregationMode.PREFILL:
+        await init(runtime, config)
+    else:
+        await init_prefill(runtime, config)
 
 
 async def init(runtime: DistributedRuntime, config: Config):
@@ -178,7 +184,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         logging.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        logging.info("Finally block reached")
         metrics_task.cancel()
         try:
             await metrics_task
@@ -482,13 +487,23 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
     await pd_worker_client.wait_for_instances()
 
+    ready_event = asyncio.Event()
+
     try:
-        # Encode Worker is an internal component, should not register with Frontend
-        # Only needs to provide internal service endpoint for Processor to call
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", server_args.served_model_name)],
+            ),
+            register_llm_with_readiness_gate(
+                None,  # encode worker doesn't have engine
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                input_type=ModelInput.Text,
+                readiness_gate=ready_event,
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -527,32 +542,21 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     try:
-        if config.serving_mode == DisaggregationMode.DECODE:
-            # Decode Worker is an internal component, should not register with Frontend
-            # Only needs to provide internal service endpoint for Processor to call
-            await generate_endpoint.serve_endpoint(
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
                 handler.generate,
                 metrics_labels=[("model", server_args.served_model_name)],
                 graceful_shutdown=True,
                 health_check_payload=health_check_payload,
-            )
-        else:
-            # In aggregated mode, need to register with Frontend
-            await asyncio.gather(
-                generate_endpoint.serve_endpoint(
-                    handler.generate,
-                    metrics_labels=[("model", server_args.served_model_name)],
-                    graceful_shutdown=True,
-                    health_check_payload=health_check_payload,
-                ),
-                register_llm_with_readiness_gate(
-                    engine,
-                    generate_endpoint,
-                    server_args,
-                    dynamo_args,
-                    readiness_gate=ready_event,
-                ),
-            )
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                readiness_gate=ready_event,
+            ),
+        )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -576,15 +580,23 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
+    ready_event = asyncio.Event()
 
     try:
-        # Prefill Worker is an internal component, should not register with Frontend
-        # Only needs to provide internal service endpoint for Decode Worker to call
-        await generate_endpoint.serve_endpoint(
-            handler.generate,
-            graceful_shutdown=True,
-            metrics_labels=[("model", server_args.served_model_name)],
-            health_check_payload=health_check_payload,
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate,
+                graceful_shutdown=True,
+                metrics_labels=[("model", server_args.served_model_name)],
+                health_check_payload=health_check_payload,
+            ),
+            register_llm_with_readiness_gate(
+                engine,
+                generate_endpoint,
+                server_args,
+                dynamo_args,
+                readiness_gate=ready_event,
+            ),
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -626,6 +638,12 @@ async def _warmup_prefill_engine(engine: sgl.Engine, server_args) -> None:
         logging.warning("Prefill warmup timed out after 1800s")
     except Exception as e:
         logging.warning(f"Prefill warmup failed: {e}")
+
+
+async def graceful_shutdown(runtime):
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
 
 
 def main():

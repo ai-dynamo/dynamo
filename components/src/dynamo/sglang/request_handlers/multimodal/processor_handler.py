@@ -54,9 +54,7 @@ class MultimodalProcessorHandler(BaseWorkerHandler):
     def cleanup(self):
         pass
 
-    async def _internal_generate(
-        self, raw_request: MultiModalRequest, context: Context
-    ):
+    async def generate(self, raw_request: MultiModalRequest, context: Context):
         """
         Process multimodal request and forward to encode worker.
 

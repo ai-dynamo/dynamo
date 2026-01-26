@@ -237,7 +237,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
         config: Config,
         prefill_client: Client = None,
     ):
-        super().__init__(component, engine, config, None)
+        super().__init__(component, engine, config, None, prefill_client)
 
         # Initialize processors
         self.embeddings_processor = EmbeddingsProcessor()
@@ -269,7 +269,7 @@ class MultimodalWorkerHandler(BaseWorkerHandler):
                 request = SglangMultimodalRequest.model_validate(request)
         return request
 
-    async def _internal_generate(
+    async def generate(
         self, request: SglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:
         """
@@ -428,7 +428,7 @@ class MultimodalPrefillWorkerHandler(BaseWorkerHandler):
         """Initialize async components like connector"""
         await self.embeddings_processor.initialize()
 
-    async def _internal_generate(
+    async def generate(
         self, disagg_request: DisaggSglangMultimodalRequest, context: Context
     ) -> AsyncIterator[str]:
         """
