@@ -340,28 +340,28 @@ type EPPConfig struct {
     // Mutually exclusive with Config
     // +optional
     ConfigMapRef *ConfigMapKeySelector `json:"configMapRef,omitempty"`
-    
+
     // Config allows specifying EPP EndpointPickerConfig directly as a Go struct
     // The operator will marshal this to YAML and create a ConfigMap
     // Mutually exclusive with ConfigMapRef
     // +optional
     Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
-    
+
     // PoolName is the name of the InferencePool to create and watch
     // Defaults to {dgd-name}-pool
     // +optional
     PoolName *string `json:"poolName,omitempty"`
-    
+
     // PoolNamespace is the namespace of the InferencePool
     // Defaults to DGD namespace
     // +optional
     PoolNamespace *string `json:"poolNamespace,omitempty"`
-    
+
     // KVBlockSize for Dynamo KV-aware routing
     // +optional
     // +kubebuilder:default="16"
     KVBlockSize *string `json:"kvBlockSize,omitempty"`
-    
+
     // UseEtcd when true, EPP uses ETCD for discovery instead of Kubernetes
     // +optional
     UseEtcd *bool `json:"useEtcd,omitempty"`
@@ -401,7 +401,7 @@ EPP requires platform service connectivity:
 
 - **NATS_SERVER:** Always required, constructed from platformReleaseName and platformNamespace
 - **ETCD_ENDPOINTS:** Only set when `useEtcd: true` in EPPConfig
-- **DYN_DISCOVERY_BACKEND:** 
+- **DYN_DISCOVERY_BACKEND:**
   - Set to "etcd" when `useEtcd: true`
   - Set to "kubernetes" when `useEtcd: false` (default)
 - **DYNAMO_KV_BLOCK_SIZE:** Default "16", configurable via EPPConfig.kvBlockSize
@@ -471,7 +471,7 @@ spec:
       componentType: frontend
       replicas: 2
       # ... frontend config
-    
+
     EPP:
       componentType: epp
       replicas: 1
@@ -548,7 +548,7 @@ spec:
   - NATS (always required)
   - ETCD (only when using ETCD for discovery, configured via `useEtcd: true`)
 - Gateway API Inference CRDs and types:
-  - InferencePool v1 stable API: `sigs.k8s.io/gateway-api-inference` 
+  - InferencePool v1 stable API: `sigs.k8s.io/gateway-api-inference`
   - EndpointPickerConfig types: `sigs.k8s.io/gateway-api-inference-extension/apix/config/v1alpha1`
   - **Important:** Use `inference.networking.k8s.io/v1` for InferencePool (per PR #5592)
   - **Important:** EndpointPickerConfig is `inference.networking.x-k8s.io/v1alpha1` (config API, not resource API)
