@@ -155,7 +155,7 @@ impl DynamicSubscriber {
                             cancel.cancel();
                             tracing::info!(instance_id = %id_str, "Cancelled endpoint stream");
                         } else {
-                            tracing::warn!(instance_id = %id_str, "No active endpoint found for removed instance");
+                            tracing::warn!(instance_id = %id_str, "No active endpoint found for removed stream instance");
                         }
                     }
                     Err(e) => {
@@ -207,7 +207,7 @@ impl DynamicSubscriber {
         let sub_transport = ZmqSubTransport::connect(endpoint, zmq_topic).await?;
         let mut stream = sub_transport.subscribe(zmq_topic).await?;
 
-        tracing::info!(endpoint = %endpoint, "Started consuming ZMQ endpoint stream");
+        tracing::info!(endpoint = %endpoint, topic = %zmq_topic, "Started consuming ZMQ endpoint stream");
 
         loop {
             tokio::select! {
