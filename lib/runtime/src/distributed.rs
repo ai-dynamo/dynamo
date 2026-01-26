@@ -103,19 +103,7 @@ impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let (selected_kv_store, nats_config, request_plane) = config.dissolve();
 
-        let runtime_clone = runtime.clone();
-
-        let store = match selected_kv_store {
-            kv::Selector::Etcd(etcd_config) => {
-                let etcd_client = etcd::Client::new(*etcd_config, runtime_clone).await.inspect_err(|err|
-                    // The returned error doesn't show because of a dropped runtime error, so
-                    // log it first.
-                    tracing::error!(%err, "Could not connect to etcd. Pass `--store-kv ..` to use a different backend or start etcd."))?;
-                kv::Manager::etcd(etcd_client)
-            }
-            kv::Selector::File(root) => kv::Manager::file(runtime.primary_token(), root),
-            kv::Selector::Memory => kv::Manager::memory(),
-        };
+        let store = kv::Manager::new(selected_kv_store, Some(runtime.clone()));
 
         let nats_client = match nats_config {
             Some(nc) => Some(nc.connect().await?),
@@ -545,7 +533,7 @@ impl DistributedConfig {
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
-            store_backend: kv::Selector::Etcd(Box::default()),
+            store_backend: kv::Selector::Etcd(etcd::ClientOptions::default()),
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
@@ -564,7 +552,7 @@ impl DistributedConfig {
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
-            store_backend: kv::Selector::Etcd(Box::new(etcd_config)),
+            store_backend: kv::Selector::Etcd(etcd_config),
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
