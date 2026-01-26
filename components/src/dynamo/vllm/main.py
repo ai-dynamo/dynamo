@@ -304,6 +304,10 @@ def setup_vllm_engine(config, stat_logger=None):
             os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "True"
         if "VLLM_LORA_MODULES_LOADING_TIMEOUT" not in os.environ:
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
+
+    if engine_args.load_format == "gms":
+        engine_args.worker_cls = "gpu_memory_service.vllm_integration.worker.GMSWorker"
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -460,10 +464,10 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    # Register sleep/wake engine routes
+    # Register sleep/wake_up engine routes
     runtime.register_engine_route("sleep", handler.sleep)
-    runtime.register_engine_route("wake", handler.wake)
-    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
 
     # Handle non-leader nodes - don't serve endpoints
     if config.engine_args.data_parallel_rank:
@@ -585,10 +589,10 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     setup_metrics_collection(config, generate_endpoint, logger)
 
-    # Register sleep/wake engine routes
+    # Register sleep/wake_up engine routes
     runtime.register_engine_route("sleep", handler.sleep)
-    runtime.register_engine_route("wake", handler.wake)
-    logger.info("Registered engine routes: /engine/sleep, /engine/wake")
+    runtime.register_engine_route("wake_up", handler.wake_up)
+    logger.info("Registered engine routes: /engine/sleep, /engine/wake_up")
 
     # Handle non-leader nodes - don't serve endpoints
     if config.engine_args.data_parallel_rank:

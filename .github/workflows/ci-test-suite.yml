@@ -75,7 +75,7 @@ env:
 jobs:
   build-amd64:
     name: Build ${{ matrix.framework }} (amd64)
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -126,7 +126,7 @@ jobs:
 
   build-arm64:
     name: Build ${{ matrix.framework }} (arm64)
-    runs-on: cpu-arm-r8g-4xlarge
+    runs-on: prod-builder-arm-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -304,9 +304,9 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
     steps:
       - uses: actions/checkout@v4
       - name: Check if build succeeded
@@ -437,10 +437,10 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
             timeout: 90
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
             timeout: 90
     steps:
       - uses: actions/checkout@v4
@@ -571,10 +571,10 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
             timeout: 120
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
             timeout: 120
     steps:
       - uses: actions/checkout@v4
@@ -707,10 +707,10 @@ jobs:
         framework: [vllm, trtllm, sglang]
         arch:
           - arch: amd64
-            runner: gpu-l40-amd64
+            runner: prod-builder-amd-gpu-v1
             timeout: 150
           - arch: arm64
-            runner: cpu-arm-r8g-4xlarge
+            runner: prod-builder-arm-v1
             timeout: 150
     steps:
       - uses: actions/checkout@v4
@@ -836,7 +836,7 @@ jobs:
     name: ${{ matrix.framework.name }}-ft-k8s
     needs: [build-amd64]
     if: always()
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -1074,7 +1074,7 @@ jobs:
   ############################## SLACK NOTIFICATION ##############################
   notify-slack:
     name: Notify Slack
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     if: always() && inputs.enable_slack_notification && !github.event.repository.fork
     needs: results-summary
     permissions:

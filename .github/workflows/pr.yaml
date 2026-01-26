@@ -63,8 +63,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: cpu-amd-m5-2xlarge }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: prod-builder-amd-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
     name: operator-build (${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
     steps:
@@ -81,7 +81,6 @@ jobs:
       - name: Docker Login
         uses: ./.github/actions/docker-login
         with:
-          ngc_ci_access_token: ${{ secrets.NGC_CI_ACCESS_TOKEN }}
           aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
           aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
           azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
@@ -141,8 +140,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
@@ -219,8 +218,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
           - { major_minor: '12.9', major: '12' }
@@ -238,8 +237,8 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: amd64, runner: gpu-l40-amd64 }
-          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
+          - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+          - { arch: arm64, runner: prod-builder-arm-v1 }
         cuda_version:
           - { major_minor: '13.0', major: '13' }
     name: trtllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
@@ -250,7 +249,7 @@ jobs:
     steps: *runtime-container-build-push-test
 
   deploy-operator:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: prod-default-v1
     if: needs.changed-files.outputs.core == 'true'
     needs: [changed-files, operator, vllm, sglang, trtllm]
     env:
@@ -325,7 +324,7 @@ jobs:
         timeout 300s kubectl rollout status deployment -n $NAMESPACE --watch
 
   deploy-test-vllm:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: prod-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, vllm]
@@ -515,7 +514,7 @@ jobs:
   # - Run vllm disagg_router on all commits
   # - Run rest of jobs only on push to main or manual trigger
   deploy-test-vllm-disagg-router:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: prod-default-v1
     if: needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true' || needs.changed-files.outputs.deploy == 'true'
     needs: [changed-files, deploy-operator, vllm]
     permissions:
@@ -535,7 +534,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-sglang:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: prod-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, sglang]
@@ -557,7 +556,7 @@ jobs:
     steps: *deploy-test-steps
 
   deploy-test-trtllm:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: prod-default-v1
     # Run if push to main, or manually triggered
     if: ( github.ref_name == 'main' || github.event.inputs.run_deploy_operator )
     needs: [changed-files, deploy-operator, trtllm]
@@ -581,7 +580,7 @@ jobs:
     steps: *deploy-test-steps
 
   cleanup:
-    runs-on: cpu-amd-m5-2xlarge
+    runs-on: prod-default-v1
     if: always()
     needs: [changed-files, deploy-operator, deploy-test-trtllm, deploy-test-sglang, deploy-test-vllm, deploy-test-vllm-disagg-router]
     steps:
