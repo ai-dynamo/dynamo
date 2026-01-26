@@ -15,6 +15,7 @@ members = [
     "lib/bindings/python/codegen",
     "lib/engines/*",
     "lib/config",
+    "lib/nova-common",
 ]
 # Exclude certain packages that are slow to build and we don't ship as flagship
 # features from default build, but keep them in workspace for convenience.
@@ -43,6 +44,7 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed"]
 
 [workspace.dependencies]
 # Local crates
+dynamo-nova-common = { path = "lib/nova-common", version = "0.8.0" }
 dynamo-runtime = { path = "lib/runtime", version = "0.8.0" }
 dynamo-llm = { path = "lib/llm", version = "0.8.0" }
 dynamo-config = { path = "lib/config", version = "0.8.0" }
@@ -98,6 +100,7 @@ reqwest = { version = "0.12.24", default-features = false, features = [
 ] }
 rmp-serde = { version = "1" }
 serde = { version = "1", features = ["derive"] }
+serde_bytes = { version = "0.11" }
 serde_json = { version = "1" }
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
