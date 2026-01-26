@@ -10,8 +10,7 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 
 > **See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
 
-> [!Note]
-> Release history in this document begins at v0.6.0, as we expect the majority of users to be on v0.6.0 or later.
+Release history in this document begins at v0.6.0.
 
 ## Current Release: Dynamo v0.8.1
 
@@ -21,8 +20,7 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 
 ### Patch Release: v0.8.1.post1 (Jan 23, 2026)
 
-> [!Note]
-> **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only. There is no GitHub release for this version. All other artifacts (vLLM/SGLang containers, Helm charts, Rust crates) remain at v0.8.1.
+**v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release). All other artifacts remain at v0.8.1.
 
 | Artifact | Version | Change | Link |
 |----------|---------|--------|------|
@@ -42,13 +40,11 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 | `dynamo-frontend:0.8.1` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=0.8.1) | |
 | `kubernetes-operator:0.8.1` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=0.8.1) | |
 
-> [!Note]
-> \* Multimodality is not expected to work on ARM64 for CUDA 13 images (`vllm-runtime:*-cuda13`, `sglang-runtime:*-cuda13`). Multimodal inference works on AMD64 for these images.
+\* Multimodal inference on CUDA 13 images: works on AMD64 for all backends; works on ARM64 only for TensorRT-LLM (`vllm-runtime:*-cuda13` and `sglang-runtime:*-cuda13` do not support multimodality on ARM64).
 
 ### Python Wheels
 
-> [!Important]
-> We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtllm]` wheel. See the [NGC container collection](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) for supported images.
+We recommend using the TensorRT-LLM NGC container instead of the `ai-dynamo[trtllm]` wheel. See the [NGC container collection](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) for supported images.
 
 | Package | Description | Python | Platform | PyPI |
 |---------|-------------|--------|----------|------|
@@ -178,6 +174,11 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 ### Container Images
 
+> **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
+>
+> To access a specific version, append `?version=TAG` to the container URL:
+> `https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/{container}?version={tag}`
+
 #### vllm-runtime
 
 | Image:Tag | vLLM | Arch | CUDA | Notes |
@@ -245,6 +246,10 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 ### Python Wheels
 
+> **PyPI:** [ai-dynamo](https://pypi.org/project/ai-dynamo/) | [ai-dynamo-runtime](https://pypi.org/project/ai-dynamo-runtime/) | [kvbm](https://pypi.org/project/kvbm/)
+>
+> To access a specific version: `https://pypi.org/project/{package}/{version}/`
+
 #### ai-dynamo (wheel)
 
 | Package | Python | Platform | Notes |
@@ -280,6 +285,10 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 ### Helm Charts
 
+> **NGC Helm Registry:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
+>
+> Direct download: `https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/{chart}-{version}.tgz`
+
 #### dynamo-crds (Helm chart)
 
 | Chart | Notes |
@@ -314,6 +323,10 @@ For a complete list of known issues, refer to the release notes for each patch:
 | `dynamo-graph-0.6.0` | |
 
 ### Rust Crates
+
+> **crates.io:** [dynamo-runtime](https://crates.io/crates/dynamo-runtime) | [dynamo-llm](https://crates.io/crates/dynamo-llm) | [dynamo-async-openai](https://crates.io/crates/dynamo-async-openai) | [dynamo-parsers](https://crates.io/crates/dynamo-parsers) | [dynamo-memory](https://crates.io/crates/dynamo-memory) | [dynamo-config](https://crates.io/crates/dynamo-config)
+>
+> To access a specific version: `https://crates.io/crates/{crate}/{version}`
 
 #### dynamo-runtime (crate)
 

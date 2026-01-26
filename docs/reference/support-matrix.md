@@ -8,8 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
-> [!Note]
-> **See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
+**See also:** [Release Artifacts](release-artifacts.md) for container images, wheels, Helm charts, and crates | [Feature Matrix](feature-matrix.md) for backend feature support
 
 ## Backend Dependencies
 
@@ -22,8 +21,7 @@ The following table shows the backend framework versions included with each Dyna
 | TensorRT-LLM   | `1.2.0rc6.post2` | `1.2.0rc6.post2` | `1.2.0rc6.post1`  | `1.2.0rc6.post1` | `1.2.0rc3` | `1.2.0rc3`     | `1.2.0rc2` |
 | NIXL           | `0.9.0`        | `0.8.0`          | `0.8.0`             | `0.8.0`    | `0.8.0`    | `0.8.0`          | `0.8.0`    |
 
-> [!Note]
-> **main (ToT)** reflects the current development branch. **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release).
+**main (ToT)** reflects the current development branch. **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release).
 
 > [!Important]
 > Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] Python wheel will fail.
@@ -35,8 +33,7 @@ The following table shows the backend framework versions included with each Dyna
 | **Dynamo 0.7.1**   | CUDA 12.8                 | CUDA 13.0        | CUDA 12.9                |
 | **Dynamo 0.7.0**   | CUDA 12.9                 | CUDA 13.0        | CUDA 12.8                |
 
-> [!Note]
-> Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
+Patch versions (e.g., v0.8.1.post1, v0.7.0.post1) have the same CUDA support as their base version.
 
 For detailed artifact versions and NGC links (including container images, Python wheels, Helm charts, and Rust crates), see the [Release Artifacts](release-artifacts.md) page.
 
@@ -71,10 +68,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Ubuntu**           | 24.04       | ARM64            | Supported    |
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
-> [!Note]
-> Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS Stream 9 and Ubuntu (22.04, 24.04).
->
-> Compatibility with other Linux distributions is expected but has not been officially verified yet.
+Wheels are built using a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but not officially verified.
 
 > [!Caution]
 > KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
@@ -104,8 +98,7 @@ Dynamo container images include CUDA toolkit libraries. The host machine must ha
 | | **SGLang** | 12.9 | 575.xx+ | 576.xx+ | |
 | | **TensorRT-LLM** | 13.0 | 580.xx+ | 581.xx+ | |
 
-> [!Note]
-> Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
+Experimental CUDA 13 images are not published for all versions. Check [Release Artifacts](release-artifacts.md) for availability.
 
 #### CUDA Compatibility Resources
 
@@ -117,8 +110,7 @@ For detailed information on CUDA driver compatibility, forward compatibility, an
 - [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
 - [FAQ](https://docs.nvidia.com/deploy/cuda-compatibility/frequently-asked-questions.html)
 
-> [!Tip]
-> For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
+For extended driver compatibility beyond the minimum versions listed above, consider using `cuda-compat` packages on the host. See [Forward Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html) for details.
 
 ## Cloud Service Provider Compatibility
 
@@ -133,8 +125,7 @@ For detailed information on CUDA driver compatibility, forward compatibility, an
 
 ## Build Support
 
-> [!Note]
-> For version-specific artifact details, installation commands, and release history, see [Release Artifacts](release-artifacts.md).
+For version-specific artifact details, installation commands, and release history, see [Release Artifacts](release-artifacts.md).
 
 **Dynamo** currently provides build support in the following ways:
 
