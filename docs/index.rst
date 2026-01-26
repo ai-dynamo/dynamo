@@ -45,7 +45,6 @@ Quickstart
    Feature Matrix <reference/feature-matrix.md>
    Release Artifacts <reference/release-artifacts.md>
    Examples <_sections/examples>
-   Contribution Guide <../CONTRIBUTING.md>
 
 .. toctree::
    :hidden:
