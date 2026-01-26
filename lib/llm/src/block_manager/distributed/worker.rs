@@ -112,7 +112,25 @@ async fn perform_allocation_and_build_handler(
     device_id: usize,
     scheduler_client: Option<TransferSchedulerClient>,
 ) -> anyhow::Result<BlockTransferHandler> {
-    let agent = build_agent(worker_id, leader_meta.num_disk_blocks > 0)?;
+    // Determine if this rank should allocate G2/G3 (host/disk)
+    // - Sharded mode (rank=None): all ranks allocate
+    // - Replicated mode (rank=Some(r)): only rank 0 allocates
+    let should_allocate_offload = match worker_config.rank {
+        None => true,      // Sharded mode: all ranks allocate
+        Some(0) => true,   // Replicated mode rank 0: allocate
+        Some(_) => false,  // Replicated mode non-rank0: skip
+    };
+
+    if !should_allocate_offload {
+        tracing::info!(
+            "Rank {} skipping host/disk allocation (replicated mode)",
+            worker_config.rank.unwrap_or(-1)
+        );
+    }
+
+    // Only create NIXL agent if we need disk blocks AND we should allocate
+    let need_disk = should_allocate_offload && leader_meta.num_disk_blocks > 0;
+    let agent = build_agent(worker_id, need_disk)?;
     let pool_config = PoolConfig {
         enable_pool: true,
         max_concurrent_transfers: MAX_CONCURRENT_TRANSFERS,
@@ -139,15 +157,16 @@ async fn perform_allocation_and_build_handler(
         })?,
     );
 
-    // device
+    // device - always allocated on all ranks
     let device_blocks = Some(KvbmWorker::make_layout::<_, BasicMetadata>(
         device_layout,
         transfer_context.nixl_agent().as_ref(),
         0,
         worker_id,
     )?);
-    // host
-    let host_blocks = if leader_meta.num_host_blocks > 0 {
+
+    // host (G2) - only allocated if should_allocate_offload
+    let host_blocks = if should_allocate_offload && leader_meta.num_host_blocks > 0 {
         let host_allocator = Arc::new(PinnedAllocator::default());
         let host_layout = layout_builder
             .num_blocks(leader_meta.num_host_blocks)
@@ -162,8 +181,9 @@ async fn perform_allocation_and_build_handler(
     } else {
         None
     };
-    // disk
-    let disk_blocks = if leader_meta.num_disk_blocks > 0 {
+
+    // disk (G3) - only allocated if should_allocate_offload
+    let disk_blocks = if should_allocate_offload && leader_meta.num_disk_blocks > 0 {
         let disk_allocator = Arc::new(DiskAllocator);
         let disk_layout = layout_builder
             .num_blocks(leader_meta.num_disk_blocks)
@@ -185,6 +205,7 @@ async fn perform_allocation_and_build_handler(
         disk_blocks,
         transfer_context,
         scheduler_client,
+        worker_config.nccl_config,
     )?;
     Ok(handler)
 }
@@ -410,6 +431,18 @@ pub struct KvbmWorkerConfig {
 
     #[builder(default = "String::from(\"tcp://127.0.0.1:56002\")")]
     leader_ack_url: String,
+
+    /// Rank for replicated mode (None = sharded mode)
+    #[builder(default = "None")]
+    rank: Option<i32>,
+
+    /// World size for replicated mode
+    #[builder(default = "None")]
+    world_size: Option<i32>,
+
+    /// NCCL configuration for replicated mode
+    #[builder(default = "transfer::NcclConfig::disabled()")]
+    nccl_config: transfer::NcclConfig,
 }
 
 impl KvbmWorkerConfig {

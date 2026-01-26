@@ -6,10 +6,14 @@ mod utils;
 mod zmq;
 
 mod leader;
+#[cfg(feature = "nccl")]
+mod nccl_bootstrap;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig, KvbmLeaderNumBlocksConfig};
-pub use transfer::BlockTransferHandler;
+#[cfg(feature = "nccl")]
+pub use nccl_bootstrap::{NcclBootstrap, NcclCommOwned};
+pub use transfer::{BlockTransferHandler, NcclConfig};
 pub use utils::{
     BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
 };

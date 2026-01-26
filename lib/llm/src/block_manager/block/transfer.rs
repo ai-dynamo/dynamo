@@ -4,6 +4,8 @@
 pub mod context;
 mod cuda;
 mod memcpy;
+#[cfg(feature = "nccl")]
+mod nccl;
 mod nixl;
 mod strategy;
 
@@ -22,6 +24,9 @@ use tokio::sync::oneshot;
 pub use crate::block_manager::storage::{CudaAccessible, Local, Remote};
 pub use async_trait::async_trait;
 pub use context::{PoolConfig, TransferContext};
+
+#[cfg(feature = "nccl")]
+pub use nccl::{NcclGroup, bcast_block, bcast_layer};
 
 /// A block that can be the target of a write
 pub trait Writable {}

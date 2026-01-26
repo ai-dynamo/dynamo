@@ -3,6 +3,153 @@
 
 from typing import Any, List, Optional
 
+class NcclBootstrap:
+    """
+    NCCL bootstrap for creating dedicated KVBM communicators.
+
+    This class provides methods to generate, serialize, deserialize,
+    and initialize NCCL communicators for KVBM's replicated mode.
+
+    Usage pattern:
+    1. Rank 0: Call `NcclBootstrap.generate(world_size)` to create a new unique ID
+    2. Rank 0: Call `serialize()` and broadcast to other ranks via MPI
+    3. Other ranks: Call `NcclBootstrap.deserialize(bytes)` to reconstruct
+    4. All ranks: Call `init_communicator(rank)` collectively to create the comm
+    """
+
+    @staticmethod
+    def generate(world_size: int) -> "NcclBootstrap":
+        """
+        Generate a new unique ID for NCCL communicator initialization.
+        This should only be called on rank 0.
+
+        Parameters:
+        -----------
+        world_size: int
+            The total number of ranks that will participate
+
+        Returns:
+        --------
+        NcclBootstrap
+            A new NcclBootstrap instance
+        """
+        ...
+
+    def serialize(self) -> bytes:
+        """
+        Serialize the bootstrap data for distribution to other ranks.
+
+        Returns:
+        --------
+        bytes
+            The serialized bootstrap data (136 bytes)
+        """
+        ...
+
+    @staticmethod
+    def deserialize(data: bytes) -> "NcclBootstrap":
+        """
+        Deserialize bootstrap data received from rank 0.
+
+        Parameters:
+        -----------
+        data: bytes
+            The serialized bootstrap data (136 bytes)
+
+        Returns:
+        --------
+        NcclBootstrap
+            A new NcclBootstrap instance
+        """
+        ...
+
+    def init_communicator(self, rank: int) -> int:
+        """
+        Initialize the NCCL communicator.
+
+        IMPORTANT: This is a collective operation!
+        All ranks must call this function together with matching parameters.
+        The function will block until all ranks have called it.
+
+        Parameters:
+        -----------
+        rank: int
+            This rank's ID (0 to world_size-1)
+
+        Returns:
+        --------
+        int
+            The raw ncclComm_t pointer as an integer
+        """
+        ...
+
+    def world_size(self) -> int:
+        """
+        Get the world size for this bootstrap.
+
+        Returns:
+        --------
+        int
+            The world size
+        """
+        ...
+
+
+class KvbmWorker:
+    """
+    A KVBM worker that handles block transfers.
+    """
+
+    def __init__(
+        self,
+        num_device_blocks: int,
+        page_size: int,
+        tensors: List[Any],
+        device_id: int = 0,
+        dtype_width_bytes: int = 2,
+        drt: Optional[Any] = None,
+        layout_blocking: bool = False,
+        device_layout_type: Optional[Any] = None,
+        host_layout_type: Optional[Any] = None,
+        disk_layout_type: Optional[Any] = None,
+        rank: Optional[int] = None,
+        world_size: Optional[int] = None,
+        nccl_comm_ptr: Optional[int] = None,
+    ) -> None:
+        """
+        Create a KvbmWorker instance.
+
+        Parameters:
+        -----------
+        num_device_blocks: int
+            Number of device blocks to manage
+        page_size: int
+            Page size for blocks
+        tensors: List[Any]
+            List of tensor objects (e.g., torch.Tensor)
+        device_id: int
+            CUDA device ID, defaults to 0
+        dtype_width_bytes: int
+            Data type width in bytes, defaults to 2 (fp16)
+        drt: Optional[Any]
+            Distributed runtime, if applicable
+        layout_blocking: bool
+            Whether to block on layout initialization, defaults to False
+        device_layout_type: Optional[Any]
+            Layout type for device blocks
+        host_layout_type: Optional[Any]
+            Layout type for host blocks
+        disk_layout_type: Optional[Any]
+            Layout type for disk blocks
+        rank: Optional[int]
+            Rank for replicated mode (None = sharded mode)
+        world_size: Optional[int]
+            World size for replicated mode
+        nccl_comm_ptr: Optional[int]
+            Raw ncclComm_t pointer for replicated mode (from NcclBootstrap)
+        """
+        ...
+
 class Layer:
     """
     A KV cache block layer
