@@ -453,11 +453,6 @@ impl RemoteTransferContext {
             None => return Err((RegistrationError::HandlerNotAvailable, xfer_req)),
         };
 
-        // Check channel capacity before moving xfer_req into notification
-        if tx.capacity() == 0 {
-            return Err((RegistrationError::ChannelUnavailable, xfer_req));
-        }
-
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let notification = RegisterTransferNotification {
             uuid: uuid::Uuid::new_v4(),
@@ -465,11 +460,19 @@ impl RemoteTransferContext {
             done: done_tx,
         };
 
-        // This should succeed since we checked capacity above
-        tx.try_send(notification)
-            .expect("channel became unavailable between capacity check and send");
-
-        Ok(TransferCompleteNotification::new(done_rx))
+        // Attempt to send without a pre-check to avoid TOCTOU race.
+        // On failure, recover the XferRequest so caller can fall back to inline polling.
+        match tx.try_send(notification) {
+            Ok(()) => Ok(TransferCompleteNotification::new(done_rx)),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(notification)) => {
+                let xfer_req = notification.checker.into_xfer_req();
+                Err((RegistrationError::ChannelUnavailable, xfer_req))
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(notification)) => {
+                let xfer_req = notification.checker.into_xfer_req();
+                Err((RegistrationError::HandlerNotAvailable, xfer_req))
+            }
+        }
     }
 
     /// Check if async notifications are available.

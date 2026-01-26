@@ -29,6 +29,14 @@ impl NixlStatusChecker {
     pub fn new(agent: NixlAgent, xfer_req: XferRequest) -> Self {
         Self { agent, xfer_req }
     }
+
+    /// Consume the checker and return the underlying XferRequest.
+    ///
+    /// Used to recover the request when registration fails, allowing the
+    /// caller to fall back to inline polling.
+    pub fn into_xfer_req(self) -> XferRequest {
+        self.xfer_req
+    }
 }
 
 impl CompletionChecker for NixlStatusChecker {
