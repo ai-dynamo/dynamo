@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use rmp_serde as rmps;
 use serde::Deserialize;
 use serde::Serialize;
@@ -15,11 +16,27 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher};
+use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher as EventPublisherTrait};
+use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
     component::{Component, Namespace},
     transports::nats::{NatsQueue, Slug},
 };
+
+/// Helper function to create a KV stream name from a component and subject.
+///
+/// Generates a slugified stream name in the format:
+/// `namespace-{namespace}-component-{component}-{subject}`
+fn create_kv_stream_name(component: &Component, subject: &str) -> String {
+    let event_plane_subject = format!(
+        "namespace.{}.component.{}",
+        component.namespace().name(),
+        component.name()
+    );
+    Slug::slugify(&format!("{}.{}", event_plane_subject, subject))
+        .to_string()
+        .replace("_", "-")
+}
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
@@ -176,19 +193,27 @@ impl KvEventPublisher {
                 ))
         });
 
-        // Connect the NatsQueue before passing it to the event processor
         let cancellation_token_clone = cancellation_token.clone();
         let local_indexer_clone = local_indexer.clone();
 
         if enable_local_indexer {
-            // When local indexer is enabled, use NATS Core (Component) for publishing.
-            // This is simpler and doesn't require JetStream durability since recovery
-            // is handled via the local indexer's event buffer.
-            tracing::info!("Using NATS Core for KV event publishing (local_indexer mode)");
+            // When local indexer is enabled, use the event plane directly.
+            // EventPublisher handles transport selection (ZMQ or NATS) based on environment.
+            // Durability is provided by the local indexer's event buffer.
+            tracing::info!("Using event plane for KV event publishing (local_indexer mode)");
             let component_clone = component.clone();
             component.drt().runtime().secondary().spawn(async move {
+                let event_publisher =
+                    match EventPublisher::for_component(&component_clone, KV_EVENT_SUBJECT).await {
+                        Ok(publisher) => publisher,
+                        Err(e) => {
+                            tracing::error!("Failed to create event publisher: {}", e);
+                            return;
+                        }
+                    };
+
                 start_event_processor(
-                    component_clone,
+                    event_publisher,
                     worker_id,
                     cancellation_token_clone,
                     rx,
@@ -198,10 +223,7 @@ impl KvEventPublisher {
             });
         } else {
             // When local indexer is disabled, use JetStream (NatsQueue) for durability.
-            let stream_name =
-                Slug::slugify(&format!("{}.{}", component.subject(), KV_EVENT_SUBJECT))
-                    .to_string()
-                    .replace("_", "-");
+            let stream_name = create_kv_stream_name(&component, KV_EVENT_SUBJECT);
             let nats_server = std::env::var(env_nats::NATS_SERVER)
                 .unwrap_or_else(|_| "nats://localhost:4222".to_string());
             let mut nats_queue = NatsQueue::new_without_consumer(
@@ -215,7 +237,7 @@ impl KvEventPublisher {
                     tracing::error!("Failed to connect NatsQueue: {e}");
                     return;
                 }
-                start_event_processor(
+                start_event_processor_jetstream(
                     nats_queue,
                     worker_id,
                     cancellation_token_clone,
@@ -259,7 +281,27 @@ impl Drop for KvEventPublisher {
     }
 }
 
-async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
+#[async_trait]
+trait EventSink: Send + Sync {
+    async fn publish_event(&self, event: &RouterEvent) -> Result<()>;
+}
+
+#[async_trait]
+impl EventSink for EventPublisher {
+    async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
+        self.publish(event).await
+    }
+}
+
+#[async_trait]
+impl EventSink for NatsQueue {
+    async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
+        self.publish(KV_EVENT_SUBJECT, event).await
+    }
+}
+
+/// Event processor for ephemeral transports (NATS Core / ZMQ).
+async fn start_event_processor<P: EventSink + Send + Sync + 'static>(
     publisher: P,
     worker_id: u64,
     cancellation_token: CancellationToken,
@@ -294,11 +336,55 @@ async fn start_event_processor<P: EventPublisher + Send + Sync + 'static>(
                     }
                 }
 
-                // Then publish to NATS for global distribution
-                // Use KV_EVENT_SUBJECT so both JetStream and NATS Core subscribers
-                // can receive events on the expected subject.
-                if let Err(e) = publisher.publish(KV_EVENT_SUBJECT, &router_event).await {
-                    tracing::error!("Failed to publish event to NATS: {}", e);
+                // Then publish to event plane for global distribution.
+                if let Err(e) = publisher.publish_event(&router_event).await {
+                    tracing::error!("Failed to publish event: {}", e);
+                }
+
+            }
+        }
+    }
+}
+
+/// Event processor using JetStream (durable).
+async fn start_event_processor_jetstream(
+    publisher: NatsQueue,
+    worker_id: u64,
+    cancellation_token: CancellationToken,
+    mut rx: mpsc::UnboundedReceiver<KvCacheEvent>,
+    local_indexer: Option<Arc<LocalKvIndexer>>,
+) {
+    loop {
+        tokio::select! {
+            _ = cancellation_token.cancelled() => {
+                tracing::info!("KV Event source received cancellation signal");
+                break;
+            }
+            event = rx.recv() => {
+                let Some(event) = event else {
+                    tracing::debug!("Event processor channel closed.");
+                    break;
+                };
+
+                // Encapsulate in a router event.
+                tracing::trace!("Event processor for worker_id {} processing event: {:?}", worker_id, event.data);
+                let router_event = RouterEvent::new(worker_id, event);
+
+                // Apply to local indexer first (if present)
+                if let Some(indexer) = &local_indexer {
+                    // Adds event into local indexer, and logs it into internal buffer
+                    if let Err(e) = indexer.apply_event_with_buffer(router_event.clone()).await {
+                        tracing::warn!(
+                            "Failed to send event to local indexer for worker {}: {}",
+                            worker_id,
+                            e
+                        );
+                    }
+                }
+
+                // Then publish to event plane for global distribution
+                if let Err(e) = publisher.publish_event(&router_event).await {
+                    tracing::error!("Failed to publish event to event plane: {}", e);
                 }
 
             }
@@ -634,13 +720,9 @@ enum RawKvEvent {
         parent_block_hash: Option<BlockHashValue>,
         token_ids: Vec<u32>,
         block_size: usize,
-        /// Deprecated in vLLM 0.14.0: use `lora_name` instead
         lora_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
-        /// LoRA adapter name (added in vLLM 0.14.0, replaces lora_id)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        lora_name: Option<String>,
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
@@ -689,7 +771,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut lora_id: Option<Option<u64>> = None;
         let mut medium: Option<Option<String>> = None;
-        let mut lora_name: Option<Option<String>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -715,9 +796,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "medium" => {
                     medium = Some(map.next_value()?);
                 }
-                "lora_name" => {
-                    lora_name = Some(map.next_value()?);
-                }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
                 }
@@ -741,7 +819,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id: lora_id.unwrap_or(None),
                     medium: medium.unwrap_or(None),
-                    lora_name: lora_name.unwrap_or(None),
                     block_mm_infos: block_mm_infos.unwrap_or(None),
                 })
             }
@@ -788,7 +865,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
-                let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
                     seq.next_element()?.unwrap_or(None);
 
@@ -801,7 +877,6 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id,
                     medium,
-                    lora_name,
                     block_mm_infos,
                 })
             }
@@ -886,6 +961,15 @@ impl WorkerMetricsPublisher {
         let nats_rx = self.rx.clone();
 
         tokio::spawn(async move {
+            let event_publisher =
+                match EventPublisher::for_namespace(&namespace, KV_METRICS_SUBJECT).await {
+                    Ok(publisher) => publisher,
+                    Err(e) => {
+                        tracing::error!("Failed to create metrics publisher: {}", e);
+                        return;
+                    }
+                };
+
             let mut rx = nats_rx;
             let mut last_active_decode_blocks: Option<u64> = Some(0);
             let mut pending_publish: Option<WorkerMetrics> = None;
@@ -933,10 +1017,8 @@ impl WorkerMetricsPublisher {
                                 active_prefill_tokens: None,
                             };
 
-                            if let Err(e) =
-                                namespace.publish(KV_METRICS_SUBJECT, &active_load).await
-                            {
-                                tracing::warn!("Failed to publish metrics over NATS: {}", e);
+                            if let Err(e) = event_publisher.publish(&active_load).await {
+                                tracing::warn!("Failed to publish metrics: {}", e);
                             }
                         }
 
@@ -1041,7 +1123,6 @@ mod test_event_processing {
             block_size: 4,
             lora_id: Some(0),
             medium: None,
-            lora_name: None,
             block_mm_infos: None,
         };
 
@@ -1076,7 +1157,6 @@ mod tests_startup_helpers {
     use crate::kv_router::KvIndexer;
     use crate::kv_router::indexer::KvIndexerInterface;
     use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
-    use async_trait;
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
     use zeromq::{PubSocket, Socket, SocketSend, ZmqMessage};
@@ -1105,34 +1185,14 @@ mod tests_startup_helpers {
     }
 
     #[async_trait::async_trait]
-    impl EventPublisher for MockComponent {
-        async fn publish(
-            &self,
-            event_name: impl AsRef<str> + Send + Sync,
-            event: &(impl serde::Serialize + Send + Sync),
-        ) -> anyhow::Result<()> {
+    impl EventSink for MockComponent {
+        async fn publish_event(&self, event: &RouterEvent) -> anyhow::Result<()> {
             let bytes = rmp_serde::to_vec(event).unwrap();
             self.published
                 .lock()
                 .unwrap()
-                .push((event_name.as_ref().to_string(), bytes));
+                .push((KV_EVENT_SUBJECT.to_string(), bytes));
             Ok(())
-        }
-
-        async fn publish_bytes(
-            &self,
-            event_name: impl AsRef<str> + Send + Sync,
-            bytes: Vec<u8>,
-        ) -> anyhow::Result<()> {
-            self.published
-                .lock()
-                .unwrap()
-                .push((event_name.as_ref().to_string(), bytes));
-            Ok(())
-        }
-
-        fn subject(&self) -> String {
-            "mock.subject".into()
         }
     }
 
@@ -1330,7 +1390,7 @@ mod tests_startup_helpers {
         }
         assert!(no_blocks, "worker should have no blocks after removal");
 
-        // Global kvindexer should have received two events (create/remove)
+        // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
         assert_eq!(
             published.len(),
@@ -1409,7 +1469,7 @@ mod tests_startup_helpers {
         }
         assert!(no_blocks, "worker should have no blocks after clearing");
 
-        // Global kvindexer should have received two events (create/remove)
+        // Global kvindexer should have recieved two events (create/remove)
         let published = published.lock().unwrap();
         assert_eq!(
             published.len(),
@@ -1506,7 +1566,6 @@ mod tests_startup_helpers {
             block_size: 4,
             lora_id: None,
             medium: None,
-            lora_name: None,
             block_mm_infos: None,
         }];
 
@@ -1815,7 +1874,7 @@ mod test_integration_publisher {
     use super::*;
     use crate::kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
-    use dynamo_runtime::traits::events::EventSubscriber;
+    use dynamo_runtime::transports::event_plane::EventSubscriber;
     use futures::StreamExt;
 
     #[tokio::test]
@@ -1825,11 +1884,11 @@ mod test_integration_publisher {
         let drt = create_test_drt_async().await;
         let namespace = drt.namespace("ns2001".to_string())?;
 
-        // Create a subscriber for the metrics events using subscribe_with_type
-        let mut subscriber = namespace
-            .subscribe_with_type::<ActiveLoad>(KV_METRICS_SUBJECT)
+        // Create a subscriber for the metrics events
+        let mut subscriber = EventSubscriber::for_namespace(&namespace, KV_METRICS_SUBJECT)
             .await
-            .unwrap();
+            .unwrap()
+            .typed::<ActiveLoad>();
 
         // Create WorkerMetricsPublisher
         let publisher = WorkerMetricsPublisher::new().unwrap();
@@ -1857,7 +1916,7 @@ mod test_integration_publisher {
                 .await
                 .unwrap();
 
-        let event = result.unwrap().unwrap(); // Unwrap the Option and the Result
+        let (_envelope, event) = result.unwrap().unwrap(); // Unwrap the Option and the Result
         assert_eq!(event.worker_id, worker_id);
         assert_eq!(event.active_decode_blocks, Some(900)); // Last value: 9 * 100
         assert_eq!(event.active_prefill_tokens, None); // Worker doesn't publish prefill tokens

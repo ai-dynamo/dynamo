@@ -979,16 +979,13 @@ impl KvIndexer {
 
                         Some(event) = event_rx.recv() => {
                             let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                            // Only clone if we need the event for prune_manager afterward
-                            let event_for_prune = prune_manager.is_some().then(|| event.clone());
-                            let result = trie.apply_event(event);
+                            let result = trie.apply_event(event.clone());
                             let result_is_ok = result.is_ok();
                             metrics.increment_event_applied(event_type, result);
 
                             // Track blocks in PruneManager if TTL is enabled and event was stored successfully
                             let Some(ref mut pm) = prune_manager else { continue };
                             if !result_is_ok { continue };
-                            let Some(ref event) = event_for_prune else { continue };
                             let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
 
                             let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
@@ -1710,16 +1707,13 @@ impl KvIndexerSharded {
 
                             Some(event) = shard_event_rx.recv() => {
                                 let event_type = KvIndexerMetrics::get_event_type(&event.event.data);
-                                // Only clone if we need the event for prune_manager afterward
-                                let event_for_prune = prune_manager.is_some().then(|| event.clone());
-                                let result = trie.apply_event(event);
+                                let result = trie.apply_event(event.clone());
                                 let result_is_ok = result.is_ok();
                                 metrics.increment_event_applied(event_type, result);
 
                                 // Track blocks in PruneManager if TTL is enabled and event was stored successfully
                                 let Some(ref mut pm) = prune_manager else { continue };
                                 if !result_is_ok { continue };
-                                let Some(ref event) = event_for_prune else { continue };
                                 let KvCacheEventData::Stored(ref store_data) = event.event.data else { continue };
 
                                 let worker = WorkerWithDpRank::new(event.worker_id, event.event.dp_rank);
