@@ -13,7 +13,7 @@
 //!
 //! Run with: cargo run --package dynamo-llm --bin radix_tree_microbench --features kv-router-stress -- --help
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use dynamo_llm::kv_router::{
     indexer::{RadixTree, RouterEvent},
     protocols::{
@@ -22,12 +22,29 @@ use dynamo_llm::kv_router::{
         compute_block_hash_for_seq,
     },
 };
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use std::time::{Duration, Instant};
+
+/// Sweep benchmark mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SweepMode {
+    /// Vary sequence/query length (query has exactly `depth` blocks, all matching)
+    Depth,
+    /// Vary match length (query has `max_depth` blocks, first `depth` match, rest garbage)
+    MatchLength,
+    /// Vary number of prefix prompt groups (width of shared prefixes)
+    Width,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "radix_tree_microbench")]
 #[command(about = "Microbenchmark for radix tree operations")]
 struct Args {
+    /// Ignored: passed by cargo bench harness
+    #[arg(long, hide = true)]
+    bench: bool,
+
     /// Target tree size in total (worker, block) pairs
     #[arg(long, default_value = "10000")]
     size: usize,
@@ -44,17 +61,17 @@ struct Args {
     #[arg(long, default_value = "1000")]
     iterations: usize,
 
-    /// Prefix sharing ratio (0.0 to 1.0) - fraction of sequences sharing a common prefix
-    #[arg(long, default_value = "0.5")]
-    prefix_share_ratio: f64,
+    /// Prefix prompt ratio (0.0 to 1.0) - portion of sequence from the beginning that is a shared prefix
+    #[arg(long, default_value = "0.25")]
+    prefix_prompt_ratio: f64,
 
-    /// Random seed for reproducibility
-    #[arg(long, default_value = "42")]
-    seed: u64,
+    /// Number of unique prefix prompt groups to randomly sample from
+    #[arg(long, default_value = "4")]
+    num_prefix_prompts: usize,
 
-    /// Run only specific benchmark (hash, store, remove, find_matches, sweep, or all)
+    /// Run only specific benchmark (hash, store, remove, find_matches, dump, sweep, or all)
     #[arg(long, default_value = "all")]
-    bench: String,
+    benchmark_type: String,
 
     /// KV block size in tokens (for hash computation)
     #[arg(long, default_value = "16")]
@@ -84,15 +101,21 @@ struct Args {
     #[arg(long, default_value = "table")]
     sweep_format: String,
 
-    /// Sweep match length instead of sequence length.
-    /// When set, tree sequences are fixed at max_depth length,
-    /// and depth controls how many blocks of the find_matches query match.
-    #[arg(long)]
-    sweep_match_length: bool,
+    /// Sweep mode: what to vary during the sweep
+    #[arg(long, value_enum, default_value = "depth")]
+    sweep_mode: SweepMode,
 
-    /// Fixed sequence length for sweep_match_length mode (defaults to max_depth)
-    #[arg(long)]
-    seq_length: Option<usize>,
+    /// Minimum width (num_prefix_prompts) for width sweep mode
+    #[arg(long, default_value = "1")]
+    min_width: usize,
+
+    /// Maximum width (num_prefix_prompts) for width sweep mode
+    #[arg(long, default_value = "64")]
+    max_width: usize,
+
+    /// Random seed for reproducibility
+    #[arg(long, default_value = "42")]
+    seed: u64,
 }
 
 /// Pre-generated sequence data for benchmarking
@@ -157,24 +180,28 @@ impl SequenceData {
     }
 }
 
-/// Generate sequences with optional prefix sharing
+/// Generate sequences with shared prefix prompts
 fn generate_sequences(
     num_sequences: usize,
     depth: usize,
     num_workers: usize,
-    prefix_share_ratio: f64,
+    prefix_prompt_ratio: f64,
+    num_prefix_prompts: usize,
+    seed: u64,
 ) -> Vec<SequenceData> {
     let mut sequences = Vec::with_capacity(num_sequences);
-    let num_shared_prefix = (num_sequences as f64 * prefix_share_ratio) as usize;
-    let prefix_length = depth / 4;
+    let prefix_length: usize = (depth as f64 * prefix_prompt_ratio).round() as usize;
+    let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
     for seq_id in 0..num_sequences {
         let worker_id = (seq_id % num_workers) as WorkerId;
         let mut seq = SequenceData::new(seq_id as u64, worker_id, depth);
 
-        if seq_id < num_shared_prefix && prefix_length > 0 {
+        if num_prefix_prompts > 0 && prefix_length > 0 {
+            let group_id = rng.random_range(0..num_prefix_prompts);
             for i in 0..prefix_length {
-                seq.local_hashes[i] = LocalBlockHash(0xDEAD_BEEF_0000_0000 | (i as u64));
+                seq.local_hashes[i] =
+                    LocalBlockHash(0xDEAD_BEEF_0000_0000 | ((group_id as u64) << 32) | (i as u64));
             }
         }
 
@@ -305,7 +332,9 @@ fn bench_store(args: &Args) {
         num_sequences.saturating_sub(bench_iters),
         args.depth,
         args.num_workers,
-        args.prefix_share_ratio,
+        args.prefix_prompt_ratio,
+        args.num_prefix_prompts,
+        args.seed,
     );
 
     // Generate sequences to insert during benchmark
@@ -357,7 +386,9 @@ fn bench_remove(args: &Args) {
         num_sequences,
         args.depth,
         args.num_workers,
-        args.prefix_share_ratio,
+        args.prefix_prompt_ratio,
+        args.num_prefix_prompts,
+        args.seed,
     );
 
     // Build tree once, then remove/re-add to restore state after each timed removal
@@ -399,7 +430,9 @@ fn bench_find_matches(args: &Args) {
         num_sequences,
         args.depth,
         args.num_workers,
-        args.prefix_share_ratio,
+        args.prefix_prompt_ratio,
+        args.num_prefix_prompts,
+        args.seed,
     );
 
     // Build tree once for all find_matches calls
@@ -417,9 +450,10 @@ fn bench_find_matches(args: &Args) {
 
     for i in 0..args.iterations {
         let seq = &sequences[i % sequences.len()];
+        let hashes_copy = seq.local_hashes.clone();
 
         let start = Instant::now();
-        let _ = tree.find_matches(seq.local_hashes.clone(), false);
+        let _ = tree.find_matches(hashes_copy, false);
         let elapsed = start.elapsed();
 
         hit_durations.push(elapsed);
@@ -501,363 +535,363 @@ fn bench_find_matches(args: &Args) {
     early_exit_stats.print("FIND_MATCHES (EARLY_EXIT)", args.depth);
 }
 
-/// Generate logarithmically spaced depth values
-fn generate_depth_points(min_depth: usize, max_depth: usize, num_points: usize) -> Vec<usize> {
+/// Generate logarithmically spaced values between min and max
+fn generate_log_spaced_points(min_val: usize, max_val: usize, num_points: usize) -> Vec<usize> {
     if num_points <= 1 {
-        return vec![max_depth];
+        return vec![max_val];
     }
 
-    let log_min = (min_depth as f64).ln();
-    let log_max = (max_depth as f64).ln();
+    let log_min = (min_val as f64).ln();
+    let log_max = (max_val as f64).ln();
     let step = (log_max - log_min) / (num_points - 1) as f64;
 
-    let mut depths: Vec<usize> = (0..num_points)
+    let mut points: Vec<usize> = (0..num_points)
         .map(|i| (log_min + step * i as f64).exp().round() as usize)
-        .map(|d| d.max(1)) // Ensure minimum depth of 1
+        .map(|v| v.max(1)) // Ensure minimum value of 1
         .collect();
 
     // Deduplicate (logarithmic spacing can produce duplicates at low values)
-    depths.dedup();
-    depths
+    points.dedup();
+    points
 }
 
-/// Results for a single depth point
+/// Latency statistics (avg, p50, p99) in nanoseconds
 #[derive(Debug)]
-struct DepthResult {
-    depth: usize,
-    store_avg_ns: u64,
-    store_p50_ns: u64,
-    store_p99_ns: u64,
-    remove_avg_ns: u64,
-    remove_p50_ns: u64,
-    remove_p99_ns: u64,
-    find_matches_avg_ns: u64,
-    find_matches_p50_ns: u64,
-    find_matches_p99_ns: u64,
+struct DurationStats {
+    avg_ns: u64,
+    p50_ns: u64,
+    p99_ns: u64,
 }
 
-/// Benchmark store/remove/lookup across a range of depths
-fn bench_sweep(args: &Args) {
-    println!("\n=== Depth Sweep Benchmark ===");
-    println!(
-        "  Depths: {} to {} ({} points, log-spaced)",
-        args.min_depth, args.max_depth, args.sweep_points
-    );
-    println!("  Iterations per depth: {}", args.sweep_iterations);
-    println!("  Tree size: {} blocks", args.size);
-    println!("  Workers: {}", args.num_workers);
-    println!();
-
-    let depths = generate_depth_points(args.min_depth, args.max_depth, args.sweep_points);
-    let mut results: Vec<DepthResult> = Vec::with_capacity(depths.len());
-
-    for (idx, &depth) in depths.iter().enumerate() {
-        // Skip if depth is larger than size (would result in 0 sequences)
-        if depth > args.size {
-            continue;
+impl DurationStats {
+    /// Compute stats from durations. Sorts the input vector in place.
+    fn from_durations(durations: &mut [Duration]) -> Self {
+        durations.sort();
+        let n = durations.len();
+        let avg = durations.iter().sum::<Duration>() / n as u32;
+        Self {
+            avg_ns: avg.as_nanos() as u64,
+            p50_ns: durations[n / 2].as_nanos() as u64,
+            p99_ns: durations[n * 99 / 100].as_nanos() as u64,
         }
+    }
+}
 
-        let num_sequences = args.size / depth;
-        if num_sequences < 2 {
-            continue; // Need at least 2 sequences for meaningful benchmark
-        }
+/// Results for a single sweep point (depth or width)
+#[derive(Debug)]
+struct SweepResult {
+    point: usize,
+    point_label: &'static str,
+    store: DurationStats,
+    remove: DurationStats,
+    find_matches: DurationStats,
+}
 
-        print!(
-            "[{}/{}] depth={}, sequences={}... ",
-            idx + 1,
-            depths.len(),
-            depth,
-            num_sequences
-        );
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
-
-        // Generate sequences for this depth
-        let sequences = generate_sequences(
-            num_sequences,
-            depth,
-            args.num_workers,
-            args.prefix_share_ratio,
-        );
-
-        // --- STORE benchmark ---
-        // Build tree once with fewer sequences, then store additional ones
-        let mut store_durations = Vec::with_capacity(args.sweep_iterations);
-        let pre_count = num_sequences
-            .saturating_sub(args.sweep_iterations)
-            .max(num_sequences / 2);
-        let pre_sequences = &sequences[..pre_count];
-        let store_sequences = &sequences[pre_count..];
-
-        let mut store_tree = build_tree(pre_sequences);
-        for (i, seq_to_store) in store_sequences
-            .iter()
-            .enumerate()
-            .take(args.sweep_iterations)
-        {
-            let event = seq_to_store.to_store_event(i as u64);
-
-            let start = Instant::now();
-            let _ = store_tree.apply_event(event);
-            store_durations.push(start.elapsed());
-        }
-
-        // --- REMOVE benchmark ---
-        // Build tree once, remove/re-add to restore state
-        let mut remove_tree = build_tree(&sequences);
-        let mut remove_durations = Vec::with_capacity(args.sweep_iterations);
-        for i in 0..args.sweep_iterations.min(num_sequences) {
-            let seq_to_remove = &sequences[i % sequences.len()];
-            let remove_event = seq_to_remove.to_remove_event(i as u64);
-
-            let start = Instant::now();
-            let _ = remove_tree.apply_event(remove_event);
-            remove_durations.push(start.elapsed());
-
-            // Re-add to restore state (untimed)
-            let store_event = seq_to_remove.to_store_event(i as u64 + 1000000);
-            let _ = remove_tree.apply_event(store_event);
-        }
-
-        // --- FIND_MATCHES benchmark ---
-        let tree = build_tree(&sequences);
-        let mut find_matches_durations = Vec::with_capacity(args.sweep_iterations);
-        for i in 0..args.sweep_iterations {
-            let seq = &sequences[i % sequences.len()];
-
-            let start = Instant::now();
-            let _ = tree.find_matches(seq.local_hashes.clone(), false);
-            find_matches_durations.push(start.elapsed());
-        }
-
-        // Compute stats
-        store_durations.sort();
-        remove_durations.sort();
-        find_matches_durations.sort();
-
-        let store_avg = store_durations.iter().sum::<Duration>() / store_durations.len() as u32;
-        let remove_avg = remove_durations.iter().sum::<Duration>() / remove_durations.len() as u32;
-        let find_matches_avg =
-            find_matches_durations.iter().sum::<Duration>() / find_matches_durations.len() as u32;
-
-        let result = DepthResult {
-            depth,
-            store_avg_ns: store_avg.as_nanos() as u64,
-            store_p50_ns: store_durations[store_durations.len() / 2].as_nanos() as u64,
-            store_p99_ns: store_durations[store_durations.len() * 99 / 100].as_nanos() as u64,
-            remove_avg_ns: remove_avg.as_nanos() as u64,
-            remove_p50_ns: remove_durations[remove_durations.len() / 2].as_nanos() as u64,
-            remove_p99_ns: remove_durations[remove_durations.len() * 99 / 100].as_nanos() as u64,
-            find_matches_avg_ns: find_matches_avg.as_nanos() as u64,
-            find_matches_p50_ns: find_matches_durations[find_matches_durations.len() / 2].as_nanos()
-                as u64,
-            find_matches_p99_ns: find_matches_durations[find_matches_durations.len() * 99 / 100]
-                .as_nanos() as u64,
-        };
-
-        println!(
-            "store={:.2}us, remove={:.2}us, find_matches={:.2}us",
-            result.store_avg_ns as f64 / 1000.0,
-            result.remove_avg_ns as f64 / 1000.0,
-            result.find_matches_avg_ns as f64 / 1000.0
-        );
-
-        results.push(result);
+impl SweepResult {
+    fn csv_header(&self) -> String {
+        format!(
+            "{},store_avg_ns,store_p50_ns,store_p99_ns,remove_avg_ns,remove_p50_ns,remove_p99_ns,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns",
+            self.point_label
+        )
     }
 
-    // Print results in requested format
+    fn csv_row(&self) -> String {
+        format!(
+            "{},{},{},{},{},{},{},{},{},{}",
+            self.point,
+            self.store.avg_ns,
+            self.store.p50_ns,
+            self.store.p99_ns,
+            self.remove.avg_ns,
+            self.remove.p50_ns,
+            self.remove.p99_ns,
+            self.find_matches.avg_ns,
+            self.find_matches.p50_ns,
+            self.find_matches.p99_ns
+        )
+    }
+
+    fn table_header(&self) -> String {
+        format!(
+            "{:>8} | store_avg    store_p50    store_p99 | remove_avg   remove_p50   remove_p99 |       fm_avg       fm_p50       fm_p99",
+            self.point_label
+        )
+    }
+
+    fn table_row(&self) -> String {
+        format!(
+            "{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
+            self.point,
+            format_duration_ns(self.store.avg_ns),
+            format_duration_ns(self.store.p50_ns),
+            format_duration_ns(self.store.p99_ns),
+            format_duration_ns(self.remove.avg_ns),
+            format_duration_ns(self.remove.p50_ns),
+            format_duration_ns(self.remove.p99_ns),
+            format_duration_ns(self.find_matches.avg_ns),
+            format_duration_ns(self.find_matches.p50_ns),
+            format_duration_ns(self.find_matches.p99_ns)
+        )
+    }
+}
+
+fn print_sweep_results_dynamic(results: &[SweepResult], format: &str) {
+    if results.is_empty() {
+        return;
+    }
     println!();
-    if args.sweep_format == "csv" {
-        println!(
-            "depth,store_avg_ns,store_p50_ns,store_p99_ns,remove_avg_ns,remove_p50_ns,remove_p99_ns,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns"
-        );
-        for r in &results {
-            println!(
-                "{},{},{},{},{},{},{},{},{},{}",
-                r.depth,
-                r.store_avg_ns,
-                r.store_p50_ns,
-                r.store_p99_ns,
-                r.remove_avg_ns,
-                r.remove_p50_ns,
-                r.remove_p99_ns,
-                r.find_matches_avg_ns,
-                r.find_matches_p50_ns,
-                r.find_matches_p99_ns
-            );
+    if format == "csv" {
+        println!("{}", results[0].csv_header());
+        for r in results {
+            println!("{}", r.csv_row());
         }
     } else {
-        // Table format
-        println!(
-            "{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
-            "depth",
-            "store_avg",
-            "store_p50",
-            "store_p99",
-            "remove_avg",
-            "remove_p50",
-            "remove_p99",
-            "fm_avg",
-            "fm_p50",
-            "fm_p99"
-        );
+        println!("{}", results[0].table_header());
         println!("{}", "-".repeat(130));
-        for r in &results {
-            println!(
-                "{:>8} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12} | {:>12} {:>12} {:>12}",
-                r.depth,
-                format_duration_ns(r.store_avg_ns),
-                format_duration_ns(r.store_p50_ns),
-                format_duration_ns(r.store_p99_ns),
-                format_duration_ns(r.remove_avg_ns),
-                format_duration_ns(r.remove_p50_ns),
-                format_duration_ns(r.remove_p99_ns),
-                format_duration_ns(r.find_matches_avg_ns),
-                format_duration_ns(r.find_matches_p50_ns),
-                format_duration_ns(r.find_matches_p99_ns)
-            );
+        for r in results {
+            println!("{}", r.table_row());
         }
     }
 }
 
-/// Results for a single match-length point (find_matches only)
-#[derive(Debug)]
-struct MatchLengthResult {
-    match_length: usize,
-    seq_length: usize,
-    find_matches_avg_ns: u64,
-    find_matches_p50_ns: u64,
-    find_matches_p99_ns: u64,
-}
-
-/// Benchmark find_matches with varying match lengths (fixed tree structure)
-fn bench_sweep_match_length(args: &Args) {
-    let seq_length = args.seq_length.unwrap_or(args.max_depth);
+/// Benchmark store/remove/find_matches across a range of depths or widths.
+///
+/// For each sweep point, the tree is rebuilt.
+///
+/// With `--sweep_mode match_length`, find_matches queries have `max_depth` blocks
+/// where only the first `depth` blocks match (rest are garbage). With `--sweep_mode depth`,
+/// queries have exactly `depth` blocks (all matching). With `--sweep_mode width`,
+/// the number of prefix prompt groups is varied.
+fn bench_sweep(args: &Args) {
+    let seq_length = args.max_depth;
     let num_sequences = args.size / seq_length;
 
-    if num_sequences < 1 {
+    if num_sequences < 2 {
         eprintln!(
-            "Error: size {} / seq_length {} = 0 sequences. Increase --size or decrease sequence length.",
-            args.size, seq_length
+            "Error: size {} / max_depth {} = {} sequences (need at least 2). \
+             Increase --size or decrease --max-depth.",
+            args.size, seq_length, num_sequences
         );
         std::process::exit(1);
     }
 
-    println!("\n=== Match Length Sweep Benchmark ===");
+    let (mode_name, point_label, sweep_points) = match args.sweep_mode {
+        SweepMode::Depth => (
+            "Depth",
+            "depth",
+            generate_log_spaced_points(args.min_depth, args.max_depth, args.sweep_points),
+        ),
+        SweepMode::MatchLength => (
+            "Match Length",
+            "depth",
+            generate_log_spaced_points(args.min_depth, args.max_depth, args.sweep_points),
+        ),
+        SweepMode::Width => (
+            "Width",
+            "width",
+            generate_log_spaced_points(args.min_width, args.max_width, args.sweep_points),
+        ),
+    };
+
+    println!("\n=== {} Sweep Benchmark ===", mode_name);
     println!("  Sequence length: {} blocks (fixed)", seq_length);
-    println!(
-        "  Match lengths: {} to {} ({} points, log-spaced)",
-        args.min_depth,
-        args.max_depth.min(seq_length),
-        args.sweep_points
-    );
-    println!("  Iterations per match length: {}", args.sweep_iterations);
+    match args.sweep_mode {
+        SweepMode::Depth | SweepMode::MatchLength => {
+            println!(
+                "  Sweep range: {} to {} ({} points, log-spaced)",
+                args.min_depth, args.max_depth, args.sweep_points
+            );
+        }
+        SweepMode::Width => {
+            println!(
+                "  Width range: {} to {} ({} points, log-spaced)",
+                args.min_width, args.max_width, args.sweep_points
+            );
+            println!(
+                "  Prefix prompt ratio: {:.1}%",
+                args.prefix_prompt_ratio * 100.0
+            );
+        }
+    }
+    println!("  Iterations per point: {}", args.sweep_iterations);
     println!(
         "  Tree: {} sequences, {} total blocks",
         num_sequences,
         num_sequences * seq_length
     );
     println!("  Workers: {}", args.num_workers);
+    match args.sweep_mode {
+        SweepMode::MatchLength => {
+            println!("  Mode: find_matches queries padded with garbage to max_depth");
+        }
+        SweepMode::Depth => {
+            println!("  Mode: find_matches queries truncated to depth");
+        }
+        SweepMode::Width => {
+            println!("  Mode: varying num_prefix_prompts, full-depth operations");
+        }
+    }
     println!();
 
-    // Build tree once with fixed-length sequences
-    let sequences = generate_sequences(
-        num_sequences,
-        seq_length,
-        args.num_workers,
-        args.prefix_share_ratio,
-    );
-    let tree = build_tree(&sequences);
+    let mut results: Vec<SweepResult> = Vec::with_capacity(sweep_points.len());
 
-    // Generate match length points (capped at seq_length)
-    let max_match = args.max_depth.min(seq_length);
-    let match_lengths = generate_depth_points(args.min_depth, max_match, args.sweep_points);
-    let mut results: Vec<MatchLengthResult> = Vec::with_capacity(match_lengths.len());
-
-    for (idx, &match_len) in match_lengths.iter().enumerate() {
+    for (idx, &point) in sweep_points.iter().enumerate() {
         print!(
-            "[{}/{}] match_length={}... ",
+            "[{}/{}] {}={}... ",
             idx + 1,
-            match_lengths.len(),
-            match_len
+            sweep_points.len(),
+            point_label,
+            point
         );
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
-        // Generate find_matches queries: first match_len blocks match, rest are garbage
-        let mut find_matches_durations = Vec::with_capacity(args.sweep_iterations);
+        // Determine depth and num_prefix_prompts for this sweep point
+        let (depth, num_prefix_prompts) = match args.sweep_mode {
+            SweepMode::Depth | SweepMode::MatchLength => (point, args.num_prefix_prompts),
+            SweepMode::Width => (seq_length, point),
+        };
 
-        for i in 0..args.sweep_iterations {
-            let seq = &sequences[i % sequences.len()];
+        // Generate sequences and rebuild tree for this point
+        let extra_count = args.sweep_iterations;
+        let all_sequences = generate_sequences(
+            num_sequences + extra_count,
+            seq_length,
+            args.num_workers,
+            args.prefix_prompt_ratio,
+            num_prefix_prompts,
+            args.seed,
+        );
+        let tree_sequences = &all_sequences[..num_sequences];
+        let extra_sequences = &all_sequences[num_sequences..];
 
-            // Build query: match_len blocks from real sequence, then garbage
-            let mut query_hashes = seq.local_hashes[..match_len].to_vec();
-            // Add garbage blocks to reach full seq_length
-            let garbage_len = seq_length - match_len;
-            query_hashes.extend(
-                (0..garbage_len).map(|j| {
-                    LocalBlockHash(0xBAD_C0DE_0000_0000 | ((i as u64) << 16) | (j as u64))
-                }),
-            );
+        let mut tree = build_tree(tree_sequences);
+
+        // --- STORE benchmark ---
+        let mut store_durations = Vec::with_capacity(args.sweep_iterations);
+        for (i, seq) in extra_sequences
+            .iter()
+            .enumerate()
+            .take(args.sweep_iterations)
+        {
+            let truncated = SequenceData {
+                worker_id: seq.worker_id,
+                local_hashes: seq.local_hashes[..depth].to_vec(),
+                external_hashes: seq.external_hashes[..depth].to_vec(),
+            };
+            let store_event = truncated.to_store_event(i as u64);
 
             let start = Instant::now();
-            let _ = tree.find_matches(query_hashes, false);
+            let _ = tree.apply_event(store_event);
+            store_durations.push(start.elapsed());
+
+            // Remove to restore tree state (untimed)
+            let remove_event = truncated.to_remove_event(i as u64);
+            let _ = tree.apply_event(remove_event);
+        }
+
+        // --- REMOVE benchmark ---
+        let mut remove_durations = Vec::with_capacity(args.sweep_iterations);
+        for i in 0..args.sweep_iterations.min(num_sequences) {
+            let seq = &tree_sequences[i % tree_sequences.len()];
+            let truncated = SequenceData {
+                worker_id: seq.worker_id,
+                local_hashes: seq.local_hashes[..depth].to_vec(),
+                external_hashes: seq.external_hashes[..depth].to_vec(),
+            };
+            let remove_event = truncated.to_remove_event(i as u64);
+
+            let start = Instant::now();
+            let _ = tree.apply_event(remove_event);
+            remove_durations.push(start.elapsed());
+
+            // Re-add to restore state (untimed)
+            let store_event = truncated.to_store_event(i as u64 + 1000000);
+            let _ = tree.apply_event(store_event);
+        }
+
+        // --- FIND_MATCHES benchmark ---
+        let mut find_matches_durations = Vec::with_capacity(args.sweep_iterations);
+        for i in 0..args.sweep_iterations {
+            let seq = &tree_sequences[i % tree_sequences.len()];
+
+            let query = match args.sweep_mode {
+                SweepMode::MatchLength => {
+                    // Match length mode: first `depth` blocks match, rest are garbage
+                    let mut q = seq.local_hashes[..depth].to_vec();
+                    let garbage_len = seq_length - depth;
+                    q.extend((0..garbage_len).map(|j| {
+                        LocalBlockHash(0xBAD_C0DE_0000_0000 | ((i as u64) << 16) | (j as u64))
+                    }));
+                    q
+                }
+                SweepMode::Depth | SweepMode::Width => {
+                    // Depth/width mode: query has exactly `depth` blocks
+                    seq.local_hashes[..depth].to_vec()
+                }
+            };
+
+            let start = Instant::now();
+            let _ = tree.find_matches(query, false);
             find_matches_durations.push(start.elapsed());
         }
 
-        find_matches_durations.sort();
-        let find_matches_avg =
-            find_matches_durations.iter().sum::<Duration>() / find_matches_durations.len() as u32;
-
-        let result = MatchLengthResult {
-            match_length: match_len,
-            seq_length,
-            find_matches_avg_ns: find_matches_avg.as_nanos() as u64,
-            find_matches_p50_ns: find_matches_durations[find_matches_durations.len() / 2].as_nanos()
-                as u64,
-            find_matches_p99_ns: find_matches_durations[find_matches_durations.len() * 99 / 100]
-                .as_nanos() as u64,
-        };
+        // Compute stats
+        let store = DurationStats::from_durations(&mut store_durations);
+        let remove = DurationStats::from_durations(&mut remove_durations);
+        let find_matches = DurationStats::from_durations(&mut find_matches_durations);
 
         println!(
-            "find_matches={:.2}us",
-            result.find_matches_avg_ns as f64 / 1000.0
+            "store={:.2}us, remove={:.2}us, find_matches={:.2}us",
+            store.avg_ns as f64 / 1000.0,
+            remove.avg_ns as f64 / 1000.0,
+            find_matches.avg_ns as f64 / 1000.0
         );
 
-        results.push(result);
+        results.push(SweepResult {
+            point,
+            point_label,
+            store,
+            remove,
+            find_matches,
+        });
     }
 
-    // Print results
-    println!();
-    if args.sweep_format == "csv" {
-        println!(
-            "match_length,seq_length,find_matches_avg_ns,find_matches_p50_ns,find_matches_p99_ns"
-        );
-        for r in &results {
-            println!(
-                "{},{},{},{},{}",
-                r.match_length,
-                r.seq_length,
-                r.find_matches_avg_ns,
-                r.find_matches_p50_ns,
-                r.find_matches_p99_ns
-            );
-        }
-    } else {
-        println!(
-            "{:>12} | {:>10} | {:>12} {:>12} {:>12}",
-            "match_length", "seq_length", "fm_avg", "fm_p50", "fm_p99"
-        );
-        println!("{}", "-".repeat(70));
-        for r in &results {
-            println!(
-                "{:>12} | {:>10} | {:>12} {:>12} {:>12}",
-                r.match_length,
-                r.seq_length,
-                format_duration_ns(r.find_matches_avg_ns),
-                format_duration_ns(r.find_matches_p50_ns),
-                format_duration_ns(r.find_matches_p99_ns)
-            );
-        }
-    }
+    print_sweep_results_dynamic(&results, &args.sweep_format);
+}
+
+/// Benchmark dump_tree_as_events (BFS dump)
+fn bench_dump(args: &Args) {
+    println!("\n=== Benchmarking DUMP_TREE_AS_EVENTS (BFS dump) ===");
+
+    let num_sequences = args.size / args.depth;
+    let sequences = generate_sequences(
+        num_sequences,
+        args.depth,
+        args.num_workers,
+        args.prefix_prompt_ratio,
+        args.num_prefix_prompts,
+        args.seed,
+    );
+
+    let tree = build_tree(&sequences);
+    println!(
+        "  Tree built with {} sequences, {} total blocks",
+        sequences.len(),
+        tree.current_size()
+    );
+
+    // Single iteration timing
+    let start = Instant::now();
+    let events = tree.dump_tree_as_events();
+    let elapsed = start.elapsed();
+
+    println!("\nDUMP_TREE_AS_EVENTS Results:");
+    println!("  Time:        {:?}", elapsed);
+    println!("  Events:      {}", events.len());
+    println!(
+        "  Throughput:  {:.2} events/sec",
+        events.len() as f64 / elapsed.as_secs_f64()
+    );
 }
 
 /// Format nanoseconds as human-readable string
@@ -884,10 +918,12 @@ fn main() {
         || args.block_size == 0
         || args.min_depth == 0
         || args.max_depth == 0
+        || args.min_width == 0
+        || args.max_width == 0
         || args.sweep_iterations == 0
     {
         eprintln!(
-            "size, depth, num_workers, iterations, block_size, min_depth, max_depth, and sweep_iterations must be > 0"
+            "size, depth, num_workers, iterations, block_size, min_depth, max_depth, min_width, max_width, and sweep_iterations must be > 0"
         );
         std::process::exit(1);
     }
@@ -895,20 +931,24 @@ fn main() {
         eprintln!("min_depth must be <= max_depth");
         std::process::exit(1);
     }
-    if !(0.0..=1.0).contains(&args.prefix_share_ratio) {
-        eprintln!("prefix_share_ratio must be between 0.0 and 1.0");
+    if args.min_width > args.max_width {
+        eprintln!("min_width must be <= max_width");
+        std::process::exit(1);
+    }
+    if !(0.0..=1.0).contains(&args.prefix_prompt_ratio) {
+        eprintln!("prefix_prompt_ratio must be between 0.0 and 1.0");
         std::process::exit(1);
     }
 
     let num_sequences = args.size / args.depth;
     if matches!(
-        args.bench.as_str(),
+        args.benchmark_type.as_str(),
         "store" | "remove" | "lookup" | "sweep" | "all"
     ) && num_sequences == 0
     {
         eprintln!(
             "size must be >= depth to produce at least one sequence for {}",
-            args.bench
+            args.benchmark_type
         );
         std::process::exit(1);
     }
@@ -927,38 +967,36 @@ fn main() {
     println!("  Workers: {}", args.num_workers);
     println!("  Iterations: {}", args.iterations);
     println!(
-        "  Prefix share ratio: {:.1}%",
-        args.prefix_share_ratio * 100.0
+        "  Prefix prompt ratio: {:.1}% ({} blocks at depth {})",
+        args.prefix_prompt_ratio * 100.0,
+        (args.depth as f64 * args.prefix_prompt_ratio).round() as usize,
+        args.depth
     );
-    println!("  Seed: {}", args.seed);
+    println!("  Prefix prompt groups: {}", args.num_prefix_prompts);
 
     println!(
         "\n  Derived: {} sequences to reach target size",
         num_sequences
     );
 
-    match args.bench.as_str() {
+    match args.benchmark_type.as_str() {
         "hash" => bench_hash(&args),
         "store" => bench_store(&args),
         "remove" => bench_remove(&args),
         "find_matches" => bench_find_matches(&args),
-        "sweep" => {
-            if args.sweep_match_length {
-                bench_sweep_match_length(&args);
-            } else {
-                bench_sweep(&args);
-            }
-        }
+        "dump" => bench_dump(&args),
+        "sweep" => bench_sweep(&args),
         "all" => {
             bench_hash(&args);
             bench_store(&args);
             bench_remove(&args);
             bench_find_matches(&args);
+            bench_dump(&args);
         }
         _ => {
             eprintln!(
-                "Unknown benchmark type: {}. Use 'hash', 'store', 'remove', 'find_matches', 'sweep', or 'all'",
-                args.bench
+                "Unknown benchmark type: {}. Use 'hash', 'store', 'remove', 'find_matches', 'dump', 'sweep', or 'all'",
+                args.benchmark_type
             );
             std::process::exit(1);
         }
