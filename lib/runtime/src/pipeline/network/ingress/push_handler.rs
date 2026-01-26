@@ -41,45 +41,53 @@ impl WorkHandlerMetrics {
         }
     }
 
-    /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
+    /// Create WorkHandlerMetrics from an endpoint using its built-in labeling.
+    ///
+    /// These metrics are registered only at the endpoint level (not to parent hierarchies)
+    /// because they include endpoint-specific labels that would cause collisions when
+    /// multiple endpoints in the same component register metrics with the same name.
     pub fn from_endpoint(
         endpoint: &crate::component::Endpoint,
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let metrics_labels = metrics_labels.unwrap_or(&[]);
         let metrics = endpoint.metrics();
-        let request_counter = metrics.create_intcounter(
+
+        // Use _local variants to avoid registering to parent registries.
+        // Work handler metrics have endpoint-specific labels (dynamo_endpoint) that would
+        // cause Prometheus registry collisions when multiple endpoints exist in the same component.
+        let request_counter = metrics.create_intcounter_local(
             work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
             metrics_labels,
         )?;
 
-        let request_duration = metrics.create_histogram(
+        let request_duration = metrics.create_histogram_local(
             work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
             None,
         )?;
 
-        let inflight_requests = metrics.create_intgauge(
+        let inflight_requests = metrics.create_intgauge_local(
             work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
             metrics_labels,
         )?;
 
-        let request_bytes = metrics.create_intcounter(
+        let request_bytes = metrics.create_intcounter_local(
             work_handler::REQUEST_BYTES_TOTAL,
             "Total number of bytes received in requests by work handler",
             metrics_labels,
         )?;
 
-        let response_bytes = metrics.create_intcounter(
+        let response_bytes = metrics.create_intcounter_local(
             work_handler::RESPONSE_BYTES_TOTAL,
             "Total number of bytes sent in responses by work handler",
             metrics_labels,
         )?;
 
-        let error_counter = metrics.create_intcountervec(
+        let error_counter = metrics.create_intcountervec_local(
             work_handler::ERRORS_TOTAL,
             "Total number of errors in work handler processing",
             &[work_handler::ERROR_TYPE_LABEL],

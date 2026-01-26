@@ -199,6 +199,9 @@ impl PrometheusMetric for prometheus::CounterVec {
 /// Metrics section
 /// ==============================
 /// Public helper function to create metrics - accessible for Python bindings
+///
+/// By default, metrics are registered to all parent hierarchy levels (Component, Namespace, DRT)
+/// in addition to the current level. Use `create_metric_local` to only register at the current level.
 pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     hierarchy: &H,
     metric_name: &str,
@@ -206,6 +209,35 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
     labels: &[(&str, &str)],
     buckets: Option<Vec<f64>>,
     const_labels: Option<&[&str]>,
+) -> anyhow::Result<T> {
+    create_metric_internal(hierarchy, metric_name, metric_desc, labels, buckets, const_labels, true)
+}
+
+/// Create a metric that is only registered at the current hierarchy level (not parent levels).
+///
+/// Use this for endpoint-specific metrics (like work handler metrics) that have endpoint-specific
+/// labels which would cause collisions if registered to parent registries where multiple endpoints
+/// might register metrics with the same name but different label values.
+pub fn create_metric_local<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
+    hierarchy: &H,
+    metric_name: &str,
+    metric_desc: &str,
+    labels: &[(&str, &str)],
+    buckets: Option<Vec<f64>>,
+    const_labels: Option<&[&str]>,
+) -> anyhow::Result<T> {
+    create_metric_internal(hierarchy, metric_name, metric_desc, labels, buckets, const_labels, false)
+}
+
+/// Internal implementation of metric creation with configurable parent registration.
+fn create_metric_internal<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
+    hierarchy: &H,
+    metric_name: &str,
+    metric_desc: &str,
+    labels: &[(&str, &str)],
+    buckets: Option<Vec<f64>>,
+    const_labels: Option<&[&str]>,
+    register_to_parents: bool,
 ) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
     validate_no_duplicate_label_keys(labels)?;
@@ -369,14 +401,17 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         T::with_opts(opts)?
     };
 
-    // Register the metric at all hierarchy levels (parents + self)
-    // First register at all parent levels
-    for parent in parent_hierarchies {
-        let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
-        parent.get_metrics_registry().add_metric(collector)?;
+    // Register the metric at hierarchy levels
+    // When register_to_parents is true, register at all parent levels first
+    if register_to_parents {
+        for parent in parent_hierarchies {
+            let collector: Box<dyn prometheus::core::Collector> =
+                Box::new(prometheus_metric.clone());
+            parent.get_metrics_registry().add_metric(collector)?;
+        }
     }
 
-    // Then register at this level
+    // Always register at this level
     let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
     hierarchy.get_metrics_registry().add_metric(collector)?;
 
@@ -529,6 +564,61 @@ impl<H: MetricsHierarchy> Metrics<H> {
         const_label_values: &[(&str, &str)],
     ) -> anyhow::Result<prometheus::IntGaugeVec> {
         create_metric(
+            &self.hierarchy,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
+    }
+
+    // ========================================================================
+    // Local metric creation methods (not registered to parent hierarchies)
+    // ========================================================================
+    // Use these for endpoint-specific metrics that have endpoint-specific labels
+    // which would cause collisions if registered to parent registries.
+
+    /// Create an IntCounter metric registered only at this hierarchy level
+    pub fn create_intcounter_local(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::IntCounter> {
+        create_metric_local(&self.hierarchy, name, description, labels, None, None)
+    }
+
+    /// Create a Histogram metric registered only at this hierarchy level
+    pub fn create_histogram_local(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+        buckets: Option<Vec<f64>>,
+    ) -> anyhow::Result<prometheus::Histogram> {
+        create_metric_local(&self.hierarchy, name, description, labels, buckets, None)
+    }
+
+    /// Create an IntGauge metric registered only at this hierarchy level
+    pub fn create_intgauge_local(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::IntGauge> {
+        create_metric_local(&self.hierarchy, name, description, labels, None, None)
+    }
+
+    /// Create an IntCounterVec metric registered only at this hierarchy level
+    pub fn create_intcountervec_local(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::IntCounterVec> {
+        create_metric_local(
             &self.hierarchy,
             name,
             description,
