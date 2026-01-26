@@ -125,7 +125,7 @@ uv pip install "ai-dynamo[sglang]"  # or [vllm]
 pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 ```
 
-> **Note:** TensorRT-LLM uses `pip` instead of `uv` due to URL-based dependencies, and requires NVIDIA's PyPI for the TRT-LLM wheel. The wheel may not be available for all CUDA versions—see [Release Artifacts](docs/reference/release-artifacts.md#python-wheels) for availability. For broader compatibility, we recommend using the [prebuilt TRT-LLM container](docs/reference/release-artifacts.md#container-images). See the [TRT-LLM guide](docs/backends/trtllm/) for details.
+> **Note:** TensorRT-LLM requires `pip` and NVIDIA's PyPI index. We recommend using the [TensorRT-LLM container](docs/reference/release-artifacts.md#container-images) for broader compatibility. See [Release Artifacts](docs/reference/release-artifacts.md#python-wheels) for wheel availability.
 
 ## 3. Run Dynamo
 

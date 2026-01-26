@@ -8,14 +8,14 @@ Backend engines require Python development headers for JIT compilation:
 
    sudo apt install python3-dev
 
-Install uv and create a virtual environment:
+**Option A: Install from PyPI**
 
 .. code-block:: bash
 
    # Install uv (recommended Python package manager)
    curl -LsSf https://astral.sh/uv/install.sh | sh
 
-   # Create virtual environment and install Dynamo
+   # Create virtual environment
    uv venv venv
    source venv/bin/activate
    uv pip install pip
@@ -23,18 +23,35 @@ Install uv and create a virtual environment:
    # For vLLM or SGLang:
    uv pip install --prerelease=allow "ai-dynamo[sglang]"  # or [vllm]
 
-   # For TensorRT-LLM (requires pip, not uv):
+   # For TensorRT-LLM (requires pip and NVIDIA PyPI):
    pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 
 .. note::
 
-   TensorRT-LLM uses ``pip`` instead of ``uv`` due to URL-based dependencies,
-   and requires NVIDIA's PyPI for the TRT-LLM wheel. The wheel may not be
-   available for all CUDA versions—see `Release Artifacts
-   <../reference/release-artifacts.html#python-wheels>`_ for availability. For
-   broader compatibility, we recommend using the `prebuilt TRT-LLM container
-   <../reference/release-artifacts.html#container-images>`_. See the
-   `TRT-LLM backend guide <../backends/trtllm/README.html>`_ for details.
+   TensorRT-LLM requires ``pip`` and NVIDIA's PyPI index. We recommend using
+   the `TensorRT-LLM container <../reference/release-artifacts.html#container-images>`_
+   for broader compatibility. See the `TRT-LLM backend guide
+   <../backends/trtllm/README.html>`_ for details.
+
+**Option B: Docker**
+
+Pull and run prebuilt images from NVIDIA NGC. Container names follow the pattern
+``nvcr.io/nvidia/ai-dynamo/{backend}-runtime:{version}``:
+
+.. code-block:: bash
+
+   # Examples:
+   docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+   docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+   docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+
+   # Run with GPU access
+   docker run --rm -it --gpus all --network host \
+     nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+
+See `Release Artifacts <../reference/release-artifacts.html#container-images>`_ for available
+versions and backend guides for run instructions: `vLLM <../backends/vllm/README.html>`_ |
+`SGLang <../backends/sglang/README.html>`_ | `TensorRT-LLM <../backends/trtllm/README.html>`_
 
 **2. Sanity Check (Optional)**
 
@@ -71,5 +88,3 @@ Verify your system configuration and dependencies:
      -d '{"model": "Qwen/Qwen3-0.6B",
           "messages": [{"role": "user", "content": "Hello!"}],
           "max_tokens": 50}'
-
-
