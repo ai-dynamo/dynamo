@@ -251,12 +251,7 @@ class HandlerBase:
                     pass
             else:
                 # Task completed, check if it was due to shutdown
-                try:
-                    monitor_task.result()
-                except GeneratorExit:
-                    raise
-                except Exception:
-                    pass
+                monitor_task.result()
 
     def _decode_disaggregated_params_from_prefill(
         self, prefill_result: dict
