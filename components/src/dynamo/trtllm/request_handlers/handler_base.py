@@ -183,45 +183,42 @@ class HandlerBase:
             # Get the cancellation future (already a Future, not a coroutine)
             cancellation_future = context.async_killed_or_stopped()
 
+            # Build list of futures/tasks to wait for
+            wait_for = [cancellation_future]
+            shutdown_task = None
+
             if self.shutdown_event:
-                # Create task for shutdown monitoring
+                # Create task for shutdown monitoring and add to wait list
                 shutdown_task = asyncio.create_task(self.shutdown_event.wait())
-                # Wait for whichever happens first
-                # asyncio.wait() accepts both Futures and Tasks
-                done, pending = await asyncio.wait(
-                    [cancellation_future, shutdown_task],
-                    return_when=asyncio.FIRST_COMPLETED,
+                wait_for.append(shutdown_task)
+
+            # Wait for whichever happens first
+            done, pending = await asyncio.wait(
+                wait_for,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel the pending task/future
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # Abort the generation
+            generation_result.abort()
+            logging.debug(f"Aborted Request ID: {context.id()}")
+
+            # Check which event triggered and return the reason
+            if shutdown_task and shutdown_task in done:
+                raise GeneratorExit(
+                    "Decode engine was shut down during token generation"
                 )
 
-                # Cancel the pending task/future
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-
-                # Abort the generation
-                logging.info(f"Aborting request {context.id()}")
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
-
-                # Check which event triggered and return the reason
-                if shutdown_task in done:
-                    logging.info(f"Shutdown event detected for request {context.id()}")
-                    return "shutdown"
-                else:
-                    return "cancelled"
-            else:
-                # No shutdown event, just wait for cancellation
-                await cancellation_future
-                logging.info(f"Aborting request {context.id()}")
-                generation_result.abort()
-                logging.debug(f"Aborted Request ID: {context.id()}")
-                return "cancelled"
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
-            return None
+            pass
 
     @asynccontextmanager
     async def _cancellation_monitor(
@@ -246,7 +243,6 @@ class HandlerBase:
             yield monitor_task
         finally:
             # Clean up the background monitoring task
-            shutdown_triggered = False
             if not monitor_task.done():
                 monitor_task.cancel()
                 try:
@@ -256,17 +252,11 @@ class HandlerBase:
             else:
                 # Task completed, check if it was due to shutdown
                 try:
-                    result = monitor_task.result()
-                    if result == "shutdown":
-                        shutdown_triggered = True
+                    monitor_task.result()
+                except GeneratorExit:
+                    raise
                 except Exception:
                     pass
-
-            # Raise GeneratorExit if shutdown was triggered
-            if shutdown_triggered:
-                raise GeneratorExit(
-                    "Decode engine was shut down during token generation"
-                )
 
     def _decode_disaggregated_params_from_prefill(
         self, prefill_result: dict
