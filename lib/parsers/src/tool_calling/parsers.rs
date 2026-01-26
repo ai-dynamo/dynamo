@@ -42,6 +42,7 @@ pub fn get_tool_parser_map() -> &'static HashMap<&'static str, ToolCallConfig> {
         map.insert("deepseek_v3_2", ToolCallConfig::deepseek_v3_2());
         map.insert("qwen3_coder", ToolCallConfig::qwen3_coder());
         map.insert("jamba", ToolCallConfig::jamba());
+        map.insert("minimax_m2", ToolCallConfig::minimax_m2());
         map.insert("default", ToolCallConfig::default());
         map.insert("nemotron_nano", ToolCallConfig::qwen3_coder()); // nemotron nano follows qwen3_coder format
         map
@@ -209,6 +210,7 @@ mod tests {
             "qwen3_coder",
             "jamba",
             "nemotron_nano",
+            "minimax_m2",
         ];
         for parser in available_parsers {
             assert!(parsers.contains(&parser));
@@ -2969,6 +2971,175 @@ weather forecasting
         assert_eq!(result.len(), 1);
         let (name, args) = extract_name_and_args(result[0].clone());
         assert_eq!(name, "process_list");
+        assert!(args["items"].is_array());
+        assert_eq!(args["items"], serde_json::json!([1, 2, 3, 4, 5]));
+    }
+
+    // MiniMax-M2.1 parser tests
+    #[tokio::test]
+    async fn test_minimax_m2_simple_tool_call() {
+        let input = r#"<minimax:tool_call>
+<invoke name="get_weather">
+<parameter name="location">San Francisco</parameter>
+<parameter name="unit">celsius</parameter>
+</invoke>
+</minimax:tool_call>"#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("minimax_m2"), None)
+            .await
+            .unwrap();
+        assert_eq!(content, Some("".to_string()));
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "San Francisco");
+        assert_eq!(args["unit"], "celsius");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m2_multiple_tool_calls() {
+        let input = r#"<minimax:tool_call>
+<invoke name="search_web">
+<parameter name="query_tag">["technology", "events"]</parameter>
+<parameter name="query_list">["OpenAI", "latest", "release"]</parameter>
+</invoke>
+<invoke name="search_web">
+<parameter name="query_tag">["technology", "events"]</parameter>
+<parameter name="query_list">["Gemini", "latest", "release"]</parameter>
+</invoke>
+</minimax:tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "search_web".to_string(),
+            parameters: Some(serde_json::json!({
+                "properties": {
+                    "query_tag": {"type": "array"},
+                    "query_list": {"type": "array"}
+                }
+            })),
+        }];
+        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2);
+
+        // First call
+        let (name1, args1) = extract_name_and_args(result[0].clone());
+        assert_eq!(name1, "search_web");
+        assert!(args1["query_tag"].is_array());
+        assert_eq!(
+            args1["query_tag"],
+            serde_json::json!(["technology", "events"])
+        );
+        assert!(args1["query_list"].is_array());
+        assert_eq!(
+            args1["query_list"],
+            serde_json::json!(["OpenAI", "latest", "release"])
+        );
+
+        // Second call
+        let (name2, args2) = extract_name_and_args(result[1].clone());
+        assert_eq!(name2, "search_web");
+        assert!(args2["query_tag"].is_array());
+        assert_eq!(
+            args2["query_tag"],
+            serde_json::json!(["technology", "events"])
+        );
+        assert!(args2["query_list"].is_array());
+        assert_eq!(
+            args2["query_list"],
+            serde_json::json!(["Gemini", "latest", "release"])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m2_with_normal_text() {
+        let input = r#"I'll help you check the weather. <minimax:tool_call>
+<invoke name="get_weather">
+<parameter name="location">Tokyo</parameter>
+<parameter name="unit">fahrenheit</parameter>
+</invoke>
+</minimax:tool_call> Let me get that information for you."#;
+        let (result, content) = detect_and_parse_tool_call(input, Some("minimax_m2"), None)
+            .await
+            .unwrap();
+        assert!(content.is_some());
+        assert!(
+            content
+                .unwrap()
+                .contains("I'll help you check the weather.")
+        );
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_weather");
+        assert_eq!(args["location"], "Tokyo");
+        assert_eq!(args["unit"], "fahrenheit");
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m2_empty_parameters() {
+        let input = r#"<minimax:tool_call>
+<invoke name="get_time">
+</invoke>
+</minimax:tool_call>"#;
+        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "get_time");
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m2_with_type_conversion() {
+        let input = r#"<minimax:tool_call>
+<invoke name="process_data">
+<parameter name="count">42</parameter>
+<parameter name="temperature">98.6</parameter>
+<parameter name="enabled">true</parameter>
+</invoke>
+</minimax:tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "process_data".to_string(),
+            parameters: Some(serde_json::json!({
+                "properties": {
+                    "count": {"type": "integer"},
+                    "temperature": {"type": "number"},
+                    "enabled": {"type": "boolean"}
+                }
+            })),
+        }];
+        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "process_data");
+        assert_eq!(args["count"], 42);
+        assert_eq!(args["temperature"], 98.6);
+        assert_eq!(args["enabled"], true);
+    }
+
+    #[tokio::test]
+    async fn test_minimax_m2_array_parameter() {
+        let input = r#"<minimax:tool_call>
+<invoke name="batch_process">
+<parameter name="items">[1, 2, 3, 4, 5]</parameter>
+</invoke>
+</minimax:tool_call>"#;
+        let tools = vec![ToolDefinition {
+            name: "batch_process".to_string(),
+            parameters: Some(serde_json::json!({
+                "properties": {
+                    "items": {"type": "array"}
+                }
+            })),
+        }];
+        let (result, _) = detect_and_parse_tool_call(input, Some("minimax_m2"), Some(&tools))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        let (name, args) = extract_name_and_args(result[0].clone());
+        assert_eq!(name, "batch_process");
         assert!(args["items"].is_array());
         assert_eq!(args["items"], serde_json::json!([1, 2, 3, 4, 5]));
     }

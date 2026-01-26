@@ -67,7 +67,7 @@ spec:
           - -pool-namespace
           - "{{ .Release.Namespace }}"
           - -pool-group
-          - "inference.networking.x-k8s.io"
+          - "inference.networking.k8s.io"
           - -v
           - "4"
           - --zap-encoder
@@ -118,8 +118,6 @@ spec:
             value: "{{ $ns }}"
           - name: DYNAMO_KV_BLOCK_SIZE
             value: "{{ $kv }}"
-          - name: DYNAMO_ROUTER_REPLICA_SYNC
-            value: "true"
           - name: USE_STREAMING
             value: "true"
           # HuggingFace token for downloading model config files

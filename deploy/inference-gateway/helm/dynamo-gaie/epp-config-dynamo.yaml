@@ -14,12 +14,6 @@
 # limitations under the License.
 
 # Dynamo EPP Configuration
-#
-# The KV scorer sets routing headers that the Lua filter at the gateway
-# reads to inject nvext into the request body:
-#   - x-worker-instance-id: Selected worker ID
-#   - x-prefiller-host-port: Prefill worker (disaggregated mode)
-#   - x-dynamo-routing-mode: "aggregated" or "disaggregated"
 
 apiVersion: inference.networking.x-k8s.io/v1alpha1
 kind: EndpointPickerConfig

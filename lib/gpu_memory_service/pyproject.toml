@@ -34,6 +34,9 @@ classifiers = [
 ]
 keywords = ["llm", "genai", "inference", "nvidia", "gpu", "memory", "dynamo"]
 
+[project.scripts]
+gpu-memory-service = "gpu_memory_service.cli.runner:main"
+
 [project.optional-dependencies]
 test = [
     "pytest>=8.3.4",

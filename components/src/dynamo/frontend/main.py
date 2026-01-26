@@ -7,7 +7,7 @@
 # - OpenAI HTTP server.
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
 # - Pre-processor: Prompt templating and tokenization.
-# - Router, defaulting to round-robin (TODO: Add flags to enable KV routing).
+# - Router, defaulting to round-robin. Use --router-mode to switch (round-robin, random, kv).
 #
 # Pass `--interactive` or `-i` for text chat instead of HTTP server.
 #
@@ -86,6 +86,11 @@ def validate_model_path(value):
 
 
 def parse_args():
+    """Parse command-line arguments for the Dynamo frontend.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Dynamo Frontend: HTTP+Pre-processor+Router",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
@@ -244,7 +249,7 @@ def parse_args():
     parser.add_argument(
         "--model-path",
         type=validate_model_path,
-        help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
+        help="Path to model directory on disk (e.g., /tmp/model_cache/llama3.2_1B/)",
     )
     parser.add_argument(
         "--metrics-prefix",
@@ -286,7 +291,7 @@ def parse_args():
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -315,6 +320,11 @@ def parse_args():
 
 
 async def async_main():
+    """Main async entry point for the Dynamo frontend.
+
+    Initializes the distributed runtime, configures routing, and starts
+    the HTTP server or interactive mode based on command-line arguments.
+    """
     # The system status server port is a worker concern.
     #
     # Serve tests set DYN_SYSTEM_PORT for the worker, but aggregated launch scripts
@@ -428,10 +438,16 @@ async def async_main():
 
 
 async def graceful_shutdown(runtime):
+    """Handle graceful shutdown of the distributed runtime.
+
+    Args:
+        runtime: The DistributedRuntime instance to shut down.
+    """
     runtime.shutdown()
 
 
 def main():
+    """Entry point for the Dynamo frontend CLI."""
     uvloop.run(async_main())
 
 
