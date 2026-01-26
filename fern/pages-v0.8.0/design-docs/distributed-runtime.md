@@ -68,7 +68,7 @@ Dynamo uses a `Client` object to call an endpoint. When a `Client` is created, i
 
 The watcher continuously updates the `Client` with information about available `Endpoint`s.
 
-The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [push_router.rs](../../lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
+The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [push_router.rs](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
 
 - `random`: randomly select an endpoint to hit
 - `round_robin`: select endpoints in round-robin order

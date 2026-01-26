@@ -57,10 +57,10 @@ spec:
 - No worker-side configuration changes needed
 
 **Complete K8s Examples:**
-- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/agg_router.yaml)
-- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/agg_router.yaml)
-- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/agg_router.yaml)
-- [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/blob/main/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
+- [TRT-LLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/trtllm/deploy/agg_router.yaml)
+- [vLLM aggregated router example](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm/deploy/agg_router.yaml)
+- [SGLang aggregated router example](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/sglang/deploy/agg_router.yaml)
+- [Distributed inference tutorial](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/basics/kubernetes/Distributed_Inference/agg_router.yaml)
 
 **For A/B Testing and Advanced K8s Setup:**
 See the comprehensive [KV Router A/B Benchmarking Guide](../benchmarks/kv-router-ab-testing.md) for step-by-step instructions on deploying, configuring, and benchmarking the KV router in Kubernetes.

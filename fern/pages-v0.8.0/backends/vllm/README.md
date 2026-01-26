@@ -54,7 +54,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/blob/main/deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -147,7 +147,7 @@ This setup demonstrates how to use Dynamo to create an instance using Eagle-base
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm/deploy/README.md)
 
 ## Configuration
 

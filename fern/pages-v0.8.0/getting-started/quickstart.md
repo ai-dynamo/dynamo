@@ -50,4 +50,4 @@ curl localhost:8000/v1/chat/completions \
 
 - [Installation](installation.md) - Detailed installation options
 - [Examples](examples.md) - More deployment examples
-- [Support Matrix](../reference/support-matrix.md) - Supported models and configurations
+- [Support Matrix](support-matrix.md) - Supported models and configurations

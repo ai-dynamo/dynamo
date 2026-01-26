@@ -64,9 +64,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ### Components
 
 - workers:
-  - [MultimodalEncodeWorkerHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding
-  - [MultimodalWorkerHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling and decoding.
-- processor: [MultimodalProcessorHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py)
+  - [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding
+  - [MultimodalWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling and decoding.
+- processor: [MultimodalProcessorHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py)
   - tokenizes the prompt using the chat template
   - passes the text and image url to the MultimodalEncodeWorker.
 
@@ -127,10 +127,10 @@ curl http://localhost:8000/v1/chat/completions \
 ### Components
 
 - workers:
-  - [MultimodalEncodeWorkerHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding
-  - [MultimodalWorkerHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for decoding
-  - [MultimodalPrefillWorkerHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling
-- processor: [MultimodalProcessorHandler](../../components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py) tokenizes the prompt and passes it to the MultimodalEncodeWorker.
+  - [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/encode_worker_handler.py) for encoding
+  - [MultimodalWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for decoding
+  - [MultimodalPrefillWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/worker_handler.py) for prefilling
+- processor: [MultimodalProcessorHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/sglang/request_handlers/multimodal/processor_handler.py) tokenizes the prompt and passes it to the MultimodalEncodeWorker.
 
 ### Workflow
 

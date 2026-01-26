@@ -392,10 +392,10 @@ The `model_type` can be:
 Here are some example engines:
 
 - Backend:
-    * [vllm](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_vllm.py)
-    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
+    * [vllm](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/lib/bindings/python/examples/hello_world/server_vllm.py)
+    * [sglang](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/lib/bindings/python/examples/hello_world/server_sglang.py)
 - Chat:
-    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
+    * [sglang](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
 
 More fully-featured Python engines are in `examples/backends`.
 

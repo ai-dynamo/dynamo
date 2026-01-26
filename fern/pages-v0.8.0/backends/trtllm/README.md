@@ -57,7 +57,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start Infrastructure Services (Local Development Only)
 
-For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/blob/main/deploy/docker-compose.yml):
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -159,18 +159,18 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/README.md).
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/trtllm/deploy/README.md).
 
 ### Client
 
-See [client](https://github.com/ai-dynamo/dynamo/blob/main/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
+See [client](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ### Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/benchmarks/llm/perf.sh)
 
 ## KV Cache Transfer in Disaggregated Serving
 
@@ -207,14 +207,14 @@ For more details, see the [Request Cancellation Architecture](../../fault-tolera
 
 ## Client
 
-See [client](https://github.com/ai-dynamo/dynamo/blob/main/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
+See [client](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/backends/sglang/README.md#testing-the-deployment) section to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ## Benchmarking
 
 To benchmark your deployment with AIPerf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/main/benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/benchmarks/llm/perf.sh)
 
 ## Multimodal support
 
@@ -227,7 +227,7 @@ Logits processors let you modify the next-token logits at every decoding step (e
 ### How it works
 - **Interface**: Implement `dynamo.logits_processing.BaseLogitsProcessor` which defines `__call__(input_ids, logits)` and modifies `logits` in-place.
 - **TRT-LLM adapter**: Use `dynamo.trtllm.logits_processing.adapter.create_trtllm_adapters(...)` to convert Dynamo processors into TRT-LLM-compatible processors and assign them to `SamplingParams.logits_processor`.
-- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py), [hello_world](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py)).
+- **Examples**: See example processors in `lib/bindings/python/src/dynamo/logits_processing/examples/` ([temperature](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/lib/bindings/python/src/dynamo/logits_processing/examples/temperature.py), [hello_world](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/lib/bindings/python/src/dynamo/logits_processing/examples/hello_world.py)).
 
 ### Quick test: HelloWorld processor
 You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
@@ -279,7 +279,7 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 

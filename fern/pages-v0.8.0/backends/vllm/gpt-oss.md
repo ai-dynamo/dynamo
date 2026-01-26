@@ -13,7 +13,7 @@ This deployment uses disaggregated serving in vLLM where:
 
 ## Prerequisites
 
-This guide assumes readers already knows how to deploy Dynamo disaggregated serving with vLLM as illustrated in [README.md](../backends/vllm/README.md)
+This guide assumes readers already knows how to deploy Dynamo disaggregated serving with vLLM as illustrated in [README.md](./README.md)
 
 ## Instructions
 

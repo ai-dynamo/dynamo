@@ -19,7 +19,7 @@ These are independent. A single Kubernetes namespace can host multiple Dynamo na
 
 ## Pre-deployment Checks
 
-Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](../../deploy/cloud/pre-deployment/README.md) for more details.
+Before deploying the platform, it is recommended to run the pre-deployment checks to ensure the cluster is ready for deployment. Please refer to the [pre-deployment checks](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/cloud/pre-deployment/README.md) for more details.
 
 ## 1. Install Platform First
 
@@ -52,9 +52,9 @@ Each backend has deployment examples and configuration options:
 
 | Backend      | Aggregated | Aggregated + Router | Disaggregated | Disaggregated + Router | Disaggregated + Planner | Disaggregated Multi-node |
 |--------------|:----------:|:-------------------:|:-------------:|:----------------------:|:-----------------------:|:------------------------:|
-| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
-| **[vLLM](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[SGLang](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/sglang/deploy/README.md)**       | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| **[TensorRT-LLM](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/trtllm/deploy/README.md)** | ✅ | ✅ | ✅ | ✅ | 🚧 | ✅ |
+| **[vLLM](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm/deploy/README.md)**           | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## 3. Deploy Your First Model
 
@@ -200,12 +200,12 @@ Key customization points include:
 
 ## Additional Resources
 
-- **[Examples](https://github.com/ai-dynamo/dynamo/blob/main/examples/README.md)** - Complete working examples
+- **[Examples](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/README.md)** - Complete working examples
 - **[Create Custom Deployments](./deployment/create-deployment.md)** - Build your own CRDs
 - **[Managing Models with DynamoModel](./deployment/dynamomodel-guide.md)** - Deploy LoRA adapters and manage models
 - **[Operator Documentation](./dynamo-operator.md)** - How the platform works
 - **[Service Discovery](./service-discovery.md)** - Discovery backends and configuration
-- **[Helm Charts](../../deploy/helm/README.md)** - For advanced users
+- **[Helm Charts](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/helm/README.md)** - For advanced users
 - **[GitOps Deployment with FluxCD](./fluxcd.md)** - For advanced users
 - **[Logging](./observability/logging.md)** - For logging setup
 - **[Multinode Deployment](./deployment/multinode-deployment.md)** - For multinode deployment

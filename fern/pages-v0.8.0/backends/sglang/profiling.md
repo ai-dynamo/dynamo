@@ -33,7 +33,7 @@ The profiler outputs Chrome trace files in the specified `output_dir`. You can v
 
 ## Test Script
 
-A test script is provided at [`examples/backends/sglang/test_sglang_profile.py`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/test_sglang_profile.py) that demonstrates the full profiling workflow:
+A test script is provided at [`examples/backends/sglang/test_sglang_profile.py`](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/sglang/test_sglang_profile.py) that demonstrates the full profiling workflow:
 
 ```bash
 python examples/backends/sglang/test_sglang_profile.py

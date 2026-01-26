@@ -96,7 +96,7 @@ kubectl create secret generic hf-token-secret \
 
 ### Step 1.3: Install Dynamo Platform (Per-Namespace)
 
-If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/main/docs/kubernetes/installation-guide.md) to install the platform in both namespaces:
+If your cluster uses namespace-restricted Dynamo operators, you'll need to install the Dynamo platform in each namespace. Follow the [Dynamo Kubernetes Installation Guide](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/docs/kubernetes/installation-guide.md) to install the platform in both namespaces:
 
 - `router-off-test`
 - `router-on-test`

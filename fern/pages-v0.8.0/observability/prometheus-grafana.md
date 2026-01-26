@@ -76,7 +76,7 @@ Other interfaces:
 
 ### Prometheus
 
-The Prometheus configuration is specified in [prometheus.yml](../../deploy/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is specified in [prometheus.yml](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/observability/prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
 Please be aware that you might need to modify the target settings to align with your specific host configuration and network environment.
 

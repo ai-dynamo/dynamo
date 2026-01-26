@@ -2,7 +2,7 @@
 title: "Running gpt-oss-120b Disaggregated with SGLang"
 ---
 
-The gpt-oss-120b guide for SGLang is largely identical to the [guide for vLLM](../backends/vllm/gpt-oss.md),
+The gpt-oss-120b guide for SGLang is largely identical to the [guide for vLLM](../vllm/gpt-oss.md),
 please ues the vLLM guide as a reference with the different deployment steps as highlighted below:
 
 # Launch the Deployment

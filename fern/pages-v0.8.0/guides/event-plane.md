@@ -455,6 +455,6 @@ This provides KV-aware routing with reduced accuracy but no NATS dependency.
 
 ## Related Documentation
 
-- [Distributed Runtime](distributed-runtime.md) - Runtime architecture
+- [Distributed Runtime](../design-docs/distributed-runtime.md) - Runtime architecture
 - [Request Plane](request-plane.md) - Request transport configuration
 - [Fault Tolerance](../fault-tolerance/README.md) - Failure handling

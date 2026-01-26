@@ -40,7 +40,7 @@ kubectl get clusterrolebinding -o json | \
 
 ## Installation Paths
 
-Platform is installed using Dynamo Kubernetes Platform [helm chart](../../deploy/cloud/helm/platform/README.md).
+Platform is installed using Dynamo Kubernetes Platform [helm chart](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/cloud/helm/platform/README.md).
 
 **Path A: Pre-built Artifacts**
 - Use case: Production deployment, shared or dedicated clusters
@@ -252,9 +252,9 @@ kubectl get pods -n ${NAMESPACE}
    ```
 
 2. **Explore Backend Guides**
-   - [vLLM Deployments](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/README.md)
-   - [SGLang Deployments](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/README.md)
-   - [TensorRT-LLM Deployments](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/README.md)
+   - [vLLM Deployments](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm/deploy/README.md)
+   - [SGLang Deployments](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/sglang/deploy/README.md)
+   - [TensorRT-LLM Deployments](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/trtllm/deploy/README.md)
 
 3. **Optional:**
    - [Set up Prometheus & Grafana](./observability/metrics.md)
@@ -321,7 +321,7 @@ just add the following to the helm install command:
 
 ## Advanced Options
 
-- [Helm Chart Configuration](../../deploy/cloud/helm/platform/README.md)
+- [Helm Chart Configuration](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/cloud/helm/platform/README.md)
 - [Create custom deployments](./deployment/create-deployment.md)
 - [Dynamo Operator details](./dynamo-operator.md)
 - [Model Express Server details](https://github.com/ai-dynamo/modelexpress)

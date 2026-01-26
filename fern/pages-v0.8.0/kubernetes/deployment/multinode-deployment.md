@@ -303,8 +303,8 @@ To enable compilation cache, add a volume mount with `useAsCompilationCache: tru
 
 For additional support and examples, see the working multinode configurations in:
 
-- **SGLang**: [examples/backends/sglang/deploy/](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/sglang/deploy/)
-- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/trtllm/deploy/)
-- **vLLM**: [examples/backends/vllm/deploy/](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/deploy/)
+- **SGLang**: [examples/backends/sglang/deploy/](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/sglang/deploy/)
+- **TensorRT-LLM**: [examples/backends/trtllm/deploy/](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/trtllm/deploy/)
+- **vLLM**: [examples/backends/vllm/deploy/](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm/deploy/)
 
 These examples demonstrate proper usage of the `multinode` section with corresponding `gpu` limits and correct `tp-size` configuration.

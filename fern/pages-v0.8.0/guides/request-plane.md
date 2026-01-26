@@ -167,7 +167,7 @@ Limitations:
 
 Here's a complete example showing how to launch a Dynamo deployment with different request planes:
 
-See [`examples/backends/vllm/launch/agg_request_planes.sh`](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm/launch/agg_request_planes.sh) for a complete working example that demonstrates launching Dynamo with TCP, HTTP, or NATS request planes.
+See [`examples/backends/vllm/launch/agg_request_planes.sh`](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm/launch/agg_request_planes.sh) for a complete working example that demonstrates launching Dynamo with TCP, HTTP, or NATS request planes.
 
 
 ## Real-World Example

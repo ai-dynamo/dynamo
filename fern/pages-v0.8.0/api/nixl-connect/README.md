@@ -138,11 +138,11 @@ flowchart LR
 
 #### Code Examples
 
-See [MultimodalPDWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) or [MultimodalDecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) from our Multimodal example,
+See [MultimodalPDWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) or [MultimodalDecodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) from our Multimodal example,
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable-operation.md),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
-See [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) from our Multimodal example,
+See [MultimodalEncodeWorkerHandler](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) from our Multimodal example,
 for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
 a [`WriteOperation`](write-operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
@@ -163,5 +163,5 @@ and the worker awaits for the data transfer to complete for yielding a response.
 
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/blob/main/examples/multimodal)
+  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/multimodal)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

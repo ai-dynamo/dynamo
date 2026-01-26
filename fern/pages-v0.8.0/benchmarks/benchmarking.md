@@ -84,10 +84,10 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 Follow these steps to benchmark Dynamo deployments using client-side benchmarking:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](../kubernetes/installation-guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](../kubernetes/installation-guide.md) to install Dynamo Cloud, then use [deploy/utils/README](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
-Deploy your DynamoGraphDeployments separately using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/). Each deployment should have a frontend service exposed.
+Deploy your DynamoGraphDeployments separately using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/). Each deployment should have a frontend service exposed.
 
 ### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
@@ -313,17 +313,17 @@ The server-side benchmarking solution:
 ## Prerequisites
 
 1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](../kubernetes/README.md))
-2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
+2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
 ## Quick Start
 
 ### Step 1: Deploy Your DynamoGraphDeployment
-Deploy your DynamoGraphDeployment using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/). Ensure it has a frontend service exposed.
+Deploy your DynamoGraphDeployment using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/). Ensure it has a frontend service exposed.
 
 ### Step 2: Deploy and Run Benchmark Job
 
-**Note**: The server-side benchmarking job requires a Docker image containing the Dynamo benchmarking tools. Before the 0.5.1 release, you must build your own Docker image using the [container build instructions](../../container/README.md), push it to your container registry, then update the `image` field in `benchmarks/incluster/benchmark_job.yaml` to use your built image tag.
+**Note**: The server-side benchmarking job requires a Docker image containing the Dynamo benchmarking tools. Before the 0.5.1 release, you must build your own Docker image using the [container build instructions](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/container/README.md), push it to your container registry, then update the `image` field in `benchmarks/incluster/benchmark_job.yaml` to use your built image tag.
 
 ```bash
 export NAMESPACE=benchmarking
@@ -516,7 +516,7 @@ The Python benchmarking module provides a complete end-to-end benchmarking exper
 
 ## Testing with Mocker Backend
 
-For development and testing purposes, Dynamo provides a [mocker backend](../../components/src/dynamo/mocker/) that simulates LLM inference without requiring actual GPU resources. This is useful for:
+For development and testing purposes, Dynamo provides a [mocker backend](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/mocker/) that simulates LLM inference without requiring actual GPU resources. This is useful for:
 
 - **Testing deployments** without expensive GPU infrastructure
 - **Developing and debugging** router, planner, or frontend logic
@@ -525,4 +525,4 @@ For development and testing purposes, Dynamo provides a [mocker backend](../../c
 
 The mocker backend mimics the API and behavior of real backends (vLLM, SGLang, TensorRT-LLM) but generates mock responses instead of running actual inference.
 
-See the [mocker directory](../../components/src/dynamo/mocker/) for usage examples and configuration options.
+See the [mocker directory](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/components/src/dynamo/mocker/) for usage examples and configuration options.

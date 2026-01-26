@@ -2,7 +2,7 @@
 title: "Dynamo Architecture Flow"
 ---
 
-This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/backends/vllm](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends/vllm). Color-coded flows indicate different types of operations.
+This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/backends/vllm](https://github.com/ai-dynamo/dynamo/blob/v0.8.0/examples/backends/vllm). Color-coded flows indicate different types of operations.
 
 > **Note**: The "Processor" shown in the diagram represents the request processing logic (tokenization, chat template application, routing) that runs within the Frontend component. It is not a separate deployment—the Frontend handles both HTTP serving and request preprocessing via the `make_engine` function.
 
