@@ -38,17 +38,46 @@ def get_gpu_memory_used(device: int = 0) -> int:
         pynvml.nvmlShutdown()
 
 
-def send_completion(port: int, prompt: str = "Hello") -> dict:
-    """Send a completion request to the frontend."""
-    r = requests.post(
-        f"http://localhost:{port}/v1/completions",
-        json={"model": FAULT_TOLERANCE_MODEL_NAME, "prompt": prompt, "max_tokens": 20},
-        timeout=120,
-    )
-    r.raise_for_status()
-    result = r.json()
-    assert result.get("choices"), "No choices in response"
-    return result
+def send_completion(
+    port: int, prompt: str = "Hello", max_retries: int = 3, retry_delay: float = 1.0
+) -> dict:
+    """Send a completion request to the frontend.
+
+    Includes retry logic to handle transient failures from stale routing
+    (e.g., after failover when etcd still has dead instance entries).
+
+    Args:
+        port: The frontend HTTP port.
+        prompt: The prompt to send.
+        max_retries: Max retries for transient failures.
+        retry_delay: Delay between retries in seconds.
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            r = requests.post(
+                f"http://localhost:{port}/v1/completions",
+                json={
+                    "model": FAULT_TOLERANCE_MODEL_NAME,
+                    "prompt": prompt,
+                    "max_tokens": 20,
+                },
+                timeout=120,
+            )
+            r.raise_for_status()
+            result = r.json()
+            assert result.get("choices"), "No choices in response"
+            if attempt > 0:
+                logger.info(f"send_completion succeeded after {attempt + 1} attempts")
+            return result
+        except (requests.exceptions.RequestException, AssertionError) as e:
+            last_error = e
+            if attempt < max_retries - 1:
+                logger.debug(
+                    f"send_completion attempt {attempt + 1}/{max_retries} failed: {e}"
+                )
+                time.sleep(retry_delay)
+    raise last_error  # type: ignore
 
 
 class GMSServerProcess(ManagedProcess):
