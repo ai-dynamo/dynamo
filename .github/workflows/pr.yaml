@@ -18,13 +18,13 @@ on:
         type: boolean
         default: false
 
-concurrency:
-    # The group name is a ternary operation. If the ref_name is 'main',
-    # then the group name uses the run_id to ensure a unique group for
-    # 'main' pushes. Otherwise, the group name is the ref_name, so that
-    # workflows on the same PR/branch have the same group name for cancelling.
-    group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-    cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+# concurrency:
+#     # The group name is a ternary operation. If the ref_name is 'main',
+#     # then the group name uses the run_id to ensure a unique group for
+#     # 'main' pushes. Otherwise, the group name is the ref_name, so that
+#     # workflows on the same PR/branch have the same group name for cancelling.
+#     group: docker-build-test-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
+#     cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   BUILDER_NAME: b-${{ github.run_id }}${{ github.run_attempt }}
@@ -73,41 +73,27 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Bootstrap buildkit (amd64)
-        uses: ./.github/actions/bootstrap-buildkit
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-          platform: linux/amd64
-      - name: Bootstrap buildkit (arm64)
-        uses: ./.github/actions/bootstrap-buildkit
+          flavor: general
+          all_arch: 'true'
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
         with:
-          builder_name: ${{ needs.changed-files.outputs.builder_name }}
-          buildkit_worker_addresses: ''
-          platform: linux/arm64
-
-
-      # - name: Initialize Dynamo Builder
-      #   uses: ./.github/actions/init-dynamo-builder
-      #   with:
-      #     builder_name: ${{ needs.changed-files.outputs.builder_name }}
-      #     flavor: general
-      #     all_arch: 'true'
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      # - name: Linter
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   env:
-      #     ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-      #   run: |
-      #     docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        shell: bash
+        working-directory: ./deploy/operator
+        env:
+          ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       # - name: Tester
       #   shell: bash
       #   working-directory: ./deploy/operator
