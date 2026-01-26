@@ -28,10 +28,11 @@ Backend engines require Python development headers for JIT compilation:
 
 .. note::
 
-   TensorRT-LLM requires ``pip`` and NVIDIA's PyPI index. We recommend using
-   the `TensorRT-LLM container <../reference/release-artifacts.html#container-images>`_
-   for broader compatibility. See the `TRT-LLM backend guide
-   <../backends/trtllm/README.html>`_ for details.
+   TensorRT-LLM requires ``pip`` due to a transitive Git URL dependency that
+   ``uv`` doesn't resolve. We recommend using the `TensorRT-LLM container
+   <../reference/release-artifacts.html#container-images>`_ for broader
+   compatibility. See the `TRT-LLM backend guide <../backends/trtllm/README.html>`_
+   for details.
 
 **Option B: Docker**
 
