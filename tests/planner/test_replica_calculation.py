@@ -36,7 +36,7 @@ sys.modules["dynamo.runtime"] = mock_runtime
 sys.modules["dynamo.runtime.logging"] = mock_runtime.logging
 
 # Now import after mocking
-from dynamo.planner.utils.planner_core import (
+from dynamo.planner.utils.planner_core import (  # noqa: E402
     DecodePlanner,
     Metrics,
     PlannerSharedState,
