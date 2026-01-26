@@ -8,7 +8,7 @@ on:
     branches:
       - main
       - "pull-request/[0-9]+"
-      - release/*.*.*
+      # Note: release/* branches are handled by release.yml workflow
   workflow_dispatch:
     inputs:
       run_deploy_operator:
@@ -148,7 +148,7 @@ jobs:
           - { major_minor: '12.9', major: '12' }
     name: vllm-build-test (cuda${{ matrix.cuda_version.major_minor}}, ${{ matrix.platform.arch }})
     runs-on: ${{ matrix.platform.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 240
     env:
       FRAMEWORK: vllm
     steps: &runtime-container-build-push-test

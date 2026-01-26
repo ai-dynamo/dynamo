@@ -42,6 +42,7 @@ import (
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/modelendpoint"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 )
 
@@ -294,6 +295,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.DynamoModel{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
+		Named(consts.ResourceTypeDynamoModel).
 		// Watch EndpointSlices - reconcile when endpoints change (Service changes trigger EndpointSlice updates)
 		Watches(
 			&discoveryv1.EndpointSlice{},
@@ -303,7 +305,7 @@ func (r *DynamoModelReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}),
 		).
 		WithEventFilter(commoncontroller.EphemeralDeploymentEventFilter(r.Config)). // set the event filter to ignore resources handled by other controllers in namespace-restricted mode
-		Complete(r)
+		Complete(observability.NewObservedReconciler(r, consts.ResourceTypeDynamoModel))
 }
 
 // findModelsForEndpointSlice maps an EndpointSlice to DynamoModels
