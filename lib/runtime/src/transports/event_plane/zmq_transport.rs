@@ -222,8 +222,13 @@ impl EventTransportTx for ZmqPubTransport {
 }
 
 /// ZMQ SUB transport for subscribing to events.
+///
+/// Uses a background socket pump to avoid holding the socket lock across stream lifetimes.
+/// Multiple subscribers can receive events concurrently via broadcast channel.
 pub struct ZmqSubTransport {
     socket: Arc<Mutex<zmq::Socket>>,
+    broadcast_tx: tokio::sync::broadcast::Sender<Bytes>,
+    _socket_pump_handle: tokio::task::JoinHandle<()>,
 }
 
 impl ZmqSubTransport {
@@ -260,8 +265,18 @@ impl ZmqSubTransport {
             "ZMQ SUB transport connected with configured HWM"
         );
 
+        let socket = Arc::new(Mutex::new(socket));
+
+        // Create broadcast channel for multiple subscribers
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
+
+        // Start background socket pump
+        let pump_handle = Self::start_socket_pump(Arc::clone(&socket), broadcast_tx.clone());
+
         Ok(Self {
-            socket: Arc::new(Mutex::new(socket)),
+            socket,
+            broadcast_tx,
+            _socket_pump_handle: pump_handle,
         })
     }
 
@@ -316,18 +331,30 @@ impl ZmqSubTransport {
             "ZMQ SUB transport connected to multiple endpoints with configured HWM"
         );
 
+        let socket = Arc::new(Mutex::new(socket));
+
+        // Create broadcast channel for multiple subscribers
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(1024);
+
+        // Start background socket pump
+        let pump_handle = Self::start_socket_pump(Arc::clone(&socket), broadcast_tx.clone());
+
         Ok(Self {
-            socket: Arc::new(Mutex::new(socket)),
+            socket,
+            broadcast_tx,
+            _socket_pump_handle: pump_handle,
         })
     }
-}
 
-#[async_trait]
-impl EventTransportRx for ZmqSubTransport {
-    async fn subscribe(&self, _subject: &str) -> Result<WireStream> {
-        let socket = Arc::clone(&self.socket);
-
-        let stream = stream! {
+    /// Background task that reads from socket and broadcasts to all subscribers.
+    ///
+    /// This task holds the socket lock only briefly during each recv operation,
+    /// allowing multiple subscribers to receive concurrently via broadcast channel.
+    fn start_socket_pump(
+        socket: Arc<Mutex<zmq::Socket>>,
+        broadcast_tx: tokio::sync::broadcast::Sender<Bytes>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
@@ -359,34 +386,66 @@ impl EventTransportRx for ZmqSubTransport {
                 .await;
 
                 match result {
-                    Ok(Ok((_, publisher_id, sequence, frame_bytes))) => {
-                        // Log dedup metadata for debugging (actual deduplication happens in EventSubscriber)
+                    Ok(Ok((_topic, publisher_id, sequence, frame_bytes))) => {
+                        // Log dedup metadata for debugging
                         tracing::trace!(
                             publisher_id = publisher_id,
                             sequence = sequence,
-                            "Received ZMQ message with dedup metadata"
+                            "Socket pump received ZMQ message"
                         );
 
-                        // Parse binary frame from fourth part
+                        // Parse binary frame
                         let frame_bytes = Bytes::from(frame_bytes);
                         match Frame::decode(frame_bytes) {
                             Ok(frame) => {
-                                yield Ok(frame.payload);
+                                // Broadcast payload to all subscribers
+                                // Ignore send errors (no receivers or lagging receivers)
+                                let _ = broadcast_tx.send(frame.payload);
                             }
                             Err(e) => {
-                                tracing::warn!(error = %e, "Failed to decode ZMQ frame");
+                                tracing::warn!(error = %e, "Failed to decode ZMQ frame in socket pump");
                                 continue;
                             }
                         }
                     }
                     Ok(Err(e)) => {
-                        tracing::error!(error = %e, "ZMQ receive error");
-                        yield Err(anyhow::anyhow!("ZMQ receive error: {}", e));
+                        tracing::error!(error = %e, "ZMQ receive error in socket pump");
                         break;
                     }
                     Err(e) => {
-                        tracing::error!(error = %e, "Task join error");
-                        yield Err(anyhow::anyhow!("Task join error: {}", e));
+                        tracing::error!(error = %e, "Task join error in socket pump");
+                        break;
+                    }
+                }
+            }
+
+            tracing::info!("ZMQ socket pump task terminated");
+        })
+    }
+}
+
+#[async_trait]
+impl EventTransportRx for ZmqSubTransport {
+    async fn subscribe(&self, _subject: &str) -> Result<WireStream> {
+        // Subscribe to broadcast channel (does not hold socket lock)
+        let mut receiver = self.broadcast_tx.subscribe();
+
+        let stream = stream! {
+            loop {
+                match receiver.recv().await {
+                    Ok(payload) => {
+                        yield Ok(payload);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped = skipped,
+                            "Subscriber lagged behind, skipped messages"
+                        );
+                        // Continue receiving, don't break the stream
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::info!("Broadcast channel closed");
                         break;
                     }
                 }
