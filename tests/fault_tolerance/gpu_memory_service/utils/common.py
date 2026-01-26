@@ -76,7 +76,10 @@ def send_completion(
 
 
 class GMSServerProcess(ManagedProcess):
-    """Manages GMS server lifecycle for tests. Starts server, waits for socket, cleans up on exit."""
+    """
+    Manages GMS server lifecycle for tests. Starts server, waits for socket, cleans up on exit.
+    Runs only for the specified GPU device.
+    """
 
     def __init__(self, request, device: int):
         self.device = device
