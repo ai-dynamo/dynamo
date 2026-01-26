@@ -107,6 +107,10 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		"-config-file", configFilePath,
 	}
 
+	// Mount EPP config
+	_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
+	container.VolumeMounts = append(container.VolumeMounts, volumeMount)
+
 	return container, nil
 }
 
@@ -118,6 +122,10 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 
 	// EPP needs longer grace period for graceful shutdown
 	podSpec.TerminationGracePeriodSeconds = ptr.To(int64(130))
+
+	// Add EPP config volume
+	volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
+	podSpec.Volumes = append(podSpec.Volumes, volume)
 
 	return podSpec, nil
 }
