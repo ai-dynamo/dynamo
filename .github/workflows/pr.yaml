@@ -68,7 +68,7 @@ jobs:
   operator:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
-    name: Build and push Dynamo Operator
+    name: Operator
     runs-on: prod-builder-v2
     steps:
       - name: Checkout code
@@ -111,9 +111,7 @@ jobs:
         env:
           ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
         run: |
-          sudo apt-get update && sudo apt-get install -y make
           make check
-
       - name: Build and push Container
         id: build-and-push-image
         shell: bash

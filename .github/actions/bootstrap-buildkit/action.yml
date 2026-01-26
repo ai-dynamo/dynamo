@@ -89,29 +89,33 @@ runs:
       if: inputs.buildkit_worker_addresses == ''
       shell: bash
       run: |
+        if docker buildx inspect ${{ inputs.builder_name }} > /dev/null 2>&1; then
+            # If exit code is 0 (success), print the message
+            echo "✅ Builder '${{ inputs.builder_name }}' already exists. Skipping creation."
+        else
+          echo "K8s Builder '${{ inputs.builder_name }}' does not exist. Creating it."
+          docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
+          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+          '--driver-opt=namespace=${{ inputs.namespace }}' \
+          '--driver-opt=loadbalance=sticky' \
+          '--driver-opt=replicas=${{ inputs.replicas }}' \
+          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+          '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=buildkit-amd64-worker"' \
+          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
 
-        docker buildx create --use --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/amd64 \
-         '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
-         '--driver-opt=namespace=${{ inputs.namespace }}' \
-         '--driver-opt=loadbalance=sticky' \
-         '--driver-opt=replicas=${{ inputs.replicas }}' \
-         '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
-         '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
-         '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-         '--driver-opt="nodeselector=kubernetes.io/arch=amd64,role=buildkit-amd64-worker"' \
-         '--driver-opt="tolerations=${{ inputs.tolerations }}"'
-
-        docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
-         '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
-         '--driver-opt=namespace=${{ inputs.namespace }}' \
-         '--driver-opt=loadbalance=sticky' \
-         '--driver-opt=replicas=${{ inputs.replicas }}' \
-         '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
-         '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
-         '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
-         '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=buildkit-arm64-worker"' \
-         '--driver-opt="tolerations=${{ inputs.tolerations }}"'
-
+          docker buildx create --append --name ${{ inputs.builder_name }} --driver kubernetes --platform=linux/arm64 \
+          '--driver-opt=requests.ephemeral-storage=${{ inputs.ephemeral_storage }}' \
+          '--driver-opt=namespace=${{ inputs.namespace }}' \
+          '--driver-opt=loadbalance=sticky' \
+          '--driver-opt=replicas=${{ inputs.replicas }}' \
+          '--driver-opt=requests.cpu=${{ inputs.requests_cpu }}' \
+          '--driver-opt=requests.memory=${{ inputs.requests_memory }}' \
+          '--driver-opt=limits.memory=${{ inputs.limits_memory }}' \
+          '--driver-opt="nodeselector=kubernetes.io/arch=arm64,role=buildkit-arm64-worker"' \
+          '--driver-opt="tolerations=${{ inputs.tolerations }}"'
+        fi
     - name: Bootstrap buildkit
       if: inputs.skip_bootstrap != 'true'
       shell: bash
