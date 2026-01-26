@@ -12,12 +12,12 @@ use std::time::Duration;
 use std::{collections::HashMap, path::PathBuf};
 use std::{env, fmt};
 
-use crate::{CancellationToken, Runtime};
 use crate::transports::etcd as etcd_transport;
+use crate::{CancellationToken, Runtime};
 use async_trait::async_trait;
+use futures::StreamExt;
 use once_cell::sync::OnceCell;
 use oneshot;
-use futures::StreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, percent_encode};
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +132,7 @@ pub trait Store: Send + Sync {
 }
 
 #[derive(Clone, Debug, Default)]
+#[allow(clippy::large_enum_variant)]
 pub enum Selector {
     // Box it because it is significantly bigger than the other variants
     Etcd(etcd_transport::ClientOptions),
@@ -148,23 +149,36 @@ impl Selector {
                 if let Some(runtime) = runtime {
                     let (tx, rx) = oneshot::channel();
                     runtime.primary().spawn(async move {
-                        let etcd_client = etcd_transport::Client::new(opts.clone(), runtime.clone()).await.map_err(StoreError::from);
+                        let etcd_client =
+                            etcd_transport::Client::new(opts.clone(), runtime.clone())
+                                .await
+                                .map_err(StoreError::from);
                         tx.send(etcd_client).unwrap();
                     });
-                    
+
                     // We block our async task a tiny bit here, but not a big deal since we only ever do this once.
-                    Ok(KeyValueStoreEnum::Etcd(EtcdStore::new(rx.recv().map_err(|x| StoreError::from(anyhow::anyhow!(x)))??)))
+                    Ok(KeyValueStoreEnum::Etcd(EtcdStore::new(
+                        rx.recv()
+                            .map_err(|x| StoreError::from(anyhow::anyhow!(x)))??,
+                    )))
                 } else {
-                    Err(StoreError::BuildError(anyhow::anyhow!("Runtime is required for Etcd selector")))
+                    Err(StoreError::BuildError(anyhow::anyhow!(
+                        "Runtime is required for Etcd selector"
+                    )))
                 }
             }
             Selector::File(path) => {
                 if let Some(runtime) = runtime {
-                    Ok(KeyValueStoreEnum::File(FileStore::new(runtime.primary_token(), path)))
+                    Ok(KeyValueStoreEnum::File(FileStore::new(
+                        runtime.primary_token(),
+                        path,
+                    )))
                 } else {
-                    Err(StoreError::BuildError(anyhow::anyhow!("Runtime is required for File selector")))
+                    Err(StoreError::BuildError(anyhow::anyhow!(
+                        "Runtime is required for File selector"
+                    )))
                 }
-            },
+            }
             Selector::Memory => Ok(KeyValueStoreEnum::Memory(MemoryStore::new())),
         }
     }
@@ -281,7 +295,7 @@ impl KeyValueStoreEnum {
 pub struct Manager {
     selector: Selector,
     kv_store: Arc<OnceCell<KeyValueStoreEnum>>,
-    runtime: Option<Runtime>
+    runtime: Option<Runtime>,
 }
 
 impl Default for Manager {
@@ -291,14 +305,19 @@ impl Default for Manager {
 }
 
 impl Manager {
-
     pub fn new(s: Selector, runtime: Option<Runtime>) -> Manager {
-        Manager { selector: s, kv_store: Arc::new(OnceCell::new()), runtime }
+        Manager {
+            selector: s,
+            kv_store: Arc::new(OnceCell::new()),
+            runtime,
+        }
     }
 
     fn get_kv_store(&self) -> Result<&KeyValueStoreEnum, StoreError> {
         let selector = self.selector.clone();
-        self.kv_store.get_or_try_init(|| { selector.build(self.runtime.clone()).map_err(StoreError::from) })
+        self.kv_store.get_or_try_init(|| {
+            selector
+                .build(self.runtime.clone())})
     }
 
     pub async fn get_or_create_bucket(
@@ -307,7 +326,9 @@ impl Manager {
         // auto-delete items older than this
         ttl: Option<Duration>,
     ) -> Result<Box<dyn Bucket>, StoreError> {
-        self.get_kv_store()?.get_or_create_bucket(bucket_name, ttl).await
+        self.get_kv_store()?
+            .get_or_create_bucket(bucket_name, ttl)
+            .await
     }
 
     pub async fn get_bucket(
@@ -401,7 +422,10 @@ impl Manager {
         obj: &mut T,
     ) -> anyhow::Result<StoreOutcome> {
         let obj_json = serde_json::to_vec(obj)?;
-        let bucket = self.get_kv_store()?.get_or_create_bucket(bucket_name, bucket_ttl).await?;
+        let bucket = self
+            .get_kv_store()?
+            .get_or_create_bucket(bucket_name, bucket_ttl)
+            .await?;
 
         let outcome = bucket.insert(key, obj_json.into(), obj.revision()).await?;
 
