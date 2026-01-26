@@ -101,3 +101,4 @@ Thumbs.db
 **/htmlcov/
 **/.tox/
 **/.nox/
+artifacts/
