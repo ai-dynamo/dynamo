@@ -122,14 +122,14 @@ jobs:
           ECR_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           NO_CACHE_FLAG=""
-          TAGS=(
+          IMAGE_URIS=(
             "${ECR_IMAGE_BASE}:${DEFAULT_TAG}"
             "${ACR_IMAGE_BASE}:${DEFAULT_TAG}"
           )
 
           if [[ "${{ github.ref_name }}" == "main" ]]; then
             NO_CACHE_FLAG="--no-cache"
-            TAGS+=(
+            IMAGE_URIS+=(
               "${ECR_IMAGE_BASE}:main-dynamo-operator"
               "${ECR_IMAGE_BASE}:main-${DEFAULT_TAG}"
               "${ACR_IMAGE_BASE}:main-dynamo-operator"
@@ -137,54 +137,31 @@ jobs:
             )
           fi
 
-          OPERATOR_TAGS="${TAGS[*]}"
-          echo "DEBUG: operator_tags value = '${OPERATOR_TAGS}'"
-          echo "operator_tags=${OPERATOR_TAGS}" >> $GITHUB_OUTPUT
-          TAGGING_FLAGS=$(printf -- '-t %s ' "${TAGS[@]}")
+          echo "operator_image_uris=${IMAGE_URIS[*]}" >> $GITHUB_OUTPUT
+          TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
-          # if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
-          #   NO_CACHE_FLAG="--no-cache"
-          # fi
-          # docker buildx build --push \
-          #     --platform linux/amd64,linux/arm64 \
-          #     --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-          #     ${TAGGING_FLAGS} \
-          #     ${NO_CACHE_FLAG} -f Dockerfile .
+          if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
+            NO_CACHE_FLAG="--no-cache"
+          fi
+          docker buildx build --push \
+              --platform linux/amd64,linux/arm64 \
+              --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
+              ${TAGGING_FLAGS} \
+              ${NO_CACHE_FLAG} -f Dockerfile .
 
-
-  copy-operator-to-acr:
-    needs: [operator]
-    name: copy dynamo-operator
-    runs-on: prod-default-v2
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Calculate target tag
-        id: calculate-target-tag
+      - name: Post pushed image tags to summary
         shell: bash
         run: |
-          for tag in ${{ needs.operator.outputs.operator_tags }}; do
-            echo "tag=${tag}"
-          done
-          # TARGET_TAG_PLAIN="${{ github.sha }}-dynamo-operator"
-          # echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
-    #   - name: Copy image to target registry
-    #     uses: ./.github/actions/skopeo-copy
-    #     with:
-    #       source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-    #       source_image: ai-dynamo/dynamo
-    #       source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
-    #       target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-    #       target_image: ai-dynamo/dynamo
-    #       target_tag: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
-    #       source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-    #       source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-    #       target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-    #       target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-    #       target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-    # outputs:
-    #   target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+          echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|" >> $GITHUB_STEP_SUMMARY
+          while IFS= read -r image_uri; do
+            if [ -n "$tag" ]; then
+              echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done <<< "${{ needs.build-and-push-image.outputs.operator_image_uris }}"
 
 
 
