@@ -1261,3 +1261,73 @@ def assert_deterministic(
             f"{label1}: {response1}\n"
             f"{label2}: {response2}"
         )
+
+
+def check_logs_for_race_indicators(log_path: Path) -> Dict[str, int]:
+    """Check logs for race condition indicators.
+
+    This function scans log files for patterns that indicate race conditions
+    in the KVBM slot creation and operation handling.
+
+    Args:
+        log_path: Path to the log file to analyze
+
+    Returns:
+        Dictionary with counts of:
+        - slot_retry: "slot not yet created... will retry" messages (Layer 2 activation)
+        - no_operations: "no operations" related messages
+        - panic: Any panic/PANIC messages
+        - assertion: AssertionError occurrences
+    """
+    indicators = {
+        "slot_retry": 0,
+        "no_operations": 0,
+        "panic": 0,
+        "assertion": 0,
+    }
+
+    if not log_path.exists():
+        return indicators
+
+    patterns = {
+        "slot_retry": r"slot not yet created.*will retry",
+        "no_operations": r"no operations.*leader handles cleanup|had_operations.*false",
+        "panic": r"(?i)panic|PANIC",
+        "assertion": r"AssertionError",
+    }
+
+    try:
+        with open(log_path, "r", errors="ignore") as f:
+            content = f.read()
+            for key, pattern in patterns.items():
+                matches = re.findall(pattern, content)
+                indicators[key] = len(matches)
+    except Exception as e:
+        print(f"Warning: Could not read log file {log_path}: {e}")
+
+    return indicators
+
+
+def get_server_log_path(llm_server) -> Optional[Path]:
+    """Get the log file path from an LLM server wrapper.
+
+    Args:
+        llm_server: Server wrapper object (from llm_server_kvbm fixture)
+
+    Returns:
+        Path to the server's log file, or None if not available
+    """
+    # Try to get log path from the ManagedProcess
+    if hasattr(llm_server, "proc") and hasattr(llm_server.proc, "log_path"):
+        return Path(llm_server.proc.log_path)
+
+    # Try to get log directory
+    if hasattr(llm_server, "proc") and hasattr(llm_server.proc, "log_dir"):
+        log_dir = Path(llm_server.proc.log_dir)
+        # Look for stdout.log or similar
+        for log_name in ["stdout.log", "stderr.log", "process.log"]:
+            log_file = log_dir / log_name
+            if log_file.exists():
+                return log_file
+
+    return None

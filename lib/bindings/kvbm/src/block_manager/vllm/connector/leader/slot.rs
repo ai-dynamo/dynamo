@@ -1730,3 +1730,182 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
         self.block_ids()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_llm::block_manager::connector::protocol::WorkerTransferRequest;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// Helper to create a minimal test slot without requiring VllmBlockManager.
+    /// This directly constructs the slot fields for unit testing the had_operations flag.
+    fn create_test_slot() -> VllmConnectorSlot {
+        let (xfer_tx, _xfer_rx) = mpsc::unbounded_channel();
+        let cache_stats = Arc::new(CacheStatsTracker::new(Some("test".to_string())));
+
+        // Create a minimal slot by directly setting fields
+        // Note: We need tokens to be non-empty as required by the assert in new()
+        let tokens: Tokens = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].into();
+        let block_size = 16usize;
+        let salt_hash = SaltHash::default();
+        let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+
+        VllmConnectorSlot {
+            request_id: "test-request-id".to_string(),
+            sequence,
+            // We don't have a real block_manager for testing, but we can test the flag behavior
+            // by directly manipulating the slot state. The block_manager field is only used
+            // in methods that interact with storage, not for the had_operations flag.
+            block_manager: unsafe { std::mem::zeroed() }, // Only for testing had_operations flag
+            block_size,
+            xfer_tx,
+            state: SlotState::Initialized,
+            iteration_first_scheduled: None,
+            current_position: 0,
+            evaluated_blocks: 0,
+            device_blocks: Vec::new(),
+            staging_from_host: None,
+            staging_from_disk: None,
+            pending_operations: None,
+            had_operations: false,
+            tokens_cached_from_device: 0,
+            tokens_cached_from_host: 0,
+            tokens_cached_from_disk: 0,
+            performed_cache_lookup: false,
+            total_blocks_queried: 0,
+            cache_stats,
+        }
+    }
+
+    #[test]
+    fn test_had_operations_initially_false() {
+        // Create a new slot and verify had_operations starts as false
+        let slot = create_test_slot();
+
+        // Verify had_operations starts as false
+        assert!(
+            !slot.had_operations(),
+            "had_operations should be false on slot creation"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_set_when_operations_appended() {
+        // Create a slot and directly test append_pending_operation behavior
+        let mut slot = create_test_slot();
+
+        // Verify starts false
+        assert!(!slot.had_operations());
+
+        // Create a dummy worker transfer request and append it
+        let worker_req = WorkerTransferRequest {
+            request_id: "test-request-id".to_string(),
+            uuid: uuid::Uuid::new_v4(),
+            transfer_type: TransferType::Store,
+            request_type: RequestType::Scheduled,
+        };
+
+        // Append the operation - this should set had_operations to true
+        slot.append_pending_operation(worker_req);
+
+        // Verify had_operations is now true
+        assert!(
+            slot.had_operations(),
+            "had_operations should be true after append_pending_operation"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_false_when_no_operations_added() {
+        // Create a slot, perform state changes but don't add operations
+        let mut slot = create_test_slot();
+
+        // Verify starts false
+        assert!(!slot.had_operations());
+
+        // Transition through various states that don't involve operations
+        slot.state = SlotState::Prefilling;
+        assert!(!slot.had_operations());
+
+        slot.state = SlotState::Decoding;
+        assert!(!slot.had_operations());
+
+        slot.state = SlotState::Finishing;
+        assert!(!slot.had_operations());
+
+        slot.state = SlotState::Finished;
+        assert!(
+            !slot.had_operations(),
+            "had_operations should remain false when no operations were ever added"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_persists_through_state_changes() {
+        // Create slot, add operation, verify flag persists through state changes
+        let mut slot = create_test_slot();
+
+        // Add an operation to set had_operations = true
+        let worker_req = WorkerTransferRequest {
+            request_id: "test-request-id".to_string(),
+            uuid: uuid::Uuid::new_v4(),
+            transfer_type: TransferType::Load,
+            request_type: RequestType::Immediate,
+        };
+        slot.append_pending_operation(worker_req);
+        assert!(slot.had_operations());
+
+        // Transition through states - flag should persist
+        slot.state = SlotState::Prefilling;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Prefilling"
+        );
+
+        slot.state = SlotState::Decoding;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Decoding"
+        );
+
+        slot.state = SlotState::Finishing;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Finishing"
+        );
+
+        slot.state = SlotState::Finished;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Finished"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_not_reset_on_take_pending_operations() {
+        // Verify that taking pending operations doesn't reset had_operations
+        let mut slot = create_test_slot();
+
+        // Add an operation
+        let worker_req = WorkerTransferRequest {
+            request_id: "test-request-id".to_string(),
+            uuid: uuid::Uuid::new_v4(),
+            transfer_type: TransferType::Store,
+            request_type: RequestType::Scheduled,
+        };
+        slot.append_pending_operation(worker_req);
+        assert!(slot.had_operations());
+
+        // Take the pending operations (this is what the connector does)
+        let ops = slot.take_pending_operations();
+        assert!(ops.is_some());
+        assert_eq!(ops.unwrap().len(), 1);
+
+        // Verify had_operations is STILL true after take
+        assert!(
+            slot.had_operations(),
+            "had_operations should remain true even after take_pending_operations"
+        );
+    }
+}
