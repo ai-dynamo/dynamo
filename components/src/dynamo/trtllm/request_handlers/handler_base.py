@@ -250,7 +250,6 @@ class HandlerBase:
                 except asyncio.CancelledError:
                     pass
             else:
-                # Task completed, check if it was due to shutdown
                 monitor_task.result()
 
     def _decode_disaggregated_params_from_prefill(
