@@ -33,13 +33,13 @@ var InferencePoolGVK = schema.GroupVersionKind{
 // Using the stable inference.networking.k8s.io/v1 API (per PR #5592)
 func GenerateInferencePool(
 	dgd *v1alpha1.DynamoGraphDeployment,
-	serviceName string,
+	componentName string,
+	eppServiceName string,
 	eppConfig *v1alpha1.EPPConfig,
 ) (*gaiev1.InferencePool, error) {
 	poolName := GetPoolName(dgd.Name, eppConfig)
 	poolNamespace := GetPoolNamespace(dgd.Namespace, eppConfig)
-	dynamoNamespace := dgd.GetDynamoNamespaceForService(dgd.Spec.Services[serviceName])
-	eppServiceName := GetServiceName(dgd.Name)
+	dynamoNamespace := dgd.GetDynamoNamespaceForService(dgd.Spec.Services[componentName])
 
 	// Build InferencePool using typed API
 	pool := &gaiev1.InferencePool{
@@ -48,7 +48,7 @@ func GenerateInferencePool(
 			Namespace: poolNamespace,
 			Labels: map[string]string{
 				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-				consts.KubeLabelDynamoComponent:           serviceName,
+				consts.KubeLabelDynamoComponent:           componentName,
 				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 			},
 		},
@@ -75,12 +75,12 @@ func GenerateInferencePool(
 	return pool, nil
 }
 
-// GetPoolName returns the InferencePool name
+// GetPoolName returns the InferencePool name for a given DGD
 func GetPoolName(dgdName string, eppConfig *v1alpha1.EPPConfig) string {
 	return fmt.Sprintf("%s-pool", dgdName)
 }
 
-// GetPoolNamespace returns the InferencePool namespace
+// GetPoolNamespace returns the InferencePool namespace for a given DGD
 func GetPoolNamespace(dgdNamespace string, eppConfig *v1alpha1.EPPConfig) string {
 	return dgdNamespace
 }

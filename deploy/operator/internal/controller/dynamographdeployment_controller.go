@@ -244,7 +244,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 		}
 
 		// Ensure EPP RBAC exists in cluster-wide mode if EPP service is present
-		if hasEPPService(dynamoDeployment) {
+		if dynamoDeployment.HasEPPService() {
 			if r.Config.RBAC.EPPClusterRoleName == "" {
 				return ReconcileResult{}, fmt.Errorf("EPP ClusterRole name is required in cluster-wide mode when EPP service is present")
 			}
@@ -1191,40 +1191,21 @@ func generateAdapterName(dgdName, serviceName string) string {
 }
 
 // hasEPPService checks if the DGD has an EPP service defined
-func hasEPPService(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) bool {
-	for _, component := range dgd.Spec.Services {
-		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
-			return true
-		}
-	}
-	return false
-}
-
-// getEPPService returns the EPP service name and spec if present
-func getEPPService(dgd *nvidiacomv1alpha1.DynamoGraphDeployment) (string, *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec, bool) {
-	for serviceName, component := range dgd.Spec.Services {
-		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
-			return serviceName, component, true
-		}
-	}
-	return "", nil, false
-}
-
 // reconcileEPPResources reconciles all EPP-related resources (ConfigMaps, Services, InferencePools)
 func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Context, dgd *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	logger := log.FromContext(ctx)
 
-	serviceName, eppService, hasEPP := getEPPService(dgd)
+	componentName, eppService, hasEPP := dgd.GetEPPService()
 	if !hasEPP {
 		logger.V(1).Info("No EPP service defined, skipping EPP resource reconciliation")
 		return nil
 	}
 
-	logger.Info("Reconciling EPP resources", "serviceName", serviceName)
+	logger.Info("Reconciling EPP resources", "componentName", componentName)
 
 	// 1. Reconcile EPP ConfigMap (if needed - not needed when ConfigMapRef is used)
 	if eppService.EPPConfig == nil || eppService.EPPConfig.ConfigMapRef == nil {
-		configMap, err := epp.GenerateConfigMap(ctx, dgd, serviceName, eppService.EPPConfig)
+		configMap, err := epp.GenerateConfigMap(ctx, dgd, componentName, eppService.EPPConfig)
 		if err != nil {
 			logger.Error(err, "Failed to generate EPP ConfigMap")
 			return fmt.Errorf("failed to generate EPP ConfigMap: %w", err)
@@ -1241,18 +1222,11 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		}
 	}
 
-	// 2. Reconcile EPP Service
-	eppSvc := epp.GenerateService(dgd, serviceName)
-	_, _, err := commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*corev1.Service, bool, error) {
-		return eppSvc, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "Failed to sync EPP Service")
-		return fmt.Errorf("failed to sync EPP Service: %w", err)
-	}
-
-	// 3. Reconcile InferencePool
-	inferencePool, err := epp.GenerateInferencePool(dgd, serviceName, eppService.EPPConfig)
+	// 2. Reconcile InferencePool
+	// Note: EPP Service is created automatically by the standard component reconciliation
+	// via GenerateComponentService() in graph.go (see ComponentTypeEPP case)
+	eppServiceName := dynamo.GetDynamoComponentName(dgd, componentName)
+	inferencePool, err := epp.GenerateInferencePool(dgd, componentName, eppServiceName, eppService.EPPConfig)
 	if err != nil {
 		logger.Error(err, "Failed to generate EPP InferencePool")
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)

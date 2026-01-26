@@ -30,7 +30,7 @@ const (
 func GenerateConfigMap(
 	ctx context.Context,
 	dgd *v1alpha1.DynamoGraphDeployment,
-	serviceName string,
+	componentName string,
 	eppConfig *v1alpha1.EPPConfig,
 ) (*corev1.ConfigMap, error) {
 	// If user provides ConfigMapRef, they manage the ConfigMap themselves
@@ -55,11 +55,11 @@ func GenerateConfigMap(
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      configMapName,
 			Namespace: dgd.Namespace,
-			Labels: map[string]string{
-				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
-				consts.KubeLabelDynamoComponent:           serviceName,
-				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
-			},
+		Labels: map[string]string{
+			consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+			consts.KubeLabelDynamoComponent:           componentName,
+			consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
+		},
 		},
 		Data: map[string]string{
 			ConfigKey: configYAML,
