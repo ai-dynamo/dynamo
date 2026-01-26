@@ -214,7 +214,7 @@ impl ModelWatcher {
                     // Extract ModelCardInstanceId from the removal event
                     let model_card_instance_id = match &id {
                         DiscoveryInstanceId::Model(mcid) => mcid,
-                        DiscoveryInstanceId::Endpoint(_) => {
+                        DiscoveryInstanceId::Endpoint(_) | DiscoveryInstanceId::EventChannel(_) => {
                             tracing::error!(
                                 "Unexpected discovery instance type in removal (expected Model)"
                             );

@@ -20,7 +20,7 @@ limitations under the License.
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
-[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ) ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen) ![Community PRs](https://img.shields.io/badge/PRs_merged-130%2B-blue)
+[![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ) ![Community Contributors](https://img.shields.io/badge/community_contributors-70%2B-brightgreen)
 
 | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/5506)** | **[Support Matrix](https://github.com/ai-dynamo/dynamo/blob/main/docs/reference/support-matrix.md)** | **[Docs](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Recipes](https://github.com/ai-dynamo/dynamo/tree/main/recipes)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Prebuilt Containers](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** | **[Blogs](https://developer.nvidia.com/blog/tag/nvidia-dynamo)**
 

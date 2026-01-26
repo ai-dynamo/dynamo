@@ -153,6 +153,11 @@ def parse_bootstrap_ports(ports_str: str | None) -> list[int]:
 
 
 def parse_args():
+    """Parse command-line arguments for the Dynamo mocker engine.
+
+    Returns:
+        argparse.Namespace: Parsed command-line arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Mocker engine for testing Dynamo LLM infrastructure with vLLM-style CLI.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -315,7 +320,7 @@ def parse_args():
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
