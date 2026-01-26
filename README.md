@@ -61,7 +61,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 | [**Multimodal**](docs/multimodal/index.md)                           | ✅   | ✅     | ✅           |
 | [**Tool Calling**](docs/agents/tool-calling.md)                      | ✅   | ✅     | ✅           |
 
-> **[Full Feature Matrix →](feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
+> **[Full Feature Matrix →](docs/reference/feature-matrix.md)** — Detailed compatibility including LoRA, Request Migration, Speculative Decoding, and feature interactions.
 
 ## Latest News
 
