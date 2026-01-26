@@ -219,6 +219,9 @@ pub enum Endpoint {
     /// OAI Embeddings
     Embeddings,
 
+    /// OAI Images
+    Images,
+
     /// OAI Responses
     Responses,
 
@@ -840,6 +843,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Images => write!(f, "images"),
             Endpoint::Responses => write!(f, "responses"),
             Endpoint::Tensor => write!(f, "tensor"),
         }
@@ -852,6 +856,7 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Images => "images",
             Endpoint::Responses => "responses",
             Endpoint::Tensor => "tensor",
         }
