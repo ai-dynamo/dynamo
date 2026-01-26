@@ -10,7 +10,9 @@
 //!
 //! ZMQ multipart message:
 //! - Frame 0: Topic (string) - for ZMQ subscription filtering
-//! - Frame 1: Binary frame (5-byte header + EventEnvelope payload)
+//! - Frame 1: publisher_id (8 bytes, u64 big-endian) - for fast deduplication
+//! - Frame 2: sequence (8 bytes, u64 big-endian) - for fast deduplication
+//! - Frame 3: Binary frame (5-byte header + EventEnvelope payload)
 
 use anyhow::Result;
 use async_stream::stream;
@@ -24,6 +26,7 @@ use std::sync::{Arc, Mutex};
 const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 
+use super::codec::MsgpackCodec;
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
@@ -180,21 +183,30 @@ impl ZmqPubTransport {
 #[async_trait]
 impl EventTransportTx for ZmqPubTransport {
     async fn publish(&self, _subject: &str, envelope_bytes: Bytes) -> Result<()> {
+        // Decode envelope to extract publisher_id and sequence for fast deduplication
+        let codec = MsgpackCodec;
+        let envelope = codec.decode_envelope(&envelope_bytes)?;
+
         // Create binary frame
         let frame = Frame::new(envelope_bytes);
-
         let frame_bytes = frame.encode();
 
-        // ZMQ multipart: [topic, frame_bytes]
+        // Prepare multipart message: [topic, publisher_id, sequence, frame_bytes]
         let topic_bytes = self.topic.as_bytes().to_vec();
+        let publisher_id_bytes = envelope.publisher_id.to_be_bytes().to_vec();
+        let sequence_bytes = envelope.sequence.to_be_bytes().to_vec();
         let frame_vec = frame_bytes.to_vec();
 
         let socket = Arc::clone(&self.socket);
         tokio::task::spawn_blocking(move || -> Result<()> {
             let socket = socket.lock().unwrap();
-            // Send topic frame with SNDMORE flag
+            // Send topic frame (for ZMQ subscription filtering)
             socket.send(&topic_bytes, zmq::SNDMORE)?;
-            // Send data frame
+            // Send publisher_id (for fast deduplication)
+            socket.send(&publisher_id_bytes, zmq::SNDMORE)?;
+            // Send sequence (for fast deduplication)
+            socket.send(&sequence_bytes, zmq::SNDMORE)?;
+            // Send data frame (complete envelope)
             socket.send(&frame_vec, 0)?;
             Ok(())
         })
@@ -317,23 +329,45 @@ impl EventTransportRx for ZmqSubTransport {
 
         let stream = stream! {
             loop {
-                // Receive multipart message in blocking task
+                // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, Vec<u8>)> {
+                let result = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64, u64, Vec<u8>)> {
                     let socket = socket_clone.lock().unwrap();
+
                     // Receive topic frame
                     let topic = socket.recv_bytes(0)?;
+
+                    // Receive publisher_id frame (8 bytes, u64 big-endian)
+                    let publisher_id_bytes = socket.recv_bytes(0)?;
+                    if publisher_id_bytes.len() != 8 {
+                        anyhow::bail!("Invalid publisher_id frame: expected 8 bytes, got {}", publisher_id_bytes.len());
+                    }
+                    let publisher_id = u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
+
+                    // Receive sequence frame (8 bytes, u64 big-endian)
+                    let sequence_bytes = socket.recv_bytes(0)?;
+                    if sequence_bytes.len() != 8 {
+                        anyhow::bail!("Invalid sequence frame: expected 8 bytes, got {}", sequence_bytes.len());
+                    }
+                    let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
 
                     // Receive data frame
                     let data = socket.recv_bytes(0)?;
 
-                    Ok((topic, data))
+                    Ok((topic, publisher_id, sequence, data))
                 })
                 .await;
 
                 match result {
-                    Ok(Ok((_, frame_bytes))) => {
-                        // Parse binary frame from second part
+                    Ok(Ok((_, publisher_id, sequence, frame_bytes))) => {
+                        // Log dedup metadata for debugging (actual deduplication happens in EventSubscriber)
+                        tracing::trace!(
+                            publisher_id = publisher_id,
+                            sequence = sequence,
+                            "Received ZMQ message with dedup metadata"
+                        );
+
+                        // Parse binary frame from fourth part
                         let frame_bytes = Bytes::from(frame_bytes);
                         match Frame::decode(frame_bytes) {
                             Ok(frame) => {
