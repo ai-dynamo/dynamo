@@ -582,9 +582,9 @@ class MetricsPayload(BasePayload):
                 name=f"{prefix}_*",
                 pattern=lambda name: rf"^{prefix}_\w+",
                 validator=lambda value: len(set(value))
-                >= 11,  # 80% of typical ~17 metrics (excluding _bucket) as of 2025-12-02
-                error_msg=lambda name, value: f"Expected at least 11 unique {prefix}_* metrics, but found only {len(set(value))}",
-                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 11)",
+                >= 7,  # 80% of typical ~13 metrics (excluding _bucket and removed kvstats metrics)
+                error_msg=lambda name, value: f"Expected at least 7 unique {prefix}_* metrics, but found only {len(set(value))}",
+                success_msg=lambda name, value: f"SUCCESS: Found {len(set(value))} unique {prefix}_* metrics (minimum required: 7)",
                 multiline=True,
             ),
             MetricCheck(
@@ -600,14 +600,6 @@ class MetricsPayload(BasePayload):
                 validator=lambda value: float(value) > 0,
                 error_msg=lambda name, value: f"{name} should be > 0, but got {value}",
                 success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}s",
-            ),
-            MetricCheck(
-                name=f"{prefix}_{prometheus_names.kvstats.TOTAL_BLOCKS}",
-                pattern=metric_pattern,
-                validator=lambda value: int(float(value))
-                >= 0,  # Allow 0 for SGLang (hardcoded issue in components/src/dynamo/sglang/publisher.py:70)
-                error_msg=lambda name, value: f"{name} should be >= 0, but got {value}",
-                success_msg=lambda name, value: f"SUCCESS: Found {name} = {value}",
             ),
         ]
 

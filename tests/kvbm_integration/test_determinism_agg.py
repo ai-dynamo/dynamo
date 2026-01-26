@@ -449,10 +449,6 @@ class TestDeterminismAgg(BaseTestDeterminism):
     @pytest.mark.skipif(
         not HAS_VLLM_BENCH, reason="requires vllm bench (vllm module not found)"
     )
-    @pytest.mark.xfail(
-        reason="Known issue, fixed in PR: https://github.com/ai-dynamo/dynamo/pull/5475",
-        run=True,
-    )
     def test_concurrent_determinism_under_load(
         self, tester, llm_server, runtime_services
     ):
