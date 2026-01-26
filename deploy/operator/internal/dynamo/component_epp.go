@@ -94,6 +94,8 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	poolNamespace := epp.GetPoolNamespace(context.ParentGraphDeploymentNamespace, context.EPPConfig)
 	configFilePath := epp.GetConfigFilePath()
 
+	container.Command = []string{}
+
 	container.Args = []string{
 		"-pool-name", poolName,
 		"-pool-namespace", poolNamespace,
