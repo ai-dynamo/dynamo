@@ -1,4 +1,6 @@
 ---
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 title: "Running **Meta-Llama-3.1-8B-Instruct** with Speculative Decoding (Eagle3)"
 ---
 
