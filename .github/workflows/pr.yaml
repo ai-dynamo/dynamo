@@ -81,19 +81,19 @@ jobs:
           builder_name: ${{ needs.changed-files.outputs.builder_name }}
           flavor: general
           all_arch: 'true'
-      # - name: Docker Login
-      #   uses: ./.github/actions/docker-login
-      #   with:
-      #     aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-      #     aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-      #     azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-      #     azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-      #     azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      # - name: Linter
-      #   shell: bash
-      #   working-directory: ./deploy/operator
-      #   run: |
-      #     docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
+      - name: Docker Login
+        uses: ./.github/actions/docker-login
+        with:
+          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+      - name: Linter
+        shell: bash
+        working-directory: ./deploy/operator
+        run: |
+          docker buildx build --platform linux/amd64,linux/arm64 --target linter --progress=plain --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ .
       # - name: Tester
       #   shell: bash
       #   working-directory: ./deploy/operator

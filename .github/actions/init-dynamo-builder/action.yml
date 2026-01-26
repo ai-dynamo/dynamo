@@ -99,28 +99,44 @@ runs:
         if [[ -n "${{ inputs.cuda_version }}" ]]; then
           CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
         fi
-        if [[ -n "${{ inputs.all_arch }}" ]]; then
+        if [[ "${{ inputs.all_arch }}" == "true" ]]; then
           .github/scripts/route_buildkit.sh --arch all --flavor ${{ inputs.flavor }} $CUDA_ARG
         else
           .github/scripts/route_buildkit.sh --arch ${{ inputs.arch }} --flavor ${{ inputs.flavor }} $CUDA_ARG
         fi
-    - name: Output buildkit worker addre
+
+    - name: Prepare worker addresses and platform
+      id: prepare
       shell: bash
       run: |
-        echo "buildkit_worker_addresses=${{ steps.route-buildkit.outputs }}" 
-        # echo "buildkit_worker_addresses=${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}" 
-        # echo "buildkit_worker_addresses=${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}" 
-    # - name: Bootstrap buildkit 
-    #   uses: ./.github/actions/bootstrap-buildkit
-    #   with:
-    #     builder_name: ${{ inputs.builder_name }}
-    #     buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}
-    #     platform: linux/amd64
-    #     ephemeral_storage: ${{ inputs.ephemeral_storage }}
-    #     namespace: ${{ inputs.namespace }}
-    #     replicas: ${{ inputs.replicas }}
-    #     requests_cpu: ${{ inputs.requests_cpu }}
-    #     requests_memory: ${{ inputs.requests_memory }}
-    #     limits_memory: ${{ inputs.limits_memory }}
-    #     tolerations: ${{ inputs.tolerations }}
+        if [[ "${{ inputs.all_arch }}" == "true" ]]; then
+          # Combine both architecture outputs for multi-arch builds
+          AMD64_ADDRS="${{ steps.route-buildkit.outputs[format('{0}_amd64', inputs.flavor)] }}"
+          ARM64_ADDRS="${{ steps.route-buildkit.outputs[format('{0}_arm64', inputs.flavor)] }}"
+          if [[ -n "$AMD64_ADDRS" && -n "$ARM64_ADDRS" ]]; then
+            echo "worker_addresses=${AMD64_ADDRS},${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$AMD64_ADDRS" ]]; then
+            echo "worker_addresses=${AMD64_ADDRS}" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$ARM64_ADDRS" ]]; then
+            echo "worker_addresses=${ARM64_ADDRS}" >> "$GITHUB_OUTPUT"
+          else
+            echo "worker_addresses=" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          # Single architecture build
+          echo "worker_addresses=${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.flavor, inputs.arch)] }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Bootstrap buildkit
+      uses: ./.github/actions/bootstrap-buildkit
+      with:
+        builder_name: ${{ inputs.builder_name }}
+        buildkit_worker_addresses: ${{ steps.prepare.outputs.worker_addresses }}
+        ephemeral_storage: ${{ inputs.ephemeral_storage }}
+        namespace: ${{ inputs.namespace }}
+        replicas: ${{ inputs.replicas }}
+        requests_cpu: ${{ inputs.requests_cpu }}
+        requests_memory: ${{ inputs.requests_memory }}
+        limits_memory: ${{ inputs.limits_memory }}
+        tolerations: ${{ inputs.tolerations }}
 

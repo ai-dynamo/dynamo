@@ -24,9 +24,7 @@ inputs:
     description: 'Comma-separated list of remote buildkit worker addresses. If empty, falls back to Kubernetes driver.'
     required: false
     default: ''
-  platform:
-    description: 'Docker platform (linux/amd64, linux/arm64)'
-    required: true
+
 
   # Kubernetes driver inputs (used when remote_builder is false)
   ephemeral_storage:
