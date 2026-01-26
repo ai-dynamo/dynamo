@@ -12,7 +12,7 @@
 
 # For Multimodal EPD (required for device_map="auto" in vision model loading)
 accelerate
-aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@9db6a1a5011c0ff80b5349f377f17846c5274b02
+aiconfigurator[webapp] @ git+https://github.com/ai-dynamo/aiconfigurator.git@03d44c3cc449b912409566b3c1dfd9dbf2bede65
 aiofiles
 aiperf @ git+https://github.com/ai-dynamo/aiperf.git@54cd6dc820bff8bfebc875da104e59d745e14f75
 av==15.0.0
