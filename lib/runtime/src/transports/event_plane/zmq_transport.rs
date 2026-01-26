@@ -358,32 +358,40 @@ impl ZmqSubTransport {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64, u64, Vec<u8>)> {
-                    let socket = socket_clone.lock().unwrap();
+                let result =
+                    tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64, u64, Vec<u8>)> {
+                        let socket = socket_clone.lock().unwrap();
 
-                    // Receive topic frame
-                    let topic = socket.recv_bytes(0)?;
+                        // Receive topic frame
+                        let topic = socket.recv_bytes(0)?;
 
-                    // Receive publisher_id frame (8 bytes, u64 big-endian)
-                    let publisher_id_bytes = socket.recv_bytes(0)?;
-                    if publisher_id_bytes.len() != 8 {
-                        anyhow::bail!("Invalid publisher_id frame: expected 8 bytes, got {}", publisher_id_bytes.len());
-                    }
-                    let publisher_id = u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
+                        // Receive publisher_id frame (8 bytes, u64 big-endian)
+                        let publisher_id_bytes = socket.recv_bytes(0)?;
+                        if publisher_id_bytes.len() != 8 {
+                            anyhow::bail!(
+                                "Invalid publisher_id frame: expected 8 bytes, got {}",
+                                publisher_id_bytes.len()
+                            );
+                        }
+                        let publisher_id =
+                            u64::from_be_bytes(publisher_id_bytes.try_into().unwrap());
 
-                    // Receive sequence frame (8 bytes, u64 big-endian)
-                    let sequence_bytes = socket.recv_bytes(0)?;
-                    if sequence_bytes.len() != 8 {
-                        anyhow::bail!("Invalid sequence frame: expected 8 bytes, got {}", sequence_bytes.len());
-                    }
-                    let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
+                        // Receive sequence frame (8 bytes, u64 big-endian)
+                        let sequence_bytes = socket.recv_bytes(0)?;
+                        if sequence_bytes.len() != 8 {
+                            anyhow::bail!(
+                                "Invalid sequence frame: expected 8 bytes, got {}",
+                                sequence_bytes.len()
+                            );
+                        }
+                        let sequence = u64::from_be_bytes(sequence_bytes.try_into().unwrap());
 
-                    // Receive data frame
-                    let data = socket.recv_bytes(0)?;
+                        // Receive data frame
+                        let data = socket.recv_bytes(0)?;
 
-                    Ok((topic, publisher_id, sequence, data))
-                })
-                .await;
+                        Ok((topic, publisher_id, sequence, data))
+                    })
+                    .await;
 
                 match result {
                     Ok(Ok((_topic, publisher_id, sequence, frame_bytes))) => {
