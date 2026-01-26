@@ -46,7 +46,7 @@ import (
 
 func main() {
 	// Register Dynamo custom plugins:
-	// - kv-aware-scorer: Implements Scorer, PreRequest, and ResponseComplete interfaces
+	// - kv-aware-scorer: Implements Scorer, PreRequest, and ResponseStreaming interfaces
 	//   - Score: Calls Dynamo router to select workers based on KV cache, sets routing headers
 	//   - PreRequest: Registers request with router bookkeeping after scheduling is finalized
 	//   - ResponseComplete: Cleans up router bookkeeping when response completes
