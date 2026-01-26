@@ -161,11 +161,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-# Note: Disable mirrorlist to avoid broken mirrors that don't handle URL-encoded package names
-RUN dnf config-manager \
-        --setopt=appstream.mirrorlist= \
-        --setopt=appstream.baseurl=https://repo.almalinux.org/almalinux/8/AppStream/\$basearch/os/ \
-        --save && \
+# Note: Clear stale metadata - the manylinux image has cached metadata referencing
+# old /Packages/a/ paths, but repos now use flat /Packages/ structure.
+RUN dnf clean metadata && \
     dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
