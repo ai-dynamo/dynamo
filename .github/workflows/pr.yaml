@@ -158,7 +158,7 @@ jobs:
             if [ -n "$image_uri" ]; then
               echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
             fi
-          done <<< "${IMAGE_URIS[*]}"
+          done <<< "${IMAGE_URIS[@]}"
 
 
 
