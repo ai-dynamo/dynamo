@@ -14,6 +14,7 @@
 //! - **Runtime**: Tokio runtime configuration and system server settings
 //! - **NATS**: NATS client connection and authentication
 //! - **ETCD**: ETCD client connection and authentication
+//! - **Event Plane**: Event transport selection (NATS)
 //! - **KVBM**: Key-Value Block Manager configuration
 //! - **LLM**: Language model inference configuration
 //! - **Model**: Model loading and caching
@@ -36,6 +37,9 @@ pub mod logging {
 
     /// Use local timezone for logging timestamps (default is UTC)
     pub const DYN_LOG_USE_LOCAL_TZ: &str = "DYN_LOG_USE_LOCAL_TZ";
+
+    /// Enable span event logging (create/close events)
+    pub const DYN_LOGGING_SPAN_EVENTS: &str = "DYN_LOGGING_SPAN_EVENTS";
 
     /// OTLP (OpenTelemetry Protocol) tracing configuration
     pub mod otlp {
@@ -300,6 +304,15 @@ pub mod model {
     }
 }
 
+/// Event Plane transport environment variables
+pub mod event_plane {
+    /// Event transport selection: "zmq" or "nats". Default: "nats"
+    pub const DYN_EVENT_PLANE: &str = "DYN_EVENT_PLANE";
+
+    /// Event plane codec selection: "json" or "msgpack".
+    pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
+}
+
 /// CUDA and GPU environment variables
 pub mod cuda {
     /// Path to custom CUDA fatbin file
@@ -347,6 +360,7 @@ mod tests {
             logging::DYN_LOGGING_JSONL,
             logging::DYN_SDK_DISABLE_ANSI_LOGGING,
             logging::DYN_LOG_USE_LOCAL_TZ,
+            logging::DYN_LOGGING_SPAN_EVENTS,
             logging::otlp::OTEL_EXPORT_ENABLED,
             logging::otlp::OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
             logging::otlp::OTEL_SERVICE_NAME,
@@ -402,6 +416,9 @@ mod tests {
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            // Event Plane
+            event_plane::DYN_EVENT_PLANE,
+            event_plane::DYN_EVENT_PLANE_CODEC,
             // CUDA
             cuda::DYNAMO_FATBIN_PATH,
             // Build

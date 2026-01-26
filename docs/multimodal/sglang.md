@@ -17,7 +17,7 @@ limitations under the License.
 
 # SGLang Multimodal
 
-This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal uses specialized **E/PD or E/P/D** flows with **NIXL (RDMA)** for zero-copy tensor transfer.
+This document provides a comprehensive guide for multimodal inference using SGLang backend in Dynamo. SGLang multimodal supports **EPD**, **E/PD**, and **E/P/D** flows, with NIXL (RDMA) for zero-copy tensor transfer in disaggregated modes.
 
 ## Support Matrix
 
@@ -36,12 +36,12 @@ This document provides a comprehensive guide for multimodal inference using SGLa
 
 ## Deployment Patterns
 
-SGLang supports E/PD and E/P/D patterns only (always has a separate encode worker). See [Multimodal Architecture Patterns](index.md#architecture-patterns) for detailed explanations.
+SGLang supports EPD, E/PD, and E/P/D patterns. See [Multimodal Architecture Patterns](index.md#architecture-patterns) for detailed explanations.
 
 | Pattern | Supported | Launch Script | Notes |
 |---------|-----------|---------------|-------|
-| EPD (Simple Aggregated) | ❌ | N/A | Not supported |
-| E/PD (Encode Separate) | ✅ | `multimodal_agg.sh` | Vision encoder separate |
+| EPD (Simple Aggregated) | ✅ | `agg.sh` | Internal encoding |
+| E/PD (Encode Separate) | ✅ | `multimodal_epd.sh` | Vision encoder separate |
 | E/P/D (Full Disaggregation) | ✅ | `multimodal_disagg.sh` | KV cache via bootstrap |
 | EP/D (Traditional Disaggregated) | ❌ | N/A | Not supported |
 
@@ -72,6 +72,58 @@ You can find the [latest release](https://github.com/ai-dynamo/dynamo/releases/l
 
 ```bash
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
+
+## EPD Serving (Simple Aggregated)
+
+### Components
+
+- worker: [DecodeWorkerHandler](../../components/src/dynamo/sglang/request_handlers/llm/decode_handler.py) handles encoding, prefilling, and decoding in a single process.
+
+### Workflow
+
+The `DecodeWorkerHandler` receives multimodal requests with image URLs and passes them directly to SGLang's engine. SGLang's internal `mm_data_processor` handles image fetching, loading, encoding, and token expansion.
+
+```mermaid
+flowchart LR
+  HTTP --> worker
+  worker --tokenized text + image_urls--> SGLang[SGLang Engine]
+```
+
+### Launch
+
+```bash
+cd $DYNAMO_HOME/examples/backends/sglang
+./launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct --chat-template qwen2-vl
+```
+
+**Client:**
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe the image."
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 50,
+    "stream": false
+  }' | jq
 ```
 
 ## E/PD Serving (Encode Separate)
@@ -105,7 +157,7 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/sglang
-./launch/multimodal_agg.sh
+./launch/multimodal_epd.sh
 ```
 
 **Client:**
@@ -344,6 +396,7 @@ Supported templates: `qwen2-vl`, `llama-3`, `vicuna`, etc.
 
 | Use Case | NIXL Used? | Data Transfer | Notes |
 |----------|------------|---------------|-------|
+| EPD (Simple Aggregated) | No | N/A | All processing internal to SGLang |
 | E/PD (Encode Separate) | Yes | Encoder → PD (embeddings) | Vision encoder separate |
 | E/P/D (Full Disaggregation) | Yes | Encoder → Prefill (embeddings) | KV cache via SGLang bootstrap |
 

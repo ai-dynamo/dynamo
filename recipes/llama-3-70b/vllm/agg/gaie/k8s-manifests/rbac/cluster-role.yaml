@@ -28,10 +28,6 @@ rules:
 - apiGroups: [""]
   resources: ["pods"]
   verbs: ["get", "watch", "list"]
-# Dynamo k8s service discovery - endpoints
-- apiGroups: [""]
-  resources: ["endpoints"]
-  verbs: ["get", "list", "watch"]
 # Dynamo k8s service discovery - endpointslices
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
