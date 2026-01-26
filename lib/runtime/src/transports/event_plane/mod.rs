@@ -37,7 +37,9 @@ use std::task::{Context, Poll};
 
 use crate::DistributedRuntime;
 use crate::component::{Component, Namespace};
-use crate::discovery::{Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport};
+use crate::discovery::{
+    Discovery, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, EventChannelQuery, EventTransport,
+};
 use crate::traits::DistributedRuntimeProvider;
 use crate::utils::ip_resolver::get_local_ip_for_advertise;
 
@@ -102,7 +104,9 @@ async fn resolve_zmq_broker(
     scope: &EventScope,
 ) -> Result<Option<BrokerEndpoints>> {
     // Priority 1: Explicit URL from DYN_ZMQ_BROKER_URL
-    if let Ok(broker_url) = std::env::var(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_URL) {
+    if let Ok(broker_url) =
+        std::env::var(crate::config::environment_names::zmq_broker::DYN_ZMQ_BROKER_URL)
+    {
         let (xsub_endpoints, xpub_endpoints) = parse_broker_url(&broker_url)?;
         tracing::info!(
             num_xsub = xsub_endpoints.len(),
@@ -353,12 +357,18 @@ impl EventPublisher {
                         zmq_transport::ZmqPubTransport::connect(&broker.xsub_endpoints[0], &topic)
                             .await?
                     } else {
-                        zmq_transport::ZmqPubTransport::connect_multiple(&broker.xsub_endpoints, &topic)
-                            .await?
+                        zmq_transport::ZmqPubTransport::connect_multiple(
+                            &broker.xsub_endpoints,
+                            &topic,
+                        )
+                        .await?
                     };
 
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
-                    TransportSetup::ZmqBroker(Arc::new(pub_transport) as Arc<dyn EventTransportTx>, codec)
+                    TransportSetup::ZmqBroker(
+                        Arc::new(pub_transport) as Arc<dyn EventTransportTx>,
+                        codec,
+                    )
                 } else {
                     // DIRECT MODE: Bind PUB socket
                     let (pub_transport, actual_bind_endpoint) = std::thread::spawn({
@@ -603,19 +613,28 @@ impl EventSubscriber {
 
                     let stream: WireStream = if broker.xpub_endpoints.len() == 1 {
                         // Single broker - no deduplication needed
-                        let sub_transport =
-                            zmq_transport::ZmqSubTransport::connect_broker(&broker.xpub_endpoints[0], &topic)
-                                .await?;
+                        let sub_transport = zmq_transport::ZmqSubTransport::connect_broker(
+                            &broker.xpub_endpoints[0],
+                            &topic,
+                        )
+                        .await?;
                         sub_transport.subscribe(&topic).await?
                     } else {
                         // Multiple brokers - need deduplication
                         let sub_transport =
-                            zmq_transport::ZmqSubTransport::connect_broker_multiple(&broker.xpub_endpoints, &topic)
-                                .await?;
+                            zmq_transport::ZmqSubTransport::connect_broker_multiple(
+                                &broker.xpub_endpoints,
+                                &topic,
+                            )
+                            .await?;
                         let inner_stream = sub_transport.subscribe(&topic).await?;
 
                         // Wrap with deduplication (default cache size: 100,000 entries)
-                        Box::pin(DeduplicatingStream::new(inner_stream, codec.clone(), 100_000))
+                        Box::pin(DeduplicatingStream::new(
+                            inner_stream,
+                            codec.clone(),
+                            100_000,
+                        ))
                     };
 
                     (stream, codec)
@@ -639,7 +658,8 @@ impl EventSubscriber {
                         ),
                     };
 
-                    let subscriber = Arc::new(DynamicSubscriber::new(discovery, query, topic.clone()));
+                    let subscriber =
+                        Arc::new(DynamicSubscriber::new(discovery, query, topic.clone()));
 
                     let stream = subscriber.start_zmq().await?;
                     let codec = Arc::new(Codec::Msgpack(MsgpackCodec));
