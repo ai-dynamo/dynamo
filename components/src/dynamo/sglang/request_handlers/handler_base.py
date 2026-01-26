@@ -428,9 +428,6 @@ class BaseWorkerHandler(ABC):
                 try:
                     cancellation_task.result()
                 except GeneratorExit:
-                    logging.info(
-                        "Decode engine was shut down during token generation DELTEE THIS!!!!!"
-                    )
                     raise
                 except Exception:
                     pass
