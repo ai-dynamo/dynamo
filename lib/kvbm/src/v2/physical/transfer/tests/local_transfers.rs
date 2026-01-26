@@ -723,7 +723,11 @@ fn test_can_use_whole_block_fc_fc_partial_layer() {
 
     // Partial layer transfer = should NOT use whole-block
     let partial_range = 0..1;
-    assert!(!can_use_whole_block_transfer(&src, &dst, Some(&partial_range)));
+    assert!(!can_use_whole_block_transfer(
+        &src,
+        &dst,
+        Some(&partial_range)
+    ));
 }
 
 #[test]
@@ -853,31 +857,39 @@ async fn test_partial_layer_transfer_uses_layer_wise() -> Result<()> {
 
     // Verify partial transfer should NOT use whole-block path
     let partial_range = 0..1;
-    assert!(!can_use_whole_block_transfer(&src, &dst, Some(&partial_range)));
+    assert!(!can_use_whole_block_transfer(
+        &src,
+        &dst,
+        Some(&partial_range)
+    ));
 
     let src_blocks = vec![0, 1];
     let dst_blocks = vec![2, 3];
 
     // Fill source with sequential pattern for layer 0 only
-    let checksums =
-        fill_and_checksum_with_mode(&src, &src_blocks, FillPattern::Sequential, TransferMode::FirstLayerOnly)?;
+    let checksums = fill_and_checksum_with_mode(
+        &src,
+        &src_blocks,
+        FillPattern::Sequential,
+        TransferMode::FirstLayerOnly,
+    )?;
     let ctx = create_transfer_context(agent, None)?;
 
     let options = TransferOptionsInternal::builder()
         .layer_range(partial_range)
         .build()?;
 
-    let notification = execute_transfer(
-        &src,
-        &dst,
-        &src_blocks,
-        &dst_blocks,
-        options,
-        ctx.context(),
-    )?;
+    let notification =
+        execute_transfer(&src, &dst, &src_blocks, &dst_blocks, options, ctx.context())?;
     notification.await?;
 
-    verify_checksums_by_position_with_mode(&checksums, &src_blocks, &dst, &dst_blocks, TransferMode::FirstLayerOnly)?;
+    verify_checksums_by_position_with_mode(
+        &checksums,
+        &src_blocks,
+        &dst,
+        &dst_blocks,
+        TransferMode::FirstLayerOnly,
+    )?;
 
     Ok(())
 }

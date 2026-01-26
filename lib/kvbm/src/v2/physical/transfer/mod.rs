@@ -139,7 +139,10 @@ pub fn validate_layout_compatibility(
     let src_layout = src.layout();
     let dst_layout = dst.layout();
 
-    if src_layout.block_layout().requires_transform(&dst_layout.block_layout()) {
+    if src_layout
+        .block_layout()
+        .requires_transform(&dst_layout.block_layout())
+    {
         return Err(anyhow!(
             "Layout transformation not supported: src={:?}, dst={:?}",
             src_layout.block_layout(),

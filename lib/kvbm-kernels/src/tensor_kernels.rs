@@ -350,7 +350,12 @@ pub unsafe fn operational_copy(
 // 1. testing-cuda feature is enabled
 // 2. permute_kernels feature is enabled (tests use operational_copy/universal kernels)
 // 3. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
-#[cfg(all(test, feature = "testing-cuda", feature = "permute_kernels", not(stub_kernels)))]
+#[cfg(all(
+    test,
+    feature = "testing-cuda",
+    feature = "permute_kernels",
+    not(stub_kernels)
+))]
 mod tests {
     use super::*;
     use cudarc::driver::{CudaContext, CudaSlice, DevicePtr, DevicePtrMut, DriverError};

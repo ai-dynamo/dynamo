@@ -115,9 +115,7 @@ impl KvBlockLayout {
             (Some(a), Some(b)) => a != b,
             (None, None) => {
                 // Unknown→Unknown is compatible, but warn so we can fix these
-                tracing::warn!(
-                    "Unknown→Unknown KvBlockLayout comparison - this should be fixed"
-                );
+                tracing::warn!("Unknown→Unknown KvBlockLayout comparison - this should be fixed");
                 false
             }
             // Unknown→Known requires transform (conservative)

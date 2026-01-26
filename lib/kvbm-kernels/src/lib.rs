@@ -4,7 +4,9 @@
 pub mod tensor_kernels;
 
 // Always available - core transfer functionality
-pub use tensor_kernels::{is_memcpy_batch_available, is_using_stubs, memcpy_batch, vectorized_copy};
+pub use tensor_kernels::{
+    is_memcpy_batch_available, is_using_stubs, memcpy_batch, vectorized_copy,
+};
 
 // Permute kernels - data layout transformation (requires permute_kernels feature)
 #[cfg(feature = "permute_kernels")]
