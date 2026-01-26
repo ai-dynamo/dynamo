@@ -81,8 +81,7 @@ impl NcclBootstrap {
         // 4 bytes padding for alignment
         bytes.extend_from_slice(&[0u8; 4]);
         // Cast i8 array to u8 for serialization (same binary representation)
-        let internal_bytes: &[u8; 128] =
-            unsafe { std::mem::transmute(&self.unique_id.internal) };
+        let internal_bytes: &[u8; 128] = unsafe { std::mem::transmute(&self.unique_id.internal) };
         bytes.extend_from_slice(internal_bytes);
         bytes
     }
@@ -98,8 +97,11 @@ impl NcclBootstrap {
             bytes.len()
         );
 
-        let world_size =
-            i32::from_le_bytes(bytes[0..4].try_into().context("Failed to parse world_size")?);
+        let world_size = i32::from_le_bytes(
+            bytes[0..4]
+                .try_into()
+                .context("Failed to parse world_size")?,
+        );
 
         let mut unique_id = ncclUniqueId { internal: [0; 128] };
         // Cast u8 slice to i8 for the internal array (same binary representation)
