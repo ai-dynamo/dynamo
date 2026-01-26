@@ -312,6 +312,7 @@ def frontend_server(test_directory, runtime_services):
         working_dir=str(test_directory),
         display_output=False,
         log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
+        terminate_existing=False,  # Don't kill nats-server/etcd started by runtime_services
     ) as frontend_process:
         # Get actual log file path from ManagedProcess (it may modify log_dir to use temp directory)
         log_file = Path(frontend_process._log_path)
@@ -742,6 +743,7 @@ class TestConsolidatorRouterE2E:
             working_dir=str(test_directory),
             display_output=False,
             log_dir=str(frontend_log_dir),  # Absolute path keeps logs in test directory
+            terminate_existing=False,  # Don't kill nats-server/etcd started by runtime_services
         ) as _frontend_process:
             # Get actual log file path from ManagedProcess
             frontend_log = Path(_frontend_process._log_path)
