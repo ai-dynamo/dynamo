@@ -1,7 +1,6 @@
 ---
 title: "Dynamo Feature Compatibility Matrices"
 ---
-# Dynamo Feature Compatibility Matrices
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
