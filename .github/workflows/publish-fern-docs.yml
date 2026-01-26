@@ -29,7 +29,7 @@ name: Publish Fern Docs
 on:
   push:
     branches:
-    - fern
+    - docs-website
     paths:
     - 'fern/**'
     - '.github/workflows/publish-fern-docs.yaml'
