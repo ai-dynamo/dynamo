@@ -341,11 +341,7 @@ pub async fn start_zmq_listener(
     // In multi-node setups, each node runs dynamo.sglang alongside local SGLang ranks,
     // so ZMQ connections are always local. NATS handles cross-node event distribution.
     if let Err(e) = socket.connect(&zmq_endpoint).await {
-        tracing::error!(
-            "Failed to connect ZMQ SUB socket to {}: {}",
-            zmq_endpoint,
-            e
-        );
+        tracing::error!("Failed to connect ZMQ SUB socket to {zmq_endpoint}: {e}");
         return;
     }
 
