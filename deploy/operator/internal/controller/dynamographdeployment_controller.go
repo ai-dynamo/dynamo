@@ -1232,13 +1232,6 @@ func (r *DynamoGraphDeploymentReconciler) reconcileEPPResources(ctx context.Cont
 		return fmt.Errorf("failed to generate EPP InferencePool: %w", err)
 	}
 
-	// Debug: log the generated InferencePool
-	logger.Info("Generated InferencePool",
-		"name", inferencePool.GetName(),
-		"namespace", inferencePool.GetNamespace(),
-		"targetPorts", inferencePool.Spec.TargetPorts,
-		"endpointPickerRef", inferencePool.Spec.EndpointPickerRef)
-
 	_, _, err = commoncontroller.SyncResource(ctx, r, dgd, func(ctx context.Context) (*gaiev1.InferencePool, bool, error) {
 		return inferencePool, false, nil
 	})

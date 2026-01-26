@@ -22,6 +22,7 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	controllercommon "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo/epp"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -158,7 +159,7 @@ func (v *SharedSpecValidator) validateSharedMemory() error {
 // validateEPPConfig validates EPP-specific configuration constraints.
 func (v *SharedSpecValidator) validateEPPConfig(ctx context.Context) error {
 	// Only validate if this is an EPP component
-	if v.spec.ComponentType != "epp" {
+	if v.spec.ComponentType != consts.ComponentTypeEPP {
 		return nil
 	}
 
