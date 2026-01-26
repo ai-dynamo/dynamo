@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Fern docs publish workflow
-# Publishes documentation to Fern when changes are pushed to main branch
+# Publishes documentation to Fern when changes are pushed to the docs-website branch
 #
 # Required Configuration:
 # - Secret: FERN_TOKEN (generated via `fern token` command, specific to organization)
@@ -32,7 +32,7 @@ on:
     - docs-website
     paths:
     - 'fern/**'
-    - '.github/workflows/publish-fern-docs.yaml'
+    - '.github/workflows/publish-fern-docs.yml'
   workflow_dispatch:
 
 jobs:
@@ -49,6 +49,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Convert admonitions
+        run: python fern/convert_admonitions.py --dir fern/pages
 
       - name: Install Fern CLI
         run: npm install -g fern-api
