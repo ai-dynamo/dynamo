@@ -528,7 +528,16 @@ where
     }
 
     /// Recover state from persistence.
-    pub async fn recover(&self) -> Result<Option<RegistrySnapshot<K, V, M>>> {
+    ///
+    /// Returns both the recovered snapshot and any WAL entries that need to be
+    /// applied on top of it. The caller is responsible for applying the WAL
+    /// entries to rebuild the complete state.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)` if no persisted state exists (empty snapshot and no WAL entries)
+    /// - `Ok(Some((snapshot, wal_entries)))` with the snapshot and entries to replay
+    pub async fn recover(&self) -> Result<Option<(RegistrySnapshot<K, V, M>, Vec<WalEntry<K, V, M>>)>> {
         // Load latest snapshot
         let snapshot = self.snapshot.load_latest().await?.unwrap_or_default();
 
@@ -538,12 +547,11 @@ where
         // Update sequence
         self.wal.set_seq(snapshot.sequence + 1);
 
-        // Apply WAL entries to snapshot (caller should do this based on entry types)
         if !wal_entries.is_empty() {
             tracing::info!(
                 snapshot_seq = snapshot.sequence,
                 wal_entries = wal_entries.len(),
-                "Recovery: loaded snapshot + {} WAL entries",
+                "Recovery: loaded snapshot + {} WAL entries to apply",
                 wal_entries.len()
             );
         }
@@ -552,7 +560,7 @@ where
             return Ok(None);
         }
 
-        Ok(Some(snapshot))
+        Ok(Some((snapshot, wal_entries)))
     }
 
     /// Check if a snapshot should be taken.
