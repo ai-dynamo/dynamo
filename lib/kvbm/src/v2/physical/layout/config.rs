@@ -66,6 +66,17 @@ impl LayoutConfig {
             .saturating_mul(self.dtype_width_bytes)
     }
 
+    /// Get the number of bytes per block.
+    ///
+    /// This is the total size of a single block across all layers and outer dimensions.
+    pub fn bytes_per_block(&self) -> usize {
+        self.num_layers
+            .saturating_mul(self.outer_dim)
+            .saturating_mul(self.page_size)
+            .saturating_mul(self.inner_dim)
+            .saturating_mul(self.dtype_width_bytes)
+    }
+
     /// Get the head dimension if `num_heads` is specified.
     ///
     /// Computes `inner_dim / (page_size * num_heads)`.

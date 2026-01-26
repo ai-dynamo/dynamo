@@ -113,6 +113,21 @@ kvbm_kernels_has_memcpy_batch_async(void)
   return false;
 }
 
+// Stub for memcpy_batch - returns not supported since we can't do CUDA ops
+cudaError_t
+kvbm_kernels_memcpy_batch(
+    const void* const* src_ptrs_host, void* const* dst_ptrs_host, size_t size_per_copy, size_t num_copies,
+    cudaStream_t stream)
+{
+  (void)src_ptrs_host;
+  (void)dst_ptrs_host;
+  (void)size_per_copy;
+  (void)num_copies;
+  (void)stream;
+  STUB_ABORT("kvbm_kernels_memcpy_batch");
+  return 1;  // Unreachable
+}
+
 // Returns true if this is the stub library (no real CUDA kernels).
 // Downstream crates can use this to skip CUDA tests at runtime.
 bool

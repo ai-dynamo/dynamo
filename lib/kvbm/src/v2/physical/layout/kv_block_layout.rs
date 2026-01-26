@@ -106,11 +106,21 @@ impl KvBlockLayout {
     /// Returns `true` if the layouts have different dimension orderings,
     /// meaning a transformation kernel is needed rather than a simple copy.
     ///
-    /// Returns `true` if either layout is `Unknown` (conservative).
+    /// For Unknown→Unknown comparisons, returns `false` (compatible) but emits
+    /// a warning so these cases can be tracked and fixed.
+    ///
+    /// Returns `true` if one is Unknown and the other is Known (conservative).
     pub fn requires_transform(&self, other: &Self) -> bool {
         match (self.dim_order(), other.dim_order()) {
             (Some(a), Some(b)) => a != b,
-            // Unknown always requires transform (conservative)
+            (None, None) => {
+                // Unknown→Unknown is compatible, but warn so we can fix these
+                tracing::warn!(
+                    "Unknown→Unknown KvBlockLayout comparison - this should be fixed"
+                );
+                false
+            }
+            // Unknown→Known requires transform (conservative)
             _ => true,
         }
     }
@@ -371,9 +381,12 @@ mod tests {
         assert!(KvBlockLayout::OperationalNHD.requires_transform(&KvBlockLayout::UniversalTP));
         assert!(KvBlockLayout::OperationalHND.requires_transform(&KvBlockLayout::OperationalNHD));
 
-        // Unknown always requires transform
+        // Unknown→Known requires transform (conservative)
         assert!(KvBlockLayout::Unknown.requires_transform(&KvBlockLayout::OperationalNHD));
         assert!(KvBlockLayout::OperationalNHD.requires_transform(&KvBlockLayout::Unknown));
+
+        // Unknown→Unknown is compatible (but emits warning)
+        assert!(!KvBlockLayout::Unknown.requires_transform(&KvBlockLayout::Unknown));
     }
 
     #[test]

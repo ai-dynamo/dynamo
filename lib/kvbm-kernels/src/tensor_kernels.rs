@@ -19,6 +19,7 @@ use std::ffi::c_void;
 use cudarc::runtime::sys::{cudaError_t, cudaStream_t};
 
 /// Numeric tags passed across the FFI boundary to select the CUDA template.
+#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorDataType {
@@ -29,6 +30,7 @@ pub enum TensorDataType {
 }
 
 /// Identifies how each `[nt, nh, hd]` chunk is laid out in device memory.
+#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockLayout {
@@ -37,6 +39,7 @@ pub enum BlockLayout {
 }
 
 /// Direction flag for copying between block stacks and operational buffers.
+#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalCopyDirection {
@@ -45,6 +48,7 @@ pub enum OperationalCopyDirection {
 }
 
 /// Selects how the operational copy should move data.
+#[cfg(feature = "permute_kernels")]
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OperationalCopyBackend {
@@ -61,6 +65,7 @@ pub enum OperationalCopyBackend {
     MemcpyBatch = 4,
 }
 
+#[cfg(feature = "permute_kernels")]
 unsafe extern "C" {
     fn kvbm_kernels_launch_universal_from_block(
         universal_ptrs_device: *const *mut c_void,
@@ -105,12 +110,22 @@ unsafe extern "C" {
         backend: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
+}
 
+unsafe extern "C" {
     fn kvbm_kernels_launch_vectorized_copy(
         src_ptrs_device: *mut *mut c_void,
         dst_ptrs_device: *mut *mut c_void,
         copy_size_bytes: usize,
         num_pairs: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    fn kvbm_kernels_memcpy_batch(
+        src_ptrs_host: *const *const c_void,
+        dst_ptrs_host: *const *mut c_void,
+        size_per_copy: usize,
+        num_copies: usize,
         stream: cudaStream_t,
     ) -> cudaError_t;
 
@@ -146,6 +161,36 @@ pub fn is_using_stubs() -> bool {
     unsafe { kvbm_kernels_is_stub_build() }
 }
 
+/// Batched memcpy using cudaMemcpyBatchAsync (CUDA 12.9+) or fallback to individual cudaMemcpyAsync.
+///
+/// Takes HOST arrays of src/dst pointers - no device allocation needed.
+/// Direction is auto-determined by CUDA from pointer types using cudaMemcpyDefault.
+///
+/// Returns cudaErrorNotSupported if CUDA < 12.9 and no fallback is available.
+///
+/// # Safety
+/// - `src_ptrs_host` must point to a valid array of `num_copies` source pointers
+/// - `dst_ptrs_host` must point to a valid array of `num_copies` destination pointers
+/// - Each source/destination pointer pair must have at least `size_per_copy` bytes accessible
+/// - `stream` must be a valid CUDA stream handle
+pub unsafe fn memcpy_batch(
+    src_ptrs_host: *const *const c_void,
+    dst_ptrs_host: *const *mut c_void,
+    size_per_copy: usize,
+    num_copies: usize,
+    stream: cudaStream_t,
+) -> cudaError_t {
+    unsafe {
+        kvbm_kernels_memcpy_batch(
+            src_ptrs_host,
+            dst_ptrs_host,
+            size_per_copy,
+            num_copies,
+            stream,
+        )
+    }
+}
+
 /// Copy `num_blocks` stacks of NHD/HND tensors into universal form.
 ///
 /// * `universal_device_ptrs` – device pointer to `num_blocks` universal bases.
@@ -153,6 +198,7 @@ pub fn is_using_stubs() -> bool {
 ///   table of chunk pointers.
 /// * `nh, nl, no, nt, hd` – logical dimensions of each universal tensor.
 /// * `stream` – CUDA stream used for the launch.
+#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn universal_from_block(
     universal_device_ptrs: *const *mut c_void,
@@ -185,6 +231,7 @@ pub unsafe fn universal_from_block(
 }
 
 /// Copy `num_blocks` universal tensors back into their block stacks.
+#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn block_from_universal(
     universal_device_ptrs: *const *const c_void,
@@ -263,6 +310,7 @@ pub unsafe fn vectorized_copy(
 /// - `KernelOnly` - force dtype-specific kernel
 /// - `MemcpyAsync` - force per-chunk cudaMemcpyAsync
 /// - `MemcpyBatch` - force cudaMemcpyBatchAsync
+#[cfg(feature = "permute_kernels")]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn operational_copy(
     block_ptrs_host: *const *const c_void,
@@ -300,8 +348,9 @@ pub unsafe fn operational_copy(
 
 // Tests are gated to only run when:
 // 1. testing-cuda feature is enabled
-// 2. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
-#[cfg(all(test, feature = "testing-cuda", not(stub_kernels)))]
+// 2. permute_kernels feature is enabled (tests use operational_copy/universal kernels)
+// 3. NOT using stub kernels (stub_kernels cfg is set by build.rs when no nvcc)
+#[cfg(all(test, feature = "testing-cuda", feature = "permute_kernels", not(stub_kernels)))]
 mod tests {
     use super::*;
     use cudarc::driver::{CudaContext, CudaSlice, DevicePtr, DevicePtrMut, DriverError};

@@ -298,9 +298,7 @@ fn execute_direct_transfer(
         }
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
-        | TransferStrategy::CudaAsyncD2D
-        | TransferStrategy::CudaBlockingH2D
-        | TransferStrategy::CudaBlockingD2H => Ok(cuda::execute_cuda_transfer(
+        | TransferStrategy::CudaAsyncD2D => Ok(cuda::execute_cuda_transfer(
             src,
             dst,
             src_block_ids,

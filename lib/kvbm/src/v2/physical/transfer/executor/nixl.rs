@@ -9,6 +9,7 @@
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
 use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
+use crate::v2::physical::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use anyhow::{Result, anyhow};
 use dynamo_memory::nixl::{XferDescList, XferOp};
 use std::marker::PhantomData;
@@ -225,11 +226,17 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
             ));
         }
 
+        // Validate layout compatibility (errors if transform would be needed)
+        validate_layout_compatibility(src, dst)?;
+
         // Get NIXL agent
         let nixl_agent = ctx.nixl_agent();
 
         // Determine layer range
-        let layers = layer_range.unwrap_or(0..src_layout.num_layers());
+        let layers = layer_range.clone().unwrap_or(0..src_layout.num_layers());
+
+        // Check if we can use optimized whole-block transfer
+        let use_whole_block = can_use_whole_block_transfer(src, dst, layer_range.as_ref());
 
         // Determine NIXL operation type
         let xfer_op = match strategy {
@@ -279,30 +286,52 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
         let mut src_dl = XferDescList::new(src_mem_type)?;
         let mut dst_dl = XferDescList::new(dst_mem_type)?;
 
-        // Add memory regions to descriptor lists
-        for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
-            for layer_id in layers.clone() {
-                for outer_id in 0..src_layout.outer_dim() {
-                    let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
-                    let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+        // Build descriptor lists - use whole-block or layer-wise depending on layout
+        if use_whole_block {
+            let bytes_per_block = src_layout.config().bytes_per_block();
+            tracing::debug!(
+                num_blocks = src_block_ids.len(),
+                bytes_per_block,
+                "Building whole-block NIXL descriptors"
+            );
 
-                    if src_region.size() != dst_region.size() {
-                        return Err(anyhow!(
-                            "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
-                            src_block_id,
-                            dst_block_id,
-                            layer_id,
-                            outer_id,
-                            src_region.size(),
-                            dst_region.size()
-                        ));
+            for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+                let src_region = src.memory_region(src_block_id, 0, 0)?;
+                let dst_region = dst.memory_region(dst_block_id, 0, 0)?;
+
+                src_dl.add_desc(src_region.addr(), bytes_per_block, src_device_id);
+                dst_dl.add_desc(dst_region.addr(), bytes_per_block, dst_device_id);
+            }
+        } else {
+            tracing::debug!(
+                num_blocks = src_block_ids.len(),
+                layer_range = ?layers,
+                src_fc = src_layout.is_fully_contiguous(),
+                dst_fc = dst_layout.is_fully_contiguous(),
+                "Building layer-wise NIXL descriptors"
+            );
+
+            for (&src_block_id, &dst_block_id) in src_block_ids.iter().zip(dst_block_ids.iter()) {
+                for layer_id in layers.clone() {
+                    for outer_id in 0..src_layout.outer_dim() {
+                        let src_region = src.memory_region(src_block_id, layer_id, outer_id)?;
+                        let dst_region = dst.memory_region(dst_block_id, layer_id, outer_id)?;
+
+                        if src_region.size() != dst_region.size() {
+                            return Err(anyhow!(
+                                "Size mismatch at block=({},{}), layer={}, outer={}: src={}, dst={}",
+                                src_block_id,
+                                dst_block_id,
+                                layer_id,
+                                outer_id,
+                                src_region.size(),
+                                dst_region.size()
+                            ));
+                        }
+
+                        src_dl.add_desc(src_region.addr(), src_region.size(), src_device_id);
+                        dst_dl.add_desc(dst_region.addr(), dst_region.size(), dst_device_id);
                     }
-
-                    // Add to source descriptor list (modifies in-place)
-                    src_dl.add_desc(src_region.addr(), src_region.size(), src_device_id);
-
-                    // Add to destination descriptor list (modifies in-place)
-                    dst_dl.add_desc(dst_region.addr(), dst_region.size(), dst_device_id);
                 }
             }
         }

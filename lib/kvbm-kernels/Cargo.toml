@@ -33,6 +33,11 @@ prebuilt-kernels = []
 # This is used for creating redistributable prebuilt artifacts.
 # Off by default since the .so is sufficient for normal operation.
 generate-prebuilt = []
+# Enable operational_copy, universal_from_block, block_from_universal kernels.
+# These kernels perform data layout permutation and are only needed for
+# non-standard transfer paths. The default vectorized_copy kernel handles
+# most FC↔LW transfers efficiently without permutation.
+permute_kernels = []
 
 [dependencies]
 # Note: Not using workspace = true so this crate can be built from standalone

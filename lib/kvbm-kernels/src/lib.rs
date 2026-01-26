@@ -3,10 +3,14 @@
 
 pub mod tensor_kernels;
 
+// Always available - core transfer functionality
+pub use tensor_kernels::{is_memcpy_batch_available, is_using_stubs, memcpy_batch, vectorized_copy};
+
+// Permute kernels - data layout transformation (requires permute_kernels feature)
+#[cfg(feature = "permute_kernels")]
 pub use tensor_kernels::{
     BlockLayout, OperationalCopyBackend, OperationalCopyDirection, TensorDataType,
-    block_from_universal, is_memcpy_batch_available, is_using_stubs, operational_copy,
-    universal_from_block, vectorized_copy,
+    block_from_universal, operational_copy, universal_from_block,
 };
 
 // #[cfg(feature = "python-bindings")]

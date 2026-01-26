@@ -555,7 +555,17 @@ kvbm_kernels_launch_operational_copy(
     return cudaSuccess;
   }
 
-  if (!block_ptrs_host || !operational_ptrs_host || !operational_ptrs_device) {
+  // Host pointers are always required
+  if (!block_ptrs_host || !operational_ptrs_host) {
+    return cudaErrorInvalidValue;
+  }
+
+  // Device pointers only required for kernel backends (VectorizedKernel, KernelOnly, Auto)
+  // MemcpyAsync and MemcpyBatch use host pointers only
+  bool needs_device_ptrs =
+      (backend == OperationalCopyBackend::VectorizedKernel || backend == OperationalCopyBackend::KernelOnly ||
+       backend == OperationalCopyBackend::Auto);
+  if (needs_device_ptrs && (!block_ptrs_device || !operational_ptrs_device)) {
     return cudaErrorInvalidValue;
   }
 
@@ -606,7 +616,9 @@ kvbm_kernels_launch_operational_copy(
 
   auto launch_memcpy_async = [&]() -> cudaError_t {
     for (size_t idx = 0; idx < total_chunks; ++idx) {
-      cudaError_t err = cudaMemcpyAsync(dst_ptrs[idx], src_ptrs[idx], sizes[idx], cudaMemcpyDeviceToDevice, stream);
+      // Use cudaMemcpyDefault to auto-detect direction from pointer types.
+      // This enables H2D, D2H, and D2D transfers without explicit direction.
+      cudaError_t err = cudaMemcpyAsync(dst_ptrs[idx], src_ptrs[idx], sizes[idx], cudaMemcpyDefault, stream);
       if (err != cudaSuccess) {
         return err;
       }
@@ -732,6 +744,77 @@ kvbm_kernels_has_memcpy_batch_async()
 #endif
 }
 
+/// Batched memcpy using cudaMemcpyBatchAsync (CUDA 12.9+) or fallback to individual cudaMemcpyAsync.
+///
+/// Takes HOST arrays of src/dst pointers - no device allocation needed.
+/// Direction is auto-determined by CUDA from pointer types using cudaMemcpyDefault.
+///
+/// @param src_ptrs_host Host array of source pointers
+/// @param dst_ptrs_host Host array of destination pointers
+/// @param size_per_copy Size in bytes for each copy
+/// @param num_copies Number of copies to perform
+/// @param stream CUDA stream for async execution
+/// @return cudaSuccess on success, cudaErrorNotSupported if CUDA < 12.9 and batch API unavailable
+extern "C" cudaError_t
+kvbm_kernels_memcpy_batch(
+    const void* const* src_ptrs_host, void* const* dst_ptrs_host, size_t size_per_copy, size_t num_copies,
+    cudaStream_t stream)
+{
+  if (num_copies == 0 || size_per_copy == 0) {
+    return cudaSuccess;
+  }
+
+  if (!src_ptrs_host || !dst_ptrs_host) {
+    return cudaErrorInvalidValue;
+  }
+
+#if defined(CUDART_VERSION)
+#if CUDART_VERSION >= 13000
+  // CUDA 13.0+: Use 8-parameter API (no failIdx)
+  std::vector<size_t> sizes(num_copies, size_per_copy);
+
+  return cudaMemcpyBatchAsync(
+      const_cast<void**>(dst_ptrs_host), const_cast<const void**>(src_ptrs_host), sizes.data(), num_copies,
+      nullptr,  // attrs - nullptr = auto-detect direction
+      nullptr,  // attrsIdxs
+      0,        // numAttrs
+      stream);
+
+#elif CUDART_VERSION >= 12090
+  // CUDA 12.9: Use 9-parameter API (with failIdx)
+  std::vector<size_t> sizes(num_copies, size_per_copy);
+  size_t fail_idx = 0;
+
+  return cudaMemcpyBatchAsync(
+      const_cast<void**>(dst_ptrs_host), const_cast<const void**>(src_ptrs_host), sizes.data(), num_copies,
+      nullptr,    // attrs
+      nullptr,    // attrsIdxs
+      0,          // numAttrs
+      &fail_idx,  // failIdx - included in CUDA 12.9
+      stream);
+
+#else
+  // CUDA < 12.9: Fallback to individual cudaMemcpyAsync with cudaMemcpyDefault
+  for (size_t i = 0; i < num_copies; ++i) {
+    cudaError_t err = cudaMemcpyAsync(dst_ptrs_host[i], src_ptrs_host[i], size_per_copy, cudaMemcpyDefault, stream);
+    if (err != cudaSuccess) {
+      return err;
+    }
+  }
+  return cudaSuccess;
+#endif
+#else
+  // CUDART_VERSION not defined - fallback to individual copies
+  for (size_t i = 0; i < num_copies; ++i) {
+    cudaError_t err = cudaMemcpyAsync(dst_ptrs_host[i], src_ptrs_host[i], size_per_copy, cudaMemcpyDefault, stream);
+    if (err != cudaSuccess) {
+      return err;
+    }
+  }
+  return cudaSuccess;
+#endif
+}
+
 /// Returns false - this is the real CUDA implementation, not stubs.
 /// Downstream crates can use this to skip CUDA tests at runtime when stubs are linked.
 extern "C" bool
@@ -753,7 +836,7 @@ kvbm_kernels_is_stub_build()
 // - int4 (16-byte) loads achieve peak memory bandwidth on modern GPUs
 // - Alignment check is cheap compared to memory access time
 __global__ void
-vectorised_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int num_pairs)
+vectorized_copy(void** src_ptrs, void** dst_ptrs, size_t copy_size_in_bytes, int num_pairs)
 {
   int pair_id = blockIdx.x;
   int block_stride = gridDim.x;
@@ -825,7 +908,7 @@ kvbm_kernels_launch_vectorized_copy(
   constexpr int kBlockDim = 128;
   int grid_dim = std::min(num_pairs, 65535);
 
-  vectorised_copy<<<grid_dim, kBlockDim, 0, stream>>>(src_ptrs_device, dst_ptrs_device, copy_size_bytes, num_pairs);
+  vectorized_copy<<<grid_dim, kBlockDim, 0, stream>>>(src_ptrs_device, dst_ptrs_device, copy_size_bytes, num_pairs);
 
   return cudaGetLastError();
 }

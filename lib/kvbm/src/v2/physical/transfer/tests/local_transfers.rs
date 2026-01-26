@@ -12,6 +12,7 @@ use super::skip_if_stubs_and_device;
 use super::*;
 use crate::physical::transfer::TransferCapabilities;
 use crate::physical::transfer::executor::TransferOptionsInternal;
+use crate::physical::transfer::{can_use_whole_block_transfer, validate_layout_compatibility};
 use crate::v2::physical::transfer::executor::execute_transfer;
 use anyhow::Result;
 use rstest::rstest;
@@ -44,6 +45,17 @@ fn requires_gds(src_kind: StorageKind, dst_kind: StorageKind) -> bool {
         (src_kind, dst_kind),
         (StorageKind::Device(_), StorageKind::Disk(_))
             | (StorageKind::Disk(_), StorageKind::Device(_))
+    )
+}
+
+/// Check if a transfer between two storage kinds is unsupported.
+///
+/// Device ↔ System transfers are not supported - must use Pinned memory for CUDA transfers.
+fn is_unsupported_transfer(src_kind: StorageKind, dst_kind: StorageKind) -> bool {
+    matches!(
+        (src_kind, dst_kind),
+        (StorageKind::Device(_), StorageKind::System)
+            | (StorageKind::System, StorageKind::Device(_))
     )
 }
 
@@ -97,6 +109,15 @@ async fn test_p2p(
 ) -> Result<()> {
     skip_if_stubs_and_device!(src_kind, dst_kind);
 
+    // Skip unsupported Device ↔ System transfers (must use Pinned for CUDA)
+    if is_unsupported_transfer(src_kind, dst_kind) {
+        eprintln!(
+            "Skipping unsupported Device ↔ System transfer: src={:?}, dst={:?}",
+            src_kind, dst_kind
+        );
+        return Ok(());
+    }
+
     // Device ↔ Disk direct transfers require GDS_MT
     if requires_gds(src_kind, dst_kind) && !NixlAgent::is_backend_available("GDS_MT") {
         eprintln!("Skipping Device ↔ Disk test - GDS_MT backend unavailable");
@@ -147,6 +168,17 @@ async fn test_roundtrip(
     dst_kind: StorageKind,
 ) -> Result<()> {
     skip_if_stubs_and_device!(src_kind, inter_kind, dst_kind);
+
+    // Skip unsupported Device ↔ System transfers (must use Pinned for CUDA)
+    if is_unsupported_transfer(src_kind, inter_kind)
+        || is_unsupported_transfer(inter_kind, dst_kind)
+    {
+        eprintln!(
+            "Skipping unsupported Device ↔ System transfer: src={:?}, inter={:?}, dst={:?}",
+            src_kind, inter_kind, dst_kind
+        );
+        return Ok(());
+    }
 
     use crate::physical::transfer::executor::TransferOptionsInternal;
 
@@ -633,6 +665,219 @@ async fn test_direct_transfer_impl(
 
     // Verify data integrity
     verify_checksums_by_position_with_mode(&src_checksums, &src_blocks, &dst, &dst_blocks, mode)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Layout Compatibility Helper Tests
+// ============================================================================
+
+#[test]
+fn test_validate_layout_compatibility_same_layout() {
+    let agent = create_test_agent("test_compat_same");
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_fc_layout(agent.clone(), StorageKind::System, 4);
+
+    // Both FC layouts with Unknown KvBlockLayout - should be compatible
+    assert!(validate_layout_compatibility(&src, &dst).is_ok());
+}
+
+#[test]
+fn test_validate_layout_compatibility_fc_lw_same_block_layout() {
+    let agent = create_test_agent("test_compat_fc_lw");
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_lw_layout(agent.clone(), StorageKind::System, 4);
+
+    // Both have Unknown/Unknown-derived KvBlockLayout - should be compatible
+    // (Unknown→Unknown returns false for requires_transform)
+    assert!(validate_layout_compatibility(&src, &dst).is_ok());
+}
+
+#[test]
+fn test_can_use_whole_block_fc_fc_full_block() {
+    let agent = create_test_agent("test_whole_block_fc_fc");
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_fc_layout(agent.clone(), StorageKind::System, 4);
+
+    // Both FC + full block transfer = should use whole-block
+    assert!(can_use_whole_block_transfer(&src, &dst, None));
+}
+
+#[test]
+fn test_can_use_whole_block_fc_fc_full_range() {
+    let agent = create_test_agent("test_whole_block_fc_fc_range");
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_fc_layout(agent.clone(), StorageKind::System, 4);
+
+    // Both FC + full range (0..num_layers) = should use whole-block
+    let full_range = 0..src.layout().num_layers();
+    assert!(can_use_whole_block_transfer(&src, &dst, Some(&full_range)));
+}
+
+#[test]
+fn test_can_use_whole_block_fc_fc_partial_layer() {
+    let agent = create_test_agent("test_whole_block_partial");
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_fc_layout(agent.clone(), StorageKind::System, 4);
+
+    // Partial layer transfer = should NOT use whole-block
+    let partial_range = 0..1;
+    assert!(!can_use_whole_block_transfer(&src, &dst, Some(&partial_range)));
+}
+
+#[test]
+fn test_can_use_whole_block_fc_lw() {
+    let agent = create_test_agent("test_whole_block_fc_lw");
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_lw_layout(agent.clone(), StorageKind::System, 4);
+
+    // FC + LW = should NOT use whole-block (dst is not fully contiguous)
+    assert!(!can_use_whole_block_transfer(&src, &dst, None));
+}
+
+#[test]
+fn test_can_use_whole_block_lw_fc() {
+    let agent = create_test_agent("test_whole_block_lw_fc");
+    let src = create_lw_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_fc_layout(agent.clone(), StorageKind::System, 4);
+
+    // LW + FC = should NOT use whole-block (src is not fully contiguous)
+    assert!(!can_use_whole_block_transfer(&src, &dst, None));
+}
+
+#[test]
+fn test_can_use_whole_block_lw_lw() {
+    let agent = create_test_agent("test_whole_block_lw_lw");
+    let src = create_lw_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_lw_layout(agent.clone(), StorageKind::System, 4);
+
+    // LW + LW = should NOT use whole-block (neither is fully contiguous)
+    assert!(!can_use_whole_block_transfer(&src, &dst, None));
+}
+
+// ============================================================================
+// Whole-Block Transfer Integration Tests
+// ============================================================================
+
+/// Test that FC→FC transfers with full blocks use the whole-block path.
+///
+/// This test verifies data integrity for FC→FC transfers that should use
+/// the optimized whole-block memcpy path.
+#[rstest]
+#[case(StorageKind::System, StorageKind::System)]
+#[case(StorageKind::System, StorageKind::Pinned)]
+#[case(StorageKind::Pinned, StorageKind::Pinned)]
+#[tokio::test]
+async fn test_whole_block_transfer_fc_fc(
+    #[case] src_storage: StorageKind,
+    #[case] dst_storage: StorageKind,
+) -> Result<()> {
+    let agent = create_test_agent("test_whole_block_fc_fc_transfer");
+
+    let src = create_fc_layout(agent.clone(), src_storage, 4);
+    let dst = create_fc_layout(agent.clone(), dst_storage, 4);
+
+    // Verify this should use whole-block path
+    assert!(can_use_whole_block_transfer(&src, &dst, None));
+
+    let src_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    let checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None)?;
+
+    let notification = execute_transfer(
+        &src,
+        &dst,
+        &src_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position(&checksums, &src_blocks, &dst, &dst_blocks)?;
+
+    Ok(())
+}
+
+/// Test that FC→LW transfers fall back to layer-wise path.
+///
+/// This test verifies data integrity for FC→LW transfers that should use
+/// the layer-wise path (not whole-block).
+#[rstest]
+#[case(StorageKind::System, StorageKind::System)]
+#[case(StorageKind::Pinned, StorageKind::Pinned)]
+#[tokio::test]
+async fn test_layer_wise_transfer_fc_lw(
+    #[case] src_storage: StorageKind,
+    #[case] dst_storage: StorageKind,
+) -> Result<()> {
+    let agent = create_test_agent("test_layer_wise_fc_lw_transfer");
+
+    let src = create_fc_layout(agent.clone(), src_storage, 4);
+    let dst = create_lw_layout(agent.clone(), dst_storage, 4);
+
+    // Verify this should NOT use whole-block path
+    assert!(!can_use_whole_block_transfer(&src, &dst, None));
+
+    let src_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    let checksums = fill_and_checksum(&src, &src_blocks, FillPattern::Sequential)?;
+    let ctx = create_transfer_context(agent, None)?;
+
+    let notification = execute_transfer(
+        &src,
+        &dst,
+        &src_blocks,
+        &dst_blocks,
+        TransferOptionsInternal::default(),
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position(&checksums, &src_blocks, &dst, &dst_blocks)?;
+
+    Ok(())
+}
+
+/// Test partial layer transfer uses layer-wise path even for FC→FC.
+#[tokio::test]
+async fn test_partial_layer_transfer_uses_layer_wise() -> Result<()> {
+    let agent = create_test_agent("test_partial_layer");
+
+    let src = create_fc_layout(agent.clone(), StorageKind::System, 4);
+    let dst = create_fc_layout(agent.clone(), StorageKind::Pinned, 4);
+
+    // Verify partial transfer should NOT use whole-block path
+    let partial_range = 0..1;
+    assert!(!can_use_whole_block_transfer(&src, &dst, Some(&partial_range)));
+
+    let src_blocks = vec![0, 1];
+    let dst_blocks = vec![2, 3];
+
+    // Fill source with sequential pattern for layer 0 only
+    let checksums =
+        fill_and_checksum_with_mode(&src, &src_blocks, FillPattern::Sequential, TransferMode::FirstLayerOnly)?;
+    let ctx = create_transfer_context(agent, None)?;
+
+    let options = TransferOptionsInternal::builder()
+        .layer_range(partial_range)
+        .build()?;
+
+    let notification = execute_transfer(
+        &src,
+        &dst,
+        &src_blocks,
+        &dst_blocks,
+        options,
+        ctx.context(),
+    )?;
+    notification.await?;
+
+    verify_checksums_by_position_with_mode(&checksums, &src_blocks, &dst, &dst_blocks, TransferMode::FirstLayerOnly)?;
 
     Ok(())
 }

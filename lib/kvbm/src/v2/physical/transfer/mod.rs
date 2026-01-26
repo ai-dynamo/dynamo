@@ -120,3 +120,58 @@ impl BounceBufferInternal {
         Self { layout, block_ids }
     }
 }
+
+// ============================================================================
+// Layout Compatibility Helpers
+// ============================================================================
+
+use anyhow::anyhow;
+use std::ops::Range;
+
+/// Validate that layouts are compatible for transfer.
+///
+/// Returns an error if layouts require transformation, which is not yet supported.
+/// This should be called early in transfer execution to fail fast.
+pub fn validate_layout_compatibility(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+) -> anyhow::Result<()> {
+    let src_layout = src.layout();
+    let dst_layout = dst.layout();
+
+    if src_layout.block_layout().requires_transform(&dst_layout.block_layout()) {
+        return Err(anyhow!(
+            "Layout transformation not supported: src={:?}, dst={:?}",
+            src_layout.block_layout(),
+            dst_layout.block_layout()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Check if layouts support whole-block transfers.
+///
+/// Returns true when:
+/// - Both src and dst are fully contiguous
+/// - Transfer is full-block (layer_range covers all layers or is None)
+///
+/// Note: Caller must have already validated layout compatibility via
+/// [`validate_layout_compatibility`].
+pub fn can_use_whole_block_transfer(
+    src: &PhysicalLayout,
+    dst: &PhysicalLayout,
+    layer_range: Option<&Range<usize>>,
+) -> bool {
+    // Must be full-block transfer
+    let is_full_block = match layer_range {
+        None => true,
+        Some(range) => range.start == 0 && range.end == src.layout().num_layers(),
+    };
+    if !is_full_block {
+        return false;
+    }
+
+    // Both must be fully contiguous
+    src.layout().is_fully_contiguous() && dst.layout().is_fully_contiguous()
+}

@@ -26,12 +26,6 @@ pub enum TransferStrategy {
     /// CUDA async device-to-device transfer
     CudaAsyncD2D,
 
-    /// CUDA blocking host-to-device transfer
-    CudaBlockingH2D,
-
-    /// CUDA blocking device-to-host transfer
-    CudaBlockingD2H,
-
     /// NIXL read operation (pull from remote)
     NixlRead,
 
@@ -161,11 +155,11 @@ fn select_direct_strategy(
         }
 
         // Host → Device - direct CUDA
-        (System, Device(_)) => TransferPlan::Direct(CudaBlockingH2D),
+        (System, Device(_)) => panic!("System to Device transfers are not supported"),
         (Pinned, Device(_)) => TransferPlan::Direct(CudaAsyncH2D),
 
         // Device → Host - direct CUDA
-        (Device(_), System) => TransferPlan::Direct(CudaBlockingD2H),
+        (Device(_), System) => panic!("Device to System transfers are not supported"),
         (Device(_), Pinned) => TransferPlan::Direct(CudaAsyncD2H),
 
         // Device ↔ Device - direct CUDA
@@ -313,11 +307,11 @@ mod tests {
     #[test]
     fn test_host_to_device_transfers() {
         let caps = default_caps();
-        // System (unpinned) to device should be blocking
-        assert_eq!(
-            select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
-            TransferPlan::Direct(TransferStrategy::CudaBlockingH2D)
-        );
+        // // System (unpinned) to device should be blocking
+        // assert_eq!(
+        //     select_direct_strategy(StorageKind::System, StorageKind::Device(0), false, &caps),
+        //     TransferPlan::Direct(TransferStrategy::CudaBlockingH2D)
+        // );
 
         // Pinned to device should be async
         assert_eq!(
@@ -329,11 +323,11 @@ mod tests {
     #[test]
     fn test_device_to_host_transfers() {
         let caps = default_caps();
-        // Device to system should be blocking
-        assert_eq!(
-            select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
-            TransferPlan::Direct(TransferStrategy::CudaBlockingD2H)
-        );
+        //    // Device to system should be blocking
+        //     assert_eq!(
+        //         select_direct_strategy(StorageKind::Device(0), StorageKind::System, false, &caps),
+        //         TransferPlan::Direct(TransferStrategy::CudaBlockingD2H)
+        //     );
 
         // Device to pinned should be async
         assert_eq!(
