@@ -118,9 +118,9 @@ jobs:
           IMAGE_REGISTRY: ai-dynamo
           IMAGE_REPOSITORY: dynamo
         run: |
-          DEFAULT_TAG=${{ github.sha }}-dynamo-operator
-          ECR_IMAGE_BASE=${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}
-          ACR_IMAGE_BASE=${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}
+          DEFAULT_TAG="${{ github.sha }}-dynamo-operator"
+          ECR_IMAGE_BASE="${ECR_HOSTNAME}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
+          ACR_IMAGE_BASE="${{ secrets.AZURE_ACR_HOSTNAME }}/${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}"
           NO_CACHE_FLAG=""
           TAGS=(
             "${ECR_IMAGE_BASE}:${DEFAULT_TAG}"
@@ -137,7 +137,7 @@ jobs:
             )
           fi
 
-          operator_tags=${TAGS}" >> $GITHUB_OUTPUT
+          echo "operator_tags=${TAGS[*]}" >> $GITHUB_OUTPUT
 
           if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
             NO_CACHE_FLAG="--no-cache"
