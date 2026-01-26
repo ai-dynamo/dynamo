@@ -17,7 +17,6 @@ from tests.utils.managed_process import DynamoFrontendProcess
 
 from .utils.common import (
     GMSServerProcess,
-    bytes_to_mb,
     get_gpu_memory_used,
     send_completion,
 )
@@ -69,7 +68,7 @@ def test_gms_shadow_engine_failover(
 
                 mem_after_sleep = get_gpu_memory_used()
                 logger.info(
-                    f"Shadow sleep freed {bytes_to_mb(mem_before - mem_after_sleep):.0f} MB"
+                    f"Shadow sleep freed {(mem_before - mem_after_sleep) / (1 << 20):.0f} MB"
                 )
                 assert mem_after_sleep < mem_before
 

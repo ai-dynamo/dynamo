@@ -23,11 +23,6 @@ from tests.utils.managed_process import ManagedProcess
 logger = logging.getLogger(__name__)
 
 
-def bytes_to_mb(b: int) -> float:
-    """Convert bytes to megabytes."""
-    return b / (1024 * 1024)
-
-
 def get_gpu_memory_used(device: int = 0) -> int:
     """Get GPU memory usage in bytes for the specified device."""
     pynvml.nvmlInit()
@@ -81,7 +76,7 @@ def send_completion(
 
 
 class GMSServerProcess(ManagedProcess):
-    """GPU Memory Service server process."""
+    """Manages GMS server lifecycle for tests. Starts server, waits for socket, cleans up on exit."""
 
     def __init__(self, request, device: int):
         self.device = device

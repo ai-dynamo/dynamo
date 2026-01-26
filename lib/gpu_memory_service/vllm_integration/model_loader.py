@@ -118,7 +118,11 @@ def _load_write_mode(
     default_loader,
     target_device: torch.device,
 ) -> torch.nn.Module:
-    """Load model from disk and publish weights to GMS (RW mode)."""
+    """Load model from disk and publish weights to GMS (RW mode).
+
+    Initializes model using GMS memory pool, loads weights from disk,
+    registers tensors with GMS, and commits for cross-process sharing.
+    """
     global _last_imported_weights_bytes
 
     from torch.cuda.memory import use_mem_pool
@@ -130,6 +134,7 @@ def _load_write_mode(
 
     gms_client.clear_all()
 
+    # Allocate model tensors using GMS memory pool
     with set_default_torch_dtype(model_config.dtype):
         with use_mem_pool(pool, device=target_device):
             with target_device:
@@ -141,9 +146,11 @@ def _load_write_mode(
             process_weights_after_loading(model, model_config, target_device)
             torch.cuda.empty_cache()
 
+    # Register tensors with GMS for cross-process sharing
     register_module_tensors(gms_client, model)
     _last_imported_weights_bytes = gms_client.total_bytes
 
+    # Ensure GPU writes complete before other processes import
     torch.cuda.synchronize()
 
     if not gms_client.commit():

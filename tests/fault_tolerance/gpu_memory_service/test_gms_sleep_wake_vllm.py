@@ -17,7 +17,6 @@ from tests.utils.managed_process import DynamoFrontendProcess
 
 from .utils.common import (
     GMSServerProcess,
-    bytes_to_mb,
     get_gpu_memory_used,
     send_completion,
 )
@@ -59,7 +58,7 @@ def test_gms_basic_sleep_wake(request, runtime_services, gms_ports, predownload_
                 assert result["choices"]
 
                 mem_before = get_gpu_memory_used()
-                logger.info(f"Memory before sleep: {bytes_to_mb(mem_before):.0f} MB")
+                logger.info(f"Memory before sleep: {mem_before / (1 << 20):.0f} MB")
 
                 # Sleep
                 sleep_result = engine.sleep()
@@ -67,7 +66,7 @@ def test_gms_basic_sleep_wake(request, runtime_services, gms_ports, predownload_
 
                 mem_after_sleep = get_gpu_memory_used()
                 logger.info(
-                    f"Memory after sleep: {bytes_to_mb(mem_after_sleep):.0f} MB"
+                    f"Memory after sleep: {mem_after_sleep / (1 << 20):.0f} MB"
                 )
                 assert mem_after_sleep < mem_before, "Sleep should reduce memory"
 
@@ -81,5 +80,5 @@ def test_gms_basic_sleep_wake(request, runtime_services, gms_ports, predownload_
                 assert result["choices"]
 
                 logger.info(
-                    f"Memory freed: {bytes_to_mb(mem_before - mem_after_sleep):.0f} MB"
+                    f"Memory freed: {(mem_before - mem_after_sleep) / (1 << 20):.0f} MB"
                 )
