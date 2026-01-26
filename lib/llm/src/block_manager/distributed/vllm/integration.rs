@@ -306,7 +306,12 @@ pub fn create_pipeline(
     } else if is_onboard {
         RemoteTransferPipeline::onboard_with_bounce(descriptors, bounce_block_ids, device_block_ids)
     } else {
-        RemoteTransferPipeline::offload_with_bounce(descriptors, bounce_block_ids, device_block_ids)
+        // Invariant: callers use from_g4_params (is_onboard=true) or new_h2o (is_h2o=true),
+        // so this branch where both are false should never be reached.
+        unreachable!(
+            "create_pipeline called with is_onboard=false and is_h2o=false; \
+             use from_g4_params for onboard or new_h2o for host-to-object transfers"
+        )
     }
 }
 
