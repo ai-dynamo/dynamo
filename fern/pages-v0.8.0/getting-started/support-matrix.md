@@ -4,7 +4,7 @@ title: "Dynamo Support Matrix"
 
 This document provides the support matrix for Dynamo, including hardware, software and build instructions.
 
-> **See also:** [Feature Compatibility Matrix](../../feature-matrix.md) for backend-specific feature support (vLLM, TensorRT-LLM, SGLang).
+> **See also:** [Feature Compatibility Matrix](./feature-matrix.md) for backend-specific feature support (vLLM, TensorRT-LLM, SGLang).
 
 ## Hardware Compatibility
 

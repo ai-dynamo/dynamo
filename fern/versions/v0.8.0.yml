@@ -25,7 +25,9 @@ navigation:
       - page: Installation
         path: ../pages-v0.8.0/getting-started/installation.md
       - page: Support Matrix
-        path: ../pages-v0.8.0/reference/support-matrix.md
+        path: ../pages-v0.8.0/getting-started/support-matrix.md
+      - page: Feature Matrix
+        path: ../pages-v0.8.0/getting-started/feature-matrix.md
       - page: Examples
         path: ../pages-v0.8.0/getting-started/examples.md
 
