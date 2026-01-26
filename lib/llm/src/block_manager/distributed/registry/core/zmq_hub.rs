@@ -130,31 +130,43 @@ where
             result = &mut query_handle => {
                 // Query handler finished first, cancel the other and await it
                 cancel.cancel();
-                if let Err(e) = result {
-                    error!(error = %e, "Query handler panicked");
+                match result {
+                    Err(e) => error!(error = %e, "Query handler panicked"),
+                    Ok(Err(e)) => error!(error = %e, "Query handler failed"),
+                    Ok(Ok(())) => {}
                 }
-                if let Err(e) = pull_handle.await {
-                    error!(error = %e, "Pull handler panicked during shutdown");
+                match pull_handle.await {
+                    Err(e) => error!(error = %e, "Pull handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
+                    Ok(Ok(())) => {}
                 }
             }
             result = &mut pull_handle => {
                 // Pull handler finished first, cancel the other and await it
                 cancel.cancel();
-                if let Err(e) = result {
-                    error!(error = %e, "Pull handler panicked");
+                match result {
+                    Err(e) => error!(error = %e, "Pull handler panicked"),
+                    Ok(Err(e)) => error!(error = %e, "Pull handler failed"),
+                    Ok(Ok(())) => {}
                 }
-                if let Err(e) = query_handle.await {
-                    error!(error = %e, "Query handler panicked during shutdown");
+                match query_handle.await {
+                    Err(e) => error!(error = %e, "Query handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Query handler failed during shutdown"),
+                    Ok(Ok(())) => {}
                 }
             }
             _ = cancel.cancelled() => {
                 info!("Hub received shutdown signal");
                 // Await both handlers to ensure clean shutdown
-                if let Err(e) = query_handle.await {
-                    error!(error = %e, "Query handler panicked during shutdown");
+                match query_handle.await {
+                    Err(e) => error!(error = %e, "Query handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Query handler failed during shutdown"),
+                    Ok(Ok(())) => {}
                 }
-                if let Err(e) = pull_handle.await {
-                    error!(error = %e, "Pull handler panicked during shutdown");
+                match pull_handle.await {
+                    Err(e) => error!(error = %e, "Pull handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
+                    Ok(Ok(())) => {}
                 }
             }
         }
