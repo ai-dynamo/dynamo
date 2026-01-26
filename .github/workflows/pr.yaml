@@ -137,7 +137,9 @@ jobs:
             )
           fi
 
-          echo "operator_tags=${TAGS[*]}" >> $GITHUB_OUTPUT
+          OPERATOR_TAGS="${TAGS[*]}"
+          echo "DEBUG: operator_tags value = '${OPERATOR_TAGS}'"
+          echo "operator_tags=${OPERATOR_TAGS}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${TAGS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
