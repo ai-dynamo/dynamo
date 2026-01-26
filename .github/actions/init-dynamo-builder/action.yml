@@ -107,7 +107,7 @@ runs:
     - name: Output buildkit worker addre
       shell: bash
       run: |
-        echo "buildkit_worker_addresses=${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}" >> $GITHUB_OUTPUT
+        echo "buildkit_worker_addresses=${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}" 
     # - name: Bootstrap buildkit 
     #   uses: ./.github/actions/bootstrap-buildkit
     #   with:
