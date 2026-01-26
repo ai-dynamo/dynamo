@@ -91,11 +91,16 @@ async def worker():
         loop.call_soon_threadsafe(shutdown_event.set)
 
         # Chain to the old handler if it exists and is not default/ignore
-        old_handler = old_handlers.get(signum)
-        if old_handler and old_handler not in (signal.SIG_DFL, signal.SIG_IGN):
-            old_handler(signum, frame)
-
-        runtime.shutdown()
+        try:
+            old_handler = old_handlers.get(signum)
+            if old_handler and old_handler not in (
+                signal.SIG_DFL,
+                signal.SIG_IGN,
+                signal.default_int_handler,
+            ):
+                old_handler(signum, frame)
+        finally:
+            runtime.shutdown()
 
     # Install signal handlers and save old ones for chaining
     for sig in (signal.SIGTERM, signal.SIGINT):
