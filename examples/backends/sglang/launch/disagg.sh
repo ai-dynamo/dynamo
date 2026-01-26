@@ -57,41 +57,50 @@ DYNAMO_PID=$!
 # Use DYN_SYSTEM_PORT1/2 instead of *_PREFILL/*_DECODE env names so test
 # harnesses can set one simple pair for disaggregated deployments.
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
-CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.sglang \
-  --model-path $HOME/proj/models/qwen3-0.6b \
-  --served-model-name model \
-  --page-size 16 \
-  --tp 2 --dp-size 2 --enable-dp-attention \
-  --load-balance-method round_robin \
-  --trust-remote-code \
-  --disaggregation-mode prefill \
-  --disaggregation-bootstrap-port 13345 \
-  --host 0.0.0.0 \
-  --port 10000 \
-  --disaggregation-transfer-backend nixl \
-  --enable-metrics \
-  "${TRACE_ARGS[@]}" &
+docker run --rm --gpus all --network host --ipc host --shm-size 16g --ulimit memlock=-1 -v $(readlink -f $HOME/proj/models/dsv2-lite-fp8/):/workspace/model -v /tmp/dsr1-cache:/root/.cache \
+    -e SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=768 \
+    -e CUDA_LAUNCH_BLOCKING=1 \
+    -e TORCH_USE_CUDA_DSA=1 \
+    -e SGL_FORCE_SHUTDOWN=1 \
+    -e SGLANG_FORCE_SHUTDOWN=1 \
+    nvcr.io/nvidian/dynamo-dev/warnold-utils:sglang-dd-v18-amd64 \
+    python3 -m dynamo.sglang \
+        --model-path /workspace/model \
+        --served-model-name deepseek-ai/DeepSeek-R1 \
+        --chunked-prefill-size 65536 \
+        --ep 8 \
+        --tp 8 \
+        --dp 8 \
+        --enable-dp-attention \
+        --enable-dp-lm-head \
+        --attention-backend trtllm_mla \
+        --moe-a2a-backend deepep \
+        --disable-radix-cache \
+        --disaggregation-bootstrap-port 30001 \
+        --disaggregation-transfer-backend nixl \
+        --enable-symm-mem \
+        --kv-cache-dtype fp8_e4m3 \
+        --moe-dense-tp-size 1 \
+        --scheduler-recv-interval 1 \
+        --stream-interval 10 \
+        --trust-remote-code \
+        --watchdog-timeout 1000000 \
+        --enable-nan-detection \
+        --max-running-requests 64 \
+        --cuda-graph-max-bs 64 \
+        --mem-fraction-static 0.75 \
+        --disable-cuda-graph \
+        --host 0.0.0.0 \
+        --port 10000 \
+        --enable-metrics \
+        --moe-runner-backend deep_gemm \
+        "${TRACE_ARGS[@]}" &
 PREFILL_PID=$!
+        #--deepep-mode normal \
+        #--ep-dispatch-algorithm dynamic \
+        #--ep-num-redundant-experts 32 \
+        #--disable-shared-experts-fusion \
+        #--eplb-algorithm deepseek \
 
-# run decode worker
-OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
-  --model-path $HOME/proj/models/qwen3-0.6b \
-  --served-model-name model \
-  --page-size 16 \
-  --prefill-round-robin-balance \
-  --tp 2 --dp-size 2 --enable-dp-attention \
-  --load-balance-method round_robin \
-  --trust-remote-code \
-  --disaggregation-mode decode \
-  --disaggregation-bootstrap-port 13346 \
-  --host 0.0.0.0 \
-  --port 11000 \
-  --disaggregation-transfer-backend nixl \
-  --enable-metrics \
-  "${TRACE_ARGS[@]}"
-
-
-  #--cuda-graph-bs 4096 2048 1024 512 64 8 \
-  #--load-watch-interval 2 \
-  #--max-reqs-per-dp-worker 4096 \
+# Wait for background processes
+wait $DYNAMO_PID $PREFILL_PID

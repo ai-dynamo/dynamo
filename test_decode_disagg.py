@@ -15,7 +15,7 @@ import httpx
 import torch
 from transformers import AutoTokenizer
 
-TIER_BOUNDARIES = [128, 256, 512]  # Token boundaries for decode tiers
+TIER_BOUNDARIES = [512, 1024, 4096]  # Token boundaries for decode tiers
 HEALTH_URL = "http://localhost:8080/health"
 CHAT_URL = "http://localhost:8080/v1/chat/completions"
 DEFAULT_DOCKER_IMAGE = "ai-dynamo-sglang-local:amd64"
@@ -56,7 +56,7 @@ def get_common_args(num_gpus: int, model_path: Path) -> list[str]:
         "--served-model-name",
         "model",
         "--context-length",
-        "512",
+        "4096",
         "--mem-fraction-static",
         mem_fraction,
         "--page-size",
@@ -454,7 +454,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default=str(Path.home() / "proj/models/smol2-135m"),
+        default=str(Path.home() / "proj/models/qwen3-4b"),
         help="Path to the model directory (default: ~/proj/models/smol2-135m)",
     )
     parser.add_argument(
@@ -511,8 +511,6 @@ def main():
     #   - decode2: GPUs 4,5
     #   - decode3: GPUs 6,7
     # - Decode workers use DP attention.
-    decode_tiers = [128, 256, 512]  # seqlen tiers for decode workers
-
     multi_gpu_mode = num_gpus > 1
     required_multi_gpu = 8
 
@@ -568,13 +566,13 @@ def main():
         decode_dp_args = ["--tp", "2", "--dp", "2"]
         # decode2 uses single GPU, no DP
         decode2_args = []
-        num_decode_workers = len(decode_tiers)
+        num_decode_workers = len(TIER_BOUNDARIES)
     else:
         gpu_sets = {"prefill": "0"}
         prefill_tp_args = []
         decode_dp_args = []
         decode2_args = []
-        num_decode_workers = len(decode_tiers)
+        num_decode_workers = len(TIER_BOUNDARIES)
 
     num_workers = 1 + num_decode_workers  # 1 prefill + N decode
 
@@ -618,17 +616,12 @@ def main():
         # Start decode workers
         for i in range(num_decode_workers):
             worker_name = f"decode{i + 1}"
-            seqlen_tier = decode_tiers[i]
+            seqlen_tier = TIER_BOUNDARIES[i]
             system_port = 8082 + i
 
             worker_env = {"DYN_SYSTEM_PORT": str(system_port)}
             if multi_gpu_mode:
                 worker_env["CUDA_VISIBLE_DEVICES"] = gpu_sets[worker_name]
-
-            if os.environ.get("SGLANG_DISAGG_DECODE_START_DELAY_S"):
-                worker_env["SGLANG_DISAGG_DECODE_START_DELAY_S"] = os.environ[
-                    "SGLANG_DISAGG_DECODE_START_DELAY_S"
-                ]
 
             # decode2 uses single GPU (no DP attention), others use DP attention
             if multi_gpu_mode and worker_name == "decode2":
