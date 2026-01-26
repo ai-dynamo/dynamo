@@ -72,6 +72,8 @@ jobs:
     runs-on: prod-builder-v2
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    outputs:
+      operator_tags: ${{ steps.build-and-push-image.outputs.operator_tags }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -135,6 +137,8 @@ jobs:
             )
           fi
 
+          operator_tags=${TAGS}" >> $GITHUB_OUTPUT
+
           if [[ "${{ github.event.inputs.no_cache_builds }}" == "true" ]]; then
             NO_CACHE_FLAG="--no-cache"
           fi
@@ -143,6 +147,39 @@ jobs:
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
               $(printf -- '-t %s ' "${TAGS[@]}") \ 
               ${NO_CACHE_FLAG} -f Dockerfile  .
+
+
+  copy-operator-to-acr:
+    needs: [operator]
+    name: copy dynamo-operator
+    runs-on: prod-default-v2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      - name: Calculate target tag
+        id: calculate-target-tag
+        shell: bash
+        run: |
+          echo "operator_tags=${{ needs.operator.outputs.operator_tags }}"
+          # TARGET_TAG_PLAIN="${{ github.sha }}-dynamo-operator"
+          # echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
+    #   - name: Copy image to target registry
+    #     uses: ./.github/actions/skopeo-copy
+    #     with:
+    #       source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+    #       source_image: ai-dynamo/dynamo
+    #       source_tag: ${{ github.sha }}-dynamo-operator-${{ matrix.platform.arch }}
+    #       target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+    #       target_image: ai-dynamo/dynamo
+    #       target_tag: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}-${{ matrix.platform.arch }}
+    #       source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+    #       source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+    #       target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+    #       target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+    #       target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+    # outputs:
+    #   target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+
 
 
   # vllm:
