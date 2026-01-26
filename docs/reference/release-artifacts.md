@@ -40,7 +40,7 @@ Release history in this document begins at v0.6.0.
 | `dynamo-frontend:0.8.1` | API gateway with Endpoint Prediction Protocol (EPP) | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/dynamo-frontend?version=0.8.1) | |
 | `kubernetes-operator:0.8.1` | Kubernetes operator for Dynamo deployments | — | — | AMD64/ARM64 | [link](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/kubernetes-operator?version=0.8.1) | |
 
-\* Multimodality is not expected to work on ARM64 for CUDA 13 images. Multimodal inference works on AMD64.
+\* Multimodal inference on CUDA 13 images: works on AMD64 for all backends; works on ARM64 only for TensorRT-LLM (`vllm-runtime:*-cuda13` and `sglang-runtime:*-cuda13` do not support multimodality on ARM64).
 
 ### Python Wheels
 
