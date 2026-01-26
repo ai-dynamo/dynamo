@@ -283,6 +283,9 @@ impl OpenAIPreprocessor {
             } else {
                 self.formatter.render(request)?
             };
+
+            eprintln!("=== Rendered chat template ===\n{:?}\n=== End chat template ===", formatted_prompt);
+
             Ok(Some(formatted_prompt))
         } else {
             Ok(None)
