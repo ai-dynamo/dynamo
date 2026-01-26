@@ -73,7 +73,7 @@ jobs:
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
-      operator_tags: ${{ steps.build-and-push-image.outputs.operator_tags }}
+      operator_default_image_name: ${{ steps.build-and-push-image.outputs.operator_default_image_name }}
     steps:
       - name: Checkout code
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -137,7 +137,7 @@ jobs:
             )
           fi
 
-          echo "operator_image_uris=${IMAGE_URIS[*]}" >> $GITHUB_OUTPUT
+          echo "operator_default_image_name=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${DEFAULT_TAG}" >> $GITHUB_OUTPUT
           TAGGING_FLAGS=$(printf -- '-t %s ' "${IMAGE_URIS[@]}")
           echo "flags for docker buildx: ${TAGGING_FLAGS}"
 
@@ -150,9 +150,6 @@ jobs:
               ${TAGGING_FLAGS} \
               ${NO_CACHE_FLAG} -f Dockerfile .
 
-      - name: Post pushed image tags to summary
-        shell: bash
-        run: |
           echo "### 🐳 Operator Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Tag |" >> $GITHUB_STEP_SUMMARY
@@ -161,7 +158,7 @@ jobs:
             if [ -n "$tag" ]; then
               echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
             fi
-          done <<< "${{ needs.build-and-push-image.outputs.operator_image_uris }}"
+          done <<< ${IMAGE_URIS[*]}"
 
 
 
