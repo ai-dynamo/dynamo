@@ -19,6 +19,17 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 - **Docs:** [v0.8.1](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html)
 - **NGC Collection:** [ai-dynamo](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo)
 
+### Patch Release: v0.8.1.post1 (Jan 23, 2026)
+
+> [!Note]
+> **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only. There is no GitHub release for this version. All other artifacts (vLLM/SGLang containers, Helm charts, Rust crates) remain at v0.8.1.
+
+| Artifact | Version | Change | Link |
+|----------|---------|--------|------|
+| `ai-dynamo` | `0.8.1.post1` | Updated TRT-LLM to `v1.2.0rc6.post2` | [PyPI](https://pypi.org/project/ai-dynamo/0.8.1.post1/) |
+| `ai-dynamo-runtime` | `0.8.1.post1` | Updated TRT-LLM to `v1.2.0rc6.post2` | [PyPI](https://pypi.org/project/ai-dynamo-runtime/0.8.1.post1/) |
+| `tensorrtllm-runtime` | `0.8.1.post1` | TRT-LLM `v1.2.0rc6.post2` | [NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/tensorrtllm-runtime?version=0.8.1.post1) |
+
 ### Container Images
 
 | Image:Tag | Description | Backend | CUDA | Arch | NGC | Notes |
@@ -74,7 +85,7 @@ This document provides a comprehensive inventory of all Dynamo release artifacts
 # Runtime containers
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
 docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1.post1
 
 # CUDA 13 variants (experimental)
 # vLLM CUDA 13 image fails to launch (known issue)
@@ -92,13 +103,13 @@ docker pull nvcr.io/nvidia/ai-dynamo/kubernetes-operator:0.8.1
 
 ```bash
 # Install Dynamo with a specific backend (Recommended)
-uv pip install "ai-dynamo[vllm]==0.8.1"
-uv pip install "ai-dynamo[sglang]==0.8.1"
+uv pip install "ai-dynamo[vllm]==0.8.1.post1"
+uv pip install "ai-dynamo[sglang]==0.8.1.post1"
 # TensorRT-LLM requires the NVIDIA PyPI index and pip
-pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]==0.8.1"
+pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]==0.8.1.post1"
 
 # Install Dynamo core only
-uv pip install ai-dynamo==0.8.1
+uv pip install ai-dynamo==0.8.1.post1
 
 # Install standalone KVBM (Python 3.12 only)
 uv pip install kvbm==0.8.1
@@ -149,6 +160,7 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 ## Release History
 
+- **v0.8.1.post1 Patch**: Updated TRT-LLM to `v1.2.0rc6.post2` (PyPI wheels and TRT-LLM container only)
 - **Standalone Frontend Container**: `dynamo-frontend` added in v0.8.0
 - **CUDA 13 Runtimes**: Experimental CUDA 13 runtime for vLLM and SGLang in v0.8.0
 - **New Rust Crates**: `dynamo-memory` and `dynamo-config` added in v0.8.0
@@ -200,6 +212,7 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 | Image:Tag | TRT-LLM | Arch | CUDA | Notes |
 |-----------|---------|------|------|-------|
+| `tensorrtllm-runtime:0.8.1.post1` | `v1.2.0rc6.post2` | AMD64/ARM64 | `v13.0` | Patch |
 | `tensorrtllm-runtime:0.8.1` | `v1.2.0rc6.post1` | AMD64/ARM64 | `v13.0` | |
 | `tensorrtllm-runtime:0.8.0` | `v1.2.0rc6.post1` | AMD64/ARM64 | `v13.0` | |
 | `tensorrtllm-runtime:0.7.0.post2` | `v1.2.0rc2` | AMD64/ARM64 | `v13.0` | Patch |
@@ -236,6 +249,7 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 | Package | Python | Platform | Notes |
 |---------|--------|----------|-------|
+| `ai-dynamo==0.8.1.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | TRT-LLM `v1.2.0rc6.post2` |
 | `ai-dynamo==0.8.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo==0.8.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo==0.7.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
@@ -247,6 +261,7 @@ For a complete list of known issues, refer to the release notes for each patch:
 
 | Package | Python | Platform | Notes |
 |---------|--------|----------|-------|
+| `ai-dynamo-runtime==0.8.1.post1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | TRT-LLM `v1.2.0rc6.post2` |
 | `ai-dynamo-runtime==0.8.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo-runtime==0.8.0` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
 | `ai-dynamo-runtime==0.7.1` | `3.10`–`3.12` | Linux (glibc `v2.28+`) | |
