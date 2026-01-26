@@ -96,7 +96,7 @@ jobs:
         platform: ${{ fromJson(inputs.platforms) }}
         cuda_version: ${{ fromJson(inputs.cuda_versions) }}
     name: build ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform }}
-    runs-on: builder-cpu-amd-runner
+    runs-on: prod-builder-v2
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
     steps:

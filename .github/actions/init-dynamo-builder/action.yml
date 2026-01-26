@@ -90,10 +90,6 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: debuggin
-      shell: bash
-      run: |
-        sleep 3600
     - name: Route buildkit workers
       id: route-buildkit
       continue-on-error: true
