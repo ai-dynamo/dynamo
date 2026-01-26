@@ -156,7 +156,7 @@ RUN dnf install -y almalinux-release-synergy && \
         automake \
         libtool \
         make \
-        # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
         rpm-build \
         # Build tools
         cmake \

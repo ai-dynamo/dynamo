@@ -173,7 +173,7 @@ RUN dnf install -y almalinux-release-synergy && \
         cmake \
         ninja-build \
         clang-devel \
-        # GCC toolset 14 (CUDA compatible, max version 14)
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
         gcc-toolset-14-gcc \
         gcc-toolset-14-gcc-c++ \
         gcc-toolset-14-binutils \
