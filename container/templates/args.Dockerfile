@@ -35,7 +35,7 @@ ARG RUNTIME_IMAGE_TAG={{ context[framework].runtime_image_tag }}
 {%- endif %}
 
 # Build configuration
-ARG ENABLE_KVBM={{ context.dynamo.enable_kvbm }}
+ARG ENABLE_KVBM={{ context[framework].enable_kvbm }}
 ARG CARGO_BUILD_JOBS
 
 ARG NATS_VERSION={{ context.dynamo.nats_version }}
