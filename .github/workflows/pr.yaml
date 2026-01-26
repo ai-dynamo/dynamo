@@ -145,8 +145,8 @@ jobs:
           docker buildx build --push \
               --platform linux/amd64,linux/arm64 \
               --build-arg DOCKER_PROXY=${ECR_HOSTNAME}/dockerhub/ \
-              $(printf -- '-t %s ' "${TAGS[@]}") \ 
-              ${NO_CACHE_FLAG} -f Dockerfile  .
+              $(printf -- '-t %s ' "${TAGS[@]}") \
+              ${NO_CACHE_FLAG} -f Dockerfile .
 
 
   copy-operator-to-acr:
