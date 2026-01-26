@@ -180,11 +180,10 @@ class HandlerBase:
         Returns 'shutdown' if shutdown was triggered, 'cancelled' if cancelled, None otherwise.
         """
         try:
-            # Get the cancellation future (already a Future, not a coroutine)
-            cancellation_future = context.async_killed_or_stopped()
+            cancellation_task = context.async_killed_or_stopped()
 
             # Build list of futures/tasks to wait for
-            wait_for = [cancellation_future]
+            wait_for = [cancellation_task]
             shutdown_task = None
 
             if self.shutdown_event:
