@@ -48,6 +48,19 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+async def _handle_non_leader_node(dp_rank: int) -> None:
+    """
+    Handle non-leader node (data_parallel_rank >= 1) in multi-node deployments.
+    Non-leader nodes run vLLM workers but don't serve Dynamo endpoints.
+    """
+    logger.info(
+        f"Non-leader node detected (data_parallel_rank={dp_rank}). "
+        "Skipping endpoint serving."
+    )
+    # Wait indefinitely - process terminated via signal handlers
+    await asyncio.Event().wait()
+
+
 async def graceful_shutdown(runtime):
     """
     Shutdown dynamo distributed runtime.
@@ -452,20 +465,22 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     runtime.register_engine_route("wake", handler.wake)
     logger.info("Registered engine routes: /engine/sleep, /engine/wake")
 
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
     # Register prefill model with ModelType.Prefill
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-        await register_vllm_model(
-            model_input,
-            ModelType.Prefill,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=0,  # Prefill doesn't support migration
-        )
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+    await register_vllm_model(
+        model_input,
+        ModelType.Prefill,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=0,  # Prefill doesn't support migration
+    )
 
     health_check_payload = VllmPrefillHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
@@ -575,33 +590,33 @@ async def init(runtime: DistributedRuntime, config: Config):
     runtime.register_engine_route("wake", handler.wake)
     logger.info("Registered engine routes: /engine/sleep, /engine/wake")
 
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        # Parse endpoint types from --dyn-endpoint-types flag
-        model_type = parse_endpoint_types(config.dyn_endpoint_types)
-        logger.info(
-            f"Registering model with endpoint types: {config.dyn_endpoint_types}"
+    # Handle non-leader nodes - don't serve endpoints
+    if config.engine_args.data_parallel_rank:
+        await _handle_non_leader_node(config.engine_args.data_parallel_rank)
+        return
+
+    # Parse endpoint types from --dyn-endpoint-types flag
+    model_type = parse_endpoint_types(config.dyn_endpoint_types)
+    logger.info(f"Registering model with endpoint types: {config.dyn_endpoint_types}")
+
+    model_input = ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
+
+    # Warn if custom template provided but chat endpoint not enabled
+    if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
+        logger.warning(
+            "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
+            "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
         )
 
-        model_input = (
-            ModelInput.Text if config.use_vllm_tokenizer else ModelInput.Tokens
-        )
-
-        # Warn if custom template provided but chat endpoint not enabled
-        if config.custom_jinja_template and "chat" not in config.dyn_endpoint_types:
-            logger.warning(
-                "Custom Jinja template provided (--custom-jinja-template) but 'chat' not in --dyn-endpoint-types. "
-                "The chat template will be loaded but the /v1/chat/completions endpoint will not be available."
-            )
-
-        await register_vllm_model(
-            model_input,
-            model_type,
-            generate_endpoint,
-            config,
-            engine_client,
-            vllm_config,
-            migration_limit=config.migration_limit,
-        )
+    await register_vllm_model(
+        model_input,
+        model_type,
+        generate_endpoint,
+        config,
+        engine_client,
+        vllm_config,
+        migration_limit=config.migration_limit,
+    )
 
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer

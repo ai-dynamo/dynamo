@@ -634,9 +634,13 @@ enum RawKvEvent {
         parent_block_hash: Option<BlockHashValue>,
         token_ids: Vec<u32>,
         block_size: usize,
+        /// Deprecated in vLLM 0.14.0: use `lora_name` instead
         lora_id: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         medium: Option<String>,
+        /// LoRA adapter name (added in vLLM 0.14.0, replaces lora_id)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lora_name: Option<String>,
         /// Multimodal extra info for each block (length should match block_hashes)
         #[serde(default, skip_serializing_if = "Option::is_none")]
         block_mm_infos: Option<Vec<Option<BlockExtraInfo>>>,
@@ -685,6 +689,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
         let mut block_size: Option<usize> = None;
         let mut lora_id: Option<Option<u64>> = None;
         let mut medium: Option<Option<String>> = None;
+        let mut lora_name: Option<Option<String>> = None;
         let mut block_mm_infos: Option<Option<Vec<Option<BlockExtraInfo>>>> = None;
 
         while let Some(key) = map.next_key::<String>()? {
@@ -710,6 +715,9 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                 "medium" => {
                     medium = Some(map.next_value()?);
                 }
+                "lora_name" => {
+                    lora_name = Some(map.next_value()?);
+                }
                 "block_mm_infos" => {
                     block_mm_infos = Some(map.next_value()?);
                 }
@@ -733,6 +741,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id: lora_id.unwrap_or(None),
                     medium: medium.unwrap_or(None),
+                    lora_name: lora_name.unwrap_or(None),
                     block_mm_infos: block_mm_infos.unwrap_or(None),
                 })
             }
@@ -779,6 +788,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     .ok_or_else(|| de::Error::invalid_length(4, &"missing block_size"))?;
                 let lora_id: Option<u64> = seq.next_element()?.unwrap_or(None);
                 let medium: Option<String> = seq.next_element()?.unwrap_or(None);
+                let lora_name: Option<String> = seq.next_element()?.unwrap_or(None);
                 let block_mm_infos: Option<Vec<Option<BlockExtraInfo>>> =
                     seq.next_element()?.unwrap_or(None);
 
@@ -791,6 +801,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
                     block_size,
                     lora_id,
                     medium,
+                    lora_name,
                     block_mm_infos,
                 })
             }
@@ -1030,6 +1041,7 @@ mod test_event_processing {
             block_size: 4,
             lora_id: Some(0),
             medium: None,
+            lora_name: None,
             block_mm_infos: None,
         };
 
@@ -1494,6 +1506,7 @@ mod tests_startup_helpers {
             block_size: 4,
             lora_id: None,
             medium: None,
+            lora_name: None,
             block_mm_infos: None,
         }];
 
