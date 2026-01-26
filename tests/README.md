@@ -129,7 +129,8 @@ then this test will be included in the nightly run as well.
   ```
 - Run in container:
   ```bash
-  ./container/build.sh --framework <backend>
+  python container/render.py --framework=${FRAMEWORK} --target=runtime
+  docker build -t dynamo:${FRAMEWORK}-latest -f container/rendered.Dockerfile .
   ./container/run.sh --mount-workspace -it -- pytest
   ./container/run.sh --mount-workspace -it -- pytest -m [optional markers]
   ```

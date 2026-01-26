@@ -102,7 +102,8 @@ Before using these templates, ensure you have:
 We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo/artifacts). If you'd prefer to use your own registry, build and push your own image:
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework=vllm
+docker build -f container/rendered.Dockerfile .
 # Tag and push to your container registry
 # Update the image references in the YAML files
 ```
