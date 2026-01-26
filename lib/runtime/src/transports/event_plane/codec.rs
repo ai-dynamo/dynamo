@@ -9,6 +9,57 @@ use serde::{Serialize, de::DeserializeOwned};
 
 use super::EventEnvelope;
 
+/// Codec for serializing and deserializing event envelopes and payloads.
+///
+/// Currently only supports MessagePack for all transports.
+#[derive(Debug, Clone, Copy)]
+pub enum Codec {
+    Msgpack(MsgpackCodec),
+}
+
+impl Default for Codec {
+    fn default() -> Self {
+        Codec::Msgpack(MsgpackCodec)
+    }
+}
+
+impl Codec {
+    /// Encode an EventEnvelope to wire bytes
+    pub fn encode_envelope(&self, envelope: &EventEnvelope) -> Result<Bytes> {
+        match self {
+            Codec::Msgpack(c) => c.encode_envelope(envelope),
+        }
+    }
+
+    /// Decode wire bytes to an EventEnvelope
+    pub fn decode_envelope(&self, bytes: &Bytes) -> Result<EventEnvelope> {
+        match self {
+            Codec::Msgpack(c) => c.decode_envelope(bytes),
+        }
+    }
+
+    /// Encode a typed payload to bytes (for embedding in envelope)
+    pub fn encode_payload<T: Serialize>(&self, payload: &T) -> Result<Bytes> {
+        match self {
+            Codec::Msgpack(c) => c.encode_payload(payload),
+        }
+    }
+
+    /// Decode payload bytes to a typed value
+    pub fn decode_payload<T: DeserializeOwned>(&self, bytes: &Bytes) -> Result<T> {
+        match self {
+            Codec::Msgpack(c) => c.decode_payload(bytes),
+        }
+    }
+
+    /// Codec name for debugging
+    pub fn name(&self) -> &'static str {
+        match self {
+            Codec::Msgpack(c) => c.name(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MsgpackCodec;
 
