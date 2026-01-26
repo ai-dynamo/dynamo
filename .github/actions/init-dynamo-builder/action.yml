@@ -90,10 +90,8 @@ inputs:
 runs:
   using: "composite"
   steps:
-    # --- AMD64 Setup ---
-    - name: Route buildkit workers (amd64)
-      if: inputs.all_arch == 'true' || inputs.arch == 'amd64'
-      id: route-buildkit-amd64
+    - name: Route buildkit workers
+      id: route-buildkit
       continue-on-error: true
       shell: bash
       run: |
@@ -101,47 +99,26 @@ runs:
         if [[ -n "${{ inputs.cuda_version }}" ]]; then
           CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
         fi
-        .github/scripts/route_buildkit.sh --arch amd64 --flavor ${{ inputs.flavor }} $CUDA_ARG
-
-    - name: Bootstrap buildkit (amd64)
-      if: inputs.all_arch == 'true' || inputs.arch == 'amd64'
-      uses: ./.github/actions/bootstrap-buildkit
-      with:
-        builder_name: ${{ inputs.builder_name }}
-        buildkit_worker_addresses: ${{ steps.route-buildkit-amd64.outputs[format('{0}_amd64', inputs.flavor)] }}
-        platform: linux/amd64
-        ephemeral_storage: ${{ inputs.ephemeral_storage }}
-        namespace: ${{ inputs.namespace }}
-        replicas: ${{ inputs.replicas }}
-        requests_cpu: ${{ inputs.requests_cpu }}
-        requests_memory: ${{ inputs.requests_memory }}
-        limits_memory: ${{ inputs.limits_memory }}
-        tolerations: ${{ inputs.tolerations }}
-
-    # --- ARM64 Setup ---
-    - name: Route buildkit workers (arm64)
-      if: inputs.all_arch == 'true' || inputs.arch == 'arm64'
-      id: route-buildkit-arm64
-      continue-on-error: true
+        if [[ -n "${{ inputs.all_arch }}" ]]; then
+          .github/scripts/route_buildkit.sh --arch all --flavor ${{ inputs.flavor }} $CUDA_ARG
+        else
+          .github/scripts/route_buildkit.sh --arch ${{ inputs.arch }} --flavor ${{ inputs.flavor }} $CUDA_ARG
+        fi
+    - name: Output buildkit worker addre
       shell: bash
       run: |
-        CUDA_ARG=""
-        if [[ -n "${{ inputs.cuda_version }}" ]]; then
-          CUDA_ARG="--cuda ${{ inputs.cuda_version }}"
-        fi
-        .github/scripts/route_buildkit.sh --arch arm64 --flavor ${{ inputs.flavor }} $CUDA_ARG
+        echo "buildkit_worker_addresses=${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}" >> $GITHUB_OUTPUT
+    # - name: Bootstrap buildkit 
+    #   uses: ./.github/actions/bootstrap-buildkit
+    #   with:
+    #     builder_name: ${{ inputs.builder_name }}
+    #     buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}', inputs.flavor)] }}
+    #     platform: linux/amd64
+    #     ephemeral_storage: ${{ inputs.ephemeral_storage }}
+    #     namespace: ${{ inputs.namespace }}
+    #     replicas: ${{ inputs.replicas }}
+    #     requests_cpu: ${{ inputs.requests_cpu }}
+    #     requests_memory: ${{ inputs.requests_memory }}
+    #     limits_memory: ${{ inputs.limits_memory }}
+    #     tolerations: ${{ inputs.tolerations }}
 
-    - name: Bootstrap buildkit (arm64)
-      if: inputs.all_arch == 'true' || inputs.arch == 'arm64'
-      uses: ./.github/actions/bootstrap-buildkit
-      with:
-        builder_name: ${{ inputs.builder_name }}
-        buildkit_worker_addresses: ${{ steps.route-buildkit-arm64.outputs[format('{0}_arm64', inputs.flavor)] }}
-        platform: linux/arm64
-        ephemeral_storage: ${{ inputs.ephemeral_storage }}
-        namespace: ${{ inputs.namespace }}
-        replicas: ${{ inputs.replicas }}
-        requests_cpu: ${{ inputs.requests_cpu }}
-        requests_memory: ${{ inputs.requests_memory }}
-        limits_memory: ${{ inputs.limits_memory }}
-        tolerations: ${{ inputs.tolerations }}
