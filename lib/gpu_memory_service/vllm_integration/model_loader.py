@@ -146,11 +146,11 @@ def _load_write_mode(
             process_weights_after_loading(model, model_config, target_device)
             torch.cuda.empty_cache()
 
-    # Register tensors with GMS for cross-process sharing
+    # Update GMS metadata store with model tensors
     register_module_tensors(gms_client, model)
     _last_imported_weights_bytes = gms_client.total_bytes
 
-    # Ensure GPU writes complete before other processes import
+    # Ensure all writes to GPU memory are finished before we unmap
     torch.cuda.synchronize()
 
     if not gms_client.commit():
