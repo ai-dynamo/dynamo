@@ -135,9 +135,8 @@ We are in the process of shipping pre-built docker containers that contain insta
 
 ```bash
 cd $DYNAMO_ROOT
-./container/build.sh \
-  --framework SGLANG \
-  --tag dynamo-sglang:latest \
+python container/render.py --framework=sglang --target=runtime
+docker build -t dynamo:sglang-latest -f container/rendered.Dockerfile .
 ```
 
 And then run it using
