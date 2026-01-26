@@ -67,8 +67,9 @@ use super::{managers, nova, physical, token_blocks};
 ///
 /// # Example - Custom NIXL
 /// ```rust,ignore
+/// // Use POSIX for disk tests (always available, unlike GDS)
 /// let config = ConnectorTestConfig::new()
-///     .worker_nixl(NixlConfig::empty().with_backend("GDS"));
+///     .worker_nixl(NixlConfig::empty().with_backend("POSIX"));
 /// ```
 #[derive(Clone)]
 pub struct ConnectorTestConfig {
@@ -203,7 +204,7 @@ impl ConnectorTestConfig {
     /// ```rust,ignore
     /// let config = ConnectorTestConfig::from_json(r#"{
     ///     "leader": { "cache": { "host": { "cache_size_gb": 1.0 } } },
-    ///     "worker": { "nixl": { "backends": { "UCX": {}, "GDS": {} } } }
+    ///     "worker": { "nixl": { "backends": { "UCX": {}, "POSIX": {} } } }
     /// }"#)?;
     /// ```
     pub fn from_json(json: &str) -> Result<Self> {
@@ -1604,7 +1605,8 @@ mod tests {
     #[test]
     fn test_worker_custom_nixl_replaces() {
         // Test fully replacing NIXL configuration using worker_nixl_replace()
-        let custom_nixl = NixlConfig::empty().with_backend("GDS");
+        // Use POSIX as it's always available (unlike GDS which requires GPU Direct Storage)
+        let custom_nixl = NixlConfig::empty().with_backend("POSIX");
 
         let config = ConnectorTestConfig::new().worker_nixl_replace(custom_nixl);
 
@@ -1613,8 +1615,8 @@ mod tests {
         assert!(worker.nixl.is_some(), "Worker should have NIXL config");
         let nixl = worker.nixl.unwrap();
         assert!(
-            nixl.backends.contains_key("GDS"),
-            "Worker should have GDS backend"
+            nixl.backends.contains_key("POSIX"),
+            "Worker should have POSIX backend"
         );
         // Should NOT have the defaults since we used _replace
         assert!(
@@ -1626,14 +1628,15 @@ mod tests {
     #[test]
     fn test_worker_nixl_merges_backends() {
         // Test that worker_nixl() adds to existing backends
-        let extra_nixl = NixlConfig::empty().with_backend("GDS");
+        // Use POSIX_MT as a distinct backend to test merging (POSIX is already in defaults)
+        let extra_nixl = NixlConfig::empty().with_backend("POSIX_MT");
 
         let config = ConnectorTestConfig::new().worker_nixl(extra_nixl);
 
         let worker = config.build_worker().expect("Should build worker config");
 
         let nixl = worker.nixl.expect("Worker should have NIXL config");
-        // Should have all backends: defaults (UCX, POSIX) + new (GDS)
+        // Should have all backends: defaults (UCX, POSIX) + new (POSIX_MT)
         assert!(
             nixl.backends.contains_key("UCX"),
             "Should have UCX from defaults"
@@ -1643,8 +1646,8 @@ mod tests {
             "Should have POSIX from defaults"
         );
         assert!(
-            nixl.backends.contains_key("GDS"),
-            "Should have GDS from merge"
+            nixl.backends.contains_key("POSIX_MT"),
+            "Should have POSIX_MT from merge"
         );
     }
 

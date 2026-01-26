@@ -86,7 +86,10 @@ impl EventBatcher {
     /// * `config` - Batching configuration
     /// * `instance_id` - Worker instance ID to include in batched events
     pub fn new(config: BatchingConfig, instance_id: InstanceId) -> Self {
-        Self { config, instance_id }
+        Self {
+            config,
+            instance_id,
+        }
     }
 
     /// Transform an input stream of events into a batched output stream.

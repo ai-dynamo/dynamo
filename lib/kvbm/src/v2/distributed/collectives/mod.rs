@@ -58,8 +58,8 @@ use std::ops::Range;
 use anyhow::Result;
 
 use crate::physical::transfer::TransferCompleteNotification;
-use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::BlockId;
+use crate::v2::logical::LogicalLayoutHandle;
 
 /// Collective communication operations for distributed workers.
 ///

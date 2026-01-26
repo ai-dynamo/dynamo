@@ -307,7 +307,10 @@ mod tests {
         // Verify shutdown event
         assert_eq!(captured[1].instance_id, 12345);
         assert!(
-            matches!(captured[1].events, super::super::protocol::KvCacheEvents::Shutdown),
+            matches!(
+                captured[1].events,
+                super::super::protocol::KvCacheEvents::Shutdown
+            ),
             "Expected Shutdown event, got {:?}",
             captured[1].events
         );

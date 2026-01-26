@@ -340,8 +340,8 @@ impl TestInstanceLeaderWithWorkers {
 // =============================================================================
 
 use crate::v2::distributed::leader::session::{
-    BlockInfo, EndpointSessionHandle, SessionHandle as UnifiedSessionHandle,
-    SessionId, SessionPhase, SessionStateSnapshot,
+    BlockInfo, EndpointSessionHandle, SessionHandle as UnifiedSessionHandle, SessionId,
+    SessionPhase, SessionStateSnapshot,
 };
 use crate::v2::physical::transfer::TransferCompleteNotification;
 use std::time::Duration;
@@ -417,10 +417,11 @@ impl TestSession {
             .await?;
 
         // Wait for ready state
-        let initial_state = tokio::time::timeout(timeout_duration, controller_handle.wait_for_ready())
-            .await
-            .map_err(|_| anyhow::anyhow!("Timeout waiting for session to become ready"))?
-            .map_err(|e| anyhow::anyhow!("Session ready failed: {}", e))?;
+        let initial_state =
+            tokio::time::timeout(timeout_duration, controller_handle.wait_for_ready())
+                .await
+                .map_err(|_| anyhow::anyhow!("Timeout waiting for session to become ready"))?
+                .map_err(|e| anyhow::anyhow!("Session ready failed: {}", e))?;
 
         Ok(Self {
             session_id,
@@ -455,7 +456,9 @@ impl TestSession {
         src_blocks: &[BlockInfo],
         dst_ids: &[BlockId],
     ) -> Result<TransferCompleteNotification> {
-        self.controller_handle.pull_blocks_rdma(src_blocks, dst_ids).await
+        self.controller_handle
+            .pull_blocks_rdma(src_blocks, dst_ids)
+            .await
     }
 
     /// Notify that layers are ready (called from endpoint side).

@@ -654,7 +654,7 @@ mod tests {
                             buffer_ptr as *mut std::ffi::c_void,
                             test_size,
                             ncclDataType_t::ncclChar,
-                            0,                  // root rank
+                            0, // root rank
                             comm as ncclComm_t,
                             stream.cu_stream().cast(),
                         )

@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use bytes::Bytes;
-use futures::future::BoxFuture;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 use tokio::sync::mpsc;
 
 use super::batcher::BatchingConfig;
@@ -231,7 +231,11 @@ async fn test_max_batch_size_flush() {
         .unwrap()
         .unwrap();
     if let KvCacheEvents::Create(hashes) = &batch1.events {
-        assert_eq!(hashes.len(), 3, "First batch should have max_size (3) events");
+        assert_eq!(
+            hashes.len(),
+            3,
+            "First batch should have max_size (3) events"
+        );
     } else {
         panic!("Expected Create batch");
     }

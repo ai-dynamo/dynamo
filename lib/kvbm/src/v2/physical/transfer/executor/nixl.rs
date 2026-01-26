@@ -9,7 +9,7 @@
 use super::{PhysicalLayout, TransferContext, TransferStrategy};
 use crate::BlockId;
 use crate::v2::physical::transfer::context::TransferCompleteNotification;
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use dynamo_memory::nixl::{XferDescList, XferOp};
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -298,15 +298,11 @@ impl<'a> NixlTransferBuilder<'a, Set, Set, Set, Set, Set> {
                         ));
                     }
 
-                    // Add to source descriptor list
-                    src_dl
-                        .add_desc(src_region.addr(), src_region.size(), src_device_id)
-                        .context("building NIXL descriptor list")?;
+                    // Add to source descriptor list (modifies in-place)
+                    src_dl.add_desc(src_region.addr(), src_region.size(), src_device_id);
 
-                    // Add to destination descriptor list
-                    dst_dl
-                        .add_desc(dst_region.addr(), dst_region.size(), dst_device_id)
-                        .context("building NIXL descriptor list")?;
+                    // Add to destination descriptor list (modifies in-place)
+                    dst_dl.add_desc(dst_region.addr(), dst_region.size(), dst_device_id);
                 }
             }
         }

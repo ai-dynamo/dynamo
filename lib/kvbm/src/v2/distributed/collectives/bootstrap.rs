@@ -97,7 +97,10 @@ impl NcclBootstrap {
         // SAFETY: ncclGetUniqueId has initialized the struct
         let nccl_id = unsafe { nccl_id.assume_init() };
 
-        Ok(Self { nccl_id, world_size })
+        Ok(Self {
+            nccl_id,
+            world_size,
+        })
     }
 
     /// Get the world size for this bootstrap.
@@ -152,7 +155,10 @@ impl NcclBootstrap {
             nccl_id.internal[i] = byte as i8;
         }
 
-        Ok(Self { nccl_id, world_size })
+        Ok(Self {
+            nccl_id,
+            world_size,
+        })
     }
 
     /// Initialize an NCCL communicator for this rank.

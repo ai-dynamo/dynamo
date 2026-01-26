@@ -297,11 +297,11 @@ pub fn create_and_populate_manager<T: BlockMetadata>(
 
 use std::ops::Range;
 
-use dynamo_tokens::TokenBlockSequence;
 use super::token_blocks::create_token_sequence;
-use crate::v2::physical::transfer::FillPattern;
-use crate::v2::KvbmSequenceHashProvider;
 use crate::BlockId;
+use crate::v2::KvbmSequenceHashProvider;
+use crate::v2::physical::transfer::FillPattern;
+use dynamo_tokens::TokenBlockSequence;
 
 /// Specification for a single instance's population.
 pub struct InstancePopulationSpec<'a, M: BlockMetadata> {
@@ -488,10 +488,8 @@ impl<'a, M: BlockMetadata> MultiInstancePopulatorBuilder<'a, M> {
         let full_blocks = token_sequence.blocks();
 
         // Generate all hashes from the sequence
-        let all_hashes: Vec<SequenceHash> = full_blocks
-            .iter()
-            .map(|b| b.kvbm_sequence_hash())
-            .collect();
+        let all_hashes: Vec<SequenceHash> =
+            full_blocks.iter().map(|b| b.kvbm_sequence_hash()).collect();
 
         // Populate each instance
         let mut instance_results = Vec::with_capacity(self.instances.len());

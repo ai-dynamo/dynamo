@@ -80,7 +80,7 @@ dynamo-nova-common = { path = "lib/nova-common", version = "0.8.0" }
 dynamo-nova-discovery = { path = "lib/nova-discovery", version = "0.8.0" }
 
 # nixl
-nixl-sys = { version = "0.8.0" }
+nixl-sys = { version = "0.9.0" }
 
 # External dependencies
 anyhow = { version = "1" }

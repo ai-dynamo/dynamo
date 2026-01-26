@@ -13,8 +13,8 @@ use anyhow::Result;
 use dynamo_nova::events::LocalEventSystem;
 
 use crate::physical::transfer::TransferCompleteNotification;
-use crate::v2::logical::LogicalLayoutHandle;
 use crate::v2::BlockId;
+use crate::v2::logical::LogicalLayoutHandle;
 
 use super::CollectiveOps;
 

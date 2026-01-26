@@ -59,6 +59,9 @@ tokio-rayon = { version = "2", optional = true }
 chrono = { version = "0.4", optional = true }
 nvtx = { version = "1.3", optional = true }
 
+# NIXL for distributed transfers (collectives feature)
+nixl-sys = { workspace = true, optional = true }
+
 # PubSub dependencies
 tokio-stream = { workspace = true }
 async-nats = { workspace = true, optional = true }
@@ -73,7 +76,8 @@ testing = ["dynamo-nova-backend"]
 kvbm-bench = ["testing", "dep:clap", "dep:indicatif"]
 s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:chrono"]
 nvtx = ["dep:nvtx", "dynamo-kvbm-config/nvtx"]
-collectives = []  # Enable NCCL collective support
+collectives = ["dep:nixl-sys", "nccl"]  # Enable NIXL transfers and NCCL collective support
+nccl = []  # Enable NCCL collective operations (via cudarc)
 nats = ["dep:async-nats", "dep:flume"]  # Enable NATS pubsub implementation
 
 [dev-dependencies]

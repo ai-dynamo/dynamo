@@ -94,8 +94,8 @@ mod tests {
     use super::*;
     use crate::KvbmSequenceHashProvider;
     use dynamo_tokens::TokenBlockSequence;
-    use tokio_stream::wrappers::BroadcastStream;
     use tokio_stream::StreamExt;
+    use tokio_stream::wrappers::BroadcastStream;
 
     #[test]
     fn test_event_serialization() {
@@ -118,7 +118,11 @@ mod tests {
     fn test_batch_events_serialization() {
         let tokens = vec![1u32, 2, 3, 4, 5, 6, 7, 8];
         let seq = TokenBlockSequence::from_slice(&tokens, 4, Some(1337));
-        let seq_hashes: Vec<_> = seq.blocks().iter().map(|b| b.kvbm_sequence_hash()).collect();
+        let seq_hashes: Vec<_> = seq
+            .blocks()
+            .iter()
+            .map(|b| b.kvbm_sequence_hash())
+            .collect();
 
         let batch = KvbmCacheEvents {
             events: KvCacheEvents::Create(seq_hashes.clone()),

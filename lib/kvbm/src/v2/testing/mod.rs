@@ -30,8 +30,8 @@ pub use physical::{TestAgent, TestAgentBuilder, TransferChecksums};
 
 // Manager utilities
 pub use managers::{
-    MultiInstancePopulator, MultiInstancePopulatorBuilder, PopulatedInstances,
-    InstancePopulationResult, InstancePopulationSpec,
+    InstancePopulationResult, InstancePopulationSpec, MultiInstancePopulator,
+    MultiInstancePopulatorBuilder, PopulatedInstances,
 };
 
 // Distributed testing utilities
