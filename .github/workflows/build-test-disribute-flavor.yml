@@ -143,18 +143,15 @@ jobs:
           echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
           echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
 
-      - name: Route buildkit workers
-        id: route-buildkit
-        continue-on-error: true
-        shell: bash
-        run: .github/scripts/route_buildkit.sh --arch ${{ matrix.platform }} --flavor ${{ inputs.framework }} --cuda ${{ matrix.cuda_version }}
 
-      - name: Bootstrap Buildkit
-        uses: ./.github/actions/bootstrap-buildkit
+      - name: Initialize Dynamo Builder
+        uses: ./.github/actions/init-dynamo-builder
         with:
           builder_name: ${{ inputs.builder_name }}
-          buildkit_worker_addresses: ${{ steps.route-buildkit.outputs[format('{0}_{1}', inputs.framework, matrix.platform)] }}
-          platform: linux/${{ matrix.platform }}
+          flavor: ${{ inputs.framework }}
+          arch: ${{ matrix.platform }}
+          cuda_version: ${{ matrix.cuda_version }}
+
 
       - name: Print Build Container inputs
         run: |
