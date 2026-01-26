@@ -116,9 +116,9 @@ async fn perform_allocation_and_build_handler(
     // - Sharded mode (rank=None): all ranks allocate
     // - Replicated mode (rank=Some(r)): only rank 0 allocates
     let should_allocate_offload = match worker_config.rank {
-        None => true,      // Sharded mode: all ranks allocate
-        Some(0) => true,   // Replicated mode rank 0: allocate
-        Some(_) => false,  // Replicated mode non-rank0: skip
+        None => true,     // Sharded mode: all ranks allocate
+        Some(0) => true,  // Replicated mode rank 0: allocate
+        Some(_) => false, // Replicated mode non-rank0: skip
     };
 
     if !should_allocate_offload {
