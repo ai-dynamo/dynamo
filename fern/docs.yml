@@ -20,8 +20,6 @@ title: NVIDIA Dynamo Documentation
 
 # Version configuration
 versions:
-  - display-name: Next
-    path: ./versions/next.yml
   - display-name: v0.8.0
     path: ./versions/v0.8.0.yml
 
