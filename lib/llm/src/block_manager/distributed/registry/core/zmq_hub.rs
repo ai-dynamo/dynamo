@@ -319,6 +319,14 @@ where
 
         let Some(query) = codec.decode_query(data) else {
             warn!("Failed to decode query");
+            // Return an explicit error response so clients can distinguish
+            // decode errors from legitimate empty results
+            if let Err(e) = codec.encode_response(
+                &ResponseType::Error("Failed to decode query".to_string()),
+                &mut response,
+            ) {
+                warn!("Failed to encode error response: {}", e);
+            }
             return response;
         };
 

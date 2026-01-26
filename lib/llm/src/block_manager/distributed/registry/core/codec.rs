@@ -26,6 +26,8 @@ pub enum MessageType {
     /// Touch/access notification for LRU/LFU tracking
     Touch = 8,
     TouchResponse = 9,
+    /// Error response for decode/processing failures
+    ErrorResponse = 10,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -42,6 +44,7 @@ impl TryFrom<u8> for MessageType {
             7 => Ok(Self::RemoveResponse),
             8 => Ok(Self::Touch),
             9 => Ok(Self::TouchResponse),
+            10 => Ok(Self::ErrorResponse),
             _ => Err(()),
         }
     }
@@ -87,6 +90,10 @@ pub enum ResponseType<K, V, M> {
     Remove(usize),
     /// Number of entries touched (acknowledged).
     Touch(usize),
+    /// Error response for decode/processing failures.
+    /// Contains an error message that clients can use to distinguish
+    /// errors from legitimate empty results.
+    Error(String),
 }
 
 pub trait RegistryCodec<K, V, M>: Send + Sync
@@ -414,6 +421,17 @@ where
                 buf.push(MessageType::TouchResponse as u8);
                 buf.extend_from_slice(&(*count as u64).to_le_bytes());
             }
+            ResponseType::Error(msg) => {
+                buf.push(MessageType::ErrorResponse as u8);
+                let msg_bytes = msg.as_bytes();
+                if msg_bytes.len() > u16::MAX as usize {
+                    return Err(RegistryError::EncodeError {
+                        context: "error message exceeds u16::MAX bytes",
+                    });
+                }
+                buf.extend_from_slice(&(msg_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(msg_bytes);
+            }
         }
         Ok(())
     }
@@ -428,10 +446,11 @@ where
         }
         let msg_type = MessageType::try_from(data[0]).ok()?;
 
-        // Handle RemoveResponse and TouchResponse separately as they use u64 count
-        // format: [msg_type (1 byte)][u64 count (8 bytes)]
+        // Handle RemoveResponse, TouchResponse, and ErrorResponse separately
+        // as they use different formats than the u32-count responses
         match msg_type {
             MessageType::RemoveResponse => {
+                // format: [msg_type (1 byte)][u64 count (8 bytes)]
                 if data.len() < 1 + 8 {
                     return None;
                 }
@@ -439,11 +458,24 @@ where
                 return Some(ResponseType::Remove(removed));
             }
             MessageType::TouchResponse => {
+                // format: [msg_type (1 byte)][u64 count (8 bytes)]
                 if data.len() < 1 + 8 {
                     return None;
                 }
                 let touched = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
                 return Some(ResponseType::Touch(touched));
+            }
+            MessageType::ErrorResponse => {
+                // format: [msg_type (1 byte)][u16 length (2 bytes)][utf8 message]
+                if data.len() < 1 + 2 {
+                    return None;
+                }
+                let msg_len = u16::from_le_bytes(data[1..3].try_into().ok()?) as usize;
+                if data.len() < 1 + 2 + msg_len {
+                    return None;
+                }
+                let msg = String::from_utf8(data[3..3 + msg_len].to_vec()).ok()?;
+                return Some(ResponseType::Error(msg));
             }
             _ => {}
         }
