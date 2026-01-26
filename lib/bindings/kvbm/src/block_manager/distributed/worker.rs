@@ -8,10 +8,49 @@ use utils::{get_leader_zmq_ack_url, get_leader_zmq_pub_url};
 
 use llm_rs::block_manager::distributed::{
     BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
-    KvbmWorkerConfig,
+    KvbmWorkerConfig, NcclConfig,
 };
+#[cfg(feature = "nccl")]
+use llm_rs::block_manager::distributed::NcclBootstrap;
 use llm_rs::block_manager::layout::LayoutType;
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
+
+/// Build NcclConfig from Python parameters.
+///
+/// Returns an error if NCCL parameters are provided but the NCCL feature is not enabled.
+fn build_nccl_config(
+    rank: Option<i32>,
+    world_size: Option<i32>,
+    nccl_comm_ptr: Option<usize>,
+) -> anyhow::Result<NcclConfig> {
+    // Check if the user is trying to use replicated mode
+    let wants_replicated = rank.is_some() || world_size.is_some() || nccl_comm_ptr.is_some();
+
+    #[cfg(feature = "nccl")]
+    {
+        match (rank, world_size, nccl_comm_ptr) {
+            (Some(r), Some(ws), Some(ptr)) if ptr != 0 => {
+                use cudarc::nccl::sys::ncclComm_t;
+                Ok(unsafe { NcclConfig::enabled(ptr as ncclComm_t, r, ws) })
+            }
+            _ => Ok(NcclConfig::disabled()),
+        }
+    }
+    #[cfg(not(feature = "nccl"))]
+    {
+        if wants_replicated {
+            anyhow::bail!(
+                "NCCL replicated mode requested (rank={:?}, world_size={:?}, nccl_comm_ptr={:?}) \
+                 but kvbm was not built with the 'nccl' feature enabled. \
+                 Please rebuild with 'nccl' feature or use sharded mode (omit rank/world_size/nccl_comm_ptr).",
+                rank,
+                world_size,
+                nccl_comm_ptr
+            );
+        }
+        Ok(NcclConfig::disabled())
+    }
+}
 
 /// A wrapper around a layout type.
 /// This is used to convert between the Python and Rust layout types.
@@ -143,7 +182,7 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None, layout_blocking=false, device_layout_type=None, host_layout_type=None, disk_layout_type=None, rank=None, world_size=None, nccl_comm_ptr=None))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
@@ -155,6 +194,9 @@ impl KvbmWorker {
         device_layout_type: Option<PyLayoutType>,
         host_layout_type: Option<PyLayoutType>,
         disk_layout_type: Option<PyLayoutType>,
+        rank: Option<i32>,
+        world_size: Option<i32>,
+        nccl_comm_ptr: Option<usize>,
     ) -> PyResult<Self> {
         let drt: Option<Arc<rs::DistributedRuntime>> = Python::with_gil(|py| {
             if let Some(obj) = drt {
@@ -172,6 +214,10 @@ impl KvbmWorker {
             let vllm_tensor = VllmTensor::new(tensor.clone()).map_err(to_pyerr)?;
             vllm_tensors.push(Arc::new(vllm_tensor));
         }
+
+        // Build NcclConfig from bootstrapped comm (if provided)
+        // This will error if NCCL params are provided but feature is not enabled
+        let nccl_config = build_nccl_config(rank, world_size, nccl_comm_ptr).map_err(to_pyerr)?;
 
         let config = KvbmWorkerConfig::builder()
             .cancel_token(get_current_cancel_token())
@@ -197,6 +243,9 @@ impl KvbmWorker {
             )
             .leader_pub_url(get_leader_zmq_pub_url())
             .leader_ack_url(get_leader_zmq_ack_url())
+            .rank(rank)
+            .world_size(world_size)
+            .nccl_config(nccl_config)
             .build()
             .map_err(to_pyerr)?;
 
@@ -211,5 +260,82 @@ impl KvbmWorker {
             inner: Arc::new(Mutex::new(worker)),
             _drt: drt,
         })
+    }
+}
+
+/// Python wrapper for NCCL bootstrap functionality.
+///
+/// This class provides methods to generate, serialize, deserialize,
+/// and initialize NCCL communicators for KVBM's replicated mode.
+///
+/// Usage pattern:
+/// 1. Rank 0: Call `NcclBootstrap.generate(world_size)` to create a new unique ID
+/// 2. Rank 0: Call `serialize()` and broadcast to other ranks via MPI
+/// 3. Other ranks: Call `NcclBootstrap.deserialize(bytes)` to reconstruct
+/// 4. All ranks: Call `init_communicator(rank)` collectively to create the comm
+#[cfg(feature = "nccl")]
+#[pyclass]
+pub struct PyNcclBootstrap {
+    inner: NcclBootstrap,
+}
+
+#[cfg(feature = "nccl")]
+#[pymethods]
+impl PyNcclBootstrap {
+    /// Generate a new unique ID for NCCL communicator initialization.
+    /// This should only be called on rank 0.
+    ///
+    /// Args:
+    ///     world_size: The total number of ranks that will participate
+    ///
+    /// Returns:
+    ///     A new PyNcclBootstrap instance
+    #[staticmethod]
+    fn generate(world_size: i32) -> PyResult<Self> {
+        let inner = NcclBootstrap::generate(world_size).map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    /// Serialize the bootstrap data for distribution to other ranks.
+    ///
+    /// Returns:
+    ///     bytes: The serialized bootstrap data (136 bytes)
+    fn serialize<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let bytes = self.inner.serialize();
+        Ok(pyo3::types::PyBytes::new(py, &bytes))
+    }
+
+    /// Deserialize bootstrap data received from rank 0.
+    ///
+    /// Args:
+    ///     data: The serialized bootstrap data (136 bytes)
+    ///
+    /// Returns:
+    ///     A new PyNcclBootstrap instance
+    #[staticmethod]
+    fn deserialize(data: &[u8]) -> PyResult<Self> {
+        let inner = NcclBootstrap::deserialize(data).map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    /// Initialize the NCCL communicator.
+    ///
+    /// IMPORTANT: This is a collective operation!
+    /// All ranks must call this function together with matching parameters.
+    /// The function will block until all ranks have called it.
+    ///
+    /// Args:
+    ///     rank: This rank's ID (0 to world_size-1)
+    ///
+    /// Returns:
+    ///     int: The raw ncclComm_t pointer as an integer
+    fn init_communicator(&self, rank: i32) -> PyResult<usize> {
+        let comm = self.inner.init_communicator(rank).map_err(to_pyerr)?;
+        Ok(comm as usize)
+    }
+
+    /// Get the world size for this bootstrap.
+    fn world_size(&self) -> i32 {
+        self.inner.world_size()
     }
 }

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 from kvbm.trtllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
@@ -13,6 +13,77 @@ from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
 DistributedRuntime = None
 if is_dyn_runtime_enabled():
     from dynamo.runtime import DistributedRuntime
+
+
+def _get_mpi_info() -> Tuple[Optional[int], Optional[int]]:
+    """Get MPI rank and world_size if MPI is initialized.
+
+    Returns:
+        Tuple of (rank, world_size), or (None, None) if MPI is not available/initialized.
+    """
+    try:
+        from mpi4py import MPI
+
+        if MPI.Is_initialized():
+            comm = MPI.COMM_WORLD
+            return comm.Get_rank(), comm.Get_size()
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.warning(f"Failed to get MPI info: {e}")
+    return None, None
+
+
+def _create_kvbm_nccl_comm(rank: int, world_size: int) -> int:
+    """Create a dedicated NCCL communicator for KVBM using MPI for bootstrap.
+
+    This function creates an NCCL communicator that is separate from any other
+    communicators (e.g., TRT-LLM's). The bootstrap uses MPI to distribute the
+    unique ID from rank 0 to all other ranks.
+
+    Args:
+        rank: This process's rank (0 to world_size-1)
+        world_size: Total number of ranks
+
+    Returns:
+        The raw ncclComm_t pointer as an integer
+
+    Raises:
+        ImportError: If mpi4py or NcclBootstrap is not available
+        RuntimeError: If NCCL initialization fails
+    """
+    from mpi4py import MPI
+
+    try:
+        from kvbm._core import NcclBootstrap
+    except ImportError:
+        raise ImportError(
+            "NcclBootstrap not available. "
+            "Make sure kvbm was built with the 'nccl' feature enabled."
+        )
+
+    comm = MPI.COMM_WORLD
+
+    # Rank 0 generates unique ID
+    if rank == 0:
+        bootstrap = NcclBootstrap.generate(world_size)
+        bootstrap_data = bootstrap.serialize()
+    else:
+        bootstrap_data = None
+
+    # Broadcast bootstrap data to all ranks
+    bootstrap_data = comm.bcast(bootstrap_data, root=0)
+
+    # Non-rank-0 deserializes the data
+    if rank != 0:
+        bootstrap = NcclBootstrap.deserialize(bootstrap_data)
+
+    # All ranks collectively initialize (must be called together)
+    # This is a blocking collective operation
+    nccl_comm_ptr = bootstrap.init_communicator(rank)
+
+    logger.info(f"KVBM: Rank {rank} created dedicated NCCL communicator")
+    return nccl_comm_ptr
 
 
 class DynamoKVBMConnectorWorker(KvCacheConnectorWorker):
