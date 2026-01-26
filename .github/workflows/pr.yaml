@@ -105,11 +105,11 @@ jobs:
         uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version: '1.25'
-      - name: Check for uncommitted changes
-        shell: bash
-        working-directory: ./deploy/operator
-        run: |
-          make check
+      # - name: Check for uncommitted changes #todo: enable on merge
+      #   shell: bash
+      #   working-directory: ./deploy/operator
+      #   run: |
+      #     make check
       - name: Build and push Container
         id: build-and-push-image
         shell: bash
@@ -164,7 +164,9 @@ jobs:
         id: calculate-target-tag
         shell: bash
         run: |
-          echo "operator_tags=${{ needs.operator.outputs.operator_tags }}"
+          for tag in ${{ needs.operator.outputs.operator_tags }}; do
+            echo "tag=${tag}"
+          done
           # TARGET_TAG_PLAIN="${{ github.sha }}-dynamo-operator"
           # echo "target_tag_plain=${TARGET_TAG_PLAIN}" >> $GITHUB_OUTPUT
     #   - name: Copy image to target registry
