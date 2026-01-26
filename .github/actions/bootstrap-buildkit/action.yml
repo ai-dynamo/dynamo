@@ -120,4 +120,5 @@ runs:
       if: inputs.skip_bootstrap != 'true'
       shell: bash
       run: |
-        docker buildx inspect --bootstrap
+        echo "Bootstrapping buildkit..."
+        docker buildx inspect ${{ inputs.builder_name }}  --bootstrap

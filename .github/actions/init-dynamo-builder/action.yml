@@ -117,7 +117,6 @@ runs:
         requests_memory: ${{ inputs.requests_memory }}
         limits_memory: ${{ inputs.limits_memory }}
         tolerations: ${{ inputs.tolerations }}
-        skip_bootstrap: ${{ inputs.all_arch == 'true' && 'true' || 'false' }}
 
     # --- ARM64 Setup ---
     - name: Route buildkit workers (arm64)
@@ -146,4 +145,3 @@ runs:
         requests_memory: ${{ inputs.requests_memory }}
         limits_memory: ${{ inputs.limits_memory }}
         tolerations: ${{ inputs.tolerations }}
-        skip_bootstrap: 'false'
