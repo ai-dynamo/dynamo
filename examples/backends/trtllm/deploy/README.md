@@ -212,7 +212,7 @@ spec:
 
 TensorRT-LLM workers are configured through command-line arguments in the deployment YAML. Key configuration areas include:
 
-- **KV Cache Transfer**: Choose between UCX (default) or NIXL for disaggregated serving
+- **KV Cache Transfer**: Choose between NIXL (default) or UCX for disaggregated serving
 - **Request Migration**: Enable graceful failure handling with `--migration-limit`
 
 ## Testing the Deployment

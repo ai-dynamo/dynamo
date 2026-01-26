@@ -127,6 +127,142 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/disagg_router.sh
 ```
 
+### Complete Single-Node Aggregated Example
+
+This example shows the commands and configuration needed to deploy an aggregated TensorRT-LLM worker.
+
+**Step 1: Create an engine configuration file** (e.g., `engine_config.yaml`):
+
+```yaml
+# Engine configuration for aggregated serving
+backend: pytorch
+tensor_parallel_size: 1
+max_num_tokens: 8192
+max_batch_size: 16
+trust_remote_code: true
+enable_chunked_prefill: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.85
+
+cuda_graph_config:
+  max_batch_size: 16
+```
+
+**Step 2: Start the frontend** (in terminal 1):
+
+```bash
+python3 -m dynamo.frontend --http-port 8000 --store-kv file
+```
+
+**Step 3: Start the TensorRT-LLM worker** (in terminal 2):
+
+```bash
+python3 -m dynamo.trtllm \
+  --model-path "Qwen/Qwen3-0.6B" \
+  --served-model-name "Qwen/Qwen3-0.6B" \
+  --extra-engine-args engine_config.yaml \
+  --store-kv file
+```
+
+**Step 4: Test the deployment**:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
+```
+
+### Complete Single-Node Disaggregated Example
+
+This example shows how to deploy separate prefill and decode workers on different GPUs.
+
+**Step 1: Create the prefill engine configuration** (`prefill_config.yaml`):
+
+```yaml
+backend: pytorch
+tensor_parallel_size: 1
+max_num_tokens: 8192
+trust_remote_code: true
+enable_chunked_prefill: true
+# Overlap scheduler not supported in prefill-only workers
+disable_overlap_scheduler: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.85
+
+cuda_graph_config:
+  max_batch_size: 16
+
+# Required for KV cache transfer between prefill and decode
+cache_transceiver_config:
+  backend: DEFAULT
+```
+
+**Step 2: Create the decode engine configuration** (`decode_config.yaml`):
+
+```yaml
+backend: pytorch
+tensor_parallel_size: 1
+max_num_tokens: 8192
+trust_remote_code: true
+enable_chunked_prefill: true
+disable_overlap_scheduler: false
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.85
+
+cuda_graph_config:
+  max_batch_size: 16
+
+cache_transceiver_config:
+  backend: DEFAULT
+```
+
+**Step 3: Start the frontend** (in terminal 1):
+
+```bash
+python3 -m dynamo.frontend --http-port 8000 --store-kv file
+```
+
+**Step 4: Start the prefill worker on GPU 0** (in terminal 2):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.trtllm \
+  --model-path "Qwen/Qwen3-0.6B" \
+  --served-model-name "Qwen/Qwen3-0.6B" \
+  --extra-engine-args prefill_config.yaml \
+  --disaggregation-mode prefill \
+  --store-kv file
+```
+
+**Step 5: Start the decode worker on GPU 1** (in terminal 3):
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.trtllm \
+  --model-path "Qwen/Qwen3-0.6B" \
+  --served-model-name "Qwen/Qwen3-0.6B" \
+  --extra-engine-args decode_config.yaml \
+  --disaggregation-mode decode \
+  --store-kv file
+```
+
+**Step 6: Test the deployment**:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_tokens": 50
+  }'
+```
+
 ### Aggregated with Multi-Token Prediction (MTP) and DeepSeek R1
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
@@ -170,7 +306,7 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 
 ## KV Cache Transfer in Disaggregated Serving
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](kv-cache-transfer.md).
+Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: NIXL (default) and UCX. For detailed information and configuration instructions for each method, see the [KV cache transfer guide](kv-cache-transfer.md).
 
 
 ## Request Migration
