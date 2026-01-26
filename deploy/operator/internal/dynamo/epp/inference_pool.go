@@ -58,8 +58,8 @@ func GenerateInferencePool(
 			},
 			Selector: gaiev1.LabelSelector{
 				MatchLabels: map[gaiev1.LabelKey]gaiev1.LabelValue{
-					consts.KubeLabelDynamoComponent: "Frontend",
-					consts.KubeLabelDynamoNamespace: gaiev1.LabelValue(dynamoNamespace),
+					consts.KubeLabelDynamoComponentType: consts.ComponentTypeFrontend,
+					consts.KubeLabelDynamoNamespace:     gaiev1.LabelValue(dynamoNamespace),
 				},
 			},
 			EndpointPickerRef: gaiev1.EndpointPickerRef{
@@ -76,19 +76,11 @@ func GenerateInferencePool(
 }
 
 // GetPoolName returns the InferencePool name
-// Can be overridden via EPPConfig.PoolName, otherwise defaults to {dgdName}-pool
 func GetPoolName(dgdName string, eppConfig *v1alpha1.EPPConfig) string {
-	if eppConfig != nil && eppConfig.PoolName != nil && *eppConfig.PoolName != "" {
-		return *eppConfig.PoolName
-	}
 	return fmt.Sprintf("%s-pool", dgdName)
 }
 
 // GetPoolNamespace returns the InferencePool namespace
-// Can be overridden via EPPConfig.PoolNamespace, otherwise defaults to dgdNamespace
 func GetPoolNamespace(dgdNamespace string, eppConfig *v1alpha1.EPPConfig) string {
-	if eppConfig != nil && eppConfig.PoolNamespace != nil && *eppConfig.PoolNamespace != "" {
-		return *eppConfig.PoolNamespace
-	}
 	return dgdNamespace
 }

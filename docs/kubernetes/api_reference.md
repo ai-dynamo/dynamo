@@ -532,10 +532,6 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `configMapRef` _[ConfigMapKeySelector](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.28/#configmapkeyselector-v1-core)_ | ConfigMapRef references a user-provided ConfigMap containing EPP configuration.<br />The ConfigMap should contain EndpointPickerConfig YAML.<br />Mutually exclusive with Config. |  |  |
 | `config` _[EndpointPickerConfig](#endpointpickerconfig)_ | Config allows specifying EPP EndpointPickerConfig directly as a structured object.<br />The operator will marshal this to YAML and create a ConfigMap automatically.<br />Mutually exclusive with ConfigMapRef.<br />One of ConfigMapRef or Config must be specified (no default configuration).<br />Uses the upstream type from github.com/kubernetes-sigs/gateway-api-inference-extension |  | Type: object <br /> |
-| `poolName` _string_ | PoolName is the name of the InferencePool to create and watch.<br />Defaults to \{dgd-name\}-pool if not specified. |  |  |
-| `poolNamespace` _string_ | PoolNamespace is the namespace of the InferencePool to create and watch.<br />Defaults to the DGD namespace if not specified. |  |  |
-| `kvBlockSize` _string_ | KVBlockSize for Dynamo KV-aware routing. | 16 |  |
-| `useEtcd` _boolean_ | UseEtcd when true, EPP uses ETCD for discovery instead of Kubernetes.<br />When false (default), uses Kubernetes-based discovery. |  |  |
 
 
 #### EndpointInfo

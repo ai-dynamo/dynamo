@@ -76,7 +76,7 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYNAMO_KV_BLOCK_SIZE",
-			Value: "16", // Default, can be overridden via EPPConfig
+			Value: "16",
 		},
 		{
 			Name:  "USE_STREAMING",

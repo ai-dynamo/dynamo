@@ -38,7 +38,8 @@ func GenerateService(
 		Spec: corev1.ServiceSpec{
 			Type: corev1.ServiceTypeClusterIP,
 			Selector: map[string]string{
-				"app": fmt.Sprintf("%s-epp", dgd.Name),
+				consts.KubeLabelDynamoGraphDeploymentName: dgd.Name,
+				consts.KubeLabelDynamoComponentType:       consts.ComponentTypeEPP,
 			},
 			Ports: []corev1.ServicePort{
 				{

@@ -370,24 +370,4 @@ type EPPConfig struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Config *apixv1alpha1.EndpointPickerConfig `json:"config,omitempty"`
-
-	// PoolName is the name of the InferencePool to create and watch.
-	// Defaults to {dgd-name}-pool if not specified.
-	// +optional
-	PoolName *string `json:"poolName,omitempty"`
-
-	// PoolNamespace is the namespace of the InferencePool to create and watch.
-	// Defaults to the DGD namespace if not specified.
-	// +optional
-	PoolNamespace *string `json:"poolNamespace,omitempty"`
-
-	// KVBlockSize for Dynamo KV-aware routing.
-	// +optional
-	// +kubebuilder:default="16"
-	KVBlockSize *string `json:"kvBlockSize,omitempty"`
-
-	// UseEtcd when true, EPP uses ETCD for discovery instead of Kubernetes.
-	// When false (default), uses Kubernetes-based discovery.
-	// +optional
-	UseEtcd *bool `json:"useEtcd,omitempty"`
 }

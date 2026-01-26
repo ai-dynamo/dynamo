@@ -1033,25 +1033,6 @@ spec:
                         - key
                       type: object
                       x-kubernetes-map-type: atomic
-                    kvBlockSize:
-                      default: "16"
-                      description: KVBlockSize for Dynamo KV-aware routing.
-                      type: string
-                    poolName:
-                      description: |-
-                        PoolName is the name of the InferencePool to create and watch.
-                        Defaults to {dgd-name}-pool if not specified.
-                      type: string
-                    poolNamespace:
-                      description: |-
-                        PoolNamespace is the namespace of the InferencePool to create and watch.
-                        Defaults to the DGD namespace if not specified.
-                      type: string
-                    useEtcd:
-                      description: |-
-                        UseEtcd when true, EPP uses ETCD for discovery instead of Kubernetes.
-                        When false (default), uses Kubernetes-based discovery.
-                      type: boolean
                   type: object
                 extraPodMetadata:
                   description: ExtraPodMetadata adds labels/annotations to the created Pods.
