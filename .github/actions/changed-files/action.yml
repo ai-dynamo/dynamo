@@ -25,6 +25,9 @@ outputs:
   trtllm:
     description: 'Whether trtllm files changed'
     value: ${{ steps.filter.outputs.trtllm_any_modified }}
+  frontend:
+    description: 'Whether frontend files changed'
+    value: ${{ steps.filter.outputs.frontend_any_modified }}
 
 runs:
   using: "composite"
@@ -78,6 +81,7 @@ runs:
         echo "vllm: ${{ steps.filter.outputs.vllm_any_modified }}"
         echo "sglang: ${{ steps.filter.outputs.sglang_any_modified }}"
         echo "trtllm: ${{ steps.filter.outputs.trtllm_any_modified }}"
+        echo "frontend: ${{ steps.filter.outputs.frontend_any_modified }}"
         echo ""
         echo "=== Files Matching Each Filter ==="
         echo "docs: ${{ steps.filter.outputs.docs_all_modified_files }}"
@@ -89,12 +93,13 @@ runs:
         echo "vllm: ${{ steps.filter.outputs.vllm_all_modified_files }}"
         echo "sglang: ${{ steps.filter.outputs.sglang_all_modified_files }}"
         echo "trtllm: ${{ steps.filter.outputs.trtllm_all_modified_files }}"
+        echo "frontend: ${{ steps.filter.outputs.frontend_all_modified_files }}"
 
     - name: Check for uncovered files
       shell: bash
       run: |
         # Combine all filter-specific files into one list
-        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
+        COVERED_FILES=$(echo "${{ steps.filter.outputs.docs_all_modified_files }} ${{ steps.filter.outputs.examples_all_modified_files }} ${{ steps.filter.outputs.ignore_all_modified_files }} ${{ steps.filter.outputs.ci_all_modified_files }} ${{ steps.filter.outputs.core_all_modified_files }} ${{ steps.filter.outputs.operator_all_modified_files }} ${{ steps.filter.outputs.deploy_all_modified_files }} ${{ steps.filter.outputs.planner_all_modified_files }} ${{ steps.filter.outputs.vllm_all_modified_files }} ${{ steps.filter.outputs.sglang_all_modified_files }} ${{ steps.filter.outputs.trtllm_all_modified_files }} ${{ steps.filter.outputs.frontend_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
 
         # Get all modified files
         ALL_FILES=$(echo "${{ steps.filter.outputs.all_all_modified_files }}" | tr ' ' '\n' | grep -v '^$' | sort -u)
