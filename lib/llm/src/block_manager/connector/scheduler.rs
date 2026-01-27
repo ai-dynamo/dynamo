@@ -537,7 +537,9 @@ impl Scheduler {
                 "immediate transfer failed; notifying worker"
             );
             // Send failure notification to worker (ignore send errors during shutdown)
-            let _ = self.failure_tx.send((result.request_id.clone(), result.uuid));
+            let _ = self
+                .failure_tx
+                .send((result.request_id.clone(), result.uuid));
         }
 
         match self.slots.get_mut(&result.request_id) {
