@@ -49,6 +49,7 @@ def finalize_gms_write(
     register_module_tensors(allocator, model)
     total_bytes = allocator.total_bytes
 
+    # Wait for all writes to weights (from caller) to complete before mode switch
     torch.cuda.synchronize()
 
     if not allocator.commit():
