@@ -5,7 +5,7 @@
 
 import logging
 
-from dynamo.planner import KubernetesConnector, TargetReplica
+from dynamo.planner import KubernetesConnector, SubComponentType, TargetReplica
 from dynamo.planner.scale_protocol import ScaleRequest, ScaleResponse
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint
 
@@ -96,7 +96,7 @@ class ScaleRequestHandler:
             # Convert request replicas to TargetReplica objects
             target_replicas = [
                 TargetReplica(
-                    sub_component_type=r.sub_component_type,
+                    sub_component_type=SubComponentType(r.sub_component_type),
                     component_name=r.component_name,
                     desired_replicas=r.desired_replicas,
                 )
@@ -110,7 +110,7 @@ class ScaleRequestHandler:
 
             # Get current replica counts
             current_replicas = {}
-            deployment = await connector.kube_api.get_graph_deployment(
+            deployment = connector.kube_api.get_graph_deployment(
                 connector.parent_dgd_name
             )
             for service_name, service_spec in deployment["spec"]["services"].items():

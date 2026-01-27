@@ -52,7 +52,7 @@ async def test_handler_authorization_success(mock_runtime):
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
-        mock_connector.kube_api.get_graph_deployment = AsyncMock(
+        mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={
                 "spec": {
                     "services": {
@@ -145,7 +145,7 @@ async def test_handler_multiple_dgds(mock_runtime):
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
-        mock_connector.kube_api.get_graph_deployment = AsyncMock(
+        mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={"spec": {"services": {}}}
         )
 
@@ -228,7 +228,7 @@ async def test_handler_blocking_mode(mock_runtime):
         mock_connector._async_init = AsyncMock()
         mock_connector.set_component_replicas = AsyncMock()
         mock_connector.kube_api = MagicMock()
-        mock_connector.kube_api.get_graph_deployment = AsyncMock(
+        mock_connector.kube_api.get_graph_deployment = MagicMock(
             return_value={"spec": {"services": {}}}
         )
 

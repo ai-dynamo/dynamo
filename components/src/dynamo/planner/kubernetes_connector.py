@@ -282,7 +282,9 @@ if __name__ == "__main__":
     )
     parser.add_argument("--blocking", action="store_true")
     args = parser.parse_args()
-    connector = KubernetesConnector(args.dynamo_namespace, args.k8s_namespace)
+    connector = KubernetesConnector(
+        args.dynamo_namespace, k8s_namespace=args.k8s_namespace
+    )
 
     if args.action == "add":
         task = connector.add_component(SubComponentType(args.component), args.blocking)
