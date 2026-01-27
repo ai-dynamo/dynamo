@@ -32,9 +32,17 @@ use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
 use crate::discovery::EventTransportKind;
 
-/// Received ZMQ message parts: (topic, publisher_id, sequence, data).
-/// None indicates a timeout (EAGAIN).
-type ZmqRecvResult = Result<Option<(Vec<u8>, u64, u64, Vec<u8>)>>;
+/// Parts of a received ZMQ multipart message.
+struct ZmqMessage {
+    #[allow(dead_code)]
+    topic: Vec<u8>,
+    publisher_id: u64,
+    sequence: u64,
+    data: Vec<u8>,
+}
+
+/// Result of a ZMQ receive operation. None indicates a timeout (EAGAIN).
+type ZmqRecvResult = Result<Option<ZmqMessage>>;
 
 /// ZMQ PUB transport for publishing events.
 ///
@@ -397,12 +405,22 @@ impl ZmqSubTransport {
                     // Receive data frame
                     let data = socket.recv_bytes(0)?;
 
-                    Ok(Some((topic, publisher_id, sequence, data)))
+                    Ok(Some(ZmqMessage {
+                        topic,
+                        publisher_id,
+                        sequence,
+                        data,
+                    }))
                 })
                 .await;
 
                 match result {
-                    Ok(Ok(Some((_topic, publisher_id, sequence, frame_bytes)))) => {
+                    Ok(Ok(Some(ZmqMessage {
+                        publisher_id,
+                        sequence,
+                        data: frame_bytes,
+                        ..
+                    }))) => {
                         // Log dedup metadata for debugging
                         tracing::trace!(
                             publisher_id = publisher_id,
