@@ -11,94 +11,41 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 
 ---
 
-## Required Checks
+## Workflow Files
 
-| Check | Workflow | Trigger | Description |
-|-------|----------|---------|-------------|
-| `pre-commit` | `pre-merge.yml` | Direct | Code formatting and linting |
-| `copyright-checks` | `copyright-checks.yml` | Direct | Copyright header validation |
-| `DCO` | DCO App | Direct | Developer Certificate of Origin signature |
-| `dynamo-status-check` | `container-validation-dynamo.yml` | Direct | Core Dynamo container build and tests |
-| `backend-status-check` | `pr.yaml` | copy-pr-bot | Backend builds (vLLM, SGLang, TRT-LLM) and deployment tests |
-
----
-
-## CI Workflow Architecture
-
-Dynamo uses **two different CI architectures**:
-
-### 1. PR Workflow (`pr.yaml`)
-- **Purpose**: Fast feedback on PRs
-- **Strategy**: Conditional builds based on changed files
-- **Includes**: Deployment tests, operator builds
-- **Runs on**: `pull-request/N` branches (via copy-pr-bot) and `main`
-- **Build count**: 2-10 images (depends on what changed)
-
-### 2. Comprehensive Test Suite (`ci-test-suite.yml`)
-- **Purpose**: Complete validation (nightly + post-merge)
-- **Strategy**: Always builds all frameworks
-- **Reusable**: Called by both `nightly-ci.yml` and `post-merge-ci.yml`
-- **Runs on**: Schedule (nightly) or push to `main`/`release/*` (post-merge)
-- **Build count**: Always 10 images
-
-| Caller | Pipeline Type | Pytest Marks | Image Prefix | Notification |
-|--------|---------------|--------------|--------------|--------------|
-| `nightly-ci.yml` | `nightly` | Includes `nightly` | `nightly` | Slack |
-| `post-merge-ci.yml` | `post_merge` | Excludes `nightly` | `main` | Slack |
-
----
-
-## Workflows
-
-### Direct PR Checks (run immediately)
+### Direct PR Checks (run immediately on PRs)
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Pre-commit | `pre-merge.yml` | Python formatting (black, isort), YAML validation, whitespace fixes |
-| Copyright | `copyright-checks.yml` | Validates SPDX copyright headers on source files |
-| Core Build | `container-validation-dynamo.yml` | Builds `dynamo:latest`, runs Rust checks and pytest |
-| PR Title Lint | `lint-pr-title.yaml` | Validates conventional commit format, adds labels |
-| DCO Comment | `dco_comment.yml` | Posts fix instructions when DCO check fails |
-| Rust Checks | `pre-merge-rust.yml` | cargo fmt, clippy, cargo test, doc tests (conditional: runs on `*.rs` changes for PRs, always on main) |
-| Docs Links | `docs-link-check.yml` | Validates internal/external documentation links |
-| CodeQL | `codeql.yml` | Security analysis on Python code |
-| Label PR | `label-pr.yml` | Automatically labels PRs based on changed files |
-| PR Reminder | `pr_full_ci_reminder.yaml` | Comments on external PRs about CI process |
+| Pre-commit | `pre-merge.yml` | Python formatting (black, isort), YAML validation |
+| Copyright | `copyright-checks.yml` | SPDX copyright header validation |
+| Core Build | `container-validation-dynamo.yml` | Builds `dynamo:latest`, runs Rust + pytest |
+| PR Title Lint | `lint-pr-title.yaml` | Validates conventional commit format |
+| DCO Comment | `dco_comment.yml` | Posts DCO fix instructions |
+| Rust Checks | `pre-merge-rust.yml` | cargo fmt, clippy, tests (on `*.rs` changes) |
+| Docs Links | `docs-link-check.yml` | Validates documentation links |
+| CodeQL | `codeql.yml` | Security analysis on Python |
+| Label PR | `label-pr.yml` | Auto-labels PRs by changed files |
+| PR Reminder | `pr_full_ci_reminder.yaml` | Comments on external PRs |
 
 ### Via copy-pr-bot (run on `pull-request/N` branches)
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Backend Builds & Tests | `pr.yaml` | Builds vLLM (CUDA 12.9/13), SGLang (CUDA 12.9/13), TRT-LLM (CUDA 13); runs framework tests and deployment tests |
-| Frontend Build | `build-frontend-image.yaml` | Builds frontend container for both amd64 and arm64 architectures |
-| GitLab CI | `trigger_ci.yml` | Mirrors to GitLab, triggers internal test infrastructure |
+| Backend Builds | `pr.yaml` | Builds vLLM/SGLang/TRT-LLM + tests + deployment tests |
+| Frontend Build | `build-frontend-image.yaml` | Builds frontend container (amd64, arm64) |
+| GitLab CI | `trigger_ci.yml` | Mirrors to GitLab for internal tests |
 
-### Scheduled / Other
+### Scheduled / Post-Merge
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Nightly CI | `nightly-ci.yml` | Daily builds and comprehensive tests (12:00 AM PST) |
-| Post-Merge CI | `post-merge-ci.yml` | Runs full CI suite after merge to main/release branches |
-| CI Test Suite | `ci-test-suite.yml` | Reusable workflow for nightly and post-merge pipelines |
-| Docs Publish | `generate-docs.yml` | Builds and publishes documentation to S3 |
-| Stale Cleaner | `stale_cleaner.yml` | Closes stale issues/PRs after 30 days |
-| Test Report | `test_report.yaml` | Generates test result summaries |
-
----
-
-## Path Filters
-
-Workflows use the custom `changed-files` action to determine which jobs should run:
-
-| Filter | Paths | Used By |
-|--------|-------|---------|
-| `core` | `components/**`, `lib/**`, `tests/**`, `container/**`, `*.py`, `*.rs` | `pr.yaml` (gates all backend jobs) |
-| `vllm` | `container/Dockerfile.vllm`, `components/src/dynamo/vllm/**`, `container/deps/requirements.vllm.txt`, `examples/backends/vllm/**` | `pr.yaml`, `trigger_ci.yml` |
-| `sglang` | `container/Dockerfile.sglang`, `components/src/dynamo/sglang/**`, `examples/backends/sglang/**` | `pr.yaml`, `trigger_ci.yml` |
-| `trtllm` | `container/Dockerfile.trtllm`, `components/src/dynamo/trtllm/**`, `container/deps/trtllm/**`, `examples/backends/trtllm/**` | `pr.yaml`, `trigger_ci.yml` |
-| `frontend` | `components/src/dynamo/frontend/**`, `lib/llm/src/**` | `build-frontend-image.yaml` |
-| `operator` | `deploy/operator/**`, `deploy/helm/**` | `pr.yaml` |
-| `deploy` | `examples/backends/**/deploy/**` | `pr.yaml` (deployment tests) |
+| Nightly CI | `nightly-ci.yml` | Daily comprehensive tests (12 AM PST) |
+| Post-Merge CI | `post-merge-ci.yml` | Full CI after merge to main/release |
+| CI Test Suite | `ci-test-suite.yml` | Reusable workflow (nightly + post-merge) |
+| Docs Publish | `generate-docs.yml` | Publishes docs to S3 |
+| Stale Cleaner | `stale_cleaner.yml` | Closes stale issues/PRs |
+| Test Report | `test_report.yaml` | Test result summaries |
 
 ---
 
@@ -106,10 +53,10 @@ Workflows use the custom `changed-files` action to determine which jobs should r
 
 | Action | Purpose |
 |--------|---------|
-| `changed-files` | Detects which components changed to determine which jobs to run |
-| `docker-build` | Builds Dynamo containers (multi-arch, multi-framework, multi-CUDA) |
-| `docker-login` | Authenticates with ECR, NGC, ACR registries |
-| `docker-tag-push` | Tags and pushes images to registries |
+| `changed-files` | Detects which components changed |
+| `docker-build` | Builds containers (multi-arch, multi-CUDA) |
+| `docker-login` | Authenticates with ECR, NGC, ACR |
+| `docker-tag-push` | Tags and pushes images |
 | `pytest` | Runs pytest in containers with GPU detection |
 
 ---
@@ -118,8 +65,8 @@ Workflows use the custom `changed-files` action to determine which jobs should r
 
 | File | Purpose |
 |------|---------|
-| `filters.yaml` | Path patterns for conditional workflow execution |
-| `labeler.yml` | Auto-labeling rules for PRs based on changed files |
+| `filters.yaml` | Path patterns for conditional execution |
+| `labeler.yml` | Auto-labeling rules for PRs |
 | `release.yml` | Auto-generated release notes categories |
 | `dco.yml` | Developer Certificate of Origin settings |
 | `copy-pr-bot.yaml` | Copy PR bot configuration |
@@ -129,36 +76,28 @@ Workflows use the custom `changed-files` action to determine which jobs should r
 
 ## Self-Hosted Runners
 
-CI runs on production self-hosted runners with GPU support:
-
-| Runner Label | Architecture | GPU | Purpose |
-|--------------|--------------|-----|---------|
-| `prod-builder-amd-v1` | amd64 | No | CPU-only builds (arm64, frontend) |
-| `prod-builder-amd-gpu-v1` | amd64 | Yes | GPU builds and tests (vLLM, SGLang, TRT-LLM) |
-| `prod-builder-arm-v1` | arm64 | No | ARM64 builds (cross-platform support) |
+| Runner Label | Arch | GPU | Purpose |
+|--------------|------|-----|---------|
+| `prod-builder-amd-v1` | amd64 | No | CPU-only builds |
+| `prod-builder-amd-gpu-v1` | amd64 | Yes | GPU builds and tests |
+| `prod-builder-arm-v1` | arm64 | No | ARM64 builds |
 | `prod-default-v1` | amd64 | Yes | Kubernetes deployment tests |
 
 ---
 
-## Post-Merge CI
+## Workflow Modes
 
-After PRs merge to `main` or `release/*`:
+Dynamo has two CI architectures optimized for different purposes:
 
-- **Full CI suite** runs via `post-merge-ci.yml` (uses `ci-test-suite.yml`)
-- **All backend builds** for all CUDA versions (12.9, 13.0)
-- **All framework tests** (unit, integration, e2e)
-- **Rust checks** always run (not conditional on `*.rs` changes like in PRs)
-  - 8 jobs: tests + clippy across 4 Rust workspaces
-  - Validates fmt, clippy, tests, doc tests, license/ban checks
-- **Docs link check** runs in full mode (external links)
-- **GitLab CI** triggers additional internal tests
-- **Slack notifications** sent to ops team
+### PR Mode (`pr.yaml`)
+- **Goal**: Fast feedback on PRs
+- **Strategy**: Conditional - only builds changed frameworks
+- **Runs on**: `pull-request/N` branches (via copy-pr-bot)
 
----
-
-## GitLab CI
-
-The `trigger_ci.yml` workflow mirrors to GitLab and triggers internal pipelines. GitLab CI is **not a required check** - it provides supplementary validation on NVIDIA infrastructure.
+### Full Test Suite (`ci-test-suite.yml`)
+- **Goal**: Comprehensive validation
+- **Strategy**: Always builds all frameworks
+- **Runs via**: `nightly-ci.yml` (daily) and `post-merge-ci.yml` (after merge)
 
 ---
 
