@@ -316,6 +316,7 @@ get_options() {
             ;;
         --no-load)
             NO_LOAD=true
+            echo "********I GOT NO LOAD!!!!********"
             ;;
         --push)
             PUSH=" --push"
@@ -1029,6 +1030,7 @@ SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
 # Determine --load flag (default on unless --no-load or --push specified)
 LOAD_FLAG=""
+echo "**********I GOT NO LOAD: $NO_LOAD, PUSH: $PUSH *********"
 if [ "$NO_LOAD" != "true" ] && [ -z "$PUSH" ]; then
     LOAD_FLAG=" --load"
 fi

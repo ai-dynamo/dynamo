@@ -63,7 +63,7 @@ inputs:
   no_load:
     description: 'Do not load the image into docker (useful for validation-only builds)'
     required: false
-    default: 'false'
+    default: 'true'
 outputs:
   image_tag:
     description: 'Image Tag'
