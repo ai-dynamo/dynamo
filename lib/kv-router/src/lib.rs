@@ -11,5 +11,5 @@ pub mod indexer;
 pub mod protocols;
 
 // Re-export key types for convenience
-pub use indexer::{RadixTree, RouterEvent};
+pub use indexer::{MaybeError, RadixTree, RouterEvent};
 pub use protocols::{LocalBlockHash, WorkerId, compute_block_hash_for_seq};
