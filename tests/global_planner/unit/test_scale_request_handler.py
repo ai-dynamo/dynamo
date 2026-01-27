@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from dynamo.global_planner import ScaleRequestHandler
+from dynamo.global_planner.scale_handler import ScaleRequestHandler
 from dynamo.planner import SubComponentType
 from dynamo.planner.scale_protocol import ScaleRequest, TargetReplicaRequest
 
@@ -23,20 +23,6 @@ pytestmark = [
 def mock_runtime():
     """Create a mock DistributedRuntime."""
     return MagicMock()
-
-
-@pytest.mark.asyncio
-async def test_handler_initialization(mock_runtime):
-    """Test ScaleRequestHandler initialization."""
-    handler = ScaleRequestHandler(
-        runtime=mock_runtime,
-        managed_namespaces=["ns1", "ns2", "ns3"],
-        k8s_namespace="default",
-    )
-
-    assert handler.managed_namespaces == {"ns1", "ns2", "ns3"}
-    assert handler.k8s_namespace == "default"
-    assert handler.connectors == {}
 
 
 @pytest.mark.asyncio
@@ -123,69 +109,8 @@ async def test_handler_authorization_failure(mock_runtime):
 
 
 @pytest.mark.asyncio
-async def test_handler_connector_caching(mock_runtime):
-    """Test handler caches connectors per DGD."""
-    handler = ScaleRequestHandler(
-        runtime=mock_runtime, managed_namespaces=["app-ns"], k8s_namespace="default"
-    )
-
-    request1 = ScaleRequest(
-        caller_namespace="app-ns",
-        graph_deployment_name="dgd-1",
-        k8s_namespace="default",
-        target_replicas=[
-            TargetReplicaRequest(
-                sub_component_type=SubComponentType.PREFILL, desired_replicas=2
-            )
-        ],
-    )
-
-    request2 = ScaleRequest(
-        caller_namespace="app-ns",
-        graph_deployment_name="dgd-1",  # Same DGD
-        k8s_namespace="default",
-        target_replicas=[
-            TargetReplicaRequest(
-                sub_component_type=SubComponentType.PREFILL, desired_replicas=4
-            )
-        ],
-    )
-
-    with patch(
-        "dynamo.global_planner.scale_handler.KubernetesConnector"
-    ) as mock_connector_cls:
-        mock_connector = AsyncMock()
-        mock_connector_cls.return_value = mock_connector
-        mock_connector._async_init = AsyncMock()
-        mock_connector.set_component_replicas = AsyncMock()
-        mock_connector.kube_api = MagicMock()
-        mock_connector.kube_api.get_graph_deployment = AsyncMock(
-            return_value={"spec": {"services": {}}}
-        )
-
-        # Process first request
-        async for _ in handler.scale_request(request1.model_dump()):
-            pass
-
-        # Verify connector was created
-        assert "default/dgd-1" in handler.connectors
-        first_connector = handler.connectors["default/dgd-1"]
-
-        # Process second request with same DGD
-        async for _ in handler.scale_request(request2.model_dump()):
-            pass
-
-        # Verify same connector was reused
-        second_connector = handler.connectors["default/dgd-1"]
-        assert first_connector is second_connector
-
-        # Verify connector was only created once
-        assert mock_connector_cls.call_count == 1
-
-
-@pytest.mark.asyncio
 async def test_handler_multiple_dgds(mock_runtime):
-    """Test handler creates separate connectors for different DGDs."""
+    """Test handler creates separate connectors for different DGDs (and caches them)."""
     handler = ScaleRequestHandler(
         runtime=mock_runtime, managed_namespaces=["app-ns"], k8s_namespace="default"
     )

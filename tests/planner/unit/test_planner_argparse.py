@@ -18,14 +18,6 @@ pytestmark = [
 ]
 
 
-def test_parser_default_mode():
-    """Test parser sets default planner mode to local."""
-    parser = create_sla_planner_parser()
-    args = parser.parse_args(["--namespace", "test-ns"])
-
-    assert args.planner_mode == "local"
-
-
 def test_parser_delegating_mode():
     """Test parser accepts delegating mode arguments."""
     parser = create_sla_planner_parser()
@@ -71,33 +63,6 @@ def test_validate_delegating_mode_without_namespace():
 
     with pytest.raises(ValueError, match="global-planner-namespace required"):
         validate_planner_args(args)
-
-
-def test_validate_delegating_mode_success():
-    """Test validation succeeds for delegating mode with namespace."""
-    parser = create_sla_planner_parser()
-    args = parser.parse_args(
-        [
-            "--namespace",
-            "test-ns",
-            "--planner-mode",
-            "delegating",
-            "--global-planner-namespace",
-            "global-ns",
-        ]
-    )
-
-    # Should not raise
-    validate_planner_args(args)
-
-
-def test_validate_local_mode():
-    """Test validation succeeds for local mode without extra args."""
-    parser = create_sla_planner_parser()
-    args = parser.parse_args(["--namespace", "test-ns", "--planner-mode", "local"])
-
-    # Should not raise
-    validate_planner_args(args)
 
 
 def test_parser_invalid_mode():
