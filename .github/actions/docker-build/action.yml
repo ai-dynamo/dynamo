@@ -177,8 +177,7 @@ runs:
     - name: Show summary
       shell: bash
       run: |
-          IMAGE_URIS= "${{ inputs.extra_tags }} ${IMAGE_TAG}"
-          echo "uris:  $IMAGE_URIS"
+          IMAGE_URIS=(${{ inputs.extra_tags }} ${IMAGE_TAG})
           echo "### 🐳 ${{ inputs.framework }} Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
