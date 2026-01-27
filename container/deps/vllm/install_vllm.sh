@@ -20,7 +20,7 @@ MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 
 # VLLM and Dependency Configurations
-TORCH_CUDA_ARCH_LIST="9.0;10.0" # For EP Kernels -- TODO: check if we need to add 12.0+PTX
+TORCH_CUDA_ARCH_LIST="9.0;10.0;10.3;12.0;12.1" # https://developer.nvidia.com/cuda/gpus
 DEEPGEMM_REF=""
 CUDA_VERSION="12.9"
 FLASHINF_REF="v0.5.3"
