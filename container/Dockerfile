@@ -135,8 +135,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-RUN dnf -y makecache && \
-    dnf install -y almalinux-release-synergy && \
+RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
         # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
