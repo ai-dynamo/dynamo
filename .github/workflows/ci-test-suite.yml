@@ -190,7 +190,7 @@ jobs:
   # CUDA 13 builds (vllm and sglang only, both architectures)
   build-cuda13-amd64:
     name: Build ${{ matrix.framework }} CUDA13 (amd64)
-    runs-on: cpu-amd-m5-4xlarge
+    runs-on: prod-builder-amd-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -241,7 +241,7 @@ jobs:
 
   build-cuda13-arm64:
     name: Build ${{ matrix.framework }} CUDA13 (arm64)
-    runs-on: cpu-arm-r8g-4xlarge
+    runs-on: prod-builder-arm-v1
     timeout-minutes: 120
     strategy:
       fail-fast: false
