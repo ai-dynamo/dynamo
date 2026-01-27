@@ -169,19 +169,21 @@ class KvConnectorLeader:
                 req.num_computed_tokens,
             )
 
+        # In vLLM 0.14.0+, resumed_from_preemption was changed to resumed_req_ids (a set)
+        resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+
         for (
             req_id,
-            resumed_from_preemption,
             new_token_ids,
             new_block_ids,
             num_computed_tokens,
         ) in zip(
             scheduler_output.scheduled_cached_reqs.req_ids,
-            scheduler_output.scheduled_cached_reqs.resumed_from_preemption,
             scheduler_output.scheduled_cached_reqs.new_token_ids,
             scheduler_output.scheduled_cached_reqs.new_block_ids,
             scheduler_output.scheduled_cached_reqs.num_computed_tokens,
         ):
+            resumed_from_preemption = req_id in resumed_req_ids
             if new_block_ids is not None:
                 output.add_cached_request(
                     request_id=req_id,
