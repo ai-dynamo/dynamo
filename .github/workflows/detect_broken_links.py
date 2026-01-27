@@ -289,6 +289,15 @@ def find_markdown_files(root_dir: str, logger: logging.Logger) -> List[Path]:
         logger.error(error_msg)
         raise ValueError(error_msg)
 
+    # Patterns for files to skip (attribution files, etc.)
+    skip_patterns = [
+        "ATTRIBUTION",
+        "ATTRIBUTIONS",
+        "THIRD_PARTY",
+        "THIRD-PARTY",
+        "LICENSES",
+    ]
+
     md_files = []
 
     if root_path.is_file():
@@ -302,6 +311,11 @@ def find_markdown_files(root_dir: str, logger: logging.Logger) -> List[Path]:
         # If it's a directory, find all .md files recursively
         logger.debug(f"Scanning directory recursively: {root_path}")
         for file_path in root_path.rglob("*.md"):
+            # Skip attribution files
+            file_name_upper = file_path.name.upper()
+            if any(pattern in file_name_upper for pattern in skip_patterns):
+                logger.debug(f"Skipping attribution file: {file_path}")
+                continue
             md_files.append(file_path)
 
         logger.info(f"Found {len(md_files)} markdown files in {root_dir}")
