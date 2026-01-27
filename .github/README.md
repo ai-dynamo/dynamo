@@ -26,6 +26,31 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 
 ---
 
+## CI Workflow Architecture
+
+Dynamo uses **two different CI architectures**:
+
+### 1. PR Workflow (`pr.yaml`)
+- **Purpose**: Fast feedback on PRs
+- **Strategy**: Conditional builds based on changed files
+- **Includes**: Deployment tests, operator builds
+- **Runs on**: `pull-request/N` branches (via copy-pr-bot) and `main`
+- **Build count**: 2-10 images (depends on what changed)
+
+### 2. Comprehensive Test Suite (`ci-test-suite.yml`)
+- **Purpose**: Complete validation (nightly + post-merge)
+- **Strategy**: Always builds all frameworks
+- **Reusable**: Called by both `nightly-ci.yml` and `post-merge-ci.yml`
+- **Runs on**: Schedule (nightly) or push to `main`/`release/*` (post-merge)
+- **Build count**: Always 10 images
+
+| Caller | Pipeline Type | Pytest Marks | Image Prefix | Notification |
+|--------|---------------|--------------|--------------|--------------|
+| `nightly-ci.yml` | `nightly` | Includes `nightly` | `nightly` | Slack |
+| `post-merge-ci.yml` | `post_merge` | Excludes `nightly` | `main` | Slack |
+
+---
+
 ## Workflows
 
 ### Direct PR Checks (run immediately)

@@ -1,177 +1,205 @@
 # Nightly CI Workflow
 
 **Schedule**: Daily at 12:00 AM PST (08:00 UTC)  
-**Workflow**: `nightly-ci.yml` → `ci-test-suite.yml`  
-**Runners**: Production self-hosted runners (`prod-builder-*`, `prod-default-v1`)
+**Entry Point**: `nightly-ci.yml` → calls → `ci-test-suite.yml`  
+**Runners**: Production self-hosted runners with GPU support
 
-The nightly pipeline builds all frameworks for both architectures and runs comprehensive test suites. Unlike PR builds, nightly builds all frameworks regardless of what changed.
+The nightly pipeline builds all frameworks for both architectures and runs the complete test suite. Unlike PR builds, nightly builds all frameworks regardless of what changed and includes extended nightly tests.
 
 ## Reusable Workflow Architecture
 
-The nightly CI uses the `ci-test-suite.yml` reusable workflow with these parameters:
-- `pipeline_type`: `nightly`
-- `include_nightly_marks`: `true`
-- `image_prefix`: `nightly`
-- `enable_slack_notification`: `true`
+Both nightly and post-merge CI use the same `ci-test-suite.yml` reusable workflow with different parameters:
 
-This same workflow is also used by `post-merge-ci.yml` with different parameters.
+| Parameter | Nightly | Post-Merge |
+|-----------|---------|------------|
+| `pipeline_type` | `nightly` | `post_merge` |
+| `include_nightly_marks` | `true` | `false` |
+| `image_prefix` | `nightly` | `main` |
+| `enable_slack_notification` | `true` | `true` |
+
+**Why this matters**: The `include_nightly_marks` parameter controls which pytest marks are run. Nightly includes long-running tests that would be too slow for every PR.
 
 ---
 
 ## Build Stage
 
-Each framework builds for multiple CUDA versions and architectures:
+The `ci-test-suite.yml` workflow has **4 build jobs** that run in parallel:
+
+### Build Jobs
+
+| Job | Frameworks | Architecture | CUDA Version | Runner |
+|-----|------------|--------------|--------------|--------|
+| `build-amd64` | vLLM, SGLang, TRT-LLM | amd64 | 12.9 (default) | `prod-builder-amd-v1` |
+| `build-arm64` | vLLM, SGLang, TRT-LLM | arm64 | 12.9 (default) | `prod-builder-arm-v1` |
+| `build-cuda13-amd64` | vLLM, SGLang | amd64 | 13.0 | `prod-builder-amd-v1` |
+| `build-cuda13-arm64` | vLLM, SGLang | arm64 | 13.0 | `prod-builder-arm-v1` |
 
 ### CUDA Version Support
-- **vLLM**: CUDA 12.9 and CUDA 13.0
-- **SGLang**: CUDA 12.9 and CUDA 13.0
-- **TRT-LLM**: CUDA 13.0 only
+- **vLLM**: Builds for both CUDA 12.9 and 13.0 (4 images total)
+- **SGLang**: Builds for both CUDA 12.9 and 13.0 (4 images total)
+- **TRT-LLM**: Builds only for CUDA 12.9 (2 images total)
 
-Each build produces two images:
-- **Framework image**: Build dependencies, used as cache for subsequent builds
-- **Runtime image**: Deployable container with all components
+**Total builds per run**: 10 container images
 
 ```mermaid
-flowchart LR
-    subgraph Frameworks
-        F1[vLLM<br/>CUDA 12.9 & 13]
-        F2[SGLang<br/>CUDA 12.9 & 13]
-        F3[TRT-LLM<br/>CUDA 13]
+flowchart TD
+    subgraph BuildJobs["4 Parallel Build Jobs"]
+        B1[build-amd64<br/>CUDA 12.9]
+        B2[build-arm64<br/>CUDA 12.9]
+        B3[build-cuda13-amd64<br/>CUDA 13.0]
+        B4[build-cuda13-arm64<br/>CUDA 13.0]
     end
 
-    subgraph Architectures
-        A1[linux/amd64]
-        A2[linux/arm64]
+    subgraph Images["10 Runtime Images Produced"]
+        I1[nightly-vllm-amd64<br/>CUDA 12.9]
+        I2[nightly-vllm-arm64<br/>CUDA 12.9]
+        I3[nightly-sglang-amd64<br/>CUDA 12.9]
+        I4[nightly-sglang-arm64<br/>CUDA 12.9]
+        I5[nightly-trtllm-amd64<br/>CUDA 12.9]
+        I6[nightly-trtllm-arm64<br/>CUDA 12.9]
+        I7[nightly-vllm-cuda13-amd64]
+        I8[nightly-vllm-cuda13-arm64]
+        I9[nightly-sglang-cuda13-amd64]
+        I10[nightly-sglang-cuda13-arm64]
     end
 
-    subgraph Images["Runtime Images"]
-        I1[nightly-vllm-cuda12-amd64]
-        I1b[nightly-vllm-cuda13-amd64]
-        I2[nightly-vllm-cuda12-arm64]
-        I2b[nightly-vllm-cuda13-arm64]
-        I3[nightly-sglang-cuda12-amd64]
-        I3b[nightly-sglang-cuda13-amd64]
-        I4[nightly-sglang-cuda12-arm64]
-        I4b[nightly-sglang-cuda13-arm64]
-        I5[nightly-trtllm-cuda13-amd64]
-        I6[nightly-trtllm-cuda13-arm64]
-    end
-
-    F1 --> A1 --> I1 & I1b
-    F1 --> A2 --> I2 & I2b
-    F2 --> A1 --> I3 & I3b
-    F2 --> A2 --> I4 & I4b
-    F3 --> A1 --> I5
-    F3 --> A2 --> I6
+    B1 --> I1 & I3 & I5
+    B2 --> I2 & I4 & I6
+    B3 --> I7 & I9
+    B4 --> I8 & I10
 ```
 
 ---
 
 ## Test Stage
 
-Tests wait for their corresponding build to complete. If a build fails, tests fail immediately (no wasted GPU time).
+The `ci-test-suite.yml` workflow has **5 test job types** that run after builds complete:
+
+### Test Jobs
+
+| Job | Frameworks | Architectures | Timeout | Runner | GPU Required |
+|-----|------------|---------------|---------|--------|--------------|
+| `unit-tests` | vLLM, SGLang, TRT-LLM | amd64, arm64 | 45 min | GPU (amd64) / CPU (arm64) | amd64 only |
+| `integration-tests` | vLLM, SGLang, TRT-LLM | amd64, arm64 | 90 min | GPU (amd64) / CPU (arm64) | amd64 only |
+| `e2e-single-gpu-tests` | vLLM, SGLang, TRT-LLM | amd64, arm64 | 120 min | GPU (amd64) / CPU (arm64) | amd64 only |
+| `e2e-multi-gpu-tests` | vLLM, SGLang, TRT-LLM | amd64 only | 150 min | GPU | Yes |
+| `fault-tolerance-tests` | vLLM, TRT-LLM | amd64 only | 120 min | GPU | Yes |
+
+**Total test jobs per nightly run**: ~45 test jobs (3 frameworks × 2-3 architectures × ~5 test types)
 
 ```mermaid
-flowchart TD
-    subgraph Tests["Test Types"]
-        U[Unit Tests]
-        I[Integration Tests]
-        E1[E2E gpu_1]
-        E2[E2E gpu_2]
+flowchart LR
+    subgraph Builds["Build Jobs Complete"]
+        B[build-amd64<br/>build-arm64<br/>build-cuda13-*]
     end
 
-    subgraph Frameworks["3 Frameworks × 2 CUDA × 2 Arch"]
-        F[vLLM, SGLang, TRT-LLM]
+    subgraph Tests["Test Jobs (Run in Parallel)"]
+        T1[unit-tests<br/>9 jobs]
+        T2[integration-tests<br/>9 jobs]
+        T3[e2e-single-gpu<br/>9 jobs]
+        T4[e2e-multi-gpu<br/>3 jobs]
+        T5[fault-tolerance<br/>2 jobs]
     end
 
-    subgraph Runners
-        R1[prod-builder-amd-gpu-v1<br/>AMD64 GPU tests]
-        R2[prod-builder-arm-v1<br/>ARM64 CPU-only]
+    subgraph Summary
+        S[results-summary<br/>notify-slack]
     end
 
-    Tests --> Frameworks --> Runners
+    B --> Tests
+    Tests --> Summary
 ```
 
-### Test Details
+### Test Dependencies
 
-| Test Type | Timeout | pytest Markers |
-|-----------|---------|----------------|
-| Unit | 45 min | `unit and (nightly or post_merge or pre_merge)` |
-| Integration | 90 min | `integration and (nightly or post_merge or pre_merge)` |
-| E2E Single GPU | 120 min | `{framework} and e2e and gpu_1` |
-| E2E Multi GPU | 150 min | `e2e and gpu_2` |
+Tests check if the corresponding build succeeded before running. If a build fails, dependent tests are skipped (no wasted GPU time).
 
-> **Note**: ARM64 tests run in dry-run mode (collect-only) since no GPU runners are available for ARM64.
+### ARM64 Test Behavior
+
+ARM64 tests run in **collect-only mode** (dry-run) since ARM64 runners don't have GPUs:
+- Unit tests: Collect only
+- Integration tests: Collect only  
+- E2E tests: Collect only
+- Multi-GPU tests: Not run on ARM64
+- Fault tolerance: Not run on ARM64
 
 ---
 
 ## Test Dependencies
 
+Each test job checks if its corresponding build succeeded before running:
+
 ```mermaid
-flowchart LR
-    subgraph Builds
-        B1[Build vLLM amd64]
-        B2[Build vLLM arm64]
+flowchart TD
+    subgraph Builds["Build Stage"]
+        B1[build-amd64<br/>vllm, sglang, trtllm]
+        B2[build-arm64<br/>vllm, sglang, trtllm]
+        B3[build-cuda13-amd64<br/>vllm, sglang]
+        B4[build-cuda13-arm64<br/>vllm, sglang]
     end
 
-    subgraph Tests
-        T1[vLLM-amd64-unit]
-        T2[vLLM-amd64-integ]
-        T3[vLLM-arm64-unit]
+    subgraph TestCheck["Test Job Startup"]
+        C1[Check Build Status<br/>via GitHub API]
     end
 
-    B1 -->|check status| T1
-    B1 -->|check status| T2
-    B2 -->|check status| T3
+    subgraph TestExec["Test Execution"]
+        E1{Build<br/>Success?}
+        E2[Run Tests]
+        E3[Skip Tests]
+    end
+
+    Builds --> C1
+    C1 --> E1
+    E1 -->|Yes| E2
+    E1 -->|No| E3
 ```
+
+**How it works**:
+1. Test job starts and queries GitHub API for build status
+2. If build succeeded → Run tests with that framework's image
+3. If build failed/skipped → Skip tests to avoid wasting resources
+4. If build still running → Test fails with error
 
 ---
 
 ## Image Tags
 
-Images are pushed to AWS ECR and Azure ACR with the following tag patterns:
+Images are pushed to AWS ECR (`{aws-account}.dkr.ecr.{region}.amazonaws.com`) and Azure ACR with these tags:
 
-| Tag Pattern | Example | Purpose |
-|-------------|---------|---------|
-| `nightly-{framework}-cuda{ver}-{arch}` | `nightly-vllm-cuda13-amd64` | Latest nightly by CUDA version |
-| `nightly-{framework}-{arch}` | `nightly-vllm-amd64` | Latest nightly (primary CUDA) |
-| `nightly-{framework}-cuda{ver}-{arch}-run-{id}` | `nightly-vllm-cuda13-amd64-run-12345` | Specific run by CUDA version |
-| `main-{framework}-framework-{arch}` | `main-vllm-framework-amd64` | Layer cache |
+### CUDA 12.9 (Default) Images
 
-**Note**: CUDA version in tags is the major version only (e.g., `cuda12` for CUDA 12.9, `cuda13` for CUDA 13.0).
+| Tag | Example | Framework |
+|-----|---------|-----------|
+| `nightly-{framework}-{arch}` | `ai-dynamo/dynamo:nightly-vllm-amd64` | vLLM, SGLang, TRT-LLM |
+| `nightly-{framework}-{arch}-run-{id}` | `ai-dynamo/dynamo:nightly-vllm-amd64-run-12345` | vLLM, SGLang, TRT-LLM |
+
+### CUDA 13.0 Images
+
+| Tag | Example | Framework |
+|-----|---------|-----------|
+| `nightly-{framework}-cuda13-{arch}` | `ai-dynamo/dynamo:nightly-vllm-cuda13-amd64` | vLLM, SGLang only |
+| `nightly-{framework}-cuda13-{arch}-run-{id}` | `ai-dynamo/dynamo:nightly-vllm-cuda13-amd64-run-98765` | vLLM, SGLang only |
+
+**Image prefix**: Controlled by `image_prefix` parameter (`nightly` for nightly, `main` for post-merge)
 
 ---
 
 ## Timing
 
-| Stage | Duration |
-|-------|----------|
-| amd64 Builds | 60-90 min |
-| arm64 Builds | 90-120 min |
-| Unit Tests | 10-20 min |
-| Integration Tests | 30-60 min |
-| E2E Tests | 60-90 min |
-| **Total** | **3-4 hours** |
+Build and test jobs run in parallel where possible, with tests waiting for their dependencies:
 
----
+| Stage | Duration | Parallelism |
+|-------|----------|-------------|
+| Build Jobs (4 jobs) | 60-120 min | All 4 run in parallel |
+| Unit Tests (~9 jobs) | Up to 45 min | Run in parallel after builds |
+| Integration Tests (~9 jobs) | Up to 90 min | Run in parallel after builds |
+| E2E Single GPU (~9 jobs) | Up to 120 min | Run in parallel after builds |
+| E2E Multi GPU (~3 jobs) | Up to 150 min | Run in parallel after builds |
+| Fault Tolerance (~2 jobs) | Up to 120 min | Run in parallel after builds |
+| **Total Pipeline** | **~3-4 hours** | Depends on longest path |
 
-## Deployment Tests
-
-After all builds and tests complete successfully, deployment tests run on Kubernetes (AKS):
-
-| Framework | Profiles Tested |
-|-----------|-----------------|
-| vLLM | agg, agg_router, disagg, disagg_router |
-| SGLang | agg, agg_router, disagg, disagg_router |
-| TRT-LLM | agg, agg_router, disagg, disagg_router |
-
-Each test:
-1. Deploys Dynamo operator
-2. Creates DynamoGraphDeployment
-3. Waits for pods to be ready
-4. Sends test inference request
-5. Validates response
-6. Cleans up resources
+**Longest paths**:
+- Build (120 min) → E2E Multi GPU (150 min) = **~4.5 hours**
+- Build (120 min) → Fault Tolerance (120 min) = **~4 hours**
 
 ---
 
@@ -179,51 +207,63 @@ Each test:
 
 ```mermaid
 flowchart TB
-    subgraph Schedule["⏰ Daily 12:00 AM PST"]
-        Cron["cron: 0 8 * * *<br/>via ci-test-suite.yml"]
+    subgraph Trigger["⏰ Daily 12:00 AM PST"]
+        A[nightly-ci.yml<br/>cron: 0 8 * * *]
     end
 
-    subgraph BuildAMD["🔨 Build AMD64 (CUDA 12.9 & 13.0)"]
-        BA1[vLLM] --> BA2[Runtime]
-        BA3[SGLang] --> BA4[Runtime]
-        BA5[TRT-LLM] --> BA6[Runtime]
+    subgraph Workflow["📋 ci-test-suite.yml"]
+        direction TB
+        
+        subgraph Builds["🔨 4 Build Jobs (Parallel)"]
+            B1[build-amd64<br/>CUDA 12.9]
+            B2[build-arm64<br/>CUDA 12.9]
+            B3[build-cuda13-amd64]
+            B4[build-cuda13-arm64]
+        end
+
+        subgraph Tests["🧪 Test Jobs (Parallel, after builds)"]
+            T1[unit-tests<br/>~9 jobs]
+            T2[integration-tests<br/>~9 jobs]
+            T3[e2e-single-gpu<br/>~9 jobs]
+            T4[e2e-multi-gpu<br/>~3 jobs]
+            T5[fault-tolerance<br/>~2 jobs]
+        end
+
+        subgraph Summary["📊 Summary & Notify"]
+            S1[results-summary]
+            S2[notify-slack]
+        end
     end
 
-    subgraph BuildARM["🔨 Build ARM64 (CUDA 12.9 & 13.0)"]
-        BB1[vLLM] --> BB2[Runtime]
-        BB3[SGLang] --> BB4[Runtime]
-        BB5[TRT-LLM] --> BB6[Runtime]
-    end
-
-    subgraph TestAMD["🧪 AMD64 GPU Tests"]
-        TA1[Unit]
-        TA2[Integration]
-        TA3[E2E gpu_1]
-        TA4[E2E gpu_2]
-    end
-
-    subgraph TestARM["🧪 ARM64 CPU-only"]
-        TB1[Unit - collect only]
-        TB2[Integration - collect only]
-    end
-
-    subgraph Deploy["🚀 Deployment Tests"]
-        D1[Deploy Operator]
-        D2[Test All Profiles]
-        D3[Cleanup]
-    end
-
-    subgraph Summary["📊 Summary"]
-        S1[Slack Notification]
-        S2[Artifacts]
-    end
-
-    Cron --> BuildAMD & BuildARM
-    BuildAMD --> TestAMD
-    BuildARM --> TestARM
-    TestAMD & TestARM --> Deploy
-    Deploy --> Summary
+    A --> Builds
+    Builds --> Tests
+    Tests --> Summary
 ```
+
+### Pipeline Characteristics
+
+- **Total jobs**: ~60 jobs per nightly run
+- **Parallelism**: High - builds and tests run concurrently where possible
+- **Test selection**: Includes `nightly` pytest marks (long-running tests)
+- **Notifications**: Slack alerts on completion (success or failure)
+- **Artifacts**: Test results, logs, and failure summaries
+- **Registry**: Images pushed to AWS ECR and Azure ACR
+
+---
+
+## Nightly vs Post-Merge
+
+Both workflows use `ci-test-suite.yml`, but with different configurations:
+
+| Aspect | Nightly | Post-Merge |
+|--------|---------|------------|
+| **Trigger** | Cron (daily) | Push to `main`/`release/*` |
+| **Entry Point** | `nightly-ci.yml` | `post-merge-ci.yml` |
+| **Image Prefix** | `nightly` | `main` |
+| **Pytest Marks** | Includes `nightly` marks | Excludes `nightly` marks |
+| **Test Coverage** | Full (including long tests) | Standard (faster tests) |
+| **Notification** | Always via Slack | Always via Slack |
+| **Manual Trigger** | Yes (`workflow_dispatch`) | No |
 
 ---
 
