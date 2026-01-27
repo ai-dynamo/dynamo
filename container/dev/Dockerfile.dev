@@ -185,6 +185,7 @@ USER root
 
 # Redeclare build args for use in this stage
 ARG PYTHON_VERSION
+ENV HOME=/root
 
 # Ensure the runtime stage always has /usr/bin/python3.
 # - vLLM/TRTLLM runtime images may only have Python in /opt/dynamo/venv/bin/{python,python3}
@@ -313,8 +314,13 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
         /opt/dynamo/venv/bin/pip install maturin[patchelf] && \
         cp /opt/dynamo/venv/bin/maturin /usr/local/bin/maturin; \
     else \
-        pip3 install maturin[patchelf] && \
-        cp $(which maturin) /usr/local/bin/maturin; \
+        if python3 -m venv /tmp/maturin-venv >/dev/null 2>&1; then \
+            /tmp/maturin-venv/bin/pip install maturin[patchelf] && \
+            cp /tmp/maturin-venv/bin/maturin /usr/local/bin/maturin; \
+        else \
+            python3 -m pip install --break-system-packages maturin[patchelf] && \
+            cp "$(command -v maturin)" /usr/local/bin/maturin; \
+        fi; \
     fi && \
     chmod +x /usr/local/bin/maturin
 
