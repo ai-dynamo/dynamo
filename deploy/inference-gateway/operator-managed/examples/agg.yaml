@@ -12,11 +12,11 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: gitlab-mastegitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:new-build-3
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:new-build-3
           env:
             - name: DYNAMO_KV_BLOCK_SIZE
               value: "16"
-        eppConfig:
+      eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
           # Plugins define the behavior of EPP
