@@ -245,7 +245,7 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                         let active_load = match event_result {
                             Ok((_envelope, event)) => event,
                             Err(e) => {
-                                tracing::error!("Error receiving KV metrics event: {:?}", e);
+                                tracing::error!("Error receiving KV metrics event: {e:?}");
                                 continue;
                             }
                         };

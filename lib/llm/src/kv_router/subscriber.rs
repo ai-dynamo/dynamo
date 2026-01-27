@@ -30,14 +30,14 @@ use crate::kv_router::{
 /// Generates a slugified stream name in the format:
 /// `namespace-{namespace}-component-{component}-{subject}`
 fn create_kv_stream_name(component: &Component, subject: &str) -> String {
-    let event_plane_subject = format!(
-        "namespace.{}.component.{}",
+    Slug::slugify(&format!(
+        "namespace.{}.component.{}.{}",
         component.namespace().name(),
-        component.name()
-    );
-    Slug::slugify(&format!("{}.{}", event_plane_subject, subject))
-        .to_string()
-        .replace("_", "-")
+        component.name(),
+        subject
+    ))
+    .to_string()
+    .replace("_", "-")
 }
 
 /// Delay between snapshot reads to verify stability
