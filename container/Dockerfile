@@ -135,9 +135,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-# Note: Clear stale metadata - the manylinux image has cached metadata referencing
-# old /Packages/a/ paths, but repos now use flat /Packages/ structure.
-RUN dnf clean metadata && \
+RUN dnf -y makecache && \
     dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
@@ -173,7 +171,8 @@ RUN dnf clean metadata && \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel && \
+    dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
