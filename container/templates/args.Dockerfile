@@ -59,6 +59,8 @@ ARG NIXL_LIBFABRIC_REF={{ context.dynamo.nixl_libfabric_ref }}
 
 {% if target == "dev" or target == "local-dev" %}
 ARG FRAMEWORK={{ framework }}
+ARG USER_UID=$(id -u)
+ARG USER_GID=$(id -g)
 {% endif %}
 
 {% if target == "frontend" %}
