@@ -26,6 +26,10 @@ navigation:
         path: ../pages/getting-started/installation.md
       - page: Support Matrix
         path: ../pages/reference/support-matrix.md
+      - page: Feature Matrix
+        path: ../pages/getting-started/feature-matrix.md
+      - page: Release Artifacts
+        path: ../pages/reference/release-artifacts.md
       - page: Examples
         path: ../pages/getting-started/examples.md
 
@@ -48,6 +52,8 @@ navigation:
         contents:
           - page: Metrics
             path: ../pages/kubernetes/observability/metrics.md
+          - page: Operator Metrics
+            path: ../pages/kubernetes/observability/operator-metrics.md
           - page: Logging
             path: ../pages/kubernetes/observability/logging.md
       - section: Multinode
