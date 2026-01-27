@@ -1752,6 +1752,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "lru",
  "nid",
  "nix 0.29.0",
  "notify",
@@ -1772,6 +1773,7 @@ dependencies = [
  "serde_json",
  "socket2 0.5.10",
  "thiserror 2.0.17",
+ "tmq",
  "tokio",
  "tokio-rayon",
  "tokio-stream",
@@ -1785,6 +1787,7 @@ dependencies = [
  "uuid",
  "validator",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
@@ -3668,6 +3671,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown 0.15.5",
+]
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4159,6 +4171,8 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e3d48272133186f64c82a89faff4405b342478a2f015bb35d78550eff2a9961"
 dependencies = [
+ "anyhow",
+ "bincode 1.3.3",
  "bindgen 0.71.1",
  "cc",
  "libc",
@@ -4620,9 +4634,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oneshot"
-version = "0.1.11"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ce411919553d3f9fa53a0880544cda985a112117a0444d5ff1e870a893d6ea"
+checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
 
 [[package]]
 name = "onig"
