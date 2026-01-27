@@ -29,7 +29,8 @@ The gRPC server supports optional HTTP/2 flow control tuning via environment var
 | `DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE` | HTTP/2 connection-level flow control window size in bytes | tonic default (64KB) |
 | `DYN_GRPC_INITIAL_STREAM_WINDOW_SIZE` | HTTP/2 per-stream flow control window size in bytes | tonic default (64KB) |
 
-**Example: High-ISL/OSL configuration for streaming workloads**
+### Example: High-ISL/OSL configuration for streaming workloads
+
 ```bash
 # For 128 concurrent 15k-token requests
 export DYN_GRPC_INITIAL_CONNECTION_WINDOW_SIZE=16777216  # 16MB

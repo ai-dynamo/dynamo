@@ -327,7 +327,7 @@ where
         }
     })?;
 
-    // OPTIMIZATION: Python must yield JSON strings (via json.dumps or orjson.dumps)
+    // OPTIMIZATION: Python must yield JSON strings (via json.dumps)
     // This allows deserialization WITHOUT holding the GIL, enabling true parallelism.
     //
     // GIL is only held for ~10μs (string extraction) vs ~300μs (depythonize)
