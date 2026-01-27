@@ -135,9 +135,6 @@ enum ResponseProcessingError {
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
-
-    #[error("gil offload error: {0}")]
-    OffloadError(String),
 }
 
 #[async_trait::async_trait]
