@@ -57,7 +57,7 @@ flowchart LR
 |------|---------|
 | **Builds** | 2-14 container images (depends on changes) |
 | **CUDA** | vLLM/SGLang: 12.9 & 13.0<br/>TRT-LLM: 13.0 only |
-| **Tests** | Framework-specific, amd64 only |
+| **Tests** | Framework-specific, amd64 GPU only |
 | **Time** | 30-90 min (depending on changes) |
 
 ### Post-Merge Mode (`ci-test-suite.yml`)
@@ -98,7 +98,7 @@ When all frameworks are built (post-merge/nightly):
 |-----------|---------------|---------------|-------|
 | vLLM | 12.9, 13.0 | amd64, arm64 | 4 images |
 | SGLang | 12.9, 13.0 | amd64, arm64 | 4 images |
-| TRT-LLM | 12.9 only | amd64, arm64 | 2 images |
+| TRT-LLM | 13.0 only | amd64, arm64 | 2 images |
 
 **Total**: 10 container images
 

@@ -28,7 +28,7 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 | Label PR | `label-pr.yml` | Auto-labels PRs by changed files |
 | PR Reminder | `pr_full_ci_reminder.yaml` | Comments on external PRs |
 
-### Via copy-pr-bot (run on `pull-request/N` branches)
+### Backend/Frontend Builds (run on `pull-request/N` branches via copy-pr-bot)
 
 | Workflow | File | Purpose |
 |----------|------|---------|
@@ -36,13 +36,14 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 | Frontend Build | `build-frontend-image.yaml` | Builds frontend container (amd64, arm64) |
 | GitLab CI | `trigger_ci.yml` | Mirrors to GitLab for internal tests |
 
-### Scheduled / Post-Merge
+### Scheduled / Post-Merge / Release
 
 | Workflow | File | Purpose |
 |----------|------|---------|
 | Nightly CI | `nightly-ci.yml` | Daily comprehensive tests (12 AM PST) |
 | Post-Merge CI | `post-merge-ci.yml` | Full CI after merge to main/release |
 | CI Test Suite | `ci-test-suite.yml` | Reusable workflow (nightly + post-merge) |
+| Release | `release.yml` | Automated release builds and publishing |
 | Docs Publish | `generate-docs.yml` | Publishes docs to S3 |
 | Stale Cleaner | `stale_cleaner.yml` | Closes stale issues/PRs |
 | Test Report | `test_report.yaml` | Test result summaries |
@@ -65,12 +66,12 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 
 | File | Purpose |
 |------|---------|
-| `filters.yaml` | Path patterns for conditional execution |
-| `labeler.yml` | Auto-labeling rules for PRs |
-| `release.yml` | Auto-generated release notes categories |
-| `dco.yml` | Developer Certificate of Origin settings |
 | `copy-pr-bot.yaml` | Copy PR bot configuration |
+| `dco.yml` | Developer Certificate of Origin settings |
+| `filters.yaml` | Path patterns for conditional workflow execution |
+| `labeler.yml` | Auto-labeling rules for PRs based on changed files |
 | `pull_request_template.md` | PR description template |
+| `release.yml` | Auto-generated release notes categories |
 
 ---
 

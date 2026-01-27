@@ -14,7 +14,7 @@ Quick fixes for common CI issues. For workflow details, see [CI_WORKFLOWS.md](./
 
 If you see checks stuck at "Waiting for status to be reported" or no CI runs at all:
 
-```
+```text
 ⏳ backend-status-check    Expected — Waiting for status to be reported
 ```
 
@@ -97,7 +97,7 @@ git push
 
 **Solution**: Add the required copyright header to new files.
 
-```
+```python
 # SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 ```
@@ -109,7 +109,7 @@ git push
 ### PR Title Validation Failed
 
 Edit your PR title to follow conventional commits format:
-```
+```text
 <type>: <description>
 
 Valid types: feat, fix, docs, test, ci, refactor, perf, chore, revert, style, build
