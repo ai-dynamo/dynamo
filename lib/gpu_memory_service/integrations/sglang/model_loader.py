@@ -17,7 +17,6 @@ import logging
 from dataclasses import replace
 
 import torch
-
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.common.utils import setup_meta_tensor_workaround
 from gpu_memory_service.integrations.sglang.patches import (
@@ -127,7 +126,9 @@ class GMSModelLoader:
         torch.cuda.set_device(original_device)
 
         try:
-            from sglang.srt.model_loader.utils import process_model_weights_after_loading
+            from sglang.srt.model_loader.utils import (
+                process_model_weights_after_loading,
+            )
 
             process_model_weights_after_loading(model, model_config)
         except Exception as e:
