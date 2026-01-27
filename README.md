@@ -234,6 +234,8 @@ Dynamo uses TCP for inter-component communication. External services are optiona
 
 For local development without external dependencies, pass `--store-kv file` (avoids etcd) to both the frontend and workers. vLLM users should also pass `--kv-events-config '{"enable_kv_cache_events": false}'` to disable KV event publishing (avoids NATS) while keeping local prefix caching enabled; SGLang and TRT-LLM don't require this flag.
 
+> ⚠️ **Performance Note:** `--store-kv file` is for local development only and adds latency overhead. Do not use for benchmarking or production. For accurate performance measurements, use etcd (`--store-kv etcd` or run `./etcd` locally).
+
 For distributed non-Kubernetes deployments or KV-aware routing:
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
