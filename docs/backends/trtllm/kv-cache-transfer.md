@@ -30,7 +30,39 @@ By default, TensorRT-LLM uses **NIXL** (NVIDIA Inference Xfer Library) with UCX 
 
 ### Specify Backends for NIXL
 
-TODO: Add instructions for how to specify different backends for NIXL.
+NIXL supports multiple communication backends that can be configured via environment variables. By default, UCX is used if no backends are explicitly specified.
+
+**Environment Variable Format:**
+```bash
+DYN_KVBM_NIXL_BACKEND_<BACKEND>=<value>
+```
+
+**Supported Backends:**
+- `UCX` - Unified Communication X (default)
+- `GDS` - GPU Direct Storage
+
+**Examples:**
+```bash
+# Enable UCX backend (default behavior)
+export DYN_KVBM_NIXL_BACKEND_UCX=true
+
+# Enable GDS backend
+export DYN_KVBM_NIXL_BACKEND_GDS=true
+
+# Enable multiple backends
+export DYN_KVBM_NIXL_BACKEND_UCX=true
+export DYN_KVBM_NIXL_BACKEND_GDS=true
+
+# Explicitly disable a backend
+export DYN_KVBM_NIXL_BACKEND_GDS=false
+```
+
+**Valid Values:**
+- `true`, `1`, `on`, `yes` - Enable the backend
+- `false`, `0`, `off`, `no` - Disable the backend
+
+> [!Note]
+> If no `DYN_KVBM_NIXL_BACKEND_*` environment variables are set, UCX is used as the default backend.
 
 ## Alternative Method: UCX
 

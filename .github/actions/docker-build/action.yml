@@ -64,6 +64,7 @@ runs:
         driver: docker-container
         # Enable BuildKit for enhanced metadata
         buildkitd-flags: --debug
+        version: v0.14.1
     - name: Cleanup
       if: always()
       shell: bash

@@ -28,6 +28,8 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -271,6 +273,14 @@ type DynamoGraphDeploymentRequest struct {
 // SetState updates the State field in the DGDR status.
 func (s *DynamoGraphDeploymentRequest) SetState(state string) {
 	s.Status.State = state
+}
+
+// GetState returns the current lifecycle state
+func (d *DynamoGraphDeploymentRequest) GetState() string {
+	if d.Status.State == "" {
+		return consts.ResourceStateUnknown
+	}
+	return d.Status.State
 }
 
 // GetSpec returns the spec of this DGDR as a generic interface.

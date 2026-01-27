@@ -17,8 +17,6 @@ from dynamo.common.utils.input_params import InputParamManager
 from dynamo.sglang.args import Config
 from dynamo.sglang.publisher import DynamoSglangPublisher
 
-logger = logging.getLogger(__name__)
-
 
 class BaseWorkerHandler(ABC):
     """Abstract base class for SGLang worker handlers."""
@@ -72,6 +70,11 @@ class BaseWorkerHandler(ABC):
         2. Pause generation - drain in-flight requests
         3. Release memory - safe now that no requests are active
         """
+        from sglang.srt.managers.io_struct import (
+            PauseGenerationReqInput,
+            ReleaseMemoryOccupationReqInput,
+        )
+
         tags = body.get("tags", body.get("tag", None))
         if tags is None:
             tags = ["kv_cache", "weights", "cuda_graph"]
@@ -80,28 +83,27 @@ class BaseWorkerHandler(ABC):
             # Step 1: Unregister endpoint from discovery FIRST
             try:
                 await self.generate_endpoint.unregister_endpoint_instance()
-                logger.info(
-                    "[ReleaseMemory] Unregistered endpoint from discovery - worker removed from routing pool"
-                )
             except Exception as unreg_err:
-                logger.warning(
-                    f"[ReleaseMemory] Failed to unregister endpoint from discovery: {unreg_err}"
+                logging.warning(
+                    f"Failed to unregister endpoint from discovery: {unreg_err}"
                 )
 
             # Step 2: Pause generation to drain in-flight requests
-            await self.engine.async_pause_generation()
-            logger.info("[ReleaseMemory] Generation paused")
+            pause_req = PauseGenerationReqInput()
+            await self.engine.tokenizer_manager.pause_generation(pause_req)
 
             # Step 3: Release memory now that it's safe
-            await self.engine.async_release_memory_occupation(tags)
-            logger.info(f"[ReleaseMemory] Released memory for tags: {tags}")
+            release_req = ReleaseMemoryOccupationReqInput(tags=tags)
+            await self.engine.tokenizer_manager.release_memory_occupation(
+                release_req, None
+            )
 
             return {
                 "status": "ok",
                 "message": f"Memory released for tags: {tags}",
             }
         except Exception as e:
-            logger.error(f"Failed to release memory occupation: {e}")
+            logging.error(f"Failed to release memory occupation: {e}")
             return {"status": "error", "message": str(e)}
 
     async def resume_memory_occupation(self, body: dict) -> dict:
@@ -116,28 +118,32 @@ class BaseWorkerHandler(ABC):
         2. Continue generation - ready to serve requests
         3. Re-register to discovery - allow frontend to route here
         """
+        from sglang.srt.managers.io_struct import (
+            ContinueGenerationReqInput,
+            ResumeMemoryOccupationReqInput,
+        )
+
         tags = body.get("tags", body.get("tag", None))
         if tags is None:
             tags = ["kv_cache", "weights", "cuda_graph"]
 
         try:
             # Step 1: Resume memory first - must be ready before accepting requests
-            await self.engine.async_resume_memory_occupation(tags)
-            logger.info(f"[ResumeMemory] Resumed memory for tags: {tags}")
+            resume_req = ResumeMemoryOccupationReqInput(tags=tags)
+            await self.engine.tokenizer_manager.resume_memory_occupation(
+                resume_req, None
+            )
 
             # Step 2: Continue generation
-            await self.engine.async_continue_generation()
-            logger.info("[ResumeMemory] Generation continued")
+            continue_req = ContinueGenerationReqInput()
+            await self.engine.tokenizer_manager.continue_generation(continue_req)
 
             # Step 3: Re-register to discovery so frontend can route to us
             try:
                 await self.generate_endpoint.register_endpoint_instance()
-                logger.info(
-                    "[ResumeMemory] Re-registered endpoint to discovery - worker added back to routing pool"
-                )
             except Exception as reg_err:
-                logger.warning(
-                    f"[ResumeMemory] Failed to re-register endpoint to discovery: {reg_err}"
+                logging.warning(
+                    f"Failed to re-register endpoint to discovery: {reg_err}"
                 )
 
             return {
@@ -145,8 +151,41 @@ class BaseWorkerHandler(ABC):
                 "message": f"Memory resumed for tags: {tags}",
             }
         except Exception as e:
-            logger.error(f"Failed to resume memory occupation: {e}")
+            logging.error(f"Failed to resume memory occupation: {e}")
             return {"status": "error", "message": str(e)}
+
+    async def start_profile(self, body: dict) -> dict:
+        """Start profiling on the engine.
+
+        Args:
+            body: Dict with profiling parameters passed to start_profile.
+        """
+        await self.engine.tokenizer_manager.start_profile(**body)
+        return {"status": "ok", "message": "Profiling started"}
+
+    async def stop_profile(self, body: dict) -> dict:
+        """Stop profiling on the engine.
+
+        Args:
+            body: Unused, but required for handler signature.
+        """
+        await self.engine.tokenizer_manager.stop_profile()
+        return {"status": "ok", "message": "Profiling stopped"}
+
+    def register_engine_routes(self, runtime) -> None:
+        """Register all engine routes for this handler.
+
+        Args:
+            runtime: The DistributedRuntime instance to register routes on.
+        """
+        runtime.register_engine_route("start_profile", self.start_profile)
+        runtime.register_engine_route("stop_profile", self.stop_profile)
+        runtime.register_engine_route(
+            "release_memory_occupation", self.release_memory_occupation
+        )
+        runtime.register_engine_route(
+            "resume_memory_occupation", self.resume_memory_occupation
+        )
 
     @abstractmethod
     async def generate(self, request: Dict[str, Any], context: Context):

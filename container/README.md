@@ -199,8 +199,8 @@ The frontend image is a specialized container that includes the Dynamo component
 ```
 
 The build process automatically:
-1. Clones the Gateway API Inference Extension (GAIE) repository
-2. Builds the custom EPP image with Dynamo routing capabilities
+1. Builds the Dynamo static library for EPP KV-aware routing
+2. Builds the custom EPP Docker image using `make all` from `deploy/inference-gateway/epp/Makefile`
 3. Builds the frontend image with the EPP binary and Dynamo runtime components
 
 For more details, see [`deploy/inference-gateway/README.md`](../deploy/inference-gateway/README.md).

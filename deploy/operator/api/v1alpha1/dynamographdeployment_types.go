@@ -22,6 +22,8 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -185,6 +187,14 @@ type DynamoGraphDeployment struct {
 
 func (s *DynamoGraphDeployment) SetState(state string) {
 	s.Status.State = state
+}
+
+// GetState returns the current lifecycle state
+func (d *DynamoGraphDeployment) GetState() string {
+	if d.Status.State == "" {
+		return consts.ResourceStateUnknown
+	}
+	return d.Status.State
 }
 
 // +kubebuilder:object:root=true
