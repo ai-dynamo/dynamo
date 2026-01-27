@@ -25,12 +25,12 @@ import time
 import uuid
 
 import uvloop
-from vllm.engine.arg_utils import EngineArgs
+from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.usage.usage_lib import UsageContext
+from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
-from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.output_processor import OutputProcessorOutput
+from vllm.v1.engine.input_processor import InputProcessor
+from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
 from dynamo.common.config_dump import dump_config
 from dynamo.common.config_dump.config_dumper import add_config_dump_args
@@ -65,9 +65,17 @@ def random_uuid() -> str:
     return f"{uuid.uuid4().int & MASK_64_BITS:016x}"  # 16 hex chars
 
 
-class VllmEngine:
-    def __init__(self, vllm_engine: AsyncLLM, router: Client):
-        self.engine = vllm_engine
+class VllmProcessor:
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        input_processor: InputProcessor,
+        output_processor: OutputProcessor,
+        router: Client,
+    ):
+        self.tokenizer = tokenizer
+        self.input_processor = input_processor
+        self.output_processor = output_processor
         self.router = router
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
@@ -76,11 +84,11 @@ class VllmEngine:
     async def generator(self, request):
         """document"""
 
-        # ** VllmEngine.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
-        print(f"** VllmEngine.generator request: {request}")
+        # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
+        print(f"** VllmProcessor.generator request: {request}")
 
         # tokenizer is CachedQwen2TokenizerFast, subclass of PreTrainedTokenizerBase (part of `transformers` library, not vllm)
-        templated = self.engine.tokenizer.apply_chat_template(
+        templated = self.tokenizer.apply_chat_template(
             conversation=request["messages"],
             tokenize=False,
         )
@@ -95,7 +103,7 @@ class VllmEngine:
             max_tokens = 8192  # TODO what does rest of Dynamo do?
 
         request_id = random_uuid()
-        vllm_preproc: EngineCoreRequest = self.engine.input_processor.process_inputs(
+        vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
             templated,
             SamplingParams(
@@ -114,7 +122,7 @@ class VllmEngine:
         # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
         print(f"Processed: {vllm_preproc}")
 
-        self.engine.output_processor.add_request(
+        self.output_processor.add_request(
             vllm_preproc,
             request["messages"][0]["content"],  # prompt
             # parent_req: ParentRequest | None = None,
@@ -158,8 +166,8 @@ class VllmEngine:
             # "prompt_embeds": vllm_preproc.prompt_embeds,
         }
 
-        # Dynamo Router. This goes to the backend, waits, gets the streaming response, returns it
-        # stream is AsyncResponseStream
+        # Dynamo Router. This goes to the backend, waits, gets the streaming response, returns it.
+        # Stream is AsyncResponseStream
         dynamo_stream = await self.router.random(dynamo_preproc)
 
         # dynamo_response: Annotated
@@ -198,8 +206,8 @@ class VllmEngine:
             )
 
             # Let vllm handle all post-processing
-            vllm_out: OutputProcessorOutput = (
-                self.engine.output_processor.process_outputs([vllm_response])
+            vllm_out: OutputProcessorOutput = self.output_processor.process_outputs(
+                [vllm_response]
             )
             # vllm
             # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
@@ -252,25 +260,24 @@ class EngineFactory:
             print("** Fetching model '{source_path}'")
             await fetch_llm(source_path)
 
-        # Create the vllm engine
-        # TODO: Maybe re-used setup_vllm_engine from vllm/main.py ?
-        # TODO: Tell vllm to not build a CUDA graph and all that, it's just for pre/post
-        os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
-        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        engine_args = EngineArgs(
+        model_config = ModelConfig(
             model=source_path,
-            load_format="dummy",  # don't load the weights
-            enforce_eager=True,  # disable building CUDA graphs
         )
-        vllm_config = engine_args.create_engine_config(
-            usage_context=UsageContext.OPENAI_API_SERVER,
+        tokenizer = cached_tokenizer_from_config(model_config)
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            load_config=LoadConfig(load_format="dummy"),
+            cache_config=CacheConfig(),
+            # scheduler_config=SchedulerConfig(),
         )
-        # vllm_config.load_config = LoadConfig(load_format="dummy")
 
-        vllm_engine = AsyncLLM.from_vllm_config(
-            vllm_config=vllm_config,
-            usage_context=UsageContext.OPENAI_API_SERVER,
+        input_processor = InputProcessor(vllm_config, tokenizer)
+        output_processor = OutputProcessor(
+            tokenizer,
+            log_stats=False,
+            stream_interval=1,
         )
+
         (namespace_name, component_name, endpoint_name) = instance_id.triple()
         generate_endpoint = (
             self.runtime.namespace(namespace_name)
@@ -278,7 +285,7 @@ class EngineFactory:
             .endpoint(endpoint_name)
         )
         router = await generate_endpoint.client()
-        gen = VllmEngine(vllm_engine, router)
+        gen = VllmProcessor(tokenizer, input_processor, output_processor, router)
 
         return PythonAsyncEngine(gen.generator, loop)
 
