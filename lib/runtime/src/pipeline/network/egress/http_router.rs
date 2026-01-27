@@ -21,6 +21,7 @@ const DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 90; // Keep connections alive longer
 const DEFAULT_HTTP2_KEEP_ALIVE_INTERVAL_SECS: u64 = 30; // Send pings every 30s
 const DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT_SECS: u64 = 10; // Timeout for ping responses
 const DEFAULT_HTTP2_ADAPTIVE_WINDOW: bool = true; // Enable adaptive flow control
+const DEFAULT_HTTP2_PRIOR_KNOWLEDGE: bool = false; // Enable HTTP/2 prior knowledge
 
 /// HTTP/2 Performance Configuration
 #[derive(Debug, Clone)]
@@ -33,6 +34,7 @@ pub struct Http2Config {
     pub keep_alive_timeout: Duration,
     pub adaptive_window: bool,
     pub request_timeout: Duration,
+    pub prior_knowledge: bool,
 }
 
 impl Default for Http2Config {
@@ -46,6 +48,7 @@ impl Default for Http2Config {
             keep_alive_timeout: Duration::from_secs(DEFAULT_HTTP2_KEEP_ALIVE_TIMEOUT_SECS),
             adaptive_window: DEFAULT_HTTP2_ADAPTIVE_WINDOW,
             request_timeout: Duration::from_secs(DEFAULT_HTTP_REQUEST_TIMEOUT_SECS),
+            prior_knowledge: DEFAULT_HTTP2_PRIOR_KNOWLEDGE,
         }
     }
 }
@@ -101,6 +104,11 @@ impl Http2Config {
             config.request_timeout = Duration::from_secs(timeout);
         }
 
+        // todo: this should be true since we don't use TLS between router <> worker
+        if let Ok(val) = std::env::var("DYN_HTTP2_PRIOR_KNOWLEDGE") {
+            config.prior_knowledge = val.parse().unwrap_or(DEFAULT_HTTP2_PRIOR_KNOWLEDGE);
+        }
+
         config
     }
 }
@@ -132,11 +140,18 @@ impl HttpRequestClient {
     /// Note: Advanced HTTP/2 configuration methods may not be available in all versions of reqwest.
     /// This implementation uses only the stable, widely-supported configuration options.
     pub fn with_config(config: Http2Config) -> Result<Self> {
-        let builder = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .pool_max_idle_per_host(config.pool_max_idle_per_host)
             .pool_idle_timeout(config.pool_idle_timeout)
             .timeout(config.request_timeout);
-        // HTTP/2 is automatically negotiated by reqwest when available
+
+        builder = builder.http2_adaptive_window(config.adaptive_window);
+        builder = builder.http2_keep_alive_interval(config.keep_alive_interval);
+        builder = builder.http2_keep_alive_timeout(config.keep_alive_timeout);
+
+        if config.prior_knowledge {
+            builder = builder.http2_prior_knowledge();
+        }
 
         let client = builder.build()?;
 
@@ -266,6 +281,7 @@ mod tests {
             keep_alive_timeout: Duration::from_secs(15),
             adaptive_window: false,
             request_timeout: Duration::from_secs(8),
+            prior_knowledge: false,
         };
 
         let client = HttpRequestClient::with_config(config.clone());
@@ -620,21 +636,13 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Create optimized HTTP/2 client
-        let optimized_config = Http2Config {
-            max_frame_size: 1024 * 1024, // 1MB frames
-            max_concurrent_streams: 1000,
-            pool_max_idle_per_host: 100,
-            pool_idle_timeout: Duration::from_secs(90),
-            keep_alive_interval: Duration::from_secs(30),
-            keep_alive_timeout: Duration::from_secs(10),
-            adaptive_window: true,
-            request_timeout: Duration::from_secs(30),
-        };
+        let optimized_config = Http2Config::from_env();
+        println!("Using HTTP/2 config: {:?}", optimized_config);
 
         let client = Arc::new(HttpRequestClient::with_config(optimized_config).unwrap());
 
         // Performance test: Send many concurrent requests
-        let num_requests = 100;
+        let num_requests = 1000;
         let payload_size = 64 * 1024; // 64KB payload
         let payload = Bytes::from(vec![0u8; payload_size]);
 
