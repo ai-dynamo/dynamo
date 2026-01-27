@@ -122,3 +122,11 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+
+# START Ruler Generated Files
+/../../../.config/.cursor/instructions.md
+/../../../.config/.cursor/instructions.md.bak
+/../../../.config/CLAUDE.md
+/../../../.config/CLAUDE.md.bak
+# END Ruler Generated Files
