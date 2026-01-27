@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg
+spec:
+  services:
+    Epp:
+      componentType: Epp
+      replicas: 1
+    Frontend:
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:new-build-3
+          env:
+            - name: DYN_LOG
+              value: "debug,dynamo_llm::kv_router=trace"
+            - name: DYN_STORE_KV
+              value: "mem"
+            - name: DYN_ROUTER_MODE
+              value: "kv"
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:new-build-3
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+          env:
+            - name: DYN_STORE_KV
+              value: "mem"

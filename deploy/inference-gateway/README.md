@@ -22,7 +22,7 @@ Currently, these setups are only supported with the kGateway based Inference Gat
   - [1. Install Dynamo Platform](#1-install-dynamo-platform)
   - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
   - [3. Deploy Your Model](#3-deploy-your-model)
-  - [4. Build EPP image](#4-build-epp-image)
+  - [4. Build EPP image](#4-build-epp-image-optional)
   - [5. Install Dynamo GAIE helm chart](#5-install-dynamo-gaie-helm-chart)
   - [6. Verify Installation](#6-verify-installation)
   - [7. Usage](#7-usage)
@@ -102,7 +102,7 @@ Create a model configuration file similar to the vllm_agg_qwen.yaml for your mod
 This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
-### 4. Build EPP image
+### 4. Build EPP image (Optional)
 
 You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
 
@@ -130,14 +130,23 @@ make info # Check image tag
 | `make all` | Build Dynamo lib + Docker image + load locally |
 | `make all-push` | Build Dynamo lib + Docker image + push to registry |
 
-### 5. Install Dynamo GAIE helm chart ###
+### 5. Deploy
 
-The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
+We recommend deploying Inference Gateway's Endpoint Picker as a Dynamo operator's managed component. Alternatively,
+you could deploy it as a standalone pod
 
-Deploy the Inference Gateway resources to your Kubernetes cluster by running the command below.
+#### 5.a. Deploy as a DGD component
 
 ```bash
-cd deploy/inference-gateway/
+kubectl apply -f operator-managed/examples/vllm_agg_qwen.yaml -n ${NAMESPACE}
+```
+
+#### 5.b. Deploy as a standalone pod
+
+Install Dynamo GAIE helm chart
+
+```bash
+cd deploy/inference-gateway/standalone
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
