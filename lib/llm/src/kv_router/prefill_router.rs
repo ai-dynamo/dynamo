@@ -8,7 +8,6 @@ use std::sync::{
 
 use anyhow::Result;
 use futures::StreamExt;
-use rand::Rng;
 use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -296,12 +295,12 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let prefill_dp_size = match prefill_router {
+        let prefill_dp_size = match &self.0 {
             InnerPrefillRouter::KvRouter(router) => {
                 router.chooser.client().instances().len() as u64
             }
             InnerPrefillRouter::SimpleRouter(router) => {
-                router.client().instances().len() as u64
+                router.client.instances().len() as u64
             }
         };
 
