@@ -533,7 +533,7 @@ impl DistributedConfig {
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
-            store_backend: kv::Selector::Etcd(etcd::ClientOptions::default()),
+            store_backend: kv::Selector::Etcd(Box::default()),
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
@@ -552,7 +552,7 @@ impl DistributedConfig {
         let nats_enabled = request_plane.is_nats()
             || std::env::var(crate::config::environment_names::nats::NATS_SERVER).is_ok();
         DistributedConfig {
-            store_backend: kv::Selector::Etcd(etcd_config),
+            store_backend: kv::Selector::Etcd(Box::new(etcd_config)),
             nats_config: if nats_enabled {
                 Some(nats::ClientOptions::default())
             } else {
