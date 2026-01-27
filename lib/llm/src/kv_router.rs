@@ -423,12 +423,7 @@ impl KvRouter {
             let transport_kind = EventTransportKind::from_env_or_default();
 
             // Start subscriber - setup runs synchronously, then spawns background loop internally
-            if transport_kind == EventTransportKind::Zmq {
-                if !all_local_indexer {
-                    anyhow::bail!(
-                        "ZMQ event plane requires local_indexer=true for all workers."
-                    );
-                }
+            if transport_kind == EventTransportKind::Zmq && all_local_indexer {
                 if kv_router_config.router_snapshot_threshold.is_some()
                     || kv_router_config.router_reset_states
                 {
@@ -467,6 +462,11 @@ impl KvRouter {
                 )
                 .await?;
             } else {
+                if transport_kind == EventTransportKind::Zmq {
+                    tracing::warn!(
+                        "Not all workers have local_indexer enabled; falling back to JetStream for durability"
+                    );
+                }
                 tracing::info!(
                     "Not all workers have local_indexer enabled, using JetStream subscription"
                 );
