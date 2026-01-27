@@ -207,7 +207,7 @@ jobs:
   test:
     if: inputs.run_tests
     strategy:
-      fail-fast: true
+      fail-fast: false # todo: evaluate this 
       matrix:
         platform:
          - { arch: amd64, runner: prod-tester-amd-gpu-v1 }

@@ -8,10 +8,6 @@ inputs:
   image_tag:
     description: 'Image Tag to run tests on'
     required: true
-  cpu_limit:
-    description: 'Maximum number of cores available to docker'
-    required: false
-    default: '10'
   framework:
     description: 'Framework name for test metrics'
     required: false
@@ -101,7 +97,6 @@ runs:
     - name: Run tests
       shell: bash
       env:
-        NUM_CPUS: ${{ inputs.cpu_limit }}
         CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}
         PYTEST_XML_FILE: pytest_test_report.xml
         HF_HOME: /runner/_work/_temp
@@ -140,7 +135,6 @@ runs:
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
 
         docker run ${GPU_FLAGS} --rm -w /workspace \
-          --cpus=${NUM_CPUS} \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
