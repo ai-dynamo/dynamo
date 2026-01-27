@@ -351,8 +351,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --index-strategy unsafe-best-match \
         --extra-index-url https://download.pytorch.org/whl/cu130 \
         --requirement /tmp/requirements.txt \
-        --requirement /tmp/requirements.test.txt \
-        cupy-cuda13x && \
+        --requirement /tmp/requirements.test.txt && \
     if [ "${FRAMEWORK}" = "sglang" ]; then \
         uv pip install --force-reinstall --no-deps pytest; \
     fi
