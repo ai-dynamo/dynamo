@@ -64,11 +64,13 @@ python -m dynamo.mocker \
 # ============================================================================
 # test request
 # ============================================================================
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "max_tokens": 50,
-    "stream": true
-  }'
+
+# wait for all components to start
+# curl -X POST http://localhost:8000/v1/chat/completions \
+#   -H "Content-Type: application/json" \
+#   -d '{
+#     "model": "Qwen/Qwen3-0.6B",
+#     "messages": [{"role": "user", "content": "Hello!"}],
+#     "max_tokens": 50,
+#     "stream": true
+#   }'

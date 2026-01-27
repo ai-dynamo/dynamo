@@ -163,8 +163,49 @@ class GlobalRouterConfig:
                 f"decode_pool_dynamo_namespaces length ({len(self.decode_pool_dynamo_namespaces)})"
             )
 
-        # Validate mapping dimensions match resolution
+        # Validate prefill strategy ranges and resolutions
         prefill_strategy = self.prefill_pool_selection_strategy
+        if prefill_strategy.isl_resolution <= 0:
+            raise ValueError(
+                f"isl_resolution must be positive, got {prefill_strategy.isl_resolution}"
+            )
+        if prefill_strategy.ttft_resolution <= 0:
+            raise ValueError(
+                f"ttft_resolution must be positive, got {prefill_strategy.ttft_resolution}"
+            )
+        if prefill_strategy.isl_min >= prefill_strategy.isl_max:
+            raise ValueError(
+                f"isl_min ({prefill_strategy.isl_min}) must be less than "
+                f"isl_max ({prefill_strategy.isl_max})"
+            )
+        if prefill_strategy.ttft_min >= prefill_strategy.ttft_max:
+            raise ValueError(
+                f"ttft_min ({prefill_strategy.ttft_min}) must be less than "
+                f"ttft_max ({prefill_strategy.ttft_max})"
+            )
+
+        # Validate decode strategy ranges and resolutions
+        decode_strategy = self.decode_pool_selection_strategy
+        if decode_strategy.context_length_resolution <= 0:
+            raise ValueError(
+                f"context_length_resolution must be positive, got {decode_strategy.context_length_resolution}"
+            )
+        if decode_strategy.itl_resolution <= 0:
+            raise ValueError(
+                f"itl_resolution must be positive, got {decode_strategy.itl_resolution}"
+            )
+        if decode_strategy.context_length_min >= decode_strategy.context_length_max:
+            raise ValueError(
+                f"context_length_min ({decode_strategy.context_length_min}) must be less than "
+                f"context_length_max ({decode_strategy.context_length_max})"
+            )
+        if decode_strategy.itl_min >= decode_strategy.itl_max:
+            raise ValueError(
+                f"itl_min ({decode_strategy.itl_min}) must be less than "
+                f"itl_max ({decode_strategy.itl_max})"
+            )
+
+        # Validate mapping dimensions match resolution
         if (
             len(prefill_strategy.prefill_pool_mapping)
             != prefill_strategy.isl_resolution
