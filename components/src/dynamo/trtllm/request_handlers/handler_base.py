@@ -211,9 +211,7 @@ class HandlerBase:
 
             # Check which event triggered and return the reason
             if shutdown_task and shutdown_task in done:
-                raise GeneratorExit(
-                    "Decode engine was shut down during token generation"
-                )
+                raise GeneratorExit("Engine was shut down during generation.")
 
         except asyncio.CancelledError:
             # Task was cancelled, which is expected when generation completes normally
