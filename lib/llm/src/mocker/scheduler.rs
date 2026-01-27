@@ -309,30 +309,26 @@ impl Scheduler {
                     &mut kv_manager,
                     &args.perf_model,
                     args.worker_type,
-                );
-                let decode_time = simulate_decode(
+                    args.speedup_ratio,
+                    iteration_start,
+                )
+                .await;
+                simulate_decode(
                     &mut state,
                     &mut kv_manager,
                     &output_tx,
                     &args.perf_model,
                     args.block_size,
-                );
-                let total_time = prefill_time + decode_time;
+                    args.speedup_ratio,
+                    iteration_start + Duration::from_secs_f64(prefill_time.as_secs_f64() / args.speedup_ratio),
+                )
+                .await;
 
                 // 4. Send metrics once per forward pass (after all prefill and decode processing)
                 let _ = metrics_tx.send(MockerMetrics {
                     dp_rank,
                     active_decode_blocks: kv_manager.num_active_blocks() as u64,
                 });
-
-                // 5. Sleep to maintain target iteration timing
-                let target_duration =
-                    Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
-                let elapsed = iteration_start.elapsed();
-
-                if elapsed < target_duration {
-                    tokio::time::sleep(target_duration - elapsed).await;
-                }
             }
         });
 
@@ -392,11 +388,13 @@ async fn receive_requests(
 
 /// Simulate prefill phase for all pending prefill requests.
 /// Returns the total prefill compute time.
-fn simulate_prefill(
+async fn simulate_prefill(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     perf_model: &PerfModel,
     worker_type: WorkerType,
+    speedup_ratio: f64,
+    iteration_start: std::time::Instant,
 ) -> Duration {
     let mut total_time = Duration::ZERO;
 
@@ -422,17 +420,26 @@ fn simulate_prefill(
         }
     }
 
+    // Compute elapsed time and adjust sleep duration for accuracy
+    let elapsed = iteration_start.elapsed();
+    let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    let sleep_duration = expected_sleep.saturating_sub(elapsed);
+    if sleep_duration > Duration::ZERO {
+        tokio::time::sleep(sleep_duration).await;
+    }
     total_time
 }
 
 /// Simulate decode phase for all active decode requests.
 /// Returns the total decode compute time.
-fn simulate_decode(
+async fn simulate_decode(
     state: &mut SchedulerState,
     kv_manager: &mut KvManager,
     output_tx: &Option<mpsc::UnboundedSender<OutputSignal>>,
     perf_model: &PerfModel,
     block_size: usize,
+    speedup_ratio: f64,
+    decode_start: std::time::Instant,
 ) -> Duration {
     // Compute decode timing
     let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
@@ -454,8 +461,17 @@ fn simulate_decode(
 
     state.reset_active_tokens();
 
-    // Process decoding
+    // Compute elapsed time and adjust sleep duration for accuracy
+    let elapsed = decode_start.elapsed();
+    let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    let sleep_duration = expected_sleep.saturating_sub(elapsed);
+    if sleep_duration > Duration::ZERO {
+        tokio::time::sleep(sleep_duration).await;
+    }
+
+    // Process decoding - first process all KV signals
     let uuids: Vec<Uuid> = state.decode.keys().cloned().collect();
+
     for uuid in uuids {
         let Some(sequence) = state.run(uuid) else {
             continue;
