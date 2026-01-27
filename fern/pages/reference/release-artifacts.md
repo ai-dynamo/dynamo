@@ -6,7 +6,7 @@ title: "Dynamo Release Artifacts"
 
 This document provides a comprehensive inventory of all Dynamo release artifacts including container images, Python wheels, Helm charts, and Rust crates.
 
-**See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](feature-matrix.md) for backend feature support
+**See also:** [Support Matrix](support-matrix.md) for hardware and platform compatibility | [Feature Matrix](../getting-started/feature-matrix.md) for backend feature support
 
 Release history in this document begins at v0.6.0.
 
