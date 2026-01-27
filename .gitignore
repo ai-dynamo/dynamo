@@ -70,6 +70,7 @@ lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
 debug/
 target/
 llm_engine.h
+Cargo.lock
 
 ### Virtual Environment ###
 .venv/
@@ -100,6 +101,7 @@ generated-values.yaml
 .build/
 **/.devcontainer/.env
 TensorRT-LLM
+core
 
 # Ruler Generated Files
 /.cursor/instructions.md
