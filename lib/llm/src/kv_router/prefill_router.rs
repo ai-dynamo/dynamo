@@ -299,9 +299,7 @@ impl PrefillRouter {
             InnerPrefillRouter::KvRouter(router) => {
                 router.chooser.client().instances().len() as u64
             }
-            InnerPrefillRouter::SimpleRouter(router) => {
-                router.client.instances().len() as u64
-            }
+            InnerPrefillRouter::SimpleRouter(router) => router.client.instances().len() as u64,
         };
 
         // Encode the chosen DP rank into bootstrap_room
