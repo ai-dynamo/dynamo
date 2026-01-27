@@ -242,12 +242,9 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             break;
                         };
 
-                        let active_load = match event_result {
-                            Ok((_envelope, event)) => event,
-                            Err(e) => {
-                                tracing::error!("Error receiving KV metrics event: {e:?}");
-                                continue;
-                            }
+                        let Ok((_envelope, active_load)) = event_result else {
+                            tracing::error!("Error receiving KV metrics event: {event_result:?}");
+                            continue;
                         };
 
                         let worker_id = active_load.worker_id;
