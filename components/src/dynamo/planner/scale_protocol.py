@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Data structures for scale request/response protocol between delegating and centralized planners."""
 
 from typing import TYPE_CHECKING, List, Optional
