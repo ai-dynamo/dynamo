@@ -168,16 +168,18 @@ jobs:
                           line = link['line']
                           link_text = link['link_text']
                           link_url = link['link_url']
+                          error_reason = link.get('error_reason', 'Link target not found')
                           github_url = link.get('github_url', '')
 
                           # Create GitHub annotation for each broken link
-                          annotation_msg = f'Broken link: [{link_text}]({link_url})'
+                          annotation_msg = f'Broken link: [{link_text}]({link_url}) - {error_reason}'
                           if github_url:
                               annotation_msg += f' - View: {github_url}'
                           print(f'::error file={file_path},line={line}::{annotation_msg}')
 
                           # Display in workflow output
                           print(f'   {i}. Line {line}: [{link_text}]({link_url})')
+                          print(f'      ❌ {error_reason}')
                           if github_url:
                               print(f'      🔗 View on GitHub: {github_url}')
                           else:

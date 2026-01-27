@@ -847,5 +847,9 @@ USER dynamo
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
 
+# In vLLM 0.12 the default sampler changed on the forward pass.
+# We need to enable this to enable the cuda kernels.
+ENV VLLM_USE_FLASHINFER_SAMPLER=1
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
