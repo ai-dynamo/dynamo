@@ -86,7 +86,10 @@ class vLLMGenerateRequest(BaseModel):
         if isinstance(v, str):
             v = json.loads(v)
         if isinstance(v, dict):
-            return SamplingParams(**v)
+            # Filter out private/internal fields that shouldn't be passed to constructor
+            # These fields are serialized but cause issues when deserialized (e.g., sets become lists)
+            filtered = {k: val for k, val in v.items() if not k.startswith("_")}
+            return SamplingParams(**filtered)
         return v
 
     @field_serializer("sampling_params")
@@ -156,7 +159,7 @@ class MultiModalGroup(BaseModel):
 
 class vLLMMultimodalRequest(vLLMGenerateRequest):
     model_config = ConfigDict(arbitrary_types_allowed=True)
-    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
+    multimodal_inputs: Optional[List[MultiModalGroup]] = Field(default_factory=list)
 
 
 class VLLMNativeEncoderRequest(BaseModel):

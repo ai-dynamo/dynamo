@@ -111,7 +111,8 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
-            for idx in range(len(request.multimodal_inputs)):
+            multimodal_inputs = request.multimodal_inputs or []
+            for idx in range(len(multimodal_inputs)):
                 if not request.multimodal_inputs[idx].multimodal_input.image_url:
                     raise ValueError("image_url is required for the encode worker.")
 

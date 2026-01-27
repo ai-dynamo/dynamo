@@ -77,9 +77,25 @@ def normalize_model_name(model_name: str) -> str:
                 return f"{org}/{model}"
 
     # Handle local directory paths - extract the last directory name
+    # and try to infer organization from known model patterns
     path = Path(model_name)
     if path.exists() and path.is_dir():
-        return path.name
+        name = path.name
+        # Try to infer org from known model patterns
+        if "Qwen" in name:
+            return f"Qwen/{name}"
+        if "llava" in name.lower():
+            return f"llava-hf/{name}"
+        return name
+
+    # If path doesn't exist but looks like a local path, still try to extract name
+    if model_name.startswith("/"):
+        name = Path(model_name).name
+        if "Qwen" in name:
+            return f"Qwen/{name}"
+        if "llava" in name.lower():
+            return f"llava-hf/{name}"
+        return name
 
     # If no pattern matches, return the original name
     return model_name
