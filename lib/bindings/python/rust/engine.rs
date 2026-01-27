@@ -339,7 +339,7 @@ where
         format!("Expected JSON string from Python generator, got non-string type: {}. Use json.dumps() in your generator.", e)
     ))?;
 
-    // Deserialize WITHOUT GIL - this is the performance win! 🚀
+    // Deserialize WITHOUT GIL
     let response = serde_json::from_str::<Resp>(&json_str)
         .map_err(|e| ResponseProcessingError::DeserializeError(
             format!("JSON deserialization failed: {}", e)
