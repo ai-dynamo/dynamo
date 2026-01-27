@@ -99,6 +99,8 @@ jobs:
     runs-on: prod-builder-v2
     outputs:
       target_tag_plain: ${{ steps.calculate-target-tag.outputs.target_tag_plain }}
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -190,16 +192,19 @@ jobs:
   # TEST
   # ============================================================================
   test:
-    if: inputs.run_tests
+    if: ${{ inputs.run_tests &&   ( inputs.framework != 'trtllm' || matrix.platform.arch == 'amd64') }}
     strategy:
       fail-fast: true
       matrix:
         platform:
-         - { arch: amd64, runner: gpu-l40-amd64 }
+         - { arch: amd64, runner: prod-builder-amd-gpu-v1 }
+#         - { arch: arm64, runner: prod-tester-cpu-v1 }
         cuda_version: ${{ fromJson(inputs.cuda_versions) }}
     needs: [build]
     name: test ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
     runs-on: ${{ matrix.platform.runner }}
+    env:
+      FRAMEWORK: ${{ inputs.framework }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
@@ -255,55 +260,56 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: "pre_merge and ${{ inputs.framework }} and (gpu_0 or gpu_1)"
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
+          hf_token: ${{ secrets.HF_TOKEN }}
 
-  # ============================================================================
-  # COPY TO ACR
-  # ============================================================================
-  copy-to-acr:
-    needs: [build, test]
-    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
-    if: |
-      always() &&
-      inputs.copy_to_acr &&
-      needs.build.result == 'success' &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped')
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: ['amd64']
-        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
-    name: copy ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
-    runs-on: builder-cpu-amd-runner
-    outputs:
-      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
-          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
-          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
-
-      - name: Copy image to target registry
-        uses: ./.github/actions/skopeo-copy
-        with:
-          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
-          source_image: ai-dynamo/dynamo
-          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
-          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_image: ai-dynamo/dynamo
-          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
-          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
+#  # ============================================================================
+#  # COPY TO ACR
+#  # ============================================================================
+#  copy-to-acr:
+#    needs: [build, test]
+#    # Run if copy_to_acr is true AND build succeeded AND (test succeeded OR test was skipped)
+#    if: |
+#      always() &&
+#      inputs.copy_to_acr &&
+#      needs.build.result == 'success' &&
+#      (needs.test.result == 'success' || needs.test.result == 'skipped')
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        platform: ['amd64']
+#        cuda_version: ${{ fromJson(inputs.cuda_versions) }}
+#    name: copy ${{ inputs.framework }}-cuda${{ matrix.cuda_version }}-${{ matrix.platform.arch }}
+#    runs-on: prod-default-small-v2
+#    outputs:
+#      target_tag_plain: ${{ needs.build.outputs.target_tag_plain }}
+#    steps:
+#      - name: Checkout repository
+#        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+#
+#      - name: Calculate target tag
+#        id: calculate-target-tag
+#        shell: bash
+#        run: |
+#          CUDA_VERSION_RAW=${{ matrix.cuda_version }}
+#          CUDA_VERSION=${CUDA_VERSION_RAW%%.*}
+#          echo "cuda_version_plain=${CUDA_VERSION}" >> $GITHUB_OUTPUT
+#
+#      - name: Copy image to target registry
+#        uses: ./.github/actions/skopeo-copy
+#        with:
+#          source_registry: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
+#          source_image: ai-dynamo/dynamo
+#          source_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
+#          target_registry: ${{ secrets.AZURE_ACR_HOSTNAME }}
+#          target_image: ai-dynamo/dynamo
+#          target_tag: ${{ needs.build.outputs.target_tag_plain }}-cuda${{ steps.calculate-target-tag.outputs.cuda_version_plain }}-${{ matrix.platform.arch }}
+#          source_aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
+#          source_aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
+#          target_azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
+#          target_azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
+#          target_azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
