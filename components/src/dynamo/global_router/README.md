@@ -15,6 +15,15 @@ The Global Router acts as both a prefill and decode worker from the frontend's p
 
 Internally, it routes requests to local routers in different namespaces based on a configurable grid-based selection strategy.
 
+## Supported Backends
+
+- **vLLM** - Uses synchronous prefill path (frontend waits for prefill to complete)
+- **Mocker** - Uses same synchronous path as vLLM
+
+**Not supported:**
+- **SGLang** - Bootstrap path (async KV transfer) not implemented
+- **TensorRT-LLM** - Bootstrap path not implemented
+
 ## Architecture
 
 ```
