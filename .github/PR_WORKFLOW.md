@@ -6,7 +6,8 @@
 |-------|---------|
 | `pre-commit` | Direct |
 | `copyright-checks` | Direct |
-| `Build and Test - dynamo` | Direct |
+| `DCO` | Direct |
+| `dynamo-status-check` | Direct |
 | `backend-status-check` | Via `pull-request/N` branch |
 
 ---
@@ -37,29 +38,40 @@ flowchart TD
     subgraph Direct["Direct PR Checks"]
         B[pre-commit]
         C[copyright-checks]
-        I[Build and Test - dynamo]
+        E[DCO]
+        I[dynamo-status-check]
         D[lint-pr-title]
-        E[DCO Check]
         F[CodeQL]
         G[docs-link-check]
+        P[label-pr]
+        Q[pr-reminder]
     end
 
     subgraph CopyPR["Via pull-request/N branch"]
-        H{has_code_changes?}
-        J[vLLM build & tests]
-        K[SGLang build & tests]
-        L[TRT-LLM build & tests]
+        H{changed-files}
+        J[vLLM CUDA 12.9/13]
+        K[SGLang CUDA 12.9/13]
+        L[TRT-LLM CUDA 13]
+        O[Operator]
+        R[Frontend]
         M[backend-status-check]
+        S[Deploy Tests]
         N[GitLab CI]
     end
 
-    A --> B & C & I & D & E & F & G
+    A --> B & C & I & D & E & F & G & P & Q
     A -.->|copy-pr-bot| H & N
-    H -->|Yes| J & K & L
-    J & K & L --> M
+    H -->|core/vllm| J
+    H -->|core/sglang| K
+    H -->|core/trtllm| L
+    H -->|operator| O
+    H -->|frontend| R
+    J & K & L & O --> M
+    M --> S
 
     style B fill:#1f6feb,color:#fff
     style C fill:#1f6feb,color:#fff
+    style E fill:#1f6feb,color:#fff
     style I fill:#1f6feb,color:#fff
     style M fill:#1f6feb,color:#fff
     style N fill:#6e7681,color:#fff
@@ -83,24 +95,28 @@ flowchart LR
 
 ---
 
-## Backend Builds (`container-validation-backends.yml`)
+## Backend Builds (`pr.yaml`)
 
-Only runs when code is pushed to `pull-request/N` branches or `main`/`release/*`. Uses `filters.yaml` to check if `has_code_changes` is true.
+Only runs when code is pushed to `pull-request/N` branches or `main`/`release/*`. Uses the `changed-files` action to determine which frameworks to build.
+
+### Multi-CUDA Support
+
+Both vLLM and SGLang now build for **CUDA 12.9** and **CUDA 13.0**. TRT-LLM builds for CUDA 13.0 only.
 
 ```mermaid
 flowchart TD
     subgraph Parallel["Parallel Jobs"]
-        subgraph vLLM["vLLM"]
+        subgraph vLLM["vLLM (CUDA 12.9 & 13.0)"]
             V1[Build amd64] --> V2[Run tests]
             V3[Build arm64]
         end
 
-        subgraph SGLang["SGLang"]
+        subgraph SGLang["SGLang (CUDA 12.9 & 13.0)"]
             S1[Build amd64] --> S2[Run tests]
             S3[Build arm64]
         end
 
-        subgraph TRT["TRT-LLM"]
+        subgraph TRT["TRT-LLM (CUDA 13.0)"]
             T1[Build amd64] --> T2[Run tests]
             T3[Build arm64]
         end
@@ -109,32 +125,55 @@ flowchart TD
             O1[Lint & Test]
             O2[Build container]
         end
+        
+        subgraph Frontend["Frontend"]
+            F1[Build amd64]
+            F2[Build arm64]
+        end
     end
 
     V2 & V3 & S2 & S3 & T2 & T3 --> Check[backend-status-check]
-    Check --> FT[Fault Tolerance Tests]
+    Check --> Deploy[Deploy Operator]
+    Deploy --> DT[Deployment Tests]
 
     style Check fill:#1f6feb,color:#fff
 ```
 
+### Deployment Tests
+
+After backend builds complete, operator deployment tests run on Kubernetes:
+
+- **Deploy Operator**: Installs Dynamo operator on AKS cluster
+- **Deploy Tests**: Tests vLLM, SGLang, TRT-LLM deployments with profiles:
+  - Aggregated (agg)
+  - Aggregated with router (agg_router)  
+  - Disaggregated (disagg)
+  - Disaggregated with KV router (disagg_router)
+- **Cleanup**: Removes deployments and namespace
+
 ---
 
-## Path Filters (`filters.yaml`)
+## Path Filters (changed-files action)
+
+The `changed-files` custom action determines which jobs run:
 
 | Filter | Used By | Paths |
 |--------|---------|-------|
-| `has_code_changes` | Backend builds | `components/**`, `lib/**`, `tests/**`, `container/**`, `*.py`, `*.rs`, etc. |
-| `vllm` | GitLab CI | `Dockerfile.vllm`, `components/dynamo/vllm/**` |
-| `sglang` | GitLab CI | `Dockerfile.sglang`, `components/dynamo/sglang/**` |
-| `trtllm` | GitLab CI | `Dockerfile.trtllm`, `components/dynamo/trtllm/**` |
+| `core` | All backend builds | `components/**`, `lib/**`, `tests/**`, `container/**`, `*.py`, `*.rs` |
+| `vllm` | vLLM builds & GitLab CI | `container/Dockerfile.vllm`, `components/src/dynamo/vllm/**`, `container/deps/requirements.vllm.txt` |
+| `sglang` | SGLang builds & GitLab CI | `container/Dockerfile.sglang`, `components/src/dynamo/sglang/**` |
+| `trtllm` | TRT-LLM builds & GitLab CI | `container/Dockerfile.trtllm`, `components/src/dynamo/trtllm/**`, `container/deps/trtllm/**` |
+| `operator` | Operator builds | `deploy/operator/**`, `deploy/helm/**` |
+| `deploy` | Deployment tests | `examples/backends/**/deploy/**` |
+| `frontend` | Frontend builds | `components/src/dynamo/frontend/**`, `lib/llm/src/**` |
 
-GitLab CI always runs (skips only `.md`/`.rst` changes) but uses framework filters to tell GitLab *which* frameworks to test.
+**Logic**: Backend jobs run if `core == true` OR framework-specific changes detected.
 
 ---
 
 ## Post-Merge
 
-After merge to `main` or `release/*`, workflows trigger on push (no copy-pr-bot needed).
+After merge to `main` or `release/*`, the `post-merge-ci.yml` workflow triggers automatically.
 
 ```mermaid
 flowchart TD
@@ -142,30 +181,40 @@ flowchart TD
         A[Push to main or release/*]
     end
 
-    subgraph PostMerge["Post-Merge Jobs"]
-        B[Rust Checks]
-        C[Core Dynamo Build]
-        D[Backend Builds]
-        E[Docs Link Check - Full]
-        F[GitLab CI]
+    subgraph PostMerge["Post-Merge CI Pipeline"]
+        B[ci-test-suite.yml]
     end
 
-    subgraph Extended["Extended Testing"]
-        G[Fault Tolerance Tests]
+    subgraph Tests["Full Test Suite"]
+        C[All Framework Builds]
+        D[Unit Tests]
+        E[Integration Tests]
+        F[E2E Tests]
+        G[Deployment Tests]
     end
 
-    A --> B & C & D & E & F
-    D --> G
+    subgraph Notification
+        H[Slack Notification]
+    end
+
+    A --> B
+    B --> Tests
+    Tests --> H
 ```
 
 ### Post-Merge vs PR
 
-| Aspect | PR | Post-Merge |
-|--------|-----|------------|
+| Aspect | PR (pull-request/N) | Post-Merge |
+|--------|---------------------|------------|
+| Workflow | `pr.yaml` | `post-merge-ci.yml` → `ci-test-suite.yml` |
+| Trigger | Push to `pull-request/N` branch | Push to `main`/`release/*` |
+| Backend builds | Only changed frameworks | All frameworks (vLLM, SGLang, TRT-LLM) |
+| CUDA versions | Both 12.9 and 13.0 | Both 12.9 and 13.0 |
+| Test scope | Pre-merge marks only | Post-merge + nightly marks |
+| Deployment tests | On main or manual trigger | Always |
 | Rust checks | On `*.rs` changes only | Always |
 | Docs link check | Offline mode | Full external links |
-| Fault tolerance | Via `pull-request/N` branch | ✅ Always |
-| GitLab CI | Via `pull-request/N` branch | Always |
+| Slack notifications | No | Yes |
 
 ---
 

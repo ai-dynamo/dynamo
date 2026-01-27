@@ -1,24 +1,42 @@
 # Nightly CI Workflow
 
-**Schedule**: Daily at 12:00 AM PST (08:00 UTC)
-**Workflow**: `nightly-ci.yml`
+**Schedule**: Daily at 12:00 AM PST (08:00 UTC)  
+**Workflow**: `nightly-ci.yml` → `ci-test-suite.yml`  
+**Runners**: Production self-hosted runners (`prod-builder-*`, `prod-default-v1`)
 
 The nightly pipeline builds all frameworks for both architectures and runs comprehensive test suites. Unlike PR builds, nightly builds all frameworks regardless of what changed.
+
+## Reusable Workflow Architecture
+
+The nightly CI uses the `ci-test-suite.yml` reusable workflow with these parameters:
+- `pipeline_type`: `nightly`
+- `include_nightly_marks`: `true`
+- `image_prefix`: `nightly`
+- `enable_slack_notification`: `true`
+
+This same workflow is also used by `post-merge-ci.yml` with different parameters.
 
 ---
 
 ## Build Stage
 
-Each framework builds two images:
+Each framework builds for multiple CUDA versions and architectures:
+
+### CUDA Version Support
+- **vLLM**: CUDA 12.9 and CUDA 13.0
+- **SGLang**: CUDA 12.9 and CUDA 13.0
+- **TRT-LLM**: CUDA 13.0 only
+
+Each build produces two images:
 - **Framework image**: Build dependencies, used as cache for subsequent builds
 - **Runtime image**: Deployable container with all components
 
 ```mermaid
 flowchart LR
     subgraph Frameworks
-        F1[vLLM]
-        F2[SGLang]
-        F3[TRT-LLM]
+        F1[vLLM<br/>CUDA 12.9 & 13]
+        F2[SGLang<br/>CUDA 12.9 & 13]
+        F3[TRT-LLM<br/>CUDA 13]
     end
 
     subgraph Architectures
@@ -26,19 +44,23 @@ flowchart LR
         A2[linux/arm64]
     end
 
-    subgraph Images["6 Runtime Images"]
-        I1[nightly-vllm-amd64]
-        I2[nightly-vllm-arm64]
-        I3[nightly-sglang-amd64]
-        I4[nightly-sglang-arm64]
-        I5[nightly-trtllm-amd64]
-        I6[nightly-trtllm-arm64]
+    subgraph Images["Runtime Images"]
+        I1[nightly-vllm-cuda12-amd64]
+        I1b[nightly-vllm-cuda13-amd64]
+        I2[nightly-vllm-cuda12-arm64]
+        I2b[nightly-vllm-cuda13-arm64]
+        I3[nightly-sglang-cuda12-amd64]
+        I3b[nightly-sglang-cuda13-amd64]
+        I4[nightly-sglang-cuda12-arm64]
+        I4b[nightly-sglang-cuda13-arm64]
+        I5[nightly-trtllm-cuda13-amd64]
+        I6[nightly-trtllm-cuda13-arm64]
     end
 
-    F1 --> A1 --> I1
-    F1 --> A2 --> I2
-    F2 --> A1 --> I3
-    F2 --> A2 --> I4
+    F1 --> A1 --> I1 & I1b
+    F1 --> A2 --> I2 & I2b
+    F2 --> A1 --> I3 & I3b
+    F2 --> A2 --> I4 & I4b
     F3 --> A1 --> I5
     F3 --> A2 --> I6
 ```
@@ -58,13 +80,13 @@ flowchart TD
         E2[E2E gpu_2]
     end
 
-    subgraph Frameworks["3 Frameworks × 2 Architectures"]
+    subgraph Frameworks["3 Frameworks × 2 CUDA × 2 Arch"]
         F[vLLM, SGLang, TRT-LLM]
     end
 
     subgraph Runners
-        R1[gpu-l40-amd64<br/>GPU tests]
-        R2[cpu-arm-r8g-4xlarge<br/>ARM64 dry-run]
+        R1[prod-builder-amd-gpu-v1<br/>AMD64 GPU tests]
+        R2[prod-builder-arm-v1<br/>ARM64 CPU-only]
     end
 
     Tests --> Frameworks --> Runners
@@ -111,9 +133,12 @@ Images are pushed to AWS ECR and Azure ACR with the following tag patterns:
 
 | Tag Pattern | Example | Purpose |
 |-------------|---------|---------|
-| `nightly-{framework}-{arch}` | `nightly-vllm-amd64` | Latest nightly |
-| `nightly-{framework}-{arch}-run-{id}` | `nightly-vllm-amd64-run-12345` | Specific run |
+| `nightly-{framework}-cuda{ver}-{arch}` | `nightly-vllm-cuda13-amd64` | Latest nightly by CUDA version |
+| `nightly-{framework}-{arch}` | `nightly-vllm-amd64` | Latest nightly (primary CUDA) |
+| `nightly-{framework}-cuda{ver}-{arch}-run-{id}` | `nightly-vllm-cuda13-amd64-run-12345` | Specific run by CUDA version |
 | `main-{framework}-framework-{arch}` | `main-vllm-framework-amd64` | Layer cache |
+
+**Note**: CUDA version in tags is the major version only (e.g., `cuda12` for CUDA 12.9, `cuda13` for CUDA 13.0).
 
 ---
 
@@ -130,21 +155,41 @@ Images are pushed to AWS ECR and Azure ACR with the following tag patterns:
 
 ---
 
+## Deployment Tests
+
+After all builds and tests complete successfully, deployment tests run on Kubernetes (AKS):
+
+| Framework | Profiles Tested |
+|-----------|-----------------|
+| vLLM | agg, agg_router, disagg, disagg_router |
+| SGLang | agg, agg_router, disagg, disagg_router |
+| TRT-LLM | agg, agg_router, disagg, disagg_router |
+
+Each test:
+1. Deploys Dynamo operator
+2. Creates DynamoGraphDeployment
+3. Waits for pods to be ready
+4. Sends test inference request
+5. Validates response
+6. Cleans up resources
+
+---
+
 ## Complete Flow
 
 ```mermaid
 flowchart TB
     subgraph Schedule["⏰ Daily 12:00 AM PST"]
-        Cron["cron: 0 8 * * *"]
+        Cron["cron: 0 8 * * *<br/>via ci-test-suite.yml"]
     end
 
-    subgraph BuildAMD["🔨 Build AMD64"]
+    subgraph BuildAMD["🔨 Build AMD64 (CUDA 12.9 & 13.0)"]
         BA1[vLLM] --> BA2[Runtime]
         BA3[SGLang] --> BA4[Runtime]
         BA5[TRT-LLM] --> BA6[Runtime]
     end
 
-    subgraph BuildARM["🔨 Build ARM64"]
+    subgraph BuildARM["🔨 Build ARM64 (CUDA 12.9 & 13.0)"]
         BB1[vLLM] --> BB2[Runtime]
         BB3[SGLang] --> BB4[Runtime]
         BB5[TRT-LLM] --> BB6[Runtime]
@@ -157,20 +202,27 @@ flowchart TB
         TA4[E2E gpu_2]
     end
 
-    subgraph TestARM["🧪 ARM64 Dry Run"]
+    subgraph TestARM["🧪 ARM64 CPU-only"]
         TB1[Unit - collect only]
         TB2[Integration - collect only]
     end
 
+    subgraph Deploy["🚀 Deployment Tests"]
+        D1[Deploy Operator]
+        D2[Test All Profiles]
+        D3[Cleanup]
+    end
+
     subgraph Summary["📊 Summary"]
-        S1[Results Summary]
+        S1[Slack Notification]
         S2[Artifacts]
     end
 
     Cron --> BuildAMD & BuildARM
     BuildAMD --> TestAMD
     BuildARM --> TestARM
-    TestAMD & TestARM --> Summary
+    TestAMD & TestARM --> Deploy
+    Deploy --> Summary
 ```
 
 ---

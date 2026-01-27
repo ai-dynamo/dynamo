@@ -21,9 +21,6 @@ If you see checks stuck at "Waiting for status to be reported" or no CI runs at 
 
 ```
 ⏳ backend-status-check    Expected — Waiting for status to be reported
-⏳ Build and Test - dynamo  Expected — Waiting for status to be reported
-⏳ copyright-checks        Expected — Waiting for status to be reported
-⏳ pre-commit              Expected — Waiting for status to be reported
 ```
 
 ### Understanding Which Checks Run When
@@ -32,10 +29,24 @@ If you see checks stuck at "Waiting for status to be reported" or no CI runs at 
 |-------|-------------------|----------------------|
 | `pre-commit` | ✅ Yes | No |
 | `copyright-checks` | ✅ Yes | No |
-| `Build and Test - dynamo` | ✅ Yes | No |
+| `DCO` | ✅ Yes | No |
+| `dynamo-status-check` | ✅ Yes | No |
+| `label-pr` | ✅ Yes | No |
+| `pr-reminder` (external PRs) | ✅ Yes | No |
 | `backend-status-check` | ❌ No | **Yes** |
+| `frontend-status-check` | ❌ No | **Yes** |
 
-If only `backend-status-check` is stuck at "Waiting", this is expected - it requires a maintainer to trigger via copy-pr-bot.
+If only `backend-status-check` or `frontend-status-check` are stuck at "Waiting", this is expected - they require a maintainer to trigger via copy-pr-bot.
+
+### Auto-Labeling
+
+The `label-pr` workflow automatically adds labels based on changed files:
+- **Backend labels**: `backend::vllm`, `backend::sglang`, `backend::trtllm`
+- **Component labels**: `router`, `frontend`, `planner`
+- **Deployment labels**: `deployment::k8s`
+- **Other labels**: `build`, `ci`, `documentation`, `multimodal`
+
+External PRs also get the `external-contribution` label automatically.
 
 ### Internal NVIDIA PRs: GPG Signing Required
 
@@ -45,87 +56,6 @@ If only `backend-status-check` is stuck at "Waiting", this is expected - it requ
 
 **Solution**: Sign your commits with GPG.
 
-#### Setting Up GPG Signing
-
-1. **Generate a GPG key** (if you don't have one):
-   ```bash
-   gpg --full-generate-key
-   # Choose RSA and RSA, 4096 bits, and your NVIDIA email
-   ```
-
-2. **Get your GPG key ID**:
-   ```bash
-   gpg --list-secret-keys --keyid-format=long
-   # Look for: sec   rsa4096/XXXXXXXXXXXXXXXX
-   #                        ^^^^^^^^^^^^^^^^ This is your key ID
-   ```
-
-3. **Configure Git to use your GPG key**:
-   ```bash
-   git config --global user.signingkey XXXXXXXXXXXXXXXX
-   git config --global commit.gpgsign true
-   ```
-
-4. **Add your GPG key to GitHub**:
-   ```bash
-   gpg --armor --export XXXXXXXXXXXXXXXX
-   # Copy the output and add it to GitHub → Settings → SSH and GPG keys → New GPG key
-   ```
-
-#### Fixing Unsigned Commits
-
-If you've already pushed unsigned commits:
-
-**Option 1: Amend the last commit**
-```bash
-git commit --amend -S --no-edit
-git push --force-with-lease
-```
-
-**Option 2: Rebase and sign all commits**
-```bash
-git rebase -i HEAD~N --exec "git commit --amend -S --no-edit"
-# Replace N with the number of commits to sign
-git push --force-with-lease
-```
-
-**Option 3: Squash and re-sign**
-```bash
-git reset --soft HEAD~N  # N = number of commits
-git commit -S -m "Your commit message"
-git push --force-with-lease
-```
-
-#### Verifying Commits are Signed
-
-```bash
-git log --show-signature -1
-# Should show: gpg: Signature made ... gpg: Good signature from ...
-```
-
-On GitHub, signed commits show a "Verified" badge.
-
----
-
-### External Contributions: CI Not Running
-
-**Symptom**: You opened a PR from a fork, CI checks show "Waiting for status", and you see a comment about external contributions.
-
-**Cause**: A maintainer must approve the CI run.
-
-**How It Works**:
-
-```mermaid
-flowchart TD
-    A[External PR Opened] --> B[copy-pr-bot detects fork PR]
-    B --> C[Bot comments on PR]
-    C --> D{NVIDIA Maintainer Review}
-    D --> E[Maintainer comments trigger phrase]
-    E --> G[CI runs with full access]
-    G -->|Request Changes| I[Contributor updates PR]
-    G -->|Approved| J[Maintainer merges PR]
-    I --> D
-```
 
 ---
 
@@ -181,7 +111,7 @@ git push
 **Solution**: Add the required copyright header to new files.
 
 ```
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 ```
 
