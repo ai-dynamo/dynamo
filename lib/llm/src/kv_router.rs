@@ -424,6 +424,11 @@ impl KvRouter {
 
             // Start subscriber - setup runs synchronously, then spawns background loop internally
             if transport_kind == EventTransportKind::Zmq {
+                if !all_local_indexer {
+                    anyhow::bail!(
+                        "ZMQ event plane requires local_indexer=true for all workers."
+                    );
+                }
                 if kv_router_config.router_snapshot_threshold.is_some()
                     || kv_router_config.router_reset_states
                 {
