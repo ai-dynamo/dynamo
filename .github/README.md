@@ -6,8 +6,7 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 
 | Document | Description |
 |----------|-------------|
-| [PR Workflow](./PR_WORKFLOW.md) | PR CI flow diagrams and required checks |
-| [Nightly Workflow](./NIGHTLY_WORKFLOW.md) | Nightly build and test pipeline diagrams |
+| [CI Workflows](./CI_WORKFLOWS.md) | How PR, post-merge, and nightly CI work |
 | [Troubleshooting](./TROUBLESHOOTING.md) | Common CI issues and how to fix them |
 
 ---
@@ -62,7 +61,7 @@ Dynamo uses **two different CI architectures**:
 | Core Build | `container-validation-dynamo.yml` | Builds `dynamo:latest`, runs Rust checks and pytest |
 | PR Title Lint | `lint-pr-title.yaml` | Validates conventional commit format, adds labels |
 | DCO Comment | `dco_comment.yml` | Posts fix instructions when DCO check fails |
-| Rust Checks | `pre-merge-rust.yml` | cargo fmt, clippy, tests (only on `*.rs` changes) |
+| Rust Checks | `pre-merge-rust.yml` | cargo fmt, clippy, cargo test, doc tests (conditional: runs on `*.rs` changes for PRs, always on main) |
 | Docs Links | `docs-link-check.yml` | Validates internal/external documentation links |
 | CodeQL | `codeql.yml` | Security analysis on Python code |
 | Label PR | `label-pr.yml` | Automatically labels PRs based on changed files |
@@ -150,9 +149,11 @@ After PRs merge to `main` or `release/*`:
 - **Full CI suite** runs via `post-merge-ci.yml` (uses `ci-test-suite.yml`)
 - **All backend builds** for all CUDA versions (12.9, 13.0)
 - **All framework tests** (unit, integration, e2e)
+- **Rust checks** always run (not conditional on `*.rs` changes like in PRs)
+  - 8 jobs: tests + clippy across 4 Rust workspaces
+  - Validates fmt, clippy, tests, doc tests, license/ban checks
 - **Docs link check** runs in full mode (external links)
 - **GitLab CI** triggers additional internal tests
-- **Rust checks** always run (not just on `*.rs` changes)
 - **Slack notifications** sent to ops team
 
 ---
