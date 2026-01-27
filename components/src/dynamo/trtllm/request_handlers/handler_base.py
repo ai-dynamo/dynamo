@@ -18,13 +18,12 @@ import copy
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, AsyncGenerator, Optional, Union
 
 import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
-from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo._core import Context
@@ -40,8 +39,9 @@ from dynamo.trtllm.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.publisher import Publisher
 from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
-    DisaggregatedParamsCodec,
+    DisaggregatedParamsUtils,
 )
+from dynamo.trtllm.request_handlers.request_utils import RequestUtils
 
 configure_dynamo_logging()
 
@@ -100,76 +100,6 @@ class HandlerBase:
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
 
-    @staticmethod
-    def _extract_logprobs(
-        output, num_output_tokens_so_far: int
-    ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        """
-        Extract logprobs from the TRTLLM output for new tokens.
-
-        Args:
-            output: TRTLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        if not new_logprobs:
-            return None, None
-
-        # From TRTLLM CompletionOutput API, logprobs: (TokenLogprobs | List[float], optional)
-        # Expect TokenLogprobs output when logprobs is set, check edge case where list[float] is returned instead
-        if isinstance(new_logprobs[0], float):
-            return [float(lp) for lp in new_logprobs], None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
-
-            # Extract log probability for the selected token
-            if actual_token_id in token_logprobs_dict:
-                selected_logprob = token_logprobs_dict[actual_token_id]
-                log_probs.append(float(selected_logprob.logprob))
-            else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_top_logprobs.append(
-                    {
-                        "rank": logprob_info.rank
-                        if hasattr(logprob_info, "rank")
-                        else 0,
-                        "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
-                        "logprob": float(logprob_info.logprob),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
-
     async def _handle_cancellation(
         self, generation_result: GenerationResult, context: Context
     ):
@@ -211,196 +141,6 @@ class HandlerBase:
                     await cancellation_task
                 except asyncio.CancelledError:
                     pass
-
-    def _decode_disaggregated_params_from_prefill(
-        self, prefill_result: dict
-    ) -> tuple[Any, dict]:
-        """
-        Extract and decode disaggregated params from prefill_result.
-
-        Args:
-            prefill_result: Result from prefill worker containing encoded disaggregated params
-
-        Returns:
-            Tuple of (disaggregated_params, epd_metadata) where:
-            - disaggregated_params: Decoded LlmDisaggregatedParams object
-            - epd_metadata: Dictionary containing EPD-specific metadata (_epd_processed_prompt, etc.)
-        """
-        params_dict = prefill_result["disaggregated_params"]
-
-        # Remove worker_id if present (added by prefill worker, not needed for decode)
-        params_dict.pop("worker_id", None)
-
-        # Extract EPD metadata that was packed by prefill worker
-        epd_metadata = {}
-        if "_epd_metadata" in params_dict:
-            epd_metadata = params_dict.pop("_epd_metadata")
-            logging.debug(
-                f"DECODE: Extracted _epd_metadata with {len(epd_metadata)} fields"
-            )
-
-        # Decode the disaggregated params
-        disaggregated_params = DisaggregatedParamsCodec.decode(
-            DisaggregatedParams(**params_dict)
-        )
-        # Set to generation_only mode for decode phase
-        disaggregated_params.request_type = "generation_only"
-
-        # In generation-only mode, multimodal embeddings are already processed and in KV cache
-        # Remove multimodal_embedding_handles to avoid TRT-LLM validation error
-        # NOTE: `hasattr` is used because multimodal_embedding_handles may not be present
-        # on DisaggregatedParams in all EPD flows (e.g., text-only requests or certain stages).
-        if (
-            hasattr(disaggregated_params, "multimodal_embedding_handles")
-            and disaggregated_params.multimodal_embedding_handles
-        ):
-            disaggregated_params.multimodal_embedding_handles = None
-
-        logging.debug("DECODE: Set request_type to generation_only")
-
-        return disaggregated_params, epd_metadata
-
-    def _encode_and_pack_disaggregated_params(
-        self,
-        output: GenerationResult,
-        disaggregated_params: Any,
-        request: dict,
-        res: Any,
-        processed_input: Any = None,
-    ) -> Optional[dict]:
-        """
-        Encode and pack disaggregated params for PREFILL mode response.
-
-        Handles:
-        - Choosing between output and input disaggregated params
-        - Preserving multimodal_embedding_handles in EPD flow
-        - Encoding params for transmission
-        - Packing prefill metadata for DECODE optimization
-
-        Args:
-            output: GenerationResult from the engine
-            disaggregated_params: Input disaggregated params
-            request: Original request dict
-            res: RequestOutput object with prompt and prompt_token_ids attributes
-            processed_input: The processed input dict from process_openai_request (contains correct prompt)
-
-        Returns:
-            Dictionary with encoded disaggregated params, or None if encoding failed
-        """
-        # In EPD flow, output.disaggregated_params might be None, use the input params
-        params_to_encode = (
-            output.disaggregated_params
-            if output.disaggregated_params is not None
-            else disaggregated_params
-        )
-
-        # In EPD flow, manually preserve multimodal_embedding_handles from input
-        # because TRT-LLM engine may not propagate them through prefill
-        if params_to_encode is not None and disaggregated_params is not None:
-            input_handles = getattr(
-                disaggregated_params,
-                "multimodal_embedding_handles",
-                None,
-            )
-            output_handles = getattr(
-                params_to_encode, "multimodal_embedding_handles", None
-            )
-
-            if input_handles is not None and output_handles is None:
-                params_to_encode.multimodal_embedding_handles = input_handles
-                # Also preserve hashes if they exist
-                input_hashes = getattr(disaggregated_params, "multimodal_hashes", None)
-                if input_hashes is not None:
-                    params_to_encode.multimodal_hashes = input_hashes
-
-        encoded_params = DisaggregatedParamsCodec.encode(params_to_encode)
-
-        if encoded_params is None:
-            logging.error("PREFILL: encoded_params is None - decode worker will fail!")
-            return None
-
-        logging.debug("PREFILL: Successfully encoded disaggregated params")
-        params_dict = asdict(encoded_params)
-
-        # Pack prefill metadata for DECODE worker optimization
-        # The frontend only forwards disaggregated_params from prefill response
-        # Note: max_tokens is already handled by Rust frontend's PrefillRouter
-        prefill_metadata = {}
-
-        # ALWAYS pack prompt info for DECODE to skip re-processing
-        # Per TRT-LLM team: DECODE never needs to reload images - KV cache has the context
-        # Use processed_input['prompt'] (from process_openai_request) which is the actual
-        # multimodal prompt used by TRT-LLM, not res.prompt which might be raw
-        if (
-            processed_input
-            and isinstance(processed_input, dict)
-            and processed_input.get("prompt")
-        ):
-            prefill_metadata["_prefill_prompt"] = processed_input["prompt"]
-        elif res.prompt:
-            prefill_metadata["_prefill_prompt"] = res.prompt
-        if res.prompt_token_ids:
-            prefill_metadata["_prefill_prompt_token_ids"] = list(res.prompt_token_ids)
-
-        # EPD-specific: use encoder's prompt if available
-        if "_epd_processed_prompt" in request and res.prompt:
-            prefill_metadata["_epd_processed_prompt"] = res.prompt
-        if "_epd_prompt_token_ids" in request and res.prompt_token_ids:
-            prefill_metadata["_epd_prompt_token_ids"] = list(res.prompt_token_ids)
-
-        # Add metadata to the disaggregated_params dict
-        if prefill_metadata:
-            params_dict["_epd_metadata"] = prefill_metadata
-
-        return params_dict
-
-    def _setup_disaggregated_params_for_mode(
-        self,
-        request: dict,
-        ep_disaggregated_params: Optional[Any],
-    ) -> tuple[Any, Any, dict]:
-        """
-        Setup disaggregated_params based on PREFILL/DECODE mode.
-
-        For PREFILL mode:
-        - Uses ep_disaggregated_params from encode worker if available
-        - Otherwise creates new LlmDisaggregatedParams with request_type="context_only"
-
-        For DECODE mode:
-        - Decodes disaggregated_params from prefill_result
-        - Extracts EPD metadata for prompt optimization
-
-        Args:
-            request: Request dictionary (may contain prefill_result)
-            ep_disaggregated_params: Optional params from encode worker (EPD flow)
-
-        Returns:
-            Tuple of (disaggregated_params, ep_disaggregated_params, epd_metadata)
-        """
-        disaggregated_params = None
-        epd_metadata = {}
-
-        # PREFILL mode: setup context_only params
-        if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            if ep_disaggregated_params:
-                ep_disaggregated_params.request_type = "context_only"
-                disaggregated_params = ep_disaggregated_params
-            else:
-                disaggregated_params = LlmDisaggregatedParams(
-                    request_type="context_only"
-                )
-
-        # DECODE mode: decode params from prefill_result
-        prefill_result = request.get("prefill_result")
-        if prefill_result and "disaggregated_params" in prefill_result:
-            (
-                disaggregated_params,
-                epd_metadata,
-            ) = self._decode_disaggregated_params_from_prefill(prefill_result)
-            # For full EPD flow, make decoded params available to multimodal processor
-            ep_disaggregated_params = disaggregated_params
-
-        return disaggregated_params, ep_disaggregated_params, epd_metadata
 
     async def _prepare_input_for_generation(
         self,
@@ -472,36 +212,6 @@ class HandlerBase:
         # Fallback: text-only flow
         return request.get("token_ids")
 
-    def _normalize_request_format(self, request: dict) -> None:
-        """
-        Convert OpenAI request format to TRT-LLM internal format.
-
-        Moves fields from OpenAI locations to where TRT-LLM expects them:
-        - max_tokens: top-level → stop_conditions.max_tokens
-        - temperature: top-level → sampling_options.temperature
-
-        Note: The Rust frontend's PrefillRouter handles the *value* of max_tokens
-        (sets to 1 for prefill, restores original for decode). This method only
-        moves fields to the correct location.
-
-        Args:
-            request: Request dictionary to normalize (modified in place)
-        """
-        # Ensure stop_conditions exists
-        if "stop_conditions" not in request:
-            request["stop_conditions"] = {}
-        if "max_tokens" in request and "max_tokens" not in request["stop_conditions"]:
-            request["stop_conditions"]["max_tokens"] = request.pop("max_tokens")
-
-        # Ensure sampling_options exists
-        if "sampling_options" not in request:
-            request["sampling_options"] = {}
-        if (
-            "temperature" in request
-            and "temperature" not in request["sampling_options"]
-        ):
-            request["sampling_options"]["temperature"] = request.pop("temperature")
-
     async def _initiate_shutdown(self, error: Exception):
         """Initiate graceful shutdown after fatal error"""
         logging.warning(f"Initiating graceful shutdown due to: {error}")
@@ -539,14 +249,16 @@ class HandlerBase:
         logging.debug(f"Request: {request}")
 
         # Normalize OpenAI format to TRT-LLM internal format
-        self._normalize_request_format(request)
+        RequestUtils.normalize_request_format(request)
 
         # Setup disaggregated params based on PREFILL/DECODE mode
         (
             disaggregated_params,
             ep_disaggregated_params,
             epd_metadata,
-        ) = self._setup_disaggregated_params_for_mode(request, ep_disaggregated_params)
+        ) = DisaggregatedParamsUtils.setup_for_mode(
+            self.disaggregation_mode, request, ep_disaggregated_params
+        )
 
         # Prepare input for generation (handles multimodal/text flows)
         processed_input = await self._prepare_input_for_generation(
@@ -675,9 +387,7 @@ class HandlerBase:
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                     # Extract logprobs from the output
-                    log_probs, top_logprobs = self._extract_logprobs(
-                        output, num_output_tokens_so_far
-                    )
+                    log_probs, top_logprobs = RequestUtils.extract_logprobs(output, num_output_tokens_so_far)
                     if log_probs:
                         out["log_probs"] = log_probs
                     if top_logprobs:
@@ -689,7 +399,7 @@ class HandlerBase:
                         out["stop_reason"] = output.stop_reason
                     if self.disaggregation_mode == DisaggregationMode.PREFILL:
                         # Return the disaggregated params only when operating in prefill mode.
-                        params_dict = self._encode_and_pack_disaggregated_params(
+                        params_dict = DisaggregatedParamsUtils.encode_and_pack(
                             output, disaggregated_params, request, res, processed_input
                         )
                         if params_dict is not None:
