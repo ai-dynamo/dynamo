@@ -295,7 +295,11 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let prefill_dp_size = match &self.0 {
+        let prefill_dp_size = match self
+            .prefill_router
+            .get()
+            .expect("prefill_router not initialized")
+        {
             InnerPrefillRouter::KvRouter(router) => {
                 router.chooser.client().instances().len() as u64
             }
