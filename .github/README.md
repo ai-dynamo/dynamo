@@ -21,8 +21,6 @@ GitHub Actions workflows and configuration for the Dynamo CI/CD system.
 | `dynamo-status-check` | `container-validation-dynamo.yml` | Direct | Core Dynamo container build and tests |
 | `backend-status-check` | `pr.yaml` | copy-pr-bot | Backend builds (vLLM, SGLang, TRT-LLM) and deployment tests |
 
-> **Note**: Checks marked "copy-pr-bot" require a maintainer to trigger CI. See [Troubleshooting](./TROUBLESHOOTING.md).
-
 ---
 
 ## CI Workflow Architecture

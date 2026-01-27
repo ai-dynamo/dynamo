@@ -144,42 +144,7 @@ For CUDA 13 images, add `-cuda13` before architecture: `nightly-vllm-cuda13-amd6
 
 ---
 
-## Quick Troubleshooting
+## Troubleshooting
 
-### My PR checks are stuck at "Waiting for status"
-
-- **4 checks stuck**: Probably need GPG signing (internal PRs) → See [TROUBLESHOOTING.md](./TROUBLESHOOTING.md#internal-nvidia-prs-gpg-signing-required)
-- **Only backend-status-check stuck**: Expected - needs maintainer to trigger copy-pr-bot
-
-### Pre-commit check failed
-
-```bash
-pip install pre-commit
-pre-commit run --all-files
-git add -A && git commit -s -m "fix: apply pre-commit"
-```
-
-### Copyright check failed
-
-Add this header to new files:
-```
-# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-```
-
-### DCO check failed
-
-Sign your commits:
-```bash
-git commit -s --amend --no-edit
-git push --force-with-lease
-```
-
----
-
-## Related Documentation
-
-- [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) - Detailed troubleshooting guide
-- [README.md](./README.md) - Complete workflow reference
-- [DCO.md](../DCO.md) - Developer Certificate of Origin guide
+For CI issues and fixes, see [TROUBLESHOOTING.md](./TROUBLESHOOTING.md).
 
