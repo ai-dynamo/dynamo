@@ -30,6 +30,9 @@ def finalize_gms_write(
     allocator: "GMSClientMemoryManager", model: torch.nn.Module
 ) -> int:
     """Finalize GMS write mode: register tensors, commit, switch to read.
+    This is typically called when the (writing) model loader finishes, and
+    is ready to commit the weights so that other engines can import these
+    weights and read them.
 
     Args:
         allocator: The GMS client memory manager in write mode.
