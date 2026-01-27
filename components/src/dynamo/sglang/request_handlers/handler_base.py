@@ -424,13 +424,4 @@ class BaseWorkerHandler(ABC):
                 except asyncio.CancelledError:
                     pass
             else:
-                # Task completed, check if it was due to shutdown
-                try:
-                    cancellation_task.result()
-                except GeneratorExit:
-                    raise
-                except Exception:
-                    pass
-                logging.debug(
-                    f"Cancellation monitor task already completed for SGLang Request ID {request_id}, Context: {context.id()}"
-                )
+                cancellation_task.result()
