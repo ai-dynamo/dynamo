@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::mocker::protocols::MoveBlock;
-use crate::tokens::blocks::UniqueBlock;
+use dynamo_tokens::blocks::UniqueBlock;
 use crate::tokens::{TokenBlockSequence, Tokens};
 use derive_getters::Getters;
 use rand::random;

@@ -23,7 +23,7 @@
 //! requests share common prefixes (e.g., system prompts, few-shot examples).
 
 use crate::kv_router::indexer::OverlapScores;
-use crate::tokens::SequenceHash;
+use dynamo_tokens::SequenceHash;
 use anyhow::Result;
 use dashmap::DashMap;
 use derive_getters::Getters;

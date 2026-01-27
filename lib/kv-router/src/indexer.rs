@@ -51,9 +51,9 @@ use std::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::kv_router::approx::{BlockEntry, PruneConfig, PruneManager};
-use crate::kv_router::protocols::*;
-use crate::tokens::SequenceHash;
+use crate::approx::{BlockEntry, PruneConfig, PruneManager};
+use crate::protocols::*;
+use dynamo_tokens::SequenceHash;
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -2038,7 +2038,7 @@ impl Drop for KvIndexerSharded {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+    use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use rstest::rstest;
     use rstest_reuse::{self, *};
     use tokio::time;
