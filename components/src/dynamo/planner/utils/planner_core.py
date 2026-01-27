@@ -155,15 +155,11 @@ class Planner:
                 args.namespace,
             )
 
-        self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
-            window_size=args.load_prediction_window_size,
-        )
-        self.isl_predictor = LOAD_PREDICTORS[args.load_predictor](
-            window_size=args.load_prediction_window_size,
-        )
-        self.osl_predictor = LOAD_PREDICTORS[args.load_predictor](
-            window_size=args.load_prediction_window_size,
-        )
+        predictor_cls = LOAD_PREDICTORS[args.load_predictor]
+        # Predictors read configuration from `args` directly.
+        self.num_req_predictor = predictor_cls(args)
+        self.isl_predictor = predictor_cls(args)
+        self.osl_predictor = predictor_cls(args)
 
         # Optional warmup: preload predictors with historical observations from a
         # mooncake-style JSONL trace (request_count/avg_isl/avg_osl per interval).

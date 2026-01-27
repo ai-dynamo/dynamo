@@ -306,7 +306,7 @@ class DeterminismTester(ApiTester):
             with open(self.shakespeare_file, "w", encoding="utf-8") as f:
                 f.write(content)
 
-    # Inherited from ApiTester, but override to add top_p for determinism testing
+    # Inherited from ApiTester, but override to add determinism-specific parameters
     def make_request(
         self,
         content: str,
@@ -322,12 +322,18 @@ class DeterminismTester(ApiTester):
         if seed == 42:  # Default seed, use env override
             seed = int(os.environ.get("KVBM_SEED", "42"))
 
+        top_k = -1
+        if check_module_available("tensorrt_llm"):
+            top_k = 0
+        # For determinism: use temperature=0 which should trigger greedy decoding in vLLM
+        # Setting top_p=1.0 and top_k=-1 to avoid any sampling/filtering
         return super().make_request(
             content,
             max_tokens=max_tokens,
             temperature=temperature,
             seed=seed,
-            top_p=0.0001,  # For determinism
+            top_p=1.0,  # No nucleus sampling filtering
+            top_k=top_k,  # No top-k filtering
             **kwargs,
         )
 

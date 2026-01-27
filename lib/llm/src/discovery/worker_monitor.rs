@@ -8,11 +8,10 @@ use dynamo_runtime::component::Client;
 use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
 use dynamo_runtime::pipeline::{WorkerLoadMonitor, async_trait};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::EventSubscriber;
+use dynamo_runtime::transports::event_plane::EventSubscriber;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use tokio_stream::StreamExt;
 
 /// Scale factor for storing f64 thresholds as u32 (10000 = 4 decimal places)
 const THRESHOLD_SCALE: u32 = 10000;
@@ -194,8 +193,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 card.runtime_config
             });
 
-        // Subscribe to KV metrics events
-        let mut kv_metrics_rx = component.namespace().subscribe(KV_METRICS_SUBJECT).await?;
+        // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
+        let mut kv_metrics_rx =
+            EventSubscriber::for_namespace(component.namespace(), KV_METRICS_SUBJECT)
+                .await?
+                .typed::<ActiveLoad>();
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
@@ -235,12 +237,13 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                     // Handle KV metrics updates (ActiveLoad)
                     kv_event = kv_metrics_rx.next() => {
-                        let Some(event) = kv_event else {
+                        let Some(event_result) = kv_event else {
                             tracing::debug!("KV metrics stream closed");
                             break;
                         };
 
-                        let Ok(active_load) = serde_json::from_slice::<ActiveLoad>(&event.payload) else {
+                        let Ok((_envelope, active_load)) = event_result else {
+                            tracing::error!("Error receiving KV metrics event: {event_result:?}");
                             continue;
                         };
 

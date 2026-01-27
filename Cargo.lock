@@ -1346,7 +1346,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "proc-macro2",
  "quote",
  "regex",
@@ -1364,7 +1364,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.13.0",
+ "itertools 0.11.0",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -3150,7 +3150,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -3189,14 +3189,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3304,7 +3304,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -3415,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "cudarc 0.19.0",
@@ -3569,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -3588,7 +3588,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3653,6 +3653,7 @@ dependencies = [
  "libc",
  "local-ip-address",
  "log",
+ "lru",
  "nid",
  "nix 0.29.0",
  "notify 6.1.1",
@@ -3676,7 +3677,8 @@ dependencies = [
  "stdio-override",
  "temp-env",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.17",
+ "tmq",
  "tokio",
  "tokio-rayon",
  "tokio-stream",
@@ -3690,11 +3692,12 @@ dependencies = [
  "uuid 1.19.0",
  "validator",
  "xxhash-rust",
+ "zmq",
 ]
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bs58",
  "bytemuck",
@@ -5871,15 +5874,6 @@ dependencies = [
 
 [[package]]
 name = "itertools"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
@@ -6242,7 +6236,7 @@ checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-once-cell",

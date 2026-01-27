@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! CUDA memory pool for efficient device memory allocation in hot paths.
@@ -255,6 +255,12 @@ impl CudaMemPool {
         // and the borrow ensures the stream lives for the duration of this call.
         unsafe { self.free_async_raw(ptr, stream.cu_stream()) }
     }
+
+    // NOTE: Unlike alloc_async_raw, this method does NOT acquire the pool mutex.
+    // The mutex in alloc_async_raw ensures each allocation returns a unique pointer.
+    // cuMemFreeAsync only enqueues a stream-ordered free operation for that unique
+    // pointer - multiple threads can safely enqueue frees for different unique pointers
+    // concurrently. The actual return-to-pool happens asynchronously on the GPU side.
 
     /// Free memory back to the pool asynchronously (raw stream handle variant).
     ///
