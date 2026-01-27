@@ -171,6 +171,9 @@ get_options() {
         -it)
             INTERACTIVE=" -it "
             ;;
+	-d)
+	    INTERACTIVE=" -d "
+	    ;;
         --mount-workspace)
             MOUNT_WORKSPACE=TRUE
             ;;

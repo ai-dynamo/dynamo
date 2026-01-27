@@ -542,6 +542,15 @@ impl RadixTree {
     /// Uses BFS traversal to ensure that the tree reconstruction is unique,
     /// though the exact event ordering will be lost.
     pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        // BFS queue entry: (current_block, parent_hashes_per_worker, tokens_hash)
+        // parent_hashes_per_worker maps WorkerWithDpRank -> ExternalSequenceBlockHash
+        // Using Rc to avoid cloning the HashMap for each child
+        type BfsQueueEntry = (
+            SharedRadixBlock,
+            Rc<HashMap<WorkerWithDpRank, ExternalSequenceBlockHash>>,
+            LocalBlockHash,
+        );
+
         tracing::debug!(
             "Dumping radix tree as events (contains information about {:?} workers)",
             self.lookup.len()
@@ -555,6 +564,8 @@ impl RadixTree {
 
         // Process root's children first
         let root_borrow = self.root.borrow();
+        let empty_parent_hashes =
+            Rc::new(HashMap::<WorkerWithDpRank, ExternalSequenceBlockHash>::new());
         for (tokens_hash, child_block) in &root_borrow.children {
             queue.push_back((child_block.clone(), None, *tokens_hash));
         }
