@@ -153,7 +153,7 @@ pub(crate) struct ZmqKvEventPublisher {
 impl ZmqKvEventPublisher {
     #[new]
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
@@ -267,7 +267,7 @@ impl KvEventPublisher {
         // The actual worker_id is inferred from component's connection_id in the Rust implementation.
         let _ = worker_id;
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             kv_block_size as u32,
             None,

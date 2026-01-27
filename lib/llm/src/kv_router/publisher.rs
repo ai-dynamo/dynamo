@@ -126,14 +126,6 @@ impl KvEventPublisher {
         component: Component,
         kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
-    ) -> Result<Self> {
-        Self::new_with_local_indexer(component, kv_block_size, source_config, false)
-    }
-
-    pub fn new_with_local_indexer(
-        component: Component,
-        kv_block_size: u32,
-        source_config: Option<KvEventSourceConfig>,
         enable_local_indexer: bool,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
