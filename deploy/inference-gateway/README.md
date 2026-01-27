@@ -139,7 +139,7 @@ you could deploy it as a standalone pod
 #### 5.a. Deploy as a DGD component
 
 ```bash
-kubectl apply -f operator-managed/examples/vllm_agg_qwen.yaml -n ${NAMESPACE}
+kubectl apply -f operator-managed/examples/agg.yaml -n ${NAMESPACE}
 kubectl apply -f operator-managed/examples/http-route.yaml -n ${NAMESPACE}
 ```
 
