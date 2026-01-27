@@ -316,7 +316,6 @@ get_options() {
             ;;
         --no-load)
             NO_LOAD=true
-            echo "********I GOT NO LOAD!!!!********"
             ;;
         --push)
             PUSH=" --push"
@@ -1030,14 +1029,12 @@ SINGLE_BUILD_LOG="${BUILD_LOG_DIR}/single-stage-build.log"
 
 # Determine --load flag (default on unless --no-load or --push specified)
 LOAD_FLAG=""
-echo "**********I GOT NO LOAD: $NO_LOAD, PUSH: $PUSH *********"
 if [ "$NO_LOAD" != "true" ] && [ -z "$PUSH" ]; then
     LOAD_FLAG=" --load"
 fi
 
 # Use BuildKit for enhanced metadata
 if docker buildx version &>/dev/null; then
-    echo "*********** $RUN_PREFIX docker buildx build --progress=plain ${LOAD_FLAG} ${PUSH} -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE  **************"
     $RUN_PREFIX docker buildx build --progress=plain ${LOAD_FLAG} ${PUSH} -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE 2>&1 | tee "${SINGLE_BUILD_LOG}"
     BUILD_EXIT_CODE=${PIPESTATUS[0]}
 else

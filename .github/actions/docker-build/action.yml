@@ -155,10 +155,6 @@ runs:
           done <<< "$EXTRA_TAGS"
         fi
 
-
-        echo "**********I GOT EXTRA ARGS: $EXTRA_ARGS *********"
-
-
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
