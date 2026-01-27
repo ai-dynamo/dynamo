@@ -49,9 +49,9 @@ flowchart LR
 
 ### PR Mode (`pr.yaml`)
 
-**Purpose**: Fast feedback on what changed  
-**Trigger**: Push to `pull-request/N` branches or `main`  
-**Strategy**: Conditional - only builds changed frameworks  
+**Purpose**: Fast feedback on what changed
+**Trigger**: Push to `pull-request/N` branches or `main`
+**Strategy**: Conditional - only builds changed frameworks
 
 | What | Details |
 |------|---------|
@@ -62,9 +62,9 @@ flowchart LR
 
 ### Post-Merge Mode (`ci-test-suite.yml`)
 
-**Purpose**: Full validation after merge  
-**Trigger**: Push to `main` or `release/*`  
-**Strategy**: Always builds everything  
+**Purpose**: Full validation after merge
+**Trigger**: Push to `main` or `release/*`
+**Strategy**: Always builds everything
 
 | What | Details |
 |------|---------|
@@ -77,9 +77,9 @@ flowchart LR
 
 ### Nightly Mode (`ci-test-suite.yml`)
 
-**Purpose**: Comprehensive nightly validation  
-**Trigger**: Daily at 12:00 AM PST  
-**Strategy**: Same as post-merge + extended tests  
+**Purpose**: Comprehensive nightly validation
+**Trigger**: Daily at 12:00 AM PST
+**Strategy**: Same as post-merge + extended tests
 
 | What | Details |
 |------|---------|
