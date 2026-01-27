@@ -46,7 +46,7 @@ def _create_ext_modules():
 
 setup(
     name="gpu-memory-service",
-    version="0.8.0",
+    version="0.9.0",
     description="GPU Memory Service for Dynamo - CUDA VMM-based GPU memory allocation and sharing",
     author="NVIDIA Inc.",
     author_email="sw-dl-dynamo@nvidia.com",

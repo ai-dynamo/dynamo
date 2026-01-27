@@ -1557,7 +1557,7 @@ checksum = "e1d926b4d407d372f141f93bb444696142c29d32962ccbd3531117cf3aa0bfa9"
 
 [[package]]
 name = "dynamo-async-openai"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "async-openai-macros",
  "backoff",
@@ -1584,14 +1584,14 @@ dependencies = [
 
 [[package]]
 name = "dynamo-config"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-llm"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "ahash",
  "aho-corasick",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-memory"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "cudarc 0.17.8",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-parsers"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-async-openai",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -3517,7 +3517,7 @@ dependencies = [
 
 [[package]]
 name = "kvbm-py3"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-stream",
