@@ -10,6 +10,31 @@ spec:
     Epp:
       componentType: Epp
       replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-mastegitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:new-build-3
+          env:
+            - name: DYNAMO_KV_BLOCK_SIZE
+              value: "16"
+        eppConfig:
+        # This configuration uses Dynamo's KV-aware scorer for intelligent routing
+        config:
+          # Plugins define the behavior of EPP
+          plugins:
+            # Required: tells EPP which profile to use (even if you only have one)
+            - type: single-profile-handler
+            # Picker: chooses the final endpoint after scoring
+            - name: picker
+              type: max-score-picker
+            - name: dyn-kv
+              type: kv-aware-scorer
+          # Scheduling profiles configure which plugins are used and their weights
+          schedulingProfiles:
+            - name: default
+              plugins:
+                - pluginRef: dyn-kv
+                  weight: 1
+                - pluginRef: picker
     Frontend:
       componentType: frontend
       replicas: 1
