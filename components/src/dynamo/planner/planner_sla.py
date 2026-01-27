@@ -18,7 +18,10 @@ import logging
 
 from pydantic import BaseModel
 
-from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
+from dynamo.planner.utils.planner_argparse import (
+    create_sla_planner_parser,
+    validate_planner_args,
+)
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
@@ -35,12 +38,19 @@ class RequestType(BaseModel):
 
 @dynamo_worker()
 async def init_planner(runtime: DistributedRuntime, args):
+    # Validate args
+    validate_planner_args(args)
+
+    component = runtime.namespace(args.namespace).component("Planner")
+
+    # Planner always runs its observation/prediction/decision loop
+    # In local mode: executes scaling directly via KubernetesConnector
+    # In delegating mode: sends scale requests to GlobalPlanner
     await asyncio.sleep(INIT_PLANNER_START_DELAY)
 
     await start_sla_planner(runtime, args)
 
-    component = runtime.namespace(args.namespace).component("Planner")
-
+    # Serve dummy generate endpoint
     async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"

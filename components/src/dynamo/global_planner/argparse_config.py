@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Argument parsing for GlobalPlanner."""
+
+import argparse
+
+
+def create_global_planner_parser() -> argparse.ArgumentParser:
+    """Create and configure the argument parser for GlobalPlanner.
+
+    Returns:
+        argparse.ArgumentParser: Configured argument parser for GlobalPlanner
+    """
+    parser = argparse.ArgumentParser(
+        description="GlobalPlanner - Centralized Scaling Execution Service",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Simple deployment (accept all namespaces)
+  python -m dynamo.global_planner --namespace=global-infra
+
+  # With authorization
+  python -m dynamo.global_planner \\
+    --namespace=global-infra \\
+    --managed-namespaces app-ns-1 app-ns-2 app-ns-3
+
+  # Custom environment
+  python -m dynamo.global_planner \\
+    --namespace=global-infra \\
+    --environment=kubernetes
+        """,
+    )
+
+    parser.add_argument(
+        "--namespace",
+        required=True,
+        help="Dynamo namespace for GlobalPlanner component",
+    )
+
+    parser.add_argument(
+        "--managed-namespaces",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Optional: List of namespaces authorized to use this GlobalPlanner (default: accept all)",
+    )
+
+    parser.add_argument(
+        "--environment",
+        default="kubernetes",
+        choices=["kubernetes"],
+        help="Environment type (currently only kubernetes supported)",
+    )
+
+    return parser
+
+
+def validate_args(args):
+    """Validate GlobalPlanner arguments.
+
+    Args:
+        args: Parsed arguments from argparse
+
+    Raises:
+        ValueError: If arguments are invalid
+    """
+    # managed_namespaces is optional - if not specified, accept all
+    if args.managed_namespaces and len(args.managed_namespaces) == 0:
+        raise ValueError(
+            "--managed-namespaces must have at least one namespace if specified"
+        )

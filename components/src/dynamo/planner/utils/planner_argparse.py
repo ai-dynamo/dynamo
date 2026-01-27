@@ -168,4 +168,36 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
         type=str,
         help="Model name of deployment (only required for virtual environment)",
     )
+
+    # Planner mode selection
+    parser.add_argument(
+        "--planner-mode",
+        type=str,
+        choices=["local", "delegating"],
+        default="local",
+        help="Planner mode: local (direct scaling), delegating (calls GlobalPlanner)",
+    )
+
+    # For delegating mode
+    parser.add_argument(
+        "--global-planner-namespace",
+        type=str,
+        default=None,
+        help="Namespace of GlobalPlanner component (required for delegating mode)",
+    )
+
+    parser.add_argument(
+        "--global-planner-component",
+        type=str,
+        default="GlobalPlanner",
+        help="Component name of GlobalPlanner (default: GlobalPlanner)",
+    )
+
     return parser
+
+
+def validate_planner_args(args):
+    """Validate planner mode configuration"""
+    if args.planner_mode == "delegating":
+        if not args.global_planner_namespace:
+            raise ValueError("--global-planner-namespace required for delegating mode")
