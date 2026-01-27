@@ -597,6 +597,7 @@ impl Slot for VllmConnectorSlot {
             self.evaluated_blocks
         );
 
+        // TODO(ryan) - apply policy
         let next_position = self.current_position + num_scheduled_tokens;
 
         debug_assert!(next_position / self.block_size >= self.evaluated_blocks);
