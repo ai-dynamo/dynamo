@@ -192,7 +192,7 @@ jobs:
   # TEST
   # ============================================================================
   test:
-    if: ${{ inputs.run_tests &&   ( inputs.framework != 'trtllm' || matrix.platform.arch == 'amd64') }}
+    if: inputs.run_tests
     strategy:
       fail-fast: true
       matrix:
@@ -206,6 +206,11 @@ jobs:
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
+      - name: Stop job if trtllm and arm64
+        if: inputs.framework == 'trtllm' && matrix.platform.arch == 'arm64'
+        run: |
+          echo "Stopping job because trtllm and arm64 are not supported"
+          exit 0
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
       - name: Calculate target tag
