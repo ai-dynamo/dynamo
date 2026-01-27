@@ -36,7 +36,7 @@ spec:
           # Plugins define the behavior of EPP
           plugins:
             # Required: tells EPP which profile to use (even if you only have one)
-            - type: single-profile-handler      
+            - type: single-profile-handler
             # Picker: chooses the final endpoint after scoring
             - name: picker
               type: max-score-picker
@@ -54,7 +54,7 @@ spec:
                 - pluginRef: dyn-kv
                   weight: 1
                 - pluginRef: picker
-      
+
       # Option 2: Reference an external ConfigMap (for advanced users)
       # eppConfig:
       #   configMapRef:
@@ -77,7 +77,7 @@ spec:
             limits:
               cpu: "4"
               memory: "16Gi"
-    
+
     # Decode Worker Service - SGLang decode worker for token generation
     # - Handles KV cache and token generation
     # - Connects to frontend via Dynamo platform
