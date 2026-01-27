@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -293,11 +296,24 @@ impl PrefillRouter {
         let host = endpoint.bootstrap_host?;
         let port = endpoint.bootstrap_port?;
 
-        let bootstrap_room: u64 = rand::rng().random();
+        let prefill_dp_size = match prefill_router {
+            InnerPrefillRouter::KvRouter(router) => {
+                router.chooser.client().instances().len() as u64
+            }
+            InnerPrefillRouter::SimpleRouter(router) => {
+                router.client().instances().len() as u64
+            }
+        };
+
+        // Encode the chosen DP rank into bootstrap_room
+        static BOOTSTRAP_ROOM_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let base = BOOTSTRAP_ROOM_COUNTER.fetch_add(prefill_dp_size, Ordering::Relaxed);
+        let bootstrap_room = base + (dp_rank as u64);
 
         tracing::info!(
             worker_id = worker_id,
             dp_rank = dp_rank,
+            prefill_dp_size = prefill_dp_size,
             bootstrap_host = %host,
             bootstrap_port = port,
             bootstrap_room = bootstrap_room,
