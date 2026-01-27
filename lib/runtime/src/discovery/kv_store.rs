@@ -600,7 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_register_endpoint() {
-        let store = kv::Manager::memory();
+        let store = kv::Manager::default();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -625,7 +625,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_list() {
-        let store = kv::Manager::memory();
+        let store = kv::Manager::default();
         let cancel_token = CancellationToken::new();
         let client = KVStoreDiscovery::new(store, cancel_token);
 
@@ -680,7 +680,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_store_discovery_watch() {
-        let store = kv::Manager::memory();
+        let store = kv::Manager::default();
         let cancel_token = CancellationToken::new();
         let client = Arc::new(KVStoreDiscovery::new(store, cancel_token.clone()));
 
