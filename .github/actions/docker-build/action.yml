@@ -14,8 +14,8 @@ inputs:
     required: false
     default: 'linux/amd64'
   image_tag:
-    description: 'Custom image tag (optional, defaults to framework:latest)'
-    required: false
+    description: 'Custom image tag'
+    required: true
   ci_token:
     description: 'CI Token'
     required: false
@@ -89,12 +89,9 @@ runs:
         CUDA_VERSION: ${{ inputs.cuda_version }}
       run: |
         set -x
-        # Determine image tag
-        if [ -n "${{ inputs.image_tag }}" ]; then
-          IMAGE_TAG="${{ inputs.image_tag }}"
-        else
-          IMAGE_TAG="${{ inputs.framework }}:latest"
-        fi
+
+        IMAGE_TAG="${{ inputs.image_tag }}"
+
 
         CUDA_VERSION_MAJOR=${CUDA_VERSION%%.*}
 
@@ -180,13 +177,16 @@ runs:
     - name: Show summary
       shell: bash
       run: |
+          IMAGE_URIS= "${{ inputs.extra_tags }} ${IMAGE_TAG}"
+          echo "uris:  $IMAGE_URIS"
           echo "### 🐳 ${{ inputs.framework }} Container Images" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
           echo "|-----|" >> $GITHUB_STEP_SUMMARY
-          for image_uri in "${{ inputs.extra_tags }} ${IMAGE_TAG}"; do
+          for image_uri in "${IMAGE_URIS[@]}"; do
             echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
           done
+
 
     - name: Capture Build Metrics
       id: metrics
