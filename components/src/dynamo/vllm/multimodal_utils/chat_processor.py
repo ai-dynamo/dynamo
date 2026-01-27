@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,18 +20,31 @@ from typing import AsyncIterator, List, Optional, Protocol, Union, runtime_check
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.chat_utils import ConversationMessage
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    CompletionRequest,
-    RequestResponseMetadata,
-)
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_engine import RequestPrompt
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike as AnyTokenizer
+
+# Try importing from new vLLM (https://github.com/vllm-project/vllm/pull/32369), fallback to old structure
+try:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+    from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+    from vllm.entrypoints.openai.engine.protocol import RequestResponseMetadata
+    from vllm.entrypoints.openai.models.protocol import BaseModelPath
+    from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+except ImportError:
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        CompletionRequest,
+        RequestResponseMetadata,
+    )
+    from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+    from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
+    from vllm.entrypoints.openai.serving_models import (
+        BaseModelPath,
+        OpenAIServingModels,
+    )
 
 
 class StubEngineClient:
@@ -59,12 +72,6 @@ class ProcessMixIn(ProcessMixInRequired):
     """
     Mixin for pre and post processing for vLLM
     """
-
-    engine_args: AsyncEngineArgs
-    chat_processor: "ChatProcessor | None"
-    completions_processor: "CompletionsProcessor | None"
-    model_config: ModelConfig
-    default_sampling_params: SamplingParams
 
     def __init__(self):
         pass
@@ -100,7 +107,6 @@ class ProcessMixIn(ProcessMixInRequired):
         return (
             request,
             preprocess_result.conversation,
-            preprocess_result.request_prompt,
             preprocess_result.engine_prompt,
             sampling_params,
         )
@@ -121,11 +127,9 @@ class PreprocessResult:
     def __init__(
         self,
         conversation: Optional[ConversationMessage],
-        request_prompt: RequestPrompt,
         engine_prompt: TokensPrompt,
     ):
         self.conversation = conversation
-        self.request_prompt = request_prompt
         self.engine_prompt = engine_prompt
 
 
@@ -168,7 +172,6 @@ class ChatProcessor:
 
         (
             conversation,
-            request_prompts,
             engine_prompts,
         ) = await self.openai_serving._preprocess_chat(
             request,
@@ -185,7 +188,12 @@ class ChatProcessor:
             add_special_tokens=request.add_special_tokens,
         )
 
-        return PreprocessResult(conversation[0], request_prompts[0], engine_prompts[0])
+        # In newer vLLM, _preprocess_chat returns (conversation, engine_prompts) - 2 values
+        if not conversation or not engine_prompts:
+            raise ValueError(
+                "Preprocessing returned empty conversation or engine_prompts"
+            )
+        return PreprocessResult(conversation[0], engine_prompts[0])
 
     async def stream_response(
         self,
@@ -198,7 +206,9 @@ class ChatProcessor:
         if request.stream:
             # Handle streaming response
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
@@ -231,7 +241,9 @@ class ChatProcessor:
             # Collect all chunks into a single response
             full_response = None
             num_output_text_so_far = 0
-            async for raw_response in self.openai_serving.chat_completion_stream_generator(
+            async for (
+                raw_response
+            ) in self.openai_serving.chat_completion_stream_generator(
                 request,
                 result_generator,
                 request_id,
@@ -305,17 +317,20 @@ class CompletionsProcessor:
     async def preprocess(self, raw_request: CompletionRequest) -> PreprocessResult:
         request = self.parse_raw_request(raw_request)
 
-        (
-            request_prompts,
-            engine_prompts,
-        ) = await self.openai_serving._preprocess_completion(
-            request,
-            self.tokenizer,
-            input_or_inputs=request.prompt,
-            add_special_tokens=request.add_special_tokens,
+        # In newer vLLM, _preprocess_completion was removed
+        # Use the renderer approach instead
+        renderer = self.openai_serving._get_renderer(self.tokenizer)
+        config = self.openai_serving._build_render_config(request)
+        engine_prompts = await renderer.render_prompt_and_embeds(
+            prompt_or_prompts=request.prompt,
+            prompt_embeds=getattr(request, "prompt_embeds", None),
+            config=config,
         )
 
-        return PreprocessResult(None, request_prompts[0], engine_prompts[0])
+        # engine_prompts is now a list of TokensPrompt
+        if not engine_prompts:
+            raise ValueError("Renderer returned empty engine_prompts")
+        return PreprocessResult(None, engine_prompts[0])
 
     async def stream_response(
         self,

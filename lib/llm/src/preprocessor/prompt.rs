@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Prompt Formatting Module
@@ -22,6 +22,8 @@ use anyhow::Result;
 use minijinja::value::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::preprocessor::media::MediaDecoder;
 
 pub mod deepseek_v32;
 mod template;
@@ -50,6 +52,11 @@ pub enum PromptInput {
 pub trait OAIChatLikeRequest {
     fn model(&self) -> String;
     fn messages(&self) -> Value;
+    fn typed_messages(
+        &self,
+    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+        None
+    }
     fn tools(&self) -> Option<Value> {
         None
     }
@@ -75,6 +82,10 @@ pub trait OAIChatLikeRequest {
     }
 
     fn extract_text(&self) -> Option<TextInput> {
+        None
+    }
+
+    fn media_io_kwargs(&self) -> Option<&MediaDecoder> {
         None
     }
 }

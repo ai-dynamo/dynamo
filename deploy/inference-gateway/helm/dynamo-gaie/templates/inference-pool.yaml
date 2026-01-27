@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,18 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: inference.networking.x-k8s.io/v1alpha2
+
+# InferencePool (stable API - inference.networking.k8s.io/v1)
+# Used by both kGateway (to resolve HTTPRoute backends) and EPP (to discover backend pods)
+apiVersion: inference.networking.k8s.io/v1
 kind: InferencePool
 metadata:
   name: {{ .Values.model.shortName }}-pool
   namespace: {{ .Release.Namespace }}
 spec:
-  targetPortNumber: {{ .Values.inferencePool.port }}
+  targetPorts:
+    - number: {{ .Values.inferencePool.port }}
   selector:
-    nvidia.com/dynamo-component: Frontend
-    nvidia.com/dynamo-namespace: {{ include "dynamo-gaie.dynamoNamespace" . }}
-  extensionRef:
-    failureMode: FailOpen
+    matchLabels:
+      nvidia.com/dynamo-component: Frontend
+      nvidia.com/dynamo-namespace: {{ include "dynamo-gaie.dynamoNamespace" . }}
+  endpointPickerRef:
     group: ""
     kind: Service
     name: {{ .Values.model.shortName }}-epp
+    port:
+      number: 9002

@@ -1,5 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+# Timing notes (measured in a TRT-LLM-enabled container):
+# - GPU-1 subset (`-m "gpu_1"`): 136.36s total for 3 tests.
+# These tests load a real model and can be slow/flaky when GPU resources are contended,
+# so we set explicit pytest timeouts to fail fast on hangs (see per-test markers below).
 import logging
 import os
 import time
@@ -14,7 +19,9 @@ from tests.router.common import (  # utilities
     generate_random_suffix,
     get_runtime,
 )
+from tests.utils.constants import DefaultPort
 from tests.utils.managed_process import ManagedProcess
+from tests.utils.port_utils import allocate_ports, deallocate_ports
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +33,15 @@ pytestmark = [
     pytest.mark.trtllm,
     pytest.mark.model(MODEL_NAME),
 ]
-PORTS = [
-    8011,
-    8022,
-]  # Frontend ports: use PORTS[0] for single router, PORTS for multi-router
 NUM_REQUESTS = 10
+
+
+def allocate_frontend_ports(request, count: int) -> list[int]:
+    """Allocate random free frontend ports for xdist-safe execution."""
+    ports = allocate_ports(count, DefaultPort.FRONTEND.value)
+    request.addfinalizer(lambda: deallocate_ports(ports))
+    return ports
+
 
 # Shared test payload for all tests
 TEST_PAYLOAD: Dict[str, Any] = {
@@ -71,6 +82,8 @@ class TRTLLMProcess:
         trtllm_args: Optional[Dict[str, Any]] = None,
         num_workers: int = 2,
         single_gpu: bool = False,
+        request_plane: str = "tcp",
+        store_backend: str = "etcd",
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -83,6 +96,8 @@ class TRTLLMProcess:
                 - max_seq_len: Maximum sequence length (optional)
             num_workers: Number of TRT-LLM worker processes
             single_gpu: If True, all workers share GPU 0
+            request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
+            store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
 
         Note: TRT-LLM doesn't support data parallelism like vLLM (dp_rank is always 0).
               Tensor parallelism (TP) is supported but creates 1 worker spanning multiple GPUs,
@@ -95,6 +110,7 @@ class TRTLLMProcess:
         self.endpoint = f"dyn://{self.namespace}.{self.component_name}.generate"
         self.num_workers = num_workers
         self.worker_processes = []
+        self.store_backend = store_backend
 
         if trtllm_args is None:
             trtllm_args = {}
@@ -143,15 +159,20 @@ class TRTLLMProcess:
             system_port = 8081 + worker_idx
 
             env = os.environ.copy()  # Copy parent environment
-            env.update(
-                {
-                    "CUDA_VISIBLE_DEVICES": gpu_device,
-                    "DYN_NAMESPACE": self.namespace,
-                    "PYTHONHASHSEED": "0",  # for deterministic event id's
-                    # Set unique system port for each worker to avoid port conflicts
-                    "DYN_SYSTEM_PORT": str(system_port),
-                }
-            )
+            env_vars = {
+                "CUDA_VISIBLE_DEVICES": gpu_device,
+                "DYN_NAMESPACE": self.namespace,
+                "DYN_REQUEST_PLANE": request_plane,
+                "PYTHONHASHSEED": "0",  # for deterministic event id's
+                # Set unique system port for each worker to avoid port conflicts
+                "DYN_SYSTEM_PORT": str(system_port),
+            }
+
+            # Add DYN_FILE_KV if using file storage backend
+            if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
+                env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
+
+            env.update(env_vars)
 
             # Create managed process for the worker
             process = ManagedProcess(
@@ -265,16 +286,25 @@ class TRTLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_trtllm_kv_router_basic(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
     """
     Quick e2e sanity test for KV router with TRT-LLM engine instances.
+    Tests both NATS and TCP request planes.
     """
 
     # runtime_services starts etcd and nats
     N_TRTLLM_WORKERS = 2
-    logger.info(f"Starting TRT-LLM KV router test with {N_TRTLLM_WORKERS} workers")
+    logger.info(
+        f"Starting TRT-LLM KV router test with {N_TRTLLM_WORKERS} workers using request_plane={request_plane}"
+    )
 
     try:
         # Start TRT-LLM workers
@@ -284,20 +314,23 @@ def test_trtllm_kv_router_basic(
             trtllm_args=TRTLLM_ARGS,
             num_workers=N_TRTLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
 
         # Run basic router test (starts router internally and waits for workers to be ready)
+        frontend_port = allocate_frontend_ports(request, 1)[0]
         _test_router_basic(
             engine_workers=trtllm_workers,
             block_size=TRTLLM_BLOCK_SIZE,
             request=request,
-            frontend_port=PORTS[0],
+            frontend_port=frontend_port,
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             frontend_timeout=180,  # 3 minutes should be plenty for TinyLlama
             store_backend="etcd",  # Explicit for clarity
+            request_plane=request_plane,
         )
 
     finally:
@@ -307,8 +340,14 @@ def test_trtllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    set_ucx_tls_no_mm,
+    request_plane,
 ):
     # runtime_services starts etcd and nats
     logger.info("Starting TRT-LLM router prefix reuse test with two workers")
@@ -324,6 +363,7 @@ def test_router_decisions_trtllm_multiple_workers(
             trtllm_args=TRTLLM_ARGS,
             num_workers=N_WORKERS,
             single_gpu=True,  # Worker uses GPU 0
+            request_plane=request_plane,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
 
@@ -331,7 +371,7 @@ def test_router_decisions_trtllm_multiple_workers(
         trtllm_workers.__enter__()
 
         # Get runtime and create endpoint
-        runtime = get_runtime()
+        runtime = get_runtime(request_plane=request_plane)
         namespace = runtime.namespace(trtllm_workers.namespace)
         component = namespace.component("tensorrt_llm")
         endpoint = component.endpoint("generate")
@@ -353,14 +393,39 @@ def test_router_decisions_trtllm_multiple_workers(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
+@pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
+@pytest.mark.parametrize(
+    "store_backend,use_nats_core,request_plane",
+    [
+        ("etcd", False, "nats"),  # JetStream mode
+        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
+        # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
+    ],
+    ids=["jetstream"],  # "nats_core" and "file" commented out
+)
 def test_trtllm_indexers_sync(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request,
+    runtime_services_dynamic_ports,
+    predownload_models,
+    file_storage_backend,
+    set_ucx_tls_no_mm,
+    store_backend,
+    use_nats_core,
+    request_plane,
 ):
     """
     Test that two KV routers have synchronized indexer states after processing requests
     with TRT-LLM workers. This test verifies that both routers converge to the same internal state.
+
+    Tests with configuration:
+    - jetstream: etcd backend, JetStream for KV events, NATS request plane
     """
-    logger.info("Starting TRT-LLM indexers sync test")
+    # runtime_services_dynamic_ports handles NATS and etcd startup
+    logger.info(
+        f"Starting TRT-LLM indexers sync test: store_backend={store_backend}, "
+        f"use_nats_core={use_nats_core}, request_plane={request_plane}"
+    )
+
     N_TRTLLM_WORKERS = 2
 
     try:
@@ -371,6 +436,8 @@ def test_trtllm_indexers_sync(
             trtllm_args=TRTLLM_ARGS,
             num_workers=N_TRTLLM_WORKERS,
             single_gpu=True,  # fit workers into one GPU
+            request_plane=request_plane,
+            store_backend=store_backend,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
@@ -382,7 +449,8 @@ def test_trtllm_indexers_sync(
             block_size=TRTLLM_BLOCK_SIZE,
             model_name=MODEL_NAME,
             num_workers=N_TRTLLM_WORKERS,
-            store_backend="etcd",
+            store_backend=store_backend,
+            request_plane=request_plane,
         )
 
         logger.info("TRT-LLM indexers sync test completed successfully")

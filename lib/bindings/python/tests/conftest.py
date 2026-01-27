@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -11,14 +11,14 @@ TWO MODES OF OPERATION:
    - Requires: pytest-forked (uv pip install pytest-forked)
    - Tests using 'runtime' fixture MUST have @pytest.mark.forked
    - Safer, enables parallel execution
-   - Run: ENABLE_ISOLATED_ETCD_AND_NATS=1 pytest tests/test_metrics_registry.py -n auto
+   - Run: ENABLE_ISOLATED_ETCD_AND_NATS=1 pytest tests/ -n auto
 
 2. Default Ports Mode (ENABLE_ISOLATED_ETCD_AND_NATS=0, default):
    - All tests share NATS/ETCD on default ports (4222, 2379)
    - No pytest-forked required
    - No @pytest.mark.forked required
    - Faster for sequential runs, but NO parallel execution
-   - Run: pytest tests/test_metrics_registry.py
+   - Run: pytest tests/
 
 Performance comparison (32-core machine, 13 tests):
     Default ports (ENABLE_ISOLATED_ETCD_AND_NATS=0, default): 4.06s (sequential only)

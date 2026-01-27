@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -114,7 +114,7 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
-    @pytest.mark.performance
+    @pytest.mark.integration
     async def test_trtllm_aiconfigurator_single_model(self, llm_args):
         # Test that profile_sla works with the model & backend in the llm_args fixture.
         await run_profile(llm_args)
@@ -122,18 +122,17 @@ class TestProfileSlaAiconfigurator:
     @pytest.mark.parallel
     @pytest.mark.asyncio
     @pytest.mark.gpu_1
+    @pytest.mark.integration
     @pytest.mark.nightly
-    @pytest.mark.performance
     @pytest.mark.parametrize(
         "backend, aic_backend_version",
         [
             ("trtllm", None),
-            ("trtllm", "0.20.0"),
-            ("trtllm", "1.0.0rc3"),
+            ("trtllm", "1.2.0rc5"),
             ("vllm", None),
-            ("vllm", "0.11.0"),
+            ("vllm", "0.12.0"),
             ("sglang", None),
-            ("sglang", "0.5.1.post1"),
+            ("sglang", "0.5.6.post2"),
         ],
     )
     @pytest.mark.parametrize(

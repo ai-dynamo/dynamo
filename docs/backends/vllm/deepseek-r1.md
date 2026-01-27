@@ -1,11 +1,11 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 -->
 
 # Running Deepseek R1 with Wide EP
 
-Dynamo supports running Deepseek R1 with data parallel attention and wide expert parallelism. Each data parallel attention rank is a seperate dynamo component that will emit its own KV Events and Metrics. vLLM controls the expert parallelism using the flag `--enable-expert-parallel`
+Dynamo supports running Deepseek R1 with data parallel attention and wide expert parallelism. Each data parallel attention rank is a separate dynamo component that will emit its own KV Events and Metrics. vLLM controls the expert parallelism using the flag `--enable-expert-parallel`
 
 ## Instructions
 

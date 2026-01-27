@@ -1,14 +1,17 @@
 ## Inference Gateway Setup with Dynamo
 
-When integrating Dynamo with the Inference Gateway you could either use the default EPP image provided by the extension or use the custom Dynamo image.
+When integrating Dynamo with the Inference Gateway it is recommended to use the custom Dynamo EPP image.
 
-1. When using the Dynamo custom EPP image you will take advantage of the Dynamo router when EPP chooses the best worker to route the request to. This setup uses a custom Dynamo plugin `dyn-kv` to pick the best worker. In this case the Dynamo routing logic is moved upstream. We recommend this approach.
+1. **Dynamo EPP (Recommended):** The custom Dynamo EPP image integrates the Dynamo router directly into the gateway's endpoint picker. Using the `dyn-kv` plugin, it selects the optimal worker based on KV cache state and tokenized prompt before routing the request. The integration moves intelligent routing upstream to the gateway layer.
 
-2. When using the GAIE-provided image for the EPP, the Dynamo deployment is treated as a black box and the EPP would route round-robin. In this case GAIE just fans out the traffic, and the smarts only remain within the Dynamo graph. Use this if you have one Dynamo graph and do not want to obtain the Dynamo EPP image. This is a "backup" approach.
+2. **Standard EPP (Fallback):** You can use the default GAIE EPP image, which treats the Dynamo deployment as a black box and routes requests round-robin. Routing intelligence remains within the Dynamo graph itself. Use this approach if you have a single Dynamo graph and don't need the custom EPP image.
+
+EPP’s default kv-routing approach is not token-aware because the prompt is not tokenized. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
 
 The setup provided here uses the Dynamo custom EPP by default. Set `epp.useDynamo=false` in your deployment to pick the approach 2.
 
-EPP’s default kv-routing approach is token-aware only `by approximation` because the prompt is tokenized with a generic tokenizer unaware of the model deployed. But the Dynamo plugin uses a token-aware KV algorithm. It employs the dynamo router which implements kv routing by running your model’s tokenizer inline. The EPP plugin configuration lives in [`helm/dynamo-gaie/epp-config-dynamo.yaml`](helm/dynamo-gaie/epp-config-dynamo.yaml) per EPP [convention](https://gateway-api-inference-extension.sigs.k8s.io/guides/epp-configuration/config-text/).
+Dynamo Integration with the Inference Gateway supports Aggregated and Disaggregated Serving.
+If you want to use LoRA deploy Dynamo without the Inference Gateway or in the BlackBox approach with the Inference Gateway.
 
 Currently, these setups are only supported with the kGateway based Inference Gateway.
 
@@ -16,7 +19,18 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 - [Prerequisites](#prerequisites)
 - [Installation Steps](#installation-steps)
-- [Usage](#6-usage)
+  - [1. Install Dynamo Platform](#1-install-dynamo-platform)
+  - [2. Deploy Inference Gateway](#2-deploy-inference-gateway)
+  - [3. Deploy Your Model](#3-deploy-your-model)
+  - [4. Build EPP image](#4-build-epp-image)
+  - [5. Install Dynamo GAIE helm chart](#5-install-dynamo-gaie-helm-chart)
+  - [6. Verify Installation](#6-verify-installation)
+  - [7. Usage](#7-usage)
+  - [8. Deleting the installation](#8-deleting-the-installation)
+- [Gateway API Inference Extension Details](#gateway-api-inference-extension-integration)
+  - [Router bookkeeping operations](#router-bookkeeping-operations)
+  - [Header Routing Hints](#header-routing-hints)
+
 
 ## Prerequisites
 
@@ -27,51 +41,46 @@ Currently, these setups are only supported with the kGateway based Inference Gat
 
 ### 1. Install Dynamo Platform ###
 
-[See Quickstart Guide](../../docs/kubernetes/README.md) to install Dynamo Cloud.
+[See Quickstart Guide](../../docs/kubernetes/README.md) to install Dynamo Kubernetes Platform.
 
 ### 2. Deploy Inference Gateway ###
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
-You can use the script below or follow the steps manually.
-
-Script:
 
 ```bash
-./install_gaie_crd_kgateway.sh
+cd deploy/inference-gateway
+./scripts/install_gaie_crd_kgateway.sh
 ```
+**Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
 
-Manual steps:
-
-a. Deploy the Gateway API CRDs:
-
-```bash
-GATEWAY_API_VERSION=v1.3.0
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
-```
-
-b. Install the Inference Extension CRDs (Inference Model and Inference Pool CRDs)
+#### f. Verify the Gateway is running
 
 ```bash
-INFERENCE_EXTENSION_VERSION=v0.5.1
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$INFERENCE_EXTENSION_VERSION/manifests.yaml
-```
-
-```bash
-kubectl get gateway inference-gateway -n my-model
+kubectl get gateway inference-gateway
 
 # Sample output
 # NAME                CLASS      ADDRESS   PROGRAMMED   AGE
-# inference-gateway   kgateway   x.x.x.x   True         1m
+# inference-gateway   kgateway             True         1m
 ```
+
 
 ### 3. Deploy Your Model ###
 
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Make sure to enable kv-routing by adding the env var in the FrontEnd.
+```bash
+    mainContainer:
+      image: ...
+      env:
+        - name: DYN_ROUTER_MODE
+          value: "kv"
+```
 
 Sample commands to deploy model:
 
 ```bash
-cd <dynamo-source-root>/examples/backends/vllm/deploy
+cd <dynamo-source-root>
+cd examples/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
@@ -100,14 +109,42 @@ Create a model configuration file similar to the vllm_agg_qwen.yaml for your mod
 This file demonstrates the values needed for the Vllm Agg setup in [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml)
 Take a note of the model's block size provided in the model card.
 
-### 4. Install Dynamo GAIE helm chart ###
+### 4. Build EPP image
+
+You can either use the provided Dynamo FrontEnd image for the EPP image or you need to build your own Dynamo EPP custom image following the steps below.
+
+```bash
+# export env vars
+export DOCKER_SERVER=ghcr.io/nvidia/dynamo	# Container registry
+export IMAGE_TAG=YOUR-TAG # Or auto from git tag
+cd deploy/inference-gateway/epp
+make all # Do everything in one command
+# or make all-push to also push
+
+
+# Or step-by-step
+make dynamo-lib # Build Dynamo library and copy to project
+make image-load # Build Docker image and load locally
+make image-push # Build and push to registry
+make info # Check image tag
+```
+
+#### All-in-one Targets
+
+| Target | Description |
+|--------|-------------|
+| `make dynamo-lib` | Build Dynamo static library and copy to project |
+| `make all` | Build Dynamo lib + Docker image + load locally |
+| `make all-push` | Build Dynamo lib + Docker image + push to registry |
+
+### 5. Install Dynamo GAIE helm chart ###
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 
 Deploy the Inference Gateway resources to your Kubernetes cluster by running the command below.
 
 ```bash
-cd deploy/inference-gateway
+cd deploy/inference-gateway/
 
 # Export the Dynamo image you have used when deploying your model in Step 3.
 export DYNAMO_IMAGE=<the-dynamo-image-you-have-used-when-deploying-the-model>
@@ -117,6 +154,12 @@ export EPP_IMAGE=<the-epp-image-you-built>
 
 ```bash
 helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE
+```
+
+By default, the Kubernetes discovery mechanism is used. If you prefer etcd, please use the `--set epp.dynamo.useEtcd=true` flag below.
+
+```bash
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set-string extension.image=$EPP_IMAGE --set epp.dynamo.useEtcd=true
 ```
 
 Key configurations include:
@@ -133,7 +176,7 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
 
 - Overwrite the `DYN_NAMESPACE` env var if needed to match your model's dynamo namespace.
 - Set `DYNAMO_BUSY_THRESHOLD` to configure the upper bound on how “full” a worker can be (often derived from kv_active_blocks or other load metrics) before the router skips it. If the selected worker exceeds this value, routing falls back to the next best candidate. By default the value is negative meaning this is not enabled.
-- Set `DYNAMO_ROUTER_REPLICA_SYNC=true` to enable a background watcher to keep multiple router instances in sync (important if you run more than one KV router per component).
+- Set `DYNAMO_ENFORCE_DISAGG=true` if you want to enforce every request being served in the disaggregated manner. By default it is false meaning if the the prefill worker is not available the request will be served in the aggregated manner.
 - By default the Dynamo plugin uses KV routing. You can expose `DYNAMO_USE_KV_ROUTING=false`  in your [values-dynamo-epp.yaml] if you prefer to route in the round-robin fashion.
 - If using kv-routing:
   - Overwrite the `DYNAMO_KV_BLOCK_SIZE` in your [values-dynamo-epp.yaml](./values-dynamo-epp.yaml) to match your model's block size.The `DYNAMO_KV_BLOCK_SIZE` env var is ***MANDATORY*** to prevent silent KV routing failures.
@@ -143,76 +186,25 @@ You can configure the plugin by setting environment vars in your [values-dynamo-
   - See the [KV cache routing design](../../docs/router/kv_cache_routing.md) for details.
 
 
-
-Dynamo provides a custom routing plugin `pkg/epp/scheduling/plugins/dynamo_kv_scorer/plugin.go` to perform efficient kv routing.
-The Dynamo router is built as a static library, the EPP router will call to provide fast inference.
-You can either use the special FrontEnd image for the EPP_IMAGE in the Helm deployment command and proceed to the step 2 or you can build the image yourself following the steps below.
-
-##### 1. Build the custom EPP image #####
-
-If you choose to build your own image use the steps below.
-
-##### 1.1 Clone the official GAIE repo in a separate folder #####
-
-```bash
-git clone https://github.com/kubernetes-sigs/gateway-api-inference-extension.git
-cd gateway-api-inference-extension
-git checkout v0.5.1
-```
-
-##### 1.2 Build the Dynamo Custom EPP #####
-
-###### 1.2.1 Clone the official EPP repo ######
-
-```bash
-# Clone the official GAIE repo in a separate folder
-cd path/to/gateway-api-inference-extension
-git clone git@github.com:kubernetes-sigs/gateway-api-inference-extension.git
-git checkout v0.5.1
-```
-
-###### 1.2.2 Run the script to build the EPP image ######
-
-The script will apply a custom patch to the code with your GAIE repo and build the image for you to use.
-
-```bash
-# Use your custom paths
-export DYNAMO_DIR=/path/to/dynamo
-export GAIE_DIR=/path/to/gateway-api-inference-extension
-
-# Run the script
-cd deploy/inference-gateway
-./build-epp-dynamo.sh
-```
-
-Under the hood the script applies the Dynamo Patch to the EPP code base; creates a Dynamo Router static library and builds a custom EPP image with it.
-Re-tag the freshly built image and push it to your registry.
-
-```bash
-docker images
-docker tag <your-new-id> <your-image-tag>
-docker push  <your-image-tag>
-```
-
-
 **Note**
-You can also use the standard EPP image`us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0`. For the basic black box integration run:
+You can also use the standard EPP image i.e. `us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v1.2.1` for the basic black box integration.
 
 ```bash
 cd deploy/inference-gateway
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
+
 # Optionally export the standard EPP image if you do not want to use the default we suggest.
 export EPP_IMAGE=us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
-helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set epp.useDynamo=false
+helm upgrade --install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml --set epp.useDynamo=false --set-string extension.image=$EPP_IMAGE
 # Optionally overwrite the image --set-string extension.image=$EPP_IMAGE
 ```
 
-### 5. Verify Installation ###
+### 6. Verify Installation ###
 
 Check that all resources are properly deployed:
 
 ```bash
 kubectl get inferencepool
-kubectl get inferencemodel
 kubectl get httproute
 kubectl get service
 kubectl get gateway
@@ -225,24 +217,16 @@ Sample output:
 NAME        AGE
 qwen-pool   33m
 
-# kubectl get inferencemodel
-NAME         MODEL NAME        INFERENCE POOL   CRITICALITY   AGE
-qwen-model   Qwen/Qwen3-0.6B   qwen-pool        Critical      33m
-
 # kubectl get httproute
 NAME        HOSTNAMES   AGE
 qwen-route               33m
 ```
 
-### 6. Usage ###
+### 7. Usage ###
 
 The Inference Gateway provides HTTP endpoints for model inference.
 
 #### 1: Populate gateway URL for your k8s cluster ####
-
-```bash
-export GATEWAY_URL=<Gateway-URL>
-```
 
 To test the gateway in minikube, use the following command:
 a. User minikube tunnel to expose the gateway to the host
@@ -251,10 +235,10 @@ a. User minikube tunnel to expose the gateway to the host
 ```bash
 # in first terminal
 ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is not already running.
-minikube tunnel & # start the tunnel
+minikube tunnel # start the tunnel
 
 # in second terminal where you want to send inference requests
-GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o yaml -o jsonpath='{.spec.clusterIP}')
+GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}')
 echo $GATEWAY_URL
 ```
 
@@ -349,11 +333,52 @@ Sample inference output:
 }
 ```
 
-### 7. Deleting the installation ###
+### 8. Deleting the installation ###
 
 If you need to uninstall run:
 
 ```bash
 kubectl delete dynamoGraphDeployment vllm-agg
 helm uninstall dynamo-gaie -n my-model
+
+# To uninstall GAIE
+# 1. Delete the inference-gateway
+kubectl delete gateway inference-gateway --ignore-not-found
+
+# 2. Uninstall kgateway helm releases
+helm uninstall kgateway -n kgateway-system
+helm uninstall kgateway-crds -n kgateway-system
+
+# 3. Delete the kgateway-system namespace (optional, cleans up everything in it)
+helm uninstall kgateway --namespace kgateway-system
+kubectl delete namespace kgateway-system --ignore-not-found
+
+# 4. Delete the Inference Extension CRDs
+IGW_LATEST_RELEASE=v1.2.1
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/${IGW_LATEST_RELEASE}/manifests.yaml --ignore-not-found
+
+# 5. Delete the Gateway API CRDs
+GATEWAY_API_VERSION=v1.4.1
+kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml --ignore-not-found
 ```
+
+## Gateway API Inference Extension Integration
+
+This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
+
+### Router bookkeeping operations
+
+EPP performs Dynamo router book keeping operations so the FrontEnd's Router does not have to sync its state.
+
+
+### Header Routing Hints
+
+Since v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
+The plugins set HTTP headers that are forwarded to the backend workers.
+
+#### Headers Set by Dynamo Plugins
+
+| Header | Description | Set By |
+|--------|-------------|--------|
+| `x-worker-instance-id` | Primary worker ID (decode worker in disagg mode) | kv-aware-scorer |
+| `x-prefill-instance-id` | Prefill worker ID (disaggregated mode only) | kv-aware-scorer |

@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -762,6 +762,17 @@ Used to integrate EPP functionality within Dynamo.
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
+
+## ffmpeg
+
+**License:** GNU Lesser General Public License v2.1 or later (LGPL-2.1+)
+**Copyright:** Copyright (C) FFmpeg developers
+
+FFmpeg - a complete, cross-platform solution to record, convert and stream audio and video.
+
+The complete text of the LGPL-2.1 license can be found at: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html
+
+Note: FFmpeg may be compiled with GPL or non-free components. This projects ensures only LGPL components are included.
 
 ---
 

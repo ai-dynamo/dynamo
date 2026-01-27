@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Unit tests for autodeploy backend support in TRTLLM."""
@@ -89,4 +89,4 @@ async def test_get_llm_engine_forwards_backend(backend):
         async with get_llm_engine(engine_args=engine_args):
             pass
 
-    mocked_engine.assert_called_once_with(engine_args)
+    mocked_engine.assert_called_once_with(engine_args, None)

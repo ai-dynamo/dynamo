@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::pin::Pin;
@@ -10,12 +10,15 @@ use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryQuery, DiscoverySpec, DiscoveryStream,
+    Discovery, DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId, DiscoveryQuery,
+    DiscoverySpec, DiscoveryStream, EndpointInstanceId, EventChannelInstanceId,
+    ModelCardInstanceId,
 };
 use crate::storage::kv;
 
 const INSTANCES_BUCKET: &str = "v1/instances";
 const MODELS_BUCKET: &str = "v1/mdc";
+const EVENT_CHANNELS_BUCKET: &str = "v1/event_channels";
 
 /// Discovery implementation backed by a kv::Store
 pub struct KVStoreDiscovery {
@@ -39,6 +42,16 @@ impl KVStoreDiscovery {
     /// Build the key path for a model (relative to bucket, not absolute)
     fn model_key(namespace: &str, component: &str, endpoint: &str, instance_id: u64) -> String {
         format!("{}/{}/{}/{:x}", namespace, component, endpoint, instance_id)
+    }
+
+    /// Build the key path for an event channel relative to bucket, not absolute)
+    fn event_channel_key(
+        namespace: &str,
+        component: &str,
+        topic: &str,
+        instance_id: u64,
+    ) -> String {
+        format!("{}/{}/{}/{:x}", namespace, component, topic, instance_id)
     }
 
     /// Extract prefix for querying based on discovery query
@@ -80,6 +93,22 @@ impl KVStoreDiscovery {
                 endpoint,
             } => {
                 format!("{}/{}/{}/{}", MODELS_BUCKET, namespace, component, endpoint)
+            }
+            DiscoveryQuery::EventChannels(query) => {
+                let mut path = EVENT_CHANNELS_BUCKET.to_string();
+                if let Some(ns) = &query.namespace {
+                    path.push('/');
+                    path.push_str(ns);
+                    if let Some(comp) = &query.component {
+                        path.push('/');
+                        path.push_str(comp);
+                        if let Some(topic) = &query.topic {
+                            path.push('/');
+                            path.push_str(topic);
+                        }
+                    }
+                }
+                path
             }
         }
     }
@@ -189,6 +218,30 @@ impl Discovery for KVStoreDiscovery {
                 }
                 (MODELS_BUCKET, key)
             }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                topic,
+                instance_id,
+                ..
+            } => {
+                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                // TODO: bis - remove this info log
+                tracing::info!(
+                    "KVStoreDiscovery::register: EventChannel bucket={}, key={}",
+                    EVENT_CHANNELS_BUCKET,
+                    key
+                );
+                tracing::debug!(
+                    "KVStoreDiscovery::register: Registering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    topic,
+                    key
+                );
+                (EVENT_CHANNELS_BUCKET, key)
+            }
         };
 
         // Serialize the instance
@@ -283,6 +336,24 @@ impl Discovery for KVStoreDiscovery {
                 }
                 (MODELS_BUCKET, key)
             }
+            DiscoveryInstance::EventChannel {
+                namespace,
+                component,
+                topic,
+                instance_id,
+                ..
+            } => {
+                let key = Self::event_channel_key(namespace, component, topic, *instance_id);
+                tracing::debug!(
+                    "KVStoreDiscovery::unregister: Unregistering event channel instance_id={}, namespace={}, component={}, topic={}, key={}",
+                    instance_id,
+                    namespace,
+                    component,
+                    topic,
+                    key
+                );
+                (EVENT_CHANNELS_BUCKET, key)
+            }
         };
 
         // Get the bucket - if it doesn't exist, the instance is already removed from the KV store
@@ -306,17 +377,32 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
+        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
+            EVENT_CHANNELS_BUCKET
         } else {
             MODELS_BUCKET
         };
 
         // Get bucket - if it doesn't exist, return empty list
         let Some(bucket) = self.store.get_bucket(bucket_name).await? else {
+            tracing::info!(
+                "KVStoreDiscovery::list: bucket missing for query={:?}, prefix={}, bucket={}",
+                query,
+                prefix,
+                bucket_name
+            );
             return Ok(Vec::new());
         };
 
         // Get all entries from the bucket
         let entries = bucket.entries().await?;
+        tracing::info!(
+            "KVStoreDiscovery::list: query={:?}, prefix={}, bucket={}, entries={}",
+            query,
+            prefix,
+            bucket_name,
+            entries.len()
+        );
 
         // Filter by prefix and deserialize
         let mut instances = Vec::new();
@@ -342,6 +428,8 @@ impl Discovery for KVStoreDiscovery {
         let prefix = Self::query_prefix(&query);
         let bucket_name = if prefix.starts_with(INSTANCES_BUCKET) {
             INSTANCES_BUCKET
+        } else if prefix.starts_with(EVENT_CHANNELS_BUCKET) {
+            EVENT_CHANNELS_BUCKET
         } else {
             MODELS_BUCKET
         };
@@ -394,57 +482,105 @@ impl Discovery for KVStoreDiscovery {
                             continue;
                         }
 
-                        // Extract instance_id from the key path, not the value
-                        // Delete events have empty values in etcd, so we parse the instance_id from the key
+                        // Extract DiscoveryInstanceId from the key path
+                        // Delete events have empty values in etcd, so we reconstruct the ID from the key
                         //
                         // Key format (relative to bucket, after stripping bucket prefix):
-                        // - Instances: "namespace/component/endpoint/{instance_id:x}"
+                        // - Endpoints: "namespace/component/endpoint/{instance_id:x}"
                         // - Models: "namespace/component/endpoint/{instance_id:x}"
                         // - LoRA models: "namespace/component/endpoint/{instance_id:x}/{lora_slug}"
+                        // - EventChannels: "namespace/component/{instance_id:x}"
                         //
-                        // The instance_id is always at index 3 in the RELATIVE key (after bucket prefix).
                         // Use strip_bucket_prefix for consistency with matches_prefix().
                         let relative_key = Self::strip_bucket_prefix(key_str, bucket_name);
                         let key_parts: Vec<&str> = relative_key.split('/').collect();
 
-                        // In relative key: namespace/component/endpoint/{instance_id}[/{lora_slug}]
-                        // instance_id is at index 3
-                        let instance_id_index = 3;
+                        // EventChannels need 4 parts (namespace/component/topic/instance_id)
+                        // Endpoints/Models need at least 4 parts
+                        let min_parts = 4;
+                        if key_parts.len() < min_parts {
+                            tracing::warn!(
+                                key = %key_str,
+                                relative_key = %relative_key,
+                                actual_parts = key_parts.len(),
+                                expected_min = min_parts,
+                                bucket = bucket_name,
+                                "Delete event key doesn't have enough parts"
+                            );
+                            continue;
+                        }
 
-                        match key_parts.get(instance_id_index) {
-                            Some(instance_id_hex) => {
-                                match u64::from_str_radix(instance_id_hex, 16) {
-                                    Ok(instance_id) => {
-                                        tracing::debug!(
-                                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for instance_id={:x}, key={}",
-                                            instance_id,
-                                            key_str
-                                        );
-                                        Some(DiscoveryEvent::Removed(instance_id))
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            key = %key_str,
-                                            relative_key = %relative_key,
-                                            error = %e,
-                                            instance_id_hex = %instance_id_hex,
-                                            "Failed to parse instance_id hex from deleted key"
-                                        );
-                                        None
-                                    }
+                        let namespace = key_parts[0].to_string();
+                        let component = key_parts[1].to_string();
+
+                        // Handle EventChannel (4 parts: namespace/component/topic/instance_id) vs Endpoints/Models
+                        let id = if bucket_name == EVENT_CHANNELS_BUCKET {
+                            // EventChannel keys: namespace/component/topic/{instance_id:x}
+                            let topic = key_parts[2].to_string();
+                            let instance_id_hex = key_parts[3];
+                            match u64::from_str_radix(instance_id_hex, 16) {
+                                Ok(instance_id) => {
+                                    DiscoveryInstanceId::EventChannel(EventChannelInstanceId {
+                                        namespace,
+                                        component,
+                                        topic,
+                                        instance_id,
+                                    })
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        key = %key_str,
+                                        error = %e,
+                                        instance_id_hex = %instance_id_hex,
+                                        "Failed to parse event channel instance_id hex"
+                                    );
+                                    continue;
                                 }
                             }
-                            None => {
-                                tracing::warn!(
-                                    key = %key_str,
-                                    relative_key = %relative_key,
-                                    expected_index = instance_id_index,
-                                    actual_parts = key_parts.len(),
-                                    "Delete event key doesn't have instance_id at expected position"
-                                );
-                                None
+                        } else {
+                            let endpoint = key_parts[2].to_string();
+                            let instance_id_hex = key_parts[3];
+
+                            match u64::from_str_radix(instance_id_hex, 16) {
+                                Ok(instance_id) => {
+                                    // Construct the appropriate DiscoveryInstanceId based on bucket type
+                                    if bucket_name == INSTANCES_BUCKET {
+                                        DiscoveryInstanceId::Endpoint(EndpointInstanceId {
+                                            namespace,
+                                            component,
+                                            endpoint,
+                                            instance_id,
+                                        })
+                                    } else {
+                                        // Model - check for LoRA suffix (5th part if present)
+                                        let model_suffix = key_parts.get(4).map(|s| s.to_string());
+                                        DiscoveryInstanceId::Model(ModelCardInstanceId {
+                                            namespace,
+                                            component,
+                                            endpoint,
+                                            instance_id,
+                                            model_suffix,
+                                        })
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        key = %key_str,
+                                        error = %e,
+                                        instance_id_hex = %instance_id_hex,
+                                        "Failed to parse instance_id hex from deleted key"
+                                    );
+                                    continue;
+                                }
                             }
-                        }
+                        };
+
+                        tracing::debug!(
+                            "KVStoreDiscovery::list_and_watch: Emitting Removed event for {:?}, key={}",
+                            id,
+                            key_str
+                        );
+                        Some(DiscoveryEvent::Removed(id))
                     }
                 };
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod factory;
@@ -649,6 +649,26 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Drop for MutableBlock<S,
             && self.return_tx.send(block).is_err()
         {
             tracing::warn!("block pool shutdown before block was returned");
+        }
+
+        // Iteratively drop the parent chain to avoid stack overflow.
+        // Without this, dropping a leaf block with thousands of ancestors would cause
+        // thousands of nested drop() calls, overflowing the stack.
+        let mut current_parent = self.parent.take();
+        while let Some(arc_parent) = current_parent {
+            // Try to get exclusive ownership of the parent
+            match Arc::try_unwrap(arc_parent) {
+                Ok(mut parent) => {
+                    // We own this parent exclusively - take its parent to continue the chain.
+                    // When `parent` drops at the end of this scope, its `parent` field is None,
+                    // so no recursive drop occurs.
+                    current_parent = parent.parent.take();
+                }
+                Err(_) => {
+                    // Someone else has a reference to this parent, they'll handle the drop
+                    break;
+                }
+            }
         }
     }
 }

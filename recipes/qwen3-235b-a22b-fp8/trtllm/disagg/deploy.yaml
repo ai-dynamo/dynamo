@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: v1
 kind: ConfigMap
@@ -70,7 +70,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: qwen3-235b-a22b-disagg
       replicas: 1
       extraPodSpec:
         affinity:
@@ -84,7 +83,7 @@ spec:
                     - qwen3-235b-a22b-disagg-frontend
               topologyKey: kubernetes.io/hostname
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           args:
             - python3 -m dynamo.frontend --router-mode kv --http-port 8000
           command:
@@ -93,7 +92,6 @@ spec:
     TRTLLMPrefillWorker:
       componentType: worker
       subComponentType: prefill
-      dynamoNamespace: qwen3-235b-a22b-disagg
       envFromSecret: hf-token-secret
       replicas: 6
       resources:
@@ -114,10 +112,12 @@ spec:
         mainContainer:
           env:
             - name: MODEL_PATH
-              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
+              value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/prefill.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh
@@ -145,7 +145,6 @@ spec:
     TRTLLMDecodeWorker:
       componentType: worker
       subComponentType: decode
-      dynamoNamespace: qwen3-235b-a22b-disagg
       envFromSecret: hf-token-secret
       replicas: 1
       resources:
@@ -166,10 +165,12 @@ spec:
         mainContainer:
           env:
             - name: MODEL_PATH
-              value: /mnt/model-cache/hub/models--Qwen--Qwen3-235B-A22B-FP8/snapshots/39eb2b067ea6b8e3e1dd97d3cd0c7ffeaf3e1a35
+              value: Qwen/Qwen3-235B-A22B-FP8
+            - name: HF_HOME
+              value: /mnt/model-cache
             - name: ENGINE_ARGS
               value: /engine_configs/decode.yaml
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.0
           workingDir: /workspace/components/backends/trtllm
           command:
             - /bin/sh

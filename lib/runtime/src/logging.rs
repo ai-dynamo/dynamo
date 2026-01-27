@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Dynamo Distributed Logging Module.
@@ -47,7 +47,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{filter::Directive, fmt};
 
-use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
+use crate::config::{disable_ansi_logging, jsonl_logging_enabled, span_events_enabled};
 use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
 use axum::http;
@@ -88,6 +88,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::environment_names::logging as env_logging;
+
+use dynamo_config::env_is_truthy;
 
 /// Default log level
 const DEFAULT_FILTER_LEVEL: &str = "info";
@@ -130,11 +132,9 @@ impl Default for LoggingConfig {
     }
 }
 
-/// Check if OTLP trace exporting is enabled (set OTEL_EXPORT_ENABLED to "1" to enable)
+/// Check if OTLP trace exporting is enabled (accepts: "1", "true", "on", "yes" - case insensitive)
 fn otlp_exporter_enabled() -> bool {
-    std::env::var(env_logging::otlp::OTEL_EXPORT_ENABLED)
-        .map(|v| v == "1")
-        .unwrap_or(false)
+    env_is_truthy(env_logging::otlp::OTEL_EXPORT_ENABLED)
 }
 
 /// Get the service name from environment or use default
@@ -184,6 +184,22 @@ struct PendingDistributedTraceContext {
     tracestate: Option<String>,
     x_request_id: Option<String>,
     x_dynamo_request_id: Option<String>,
+}
+
+/// Macro to emit a tracing event at a dynamic level with a custom target.
+macro_rules! emit_at_level {
+    ($level:expr, target: $target:expr, $($arg:tt)*) => {
+        // tracing::event! requires a compile-time constant level, so we must match
+        // on the runtime level and use a literal Level constant in each arm.
+        // See: https://github.com/tokio-rs/tracing/issues/2730
+        match $level {
+            &tracing::Level::ERROR => tracing::event!(target: $target, tracing::Level::ERROR, $($arg)*),
+            &tracing::Level::WARN => tracing::event!(target: $target, tracing::Level::WARN, $($arg)*),
+            &tracing::Level::INFO => tracing::event!(target: $target, tracing::Level::INFO, $($arg)*),
+            &tracing::Level::DEBUG => tracing::event!(target: $target, tracing::Level::DEBUG, $($arg)*),
+            &tracing::Level::TRACE => tracing::event!(target: $target, tracing::Level::TRACE, $($arg)*),
+        }
+    };
 }
 
 impl DistributedTraceContext {
@@ -278,6 +294,8 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
     let version = format!("{:?}", req.version());
     let trace_parent = TraceParent::from_headers(req.headers());
 
+    let otel_context = extract_otel_context_from_http_headers(req.headers());
+
     let span = tracing::info_span!(
         "http-request",
         method = %method,
@@ -286,10 +304,50 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
         x_request_id = trace_parent.x_request_id,
-    x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+        x_dynamo_request_id = trace_parent.x_dynamo_request_id,
     );
 
+    if let Some(context) = otel_context {
+        let _ = span.set_parent(context);
+    }
+
     span
+}
+
+/// Extract OpenTelemetry context from HTTP headers for distributed tracing
+fn extract_otel_context_from_http_headers(
+    headers: &http::HeaderMap,
+) -> Option<opentelemetry::Context> {
+    let traceparent_value = headers.get("traceparent")?.to_str().ok()?;
+
+    struct HttpHeaderExtractor<'a>(&'a http::HeaderMap);
+
+    impl<'a> Extractor for HttpHeaderExtractor<'a> {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).and_then(|v| v.to_str().ok())
+        }
+
+        fn keys(&self) -> Vec<&str> {
+            vec!["traceparent", "tracestate"]
+                .into_iter()
+                .filter(|&key| self.0.get(key).is_some())
+                .collect()
+        }
+    }
+
+    // Early return if traceparent is empty
+    if traceparent_value.is_empty() {
+        return None;
+    }
+
+    let extractor = HttpHeaderExtractor(headers);
+    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
+
+    if otel_context.span().span_context().is_valid() {
+        Some(otel_context)
+    } else {
+        None
+    }
 }
 
 /// Create a handle_payload span from NATS headers with component context
@@ -335,6 +393,93 @@ pub fn make_handle_payload_span(
     }
 }
 
+/// Create a handle_payload span from TCP/HashMap headers with component context
+pub fn make_handle_payload_span_from_tcp_headers(
+    headers: &std::collections::HashMap<String, String>,
+    component: &str,
+    endpoint: &str,
+    namespace: &str,
+    instance_id: u64,
+) -> Span {
+    let (otel_context, trace_id, parent_span_id) = extract_otel_context_from_tcp_headers(headers);
+    let x_request_id = headers.get("x-request-id").cloned();
+    let x_dynamo_request_id = headers.get("x-dynamo-request-id").cloned();
+    let tracestate = headers.get("tracestate").cloned();
+
+    if let (Some(trace_id), Some(parent_id)) = (trace_id.as_ref(), parent_span_id.as_ref()) {
+        let span = tracing::info_span!(
+            "handle_payload",
+            trace_id = trace_id.as_str(),
+            parent_id = parent_id.as_str(),
+            x_request_id = x_request_id,
+            x_dynamo_request_id = x_dynamo_request_id,
+            tracestate = tracestate,
+            component = component,
+            endpoint = endpoint,
+            namespace = namespace,
+            instance_id = instance_id,
+        );
+
+        if let Some(context) = otel_context {
+            let _ = span.set_parent(context);
+        }
+        span
+    } else {
+        tracing::info_span!(
+            "handle_payload",
+            x_request_id = x_request_id,
+            x_dynamo_request_id = x_dynamo_request_id,
+            tracestate = tracestate,
+            component = component,
+            endpoint = endpoint,
+            namespace = namespace,
+            instance_id = instance_id,
+        )
+    }
+}
+
+/// Extract OpenTelemetry trace context from TCP/HashMap headers for distributed tracing
+fn extract_otel_context_from_tcp_headers(
+    headers: &std::collections::HashMap<String, String>,
+) -> (
+    Option<opentelemetry::Context>,
+    Option<String>,
+    Option<String>,
+) {
+    let traceparent_value = match headers.get("traceparent") {
+        Some(value) => value.as_str(),
+        None => return (None, None, None),
+    };
+
+    let (trace_id, parent_span_id) = parse_traceparent(traceparent_value);
+
+    struct TcpHeaderExtractor<'a>(&'a std::collections::HashMap<String, String>);
+
+    impl<'a> Extractor for TcpHeaderExtractor<'a> {
+        fn get(&self, key: &str) -> Option<&str> {
+            self.0.get(key).map(|s| s.as_str())
+        }
+
+        fn keys(&self) -> Vec<&str> {
+            vec!["traceparent", "tracestate"]
+                .into_iter()
+                .filter(|&key| self.0.get(key).is_some())
+                .collect()
+        }
+    }
+
+    let extractor = TcpHeaderExtractor(headers);
+    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
+
+    let context_with_trace = if otel_context.span().span_context().is_valid() {
+        Some(otel_context)
+    } else {
+        None
+    };
+
+    (context_with_trace, trace_id, parent_span_id)
+}
+
 /// Extract OpenTelemetry trace context from NATS headers for distributed tracing
 pub fn extract_otel_context_from_nats_headers(
     headers: &async_nats::HeaderMap,
@@ -366,8 +511,7 @@ pub fn extract_otel_context_from_nats_headers(
     }
 
     let extractor = NatsHeaderExtractor(headers);
-    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
-    let otel_context = propagator.extract(&extractor);
+    let otel_context = TRACE_PROPAGATOR.extract(&extractor);
 
     let context_with_trace = if otel_context.span().span_context().is_valid() {
         Some(otel_context)
@@ -394,8 +538,7 @@ pub fn inject_otel_context_into_nats_headers(
     }
 
     let mut injector = NatsHeaderInjector(headers);
-    let propagator = opentelemetry_sdk::propagation::TraceContextPropagator::new();
-    propagator.inject_context(&otel_context, &mut injector);
+    TRACE_PROPAGATOR.inject_context(&otel_context, &mut injector);
 }
 
 /// Inject trace context from current span into NATS headers
@@ -684,7 +827,7 @@ where
                 panic!("span_id is not set in on_enter - OtelData may not be properly initialized");
             }
 
-            // Re-acquire mutable borrow to insert the finalized context
+            let span_level = span.metadata().level();
             let mut extensions = span.extensions_mut();
             extensions.insert(DistributedTraceContext {
                 trace_id: trace_id.expect("Trace ID must be set"),
@@ -696,6 +839,14 @@ where
                 x_request_id,
                 x_dynamo_request_id,
             });
+
+            drop(extensions);
+
+            // Emit SPAN_FIRST_ENTRY event. This only runs if the span passed the layer's filter
+            // (on_enter is not called for filtered-out spans), so no additional check needed.
+            if span_events_enabled() {
+                emit_at_level!(span_level, target: "span_event", message = "SPAN_FIRST_ENTRY");
+            }
         }
     }
 }
@@ -754,8 +905,14 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let otel_filter_layer = filters(load_config());
 
     if jsonl_logging_enabled() {
+        let span_events = if span_events_enabled() {
+            FmtSpan::CLOSE
+        } else {
+            FmtSpan::NONE
+        };
         let l = fmt::layer()
             .with_ansi(false)
+            .with_span_events(span_events)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
             .with_filter(fmt_filter_layer);
@@ -854,6 +1011,13 @@ fn filters(config: LoggingConfig) -> EnvFilter {
             }
         }
     }
+
+    // When span events are enabled, allow "span_event" target at all levels
+    // This ensures SPAN_FIRST_ENTRY events pass the filter when emitted from on_enter
+    if span_events_enabled() {
+        filter_layer = filter_layer.add_directive("span_event=trace".parse().unwrap());
+    }
+
     filter_layer
 }
 
@@ -898,7 +1062,7 @@ struct JsonLog<'a> {
     file: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     line: Option<u32>,
-    target: &'a str,
+    target: String,
     message: serde_json::Value,
     #[serde(flatten)]
     fields: BTreeMap<String, serde_json::Value>,
@@ -948,6 +1112,11 @@ impl CustomJsonFormatter {
 
 use once_cell::sync::Lazy;
 use regex::Regex;
+
+/// Static W3C Trace Context propagator instance to avoid repeated allocations
+static TRACE_PROPAGATOR: Lazy<opentelemetry_sdk::propagation::TraceContextPropagator> =
+    Lazy::new(opentelemetry_sdk::propagation::TraceContextPropagator::new);
+
 fn parse_tracing_duration(s: &str) -> Option<u64> {
     static RE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r#"^["']?\s*([0-9.]+)\s*(µs|us|ns|ms|s)\s*["']?$"#).unwrap());
@@ -981,6 +1150,8 @@ where
             .fields
             .remove("message")
             .unwrap_or(serde_json::Value::String("".to_string()));
+
+        let mut target_override: Option<String> = None;
 
         let current_span = event
             .parent()
@@ -1025,11 +1196,14 @@ where
                 );
             }
 
-            message = match message.as_str() {
-                Some("new") => serde_json::Value::String("SPAN_CREATED".to_string()),
-                Some("close") => serde_json::Value::String("SPAN_CLOSED".to_string()),
-                _ => message.clone(),
-            };
+            let is_span_created = message.as_str() == Some("SPAN_FIRST_ENTRY");
+            let is_span_closed = message.as_str() == Some("close");
+            if is_span_created || is_span_closed {
+                target_override = Some(span.metadata().target().to_string());
+                if is_span_closed {
+                    message = serde_json::Value::String("SPAN_CLOSED".to_string());
+                }
+            }
 
             visitor.fields.insert(
                 "span_name".to_string(),
@@ -1111,7 +1285,7 @@ where
             time,
             file: metadata.file(),
             line: metadata.line(),
-            target: metadata.target(),
+            target: target_override.unwrap_or_else(|| metadata.target().to_string()),
             message,
             fields: visitor.fields,
         };
@@ -1484,6 +1658,230 @@ pub mod tests {
             })(),
         )
         .await;
+        Ok(())
+    }
+
+    // Test functions at different log levels for filtering tests
+    #[tracing::instrument(level = "debug", skip_all)]
+    async fn debug_level_span() {
+        tracing::debug!("inside debug span");
+    }
+
+    #[tracing::instrument(level = "info", skip_all)]
+    async fn info_level_span() {
+        tracing::info!("inside info span");
+    }
+
+    #[tracing::instrument(level = "warn", skip_all)]
+    async fn warn_level_span() {
+        tracing::warn!("inside warn span");
+    }
+
+    // Span from a different target - should be FILTERED OUT at info level
+    // because the filter is warn,dynamo_runtime::logging::tests=debug
+    #[tracing::instrument(level = "info", target = "other_module", skip_all)]
+    async fn other_target_info_span() {
+        tracing::info!(target: "other_module", "inside other target span");
+    }
+
+    /// Comprehensive test for span events covering:
+    /// - SPAN_FIRST_ENTRY and SPAN_CLOSED event emission
+    /// - Trace context (trace_id, span_id) in span events
+    /// - Timing information in SPAN_CLOSED events
+    /// - Level-based filtering (positive: allowed levels pass, negative: filtered levels blocked)
+    /// - Target-based filtering (spans from allowed targets pass even at lower levels)
+    ///
+    /// This test runs in a subprocess to ensure logging is initialized with our specific
+    /// filter settings (DYN_LOG=warn,dynamo_runtime::logging::tests=debug), avoiding
+    /// interference from other tests that may have initialized logging first.
+    #[test]
+    fn test_span_events() {
+        use std::process::Command;
+
+        // Run cargo test for the subprocess test with specific env vars
+        let output = Command::new("cargo")
+            .args([
+                "test",
+                "-p",
+                "dynamo-runtime",
+                "test_span_events_subprocess",
+                "--",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("DYN_LOGGING_JSONL", "1")
+            .env("DYN_LOGGING_SPAN_EVENTS", "1")
+            .env("DYN_LOG", "warn,dynamo_runtime::logging::tests=debug")
+            .output()
+            .expect("Failed to execute subprocess test");
+
+        // Print output for debugging
+        if !output.status.success() {
+            eprintln!(
+                "=== STDOUT ===\n{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            eprintln!(
+                "=== STDERR ===\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        assert!(
+            output.status.success(),
+            "Subprocess test failed with exit code: {:?}",
+            output.status.code()
+        );
+    }
+
+    /// Subprocess test that performs the actual span event validation.
+    /// This is called by test_span_events in a separate process with controlled env vars.
+    #[tokio::test]
+    async fn test_span_events_subprocess() -> Result<()> {
+        // Skip if not running as subprocess (env vars not set)
+        if std::env::var("DYN_LOGGING_SPAN_EVENTS").is_err() {
+            return Ok(());
+        }
+
+        let tmp_file = NamedTempFile::new().unwrap();
+        let file_name = tmp_file.path().to_str().unwrap();
+        let guard = StderrOverride::from_file(file_name)?;
+        init();
+
+        // Run parent/child/grandchild spans (all INFO level by default)
+        parent().await;
+
+        // Run spans at explicit levels from our test module
+        debug_level_span().await;
+        info_level_span().await;
+        warn_level_span().await;
+
+        // Run span from different target (should be filtered out)
+        other_target_info_span().await;
+
+        drop(guard);
+
+        let lines = load_log(file_name)?;
+
+        // Helper to check if a span event exists
+        let has_span_event = |msg: &str, span_name: &str| {
+            lines.iter().any(|log| {
+                log.get("message").and_then(|v| v.as_str()) == Some(msg)
+                    && log.get("span_name").and_then(|v| v.as_str()) == Some(span_name)
+            })
+        };
+
+        // Helper to get span events
+        let get_span_events = |msg: &str| -> Vec<&serde_json::Value> {
+            lines
+                .iter()
+                .filter(|log| log.get("message").and_then(|v| v.as_str()) == Some(msg))
+                .collect()
+        };
+
+        // === Test 1: SPAN_FIRST_ENTRY events have required fields ===
+        let span_created_events = get_span_events("SPAN_FIRST_ENTRY");
+        for event in &span_created_events {
+            // Must have span_name
+            assert!(
+                event.get("span_name").is_some(),
+                "SPAN_FIRST_ENTRY must have span_name"
+            );
+            // Must have valid trace_id (format check)
+            let trace_id = event
+                .get("trace_id")
+                .and_then(|v| v.as_str())
+                .expect("SPAN_FIRST_ENTRY must have trace_id");
+            assert!(
+                trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
+                "SPAN_FIRST_ENTRY must have valid trace_id format"
+            );
+            // Must have valid span_id
+            let span_id = event
+                .get("span_id")
+                .and_then(|v| v.as_str())
+                .expect("SPAN_FIRST_ENTRY must have span_id");
+            assert!(
+                is_valid_span_id(span_id),
+                "SPAN_FIRST_ENTRY must have valid span_id"
+            );
+        }
+
+        // === Test 2: SPAN_CLOSED events have timing info ===
+        let span_closed_events = get_span_events("SPAN_CLOSED");
+        for event in &span_closed_events {
+            assert!(
+                event.get("span_name").is_some(),
+                "SPAN_CLOSED must have span_name"
+            );
+            assert!(
+                event.get("time.busy_us").is_some()
+                    || event.get("time.idle_us").is_some()
+                    || event.get("time.duration_us").is_some(),
+                "SPAN_CLOSED must have timing information"
+            );
+            // Must have valid trace_id
+            let trace_id = event
+                .get("trace_id")
+                .and_then(|v| v.as_str())
+                .expect("SPAN_CLOSED must have trace_id");
+            assert!(
+                trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit()),
+                "SPAN_CLOSED must have valid trace_id format"
+            );
+        }
+
+        // === Test 3: Target-based filtering (positive) ===
+        // Spans from dynamo_runtime::logging::tests should pass at ALL levels
+        // because the target is allowed at debug level
+        assert!(
+            has_span_event("SPAN_FIRST_ENTRY", "debug_level_span"),
+            "DEBUG span from allowed target MUST pass (target=debug filter)"
+        );
+        assert!(
+            has_span_event("SPAN_FIRST_ENTRY", "info_level_span"),
+            "INFO span from allowed target MUST pass (target=debug filter)"
+        );
+        assert!(
+            has_span_event("SPAN_FIRST_ENTRY", "warn_level_span"),
+            "WARN span from allowed target MUST pass (target=debug filter)"
+        );
+
+        // parent/child/grandchild are INFO level from allowed target - should pass
+        assert!(
+            has_span_event("SPAN_FIRST_ENTRY", "parent"),
+            "parent span (INFO) from allowed target MUST pass"
+        );
+        assert!(
+            has_span_event("SPAN_FIRST_ENTRY", "child"),
+            "child span (INFO) from allowed target MUST pass"
+        );
+        assert!(
+            has_span_event("SPAN_FIRST_ENTRY", "grandchild"),
+            "grandchild span (INFO) from allowed target MUST pass"
+        );
+
+        // === Test 4: Level-based filtering (negative) ===
+        // Verify spans from OTHER targets at debug/info level are filtered out
+        assert!(
+            !has_span_event("SPAN_FIRST_ENTRY", "other_target_info_span"),
+            "INFO span from non-allowed target (other_module) MUST be filtered out"
+        );
+
+        // Also verify no spans from other targets appear at debug/info level
+        for event in &span_created_events {
+            let target = event.get("target").and_then(|v| v.as_str()).unwrap_or("");
+            let level = event.get("level").and_then(|v| v.as_str()).unwrap_or("");
+
+            // If level is DEBUG or INFO, target must be our test module
+            if level == "DEBUG" || level == "INFO" {
+                assert!(
+                    target.contains("dynamo_runtime::logging::tests"),
+                    "DEBUG/INFO span must be from allowed target, got target={target}"
+                );
+            }
+        }
+
         Ok(())
     }
 }

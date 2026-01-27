@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use axum::{
@@ -179,6 +179,7 @@ pub struct Metrics {
     model_context_length: IntGaugeVec,
     model_kv_cache_block_size: IntGaugeVec,
     model_migration_limit: IntGaugeVec,
+    model_migration_total: IntCounterVec,
 }
 
 // Inflight tracks requests from HTTP handler start until complete response is finished.
@@ -507,6 +508,15 @@ impl Metrics {
         )
         .unwrap();
 
+        let model_migration_total = IntCounterVec::new(
+            Opts::new(
+                frontend_metric_name(frontend_service::MODEL_MIGRATION_TOTAL),
+                "Total number of request migrations due to worker unavailability",
+            ),
+            &["model", frontend_service::MIGRATION_TYPE_LABEL],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
@@ -525,6 +535,7 @@ impl Metrics {
             model_context_length,
             model_kv_cache_block_size,
             model_migration_limit,
+            model_migration_total,
         }
     }
 
@@ -623,6 +634,7 @@ impl Metrics {
         registry.register(Box::new(self.model_context_length.clone()))?;
         registry.register(Box::new(self.model_kv_cache_block_size.clone()))?;
         registry.register(Box::new(self.model_migration_limit.clone()))?;
+        registry.register(Box::new(self.model_migration_total.clone()))?;
 
         Ok(())
     }
@@ -676,6 +688,34 @@ impl Metrics {
         );
 
         Ok(())
+    }
+
+    /// Increment the migration counter for a new request migration
+    pub fn inc_migration_new_request(&self, model: &str) {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
+            .inc();
+    }
+
+    /// Increment the migration counter for an ongoing request migration
+    pub fn inc_migration_ongoing_request(&self, model: &str) {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .inc();
+    }
+
+    /// Get the current count of new request migrations for a model
+    pub fn get_migration_new_request_count(&self, model: &str) -> u64 {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::NEW_REQUEST])
+            .get()
+    }
+
+    /// Get the current count of ongoing request migrations for a model
+    pub fn get_migration_ongoing_request_count(&self, model: &str) -> u64 {
+        self.model_migration_total
+            .with_label_values(&[model, frontend_service::migration_type::ONGOING_REQUEST])
+            .get()
     }
 
     /// Create a new [`InflightGuard`] for the given model and annotate if its a streaming request,
@@ -946,6 +986,7 @@ pub fn process_response_and_observe_metrics<T>(
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_cached_tokens(metrics.cached_tokens);
 
         // Drop http_queue_guard on first token for non-streaming (same as streaming)
         if response_collector.is_first_token()
@@ -1496,6 +1537,58 @@ mod tests {
 
         // Should return Ok(None) for metrics annotation events
         assert!(matches!(result, Ok(None)));
+
+        // Should have observed the cached tokens from the metrics annotation event
+        let metric_families = registry.gather();
+        let histogram_family = metric_families
+            .iter()
+            .find(|mf| mf.name() == expected_metric_name)
+            .expect("histogram should be registered");
+        assert_eq!(
+            histogram_family.get_metric()[0]
+                .get_histogram()
+                .get_sample_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_non_streaming_path_observes_cached_tokens() {
+        use crate::preprocessor::LLMMetricAnnotation;
+        use crate::types::Annotated;
+
+        let metrics = Arc::new(Metrics::new());
+        let registry = prometheus::Registry::new();
+        metrics.register(&registry).unwrap();
+
+        let model = "test-model";
+        let expected_metric_name = "dynamo_frontend_cached_tokens";
+        let mut collector = metrics.clone().create_response_collector(model);
+
+        // Create a metrics annotation event
+        let mut annotated = Annotated::<
+            crate::protocols::openai::chat_completions::NvCreateChatCompletionStreamResponse,
+        > {
+            id: None,
+            data: None,
+            event: Some(crate::preprocessor::ANNOTATION_LLM_METRICS.to_string()),
+            comment: None,
+        };
+
+        let llm_metrics = LLMMetricAnnotation {
+            input_tokens: 10,
+            output_tokens: 20,
+            chunk_tokens: 5,
+            cached_tokens: Some(15),
+        };
+
+        let annotation = llm_metrics.to_annotation::<()>().unwrap();
+        annotated.event = annotation.event;
+        annotated.comment = annotation.comment;
+
+        // Process via the non-streaming metrics hook
+        let mut http_queue_guard = None;
+        process_response_and_observe_metrics(&annotated, &mut collector, &mut http_queue_guard);
 
         // Should have observed the cached tokens from the metrics annotation event
         let metric_families = registry.gather();

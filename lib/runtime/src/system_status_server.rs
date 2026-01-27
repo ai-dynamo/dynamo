@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 // TODO: (DEP-635) this file should be renamed to system_http_server.rs
@@ -961,7 +961,7 @@ mod integration_tests {
 
                 // Now create a namespace, component, and endpoint to make the system healthy
                 let namespace = drt.namespace("ns1234").unwrap();
-                let mut component = namespace.component("comp1234").unwrap();
+                let component = namespace.component("comp1234").unwrap();
 
                 // Create a simple test handler
                 use crate::pipeline::{async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, SingleIn};

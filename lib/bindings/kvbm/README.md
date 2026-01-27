@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,7 +29,15 @@ The Dynamo KVBM is a distributed KV-cache block management system designed for s
 - **Runtime-Agnostic:** Works out-of-the-box with vLLM, TensorRT-LLM, and SGLang via lightweight connectors.
 - **Memory-Safe & Modular:** RAII lifecycle and pluggable design for reliability, portability, and backend extensibility.
 
-## Build and Installation
+## Installation
+
+```bash
+pip install kvbm
+```
+
+See the [support matrix](../../../docs/reference/support-matrix.md) for version compatibility questions.
+
+## Build from Source
 
 The pip wheel is built through a Docker build process:
 

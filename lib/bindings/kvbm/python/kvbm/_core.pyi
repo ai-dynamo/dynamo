@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Any, List, Optional
@@ -212,15 +212,6 @@ class BlockManager:
             List of allocated blocks
         """
         ...
-
-class KvbmCacheManager:
-    """
-    A KV cache manager for VLLM
-    """
-
-    def __init__(self, block_manager: BlockManager) -> None:
-        ...
-
 
 class KvbmRequest:
     """

@@ -1,11 +1,15 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+import os
+
+if "PYTHONHASHSEED" not in os.environ:
+    os.environ["PYTHONHASHSEED"] = "0"
 
 import argparse
 import asyncio
 import copy
 import logging
-import os
 import signal
 import sys
 from typing import Tuple
@@ -149,9 +153,6 @@ class VllmBaseWorker:
         # TODO Hack to get data, move this to registering in ETCD
         self.stats_logger.set_num_gpu_blocks_all(
             vllm_config.cache_config.num_gpu_blocks
-        )
-        self.stats_logger.set_request_total_slots_all(
-            vllm_config.scheduler_config.max_num_seqs
         )
         self.stats_logger.init_publish()
 
