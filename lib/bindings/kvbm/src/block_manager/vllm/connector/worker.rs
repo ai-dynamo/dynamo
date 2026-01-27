@@ -6,7 +6,7 @@ use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
 use super::*;
@@ -77,6 +77,9 @@ pub struct KvConnectorWorker {
     /// cuda events created by the python side
     layer_events: Vec<u64>,
 
+    /// Map request_id to (uuid → block_ids) for error tracking
+    request_to_blocks: HashMap<String, HashMap<uuid::Uuid, Vec<usize>>>,
+
     /// Block IDs that failed to load
     failed_block_ids: HashSet<u32>,
 }
@@ -117,6 +120,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            request_to_blocks: HashMap::new(),
             failed_block_ids: HashSet::new(),
         })
     }
@@ -289,6 +293,17 @@ impl Worker for KvConnectorWorker {
         // immediately enqueue the onboarding operations
         for operation in onboarding_operations {
             let request_id = operation.request_id.clone();
+            let uuid = operation.uuid;
+            let block_ids = operation.block_ids.clone();
+
+            // Store block_ids mapping for error tracking (only for load operations)
+            if !block_ids.is_empty() {
+                self.request_to_blocks
+                    .entry(request_id.clone())
+                    .or_default()
+                    .insert(uuid, block_ids);
+            }
+
             self.connector.enqueue_request(operation);
             self.maybe_finished_onboarding.insert(request_id);
         }
@@ -458,6 +473,8 @@ impl Worker for KvConnectorWorker {
         // remove the finished requests from the maybe finished set
         for request_id in &is_finished_onboarding {
             self.maybe_finished_onboarding.remove(request_id);
+            // Clean up block_ids tracking for this request
+            self.request_to_blocks.remove(request_id);
             if self.connector.has_slot(request_id) {
                 self.connector.remove_slot(request_id);
             }
@@ -467,6 +484,27 @@ impl Worker for KvConnectorWorker {
     }
 
     fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
+        // Drain failures from the scheduler and convert (request_id, uuid) -> block_ids
+        let failures = self.connector.drain_failures();
+        for (request_id, failed_uuids) in failures {
+            if let Some(uuid_to_blocks) = self.request_to_blocks.get(&request_id) {
+                for uuid in failed_uuids {
+                    if let Some(block_ids) = uuid_to_blocks.get(&uuid) {
+                        for &block_id in block_ids {
+                            self.failed_block_ids.insert(block_id as u32);
+                        }
+                        tracing::warn!(
+                            request_id = %request_id,
+                            operation_id = %uuid,
+                            block_ids = ?block_ids,
+                            "load operation failed; marking blocks as failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Return and clear the failed block IDs
         std::mem::take(&mut self.failed_block_ids)
     }
 }
