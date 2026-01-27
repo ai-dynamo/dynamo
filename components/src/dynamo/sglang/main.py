@@ -34,7 +34,7 @@ from dynamo.sglang.request_handlers import (
 )
 
 configure_dynamo_logging()
-logger = logging.getLogger(__name__)
+
 
 async def _handle_non_leader_node(
     engine: sgl.Engine,
