@@ -187,6 +187,19 @@ jobs:
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
           no_load: ${{ inputs.no_load }}
+      - name: Show summary
+        shell: bash
+        run: |
+            IMAGE_URIS=(${{ inputs.extra_tags }} ${{ steps.build-image.outputs.image_tag }})
+            echo "IMAGE_URIS=${IMAGE_URIS}"
+            # echo "### 🐳 ${{ inputs.framework }} Container Images" >> $GITHUB_STEP_SUMMARY
+            # echo "" >> $GITHUB_STEP_SUMMARY
+            # echo "| Image URI |" >> $GITHUB_STEP_SUMMARY
+            # echo "|-----|" >> $GITHUB_STEP_SUMMARY
+            # for image_uri in "${IMAGE_URIS[@]}"; do
+            #   echo "| \`${image_uri}\` |" >> $GITHUB_STEP_SUMMARY
+            # done
+
 
   # ============================================================================
   # TEST
