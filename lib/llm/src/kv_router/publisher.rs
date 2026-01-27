@@ -16,7 +16,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_runtime::traits::{DistributedRuntimeProvider, events::EventPublisher as EventPublisherTrait};
+use dynamo_runtime::traits::{
+    DistributedRuntimeProvider, events::EventPublisher as EventPublisherTrait,
+};
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
     component::{Component, Namespace},
