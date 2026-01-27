@@ -131,6 +131,14 @@ class PlannerSharedState:
 def _apply_global_gpu_budget(
     next_num_p: int, next_num_d: int, args: argparse.Namespace
 ) -> tuple[int, int]:
+    """Apply GPU budget constraint to both prefill and decode replicas.
+
+    When total GPUs required (num_p * prefill_gpus + num_d * decode_gpus) exceeds the
+    budget, scale down both proportionally using scale = budget / total_required. Prefill
+    replicas are clamped to [min_endpoint, max_prefill] where max_prefill reserves enough
+    GPUs for min_endpoint decode replicas. Remaining budget is then allocated to decode.
+    Returns (0, 0) if budget cannot satisfy min_endpoint for both components.
+    """
     if args.max_gpu_budget < 0:
         return next_num_p, next_num_d
     total_gpu_required = (
@@ -171,6 +179,12 @@ def _apply_global_gpu_budget(
 def _apply_component_gpu_budget(
     desired_replicas: int, engine_num_gpu: int, args: argparse.Namespace
 ) -> int:
+    """Apply GPU budget constraint to a single component (prefill-only or decode-only).
+
+    When total GPUs required (replicas * gpus_per_replica) exceeds the budget, scale down
+    using scale = budget / total_required, floored and clamped to at least min_endpoint.
+    Returns 0 if budget cannot satisfy min_endpoint replicas.
+    """
     if args.max_gpu_budget < 0:
         return desired_replicas
     total_gpu_required = desired_replicas * engine_num_gpu
@@ -367,6 +381,18 @@ class BasePlanner:
             model_name = await model_name
         return model_name
 
+    async def _get_or_create_client(self, component_name: str, endpoint_name: str):
+        """Create a client for the given component and endpoint, with a brief sleep for state sync."""
+        client = (
+            await self.runtime.namespace(self.namespace)
+            .component(component_name)
+            .endpoint(endpoint_name)
+            .client()
+        )
+        # TODO: remove this sleep after rust client() is blocking until watching state
+        await asyncio.sleep(0.1)
+        return client
+
     async def get_workers_info(
         self, include_prefill: bool = True, include_decode: bool = True
     ):
@@ -375,55 +401,33 @@ class BasePlanner:
 
         p_endpoints = []
         d_endpoints = []
+        worker_names = WORKER_COMPONENT_NAMES[self.args.backend]
+
         if include_prefill:
             try:
                 if self.prefill_client is None:
-                    self.prefill_client = (
-                        await self.runtime.namespace(self.namespace)
-                        .component(
-                            WORKER_COMPONENT_NAMES[
-                                self.args.backend
-                            ].prefill_worker_component_name
-                        )
-                        .endpoint(
-                            WORKER_COMPONENT_NAMES[
-                                self.args.backend
-                            ].prefill_worker_endpoint
-                        )
-                        .client()
+                    self.prefill_client = await self._get_or_create_client(
+                        worker_names.prefill_worker_component_name,
+                        worker_names.prefill_worker_endpoint,
                     )
-                    # TODO: remove this sleep after rust client() is blocking until watching state
-                    await asyncio.sleep(0.1)
-                # TODO: use etcd events instead of pulling instance_ids
                 p_endpoints = self.prefill_client.instance_ids()  # type: ignore
             except Exception:
                 p_endpoints = []
                 logger.warning(
                     "No prefill workers found, aggregated mode is not supported yet"
                 )
+
         if include_decode:
             try:
                 if self.workers_client is None:
-                    self.workers_client = (
-                        await self.runtime.namespace(self.namespace)
-                        .component(
-                            WORKER_COMPONENT_NAMES[
-                                self.args.backend
-                            ].decode_worker_component_name
-                        )
-                        .endpoint(
-                            WORKER_COMPONENT_NAMES[
-                                self.args.backend
-                            ].decode_worker_endpoint
-                        )
-                        .client()
+                    self.workers_client = await self._get_or_create_client(
+                        worker_names.decode_worker_component_name,
+                        worker_names.decode_worker_endpoint,
                     )
-                    # TODO: remove this sleep after rust client() is blocking until watching state
-                    await asyncio.sleep(0.1)
-                # TODO: use etcd events instead of pulling instance_ids
                 d_endpoints = self.workers_client.instance_ids()  # type: ignore
             except Exception as e:
                 raise RuntimeError(f"Failed to get decode worker endpoints: {e}")
+
         return p_endpoints, d_endpoints
 
     async def observe_metrics(

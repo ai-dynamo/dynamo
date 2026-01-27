@@ -47,14 +47,22 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
 
     def compute_safe_p_thpt(num_p: int, isl: float, ttft: float):
         """safe throughput is maximum throughput that the engine can handle given the TTFT SLA"""
-        actual_ttft = prefill_planner.prefill_interpolator.interpolate_ttft(isl)  # type: ignore[union-attr]
+        assert prefill_planner is not None
+        actual_ttft = prefill_planner.prefill_interpolator.interpolate_ttft(isl)
         if actual_ttft > ttft:
             return 0
-        return num_p * prefill_planner.prefill_interpolator.interpolate_thpt_per_gpu(isl)  # type: ignore[union-attr]
+        return num_p * prefill_planner.prefill_interpolator.interpolate_thpt_per_gpu(
+            isl
+        )
 
     def compute_safe_d_thpt(num_d: int, isl: float, osl: float, itl: float):
         """safe throughput is maximum throughput that the engine can handle given the ITL SLA"""
-        pred_decode_thpt_per_gpu, actual_itl, _ = decode_planner.decode_interpolator.find_best_throughput_per_gpu(  # type: ignore[union-attr]
+        assert decode_planner is not None
+        (
+            pred_decode_thpt_per_gpu,
+            actual_itl,
+            _,
+        ) = decode_planner.decode_interpolator.find_best_throughput_per_gpu(
             itl=itl, context_length=isl + osl / 2
         )
         if actual_itl > itl:
@@ -71,16 +79,12 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
 
     if prefill_planner is not None:
         num_p = [args.start_num_p]
-        p_thpt = [metrics[0]["request_count"] * metrics[0]["avg_isl"]]
+        p_thpt = [rr[0] * isl[0]]
         safe_p_thpt = [
-            compute_safe_p_thpt(args.start_num_p, metrics[0]["avg_isl"], args.ttft)
+            compute_safe_p_thpt(args.start_num_p, isl[0], args.ttft)
             * args.adjustment_interval
         ]
-        prefill_planner.dryrun_observe_metrics(
-            metrics[0]["request_count"],
-            metrics[0]["avg_isl"],
-            metrics[0]["avg_osl"],
-        )
+        prefill_planner.dryrun_observe_metrics(rr[0], isl[0], osl[0])
     else:
         num_p = [0]
         p_thpt = [0]
@@ -88,53 +92,43 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
 
     if decode_planner is not None:
         num_d = [args.start_num_d]
-        d_thpt = [metrics[0]["request_count"] * metrics[0]["avg_osl"]]
+        d_thpt = [rr[0] * osl[0]]
         safe_d_thpt = [
-            compute_safe_d_thpt(
-                args.start_num_d,
-                metrics[0]["avg_isl"],
-                metrics[0]["avg_osl"],
-                args.itl,
-            )
+            compute_safe_d_thpt(args.start_num_d, isl[0], osl[0], args.itl)
             * args.adjustment_interval
         ]
-        decode_planner.dryrun_observe_metrics(
-            metrics[0]["request_count"],
-            metrics[0]["avg_isl"],
-            metrics[0]["avg_osl"],
-        )
+        decode_planner.dryrun_observe_metrics(rr[0], isl[0], osl[0])
     else:
         num_d = [0]
         d_thpt = [0]
         safe_d_thpt = [0]
 
     predictor_planner = prefill_planner or decode_planner
+    assert predictor_planner is not None
 
     for metric in metrics[1:]:
         # update time
         time_series.append(time_series[-1] + args.adjustment_interval)
 
         # load prediction
-        _est_rr, _est_isl, _est_osl = predictor_planner.predict_load()  # type: ignore[union-attr]
+        _est_rr, _est_isl, _est_osl = predictor_planner.predict_load()
         est_rr.append(_est_rr)
         est_isl.append(_est_isl)
         est_osl.append(_est_osl)
 
         # compute num_p and num_d
-        if prefill_planner is not None:
-            _num_p = prefill_planner._compute_replica_requirements(
-                _est_rr, _est_isl, _est_osl
-            )
-        else:
-            num_p.append(0)
+        _num_p = (
+            prefill_planner._compute_replica_requirements(_est_rr, _est_isl, _est_osl)
+            if prefill_planner is not None
+            else 0
+        )
+        _num_d = (
+            decode_planner._compute_replica_requirements(_est_rr, _est_isl, _est_osl)
+            if decode_planner is not None
+            else 0
+        )
 
-        if decode_planner is not None:
-            _num_d = decode_planner._compute_replica_requirements(
-                _est_rr, _est_isl, _est_osl
-            )
-        else:
-            num_d.append(0)
-
+        # apply GPU budget
         if prefill_planner is not None and decode_planner is not None:
             _num_p, _num_d = _apply_global_gpu_budget(_num_p, _num_d, args)
         elif prefill_planner is not None:
@@ -146,53 +140,36 @@ def run_sla_planner_dryrun(args: argparse.Namespace) -> None:
                 _num_d, args.decode_engine_num_gpu, args
             )
 
-        if prefill_planner is not None:
-            num_p.append(_num_p)
-        if decode_planner is not None:
-            num_d.append(_num_d)
+        num_p.append(_num_p)
+        num_d.append(_num_d)
 
         # update load predictor
-        if prefill_planner is not None:
-            prefill_planner.dryrun_observe_metrics(
-                metric["request_count"],
-                metric["avg_isl"],
-                metric["avg_osl"],
-            )
-        if decode_planner is not None:
-            decode_planner.dryrun_observe_metrics(
-                metric["request_count"],
-                metric["avg_isl"],
-                metric["avg_osl"],
-            )
+        for planner in [prefill_planner, decode_planner]:
+            if planner is not None:
+                planner.dryrun_observe_metrics(
+                    metric["request_count"], metric["avg_isl"], metric["avg_osl"]
+                )
 
         # fill in ground truth
         rr.append(metric["request_count"])
         isl.append(metric["avg_isl"])
         osl.append(metric["avg_osl"])
 
-        if prefill_planner is not None:
-            p_thpt.append(rr[-1] * isl[-1])
-        else:
-            p_thpt.append(0)
-        if decode_planner is not None:
-            d_thpt.append(rr[-1] * osl[-1])
-        else:
-            d_thpt.append(0)
+        p_thpt.append(rr[-1] * isl[-1] if prefill_planner is not None else 0)
+        d_thpt.append(rr[-1] * osl[-1] if decode_planner is not None else 0)
 
-        if prefill_planner is not None:
-            safe_p_thpt.append(
-                compute_safe_p_thpt(num_p[-1], isl[-1], args.ttft)
-                * args.adjustment_interval
-            )
-        else:
-            safe_p_thpt.append(0)
-        if decode_planner is not None:
-            safe_d_thpt.append(
-                compute_safe_d_thpt(num_d[-1], isl[-1], osl[-1], args.itl)
-                * args.adjustment_interval
-            )
-        else:
-            safe_d_thpt.append(0)
+        safe_p_thpt.append(
+            compute_safe_p_thpt(num_p[-1], isl[-1], args.ttft)
+            * args.adjustment_interval
+            if prefill_planner is not None
+            else 0
+        )
+        safe_d_thpt.append(
+            compute_safe_d_thpt(num_d[-1], isl[-1], osl[-1], args.itl)
+            * args.adjustment_interval
+            if decode_planner is not None
+            else 0
+        )
 
     warmup_time = None
     warmup_rr = None
