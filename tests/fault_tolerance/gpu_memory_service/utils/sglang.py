@@ -41,7 +41,7 @@ class SGLangWithGMSProcess(ManagedProcess):
                 "--model-path",
                 FAULT_TOLERANCE_MODEL_NAME,
                 "--load-format",
-                "gpu_memory_service",
+                "gms",
                 "--enable-memory-saver",
                 "--mem-fraction-static",
                 "0.8",

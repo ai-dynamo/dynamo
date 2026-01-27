@@ -36,77 +36,6 @@ from dynamo.sglang.request_handlers import (
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
-# Track if GPU Memory Service has been set up to avoid duplicate setup
-_gpu_memory_service_setup_done = False
-
-
-def _setup_gpu_memory_service_if_needed(config: Config) -> None:
-    """Setup GPU Memory Service if --load-format gpu_memory_service is passed.
-
-    This does TWO things:
-    1. Sets environment variables for patches (needed in spawned workers)
-    2. Applies GPU Memory Service patches and sets load_format to GPUServiceModelLoader class
-
-    Usage:
-        python -m dynamo.sglang --model-path ... \\
-            --load-format gpu_memory_service \\
-            --model-loader-extra-config '{"gpu_memory_service_socket_path": "/tmp/gpu_memory_service_{device}.sock"}'
-    """
-    global _gpu_memory_service_setup_done
-    if _gpu_memory_service_setup_done:
-        return
-
-    load_format = getattr(config.server_args, "load_format", None)
-    if load_format != "gpu_memory_service":
-        return
-
-    # GPU Memory Service provides its own VA-stable unmap/remap mechanism for weights.
-    # CPU backup would conflict with GPU Memory Service's shared memory approach.
-    server_args = config.server_args
-    if getattr(server_args, "enable_weights_cpu_backup", False):
-        raise ValueError(
-            "Cannot use --enable-weights-cpu-backup with --load-format gpu_memory_service. "
-            "GPU Memory Service provides its own VA-stable unmap/remap mechanism for weights."
-        )
-    if getattr(server_args, "enable_draft_weights_cpu_backup", False):
-        raise ValueError(
-            "Cannot use --enable-draft-weights-cpu-backup with --load-format gpu_memory_service. "
-            "GPU Memory Service provides its own VA-stable unmap/remap mechanism for weights."
-        )
-
-    logger.info("[GMS] Setting up GPU Memory Service integration")
-
-    # Set env var to trigger auto-registration in spawned workers
-    os.environ["GPU_MEMORY_SERVICE_SGLANG_AUTO_REGISTER"] = "1"
-
-    # Apply patches in main process
-    try:
-        from gpu_memory_service.sglang_integration.model_loader import (
-            GPUServiceModelLoader,
-            patch_model_runner_for_gpu_memory_service,
-        )
-        from gpu_memory_service.sglang_integration.patches import (
-            patch_empty_cache,
-            patch_torch_memory_saver,
-        )
-
-        # Apply utility patches
-        patch_empty_cache()
-        patch_torch_memory_saver()
-        patch_model_runner_for_gpu_memory_service()
-
-        logger.info("[GMS] Applied GPU Memory Service patches for SGLang")
-
-        # Set load_format to the actual class so SGLang uses our custom loader
-        config.server_args.load_format = GPUServiceModelLoader
-        logger.info("[GMS] Set load_format=GPUServiceModelLoader")
-    except Exception as e:
-        logger.error(f"[GMS] Failed to setup GPU Memory Service: {e}")
-        raise
-
-    _gpu_memory_service_setup_done = True
-
-
 async def _handle_non_leader_node(
     engine: sgl.Engine,
     generate_endpoint,
@@ -141,8 +70,11 @@ async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
 
-    # Setup GPU Memory Service if --load-format gpu_memory_service is used
-    _setup_gpu_memory_service_if_needed(config)
+    # Setup GPU Memory Service if --load-format gms is used
+    if config.server_args.load_format == "gms":
+        from gpu_memory_service.integrations.sglang import setup_gms
+
+        config.server_args.load_format = setup_gms(config.server_args)
 
     loop = asyncio.get_running_loop()
     # Enable NATS based on use_kv_events flag (derived from kv_events_config)

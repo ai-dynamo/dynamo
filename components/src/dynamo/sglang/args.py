@@ -359,11 +359,11 @@ async def parse_args(args: list[str]) -> Config:
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
 
-    # Add "gpu_memory_service" to --load-format choices so it passes argparse validation.
-    # The actual loader class is set in main.py's _setup_gpu_memory_service_if_needed().
+    # Add "gms" to --load-format choices so it passes argparse validation.
+    # The actual loader class is set in main.py when load_format == "gms".
     for action in parser._actions:
         if getattr(action, "dest", None) == "load_format" and action.choices:
-            action.choices = list(action.choices) + ["gpu_memory_service"]
+            action.choices = list(action.choices) + ["gms"]
             break
 
     # Handle config file if present
