@@ -149,16 +149,14 @@ class VllmProcessor:
             print(f"Stream got: {dynamo_response}")
 
             output = dynamo_response.data()
-            if output is None:
+            if output is None or "token_ids" not in output:
                 yield {
                     "finish_reason": "error: No outputs from vLLM engine",
                     "token_ids": [],
                 }
                 break
 
-            finish_reason = (
-                output["finish_reason"] if hasattr(output, "finish_reason") else None
-            )
+            finish_reason = output.get("finish_reason")
             vllm_response = EngineCoreOutput(
                 request_id=request_id,
                 new_token_ids=output["token_ids"],
@@ -221,12 +219,10 @@ class EngineFactory:
         Called by Rust when a model is discovered.
         """
         logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()}")
-        logger.info(f"Engine_factory called with instance ID: {instance_id}")
         loop = asyncio.get_running_loop()
 
         source_path = mdc.source_path()
         if not os.path.exists(source_path):
-            print("** Fetching model '{source_path}'")
             await fetch_llm(source_path)
 
         model_config = ModelConfig(
