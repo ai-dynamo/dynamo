@@ -360,8 +360,8 @@ impl ZmqSubTransport {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result =
-                    tokio::task::spawn_blocking(move || -> Result<Option<(Vec<u8>, u64, u64, Vec<u8>)>> {
+                let result = tokio::task::spawn_blocking(
+                    move || -> Result<Option<(Vec<u8>, u64, u64, Vec<u8>)>> {
                         let socket = socket_clone.lock().unwrap();
 
                         // Receive topic frame (may timeout with EAGAIN)
@@ -396,8 +396,9 @@ impl ZmqSubTransport {
                         let data = socket.recv_bytes(0)?;
 
                         Ok(Some((topic, publisher_id, sequence, data)))
-                    })
-                    .await;
+                    },
+                )
+                .await;
 
                 match result {
                     Ok(Ok(Some((_topic, publisher_id, sequence, frame_bytes)))) => {
