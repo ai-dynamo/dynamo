@@ -41,9 +41,6 @@ struct ZmqMessage {
     data: Vec<u8>,
 }
 
-/// Result of a ZMQ receive operation. None indicates a timeout (EAGAIN).
-type ZmqRecvResult = Result<Option<ZmqMessage>>;
-
 /// ZMQ PUB transport for publishing events.
 ///
 /// Uses raw zmq::Socket with configured HWM for better scalability.
@@ -372,7 +369,7 @@ impl ZmqSubTransport {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(move || -> ZmqRecvResult {
+                let result = tokio::task::spawn_blocking(move || -> Result<Option<ZmqMessage>> {
                     let socket = socket_clone.lock().unwrap();
 
                     // Receive topic frame (may timeout with EAGAIN)
