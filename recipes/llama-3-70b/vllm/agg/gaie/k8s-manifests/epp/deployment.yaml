@@ -38,7 +38,7 @@ spec:
 
       containers:
         - name: epp
-          image: nvcr.io/nvidia/ai-dynamo/frontend:<0.8.1.post1>
+          image: nvcr.io/nvidia/ai-dynamo/frontend:<0.8.1.post2>
           imagePullPolicy: IfNotPresent
           resources:
             requests:
