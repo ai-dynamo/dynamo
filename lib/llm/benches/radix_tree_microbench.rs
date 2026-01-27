@@ -328,25 +328,18 @@ fn bench_store(args: &Args) {
 
     let num_sequences = args.size / args.depth;
     let bench_iters = args.iterations.min(num_sequences);
-    let pre_sequences = generate_sequences(
-        num_sequences.saturating_sub(bench_iters),
+
+    let all_sequences = generate_sequences(
+        num_sequences,
         args.depth,
         args.num_workers,
         args.prefix_prompt_ratio,
         args.num_prefix_prompts,
         args.seed,
     );
-
-    // Generate sequences to insert during benchmark
-    let bench_sequences: Vec<SequenceData> = ((num_sequences - bench_iters)..num_sequences)
-        .map(|seq_id| {
-            SequenceData::new(
-                seq_id as u64,
-                (seq_id % args.num_workers) as WorkerId,
-                args.depth,
-            )
-        })
-        .collect();
+    let split_point = num_sequences.saturating_sub(bench_iters);
+    let pre_sequences = &all_sequences[..split_point];
+    let bench_sequences = &all_sequences[split_point..];
 
     // Build tree once, then store sequences sequentially
     // Tree grows from (size - iterations) to size over the benchmark
