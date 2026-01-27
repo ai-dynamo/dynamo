@@ -155,6 +155,10 @@ runs:
           done <<< "$EXTRA_TAGS"
         fi
 
+
+        echo "**********I GOT EXTRA ARGS: $EXTRA_ARGS *********"
+
+
         # Execute build and capture output (show on console AND save to file)
         ./container/build.sh --tag "$IMAGE_TAG" \
           --target ${{ inputs.target }} \
@@ -162,9 +166,10 @@ runs:
           --no-tag-latest \
           --framework ${{ inputs.framework }} \
           --platform ${{ inputs.platform }} \
+          $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
           # --use-sccache \ #todo: get Dillon assistance to fix sccache behavior
           # --sccache-bucket "$SCCACHE_S3_BUCKET" \
-          --sccache-region "$AWS_DEFAULT_REGION" $EXTRA_ARGS 2>&1 | tee "${BUILD_LOG_FILE}"
+          # --sccache-region "$AWS_DEFAULT_REGION"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
