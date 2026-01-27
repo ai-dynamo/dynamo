@@ -52,11 +52,6 @@ on:
         required: false
         type: boolean
         default: true
-      no_load:
-        description: 'Do not load the image into docker (useful for validation-only builds with remote builders)'
-        required: false
-        type: boolean
-        default: false
     secrets:
       AWS_DEFAULT_REGION:
         required: true
@@ -166,7 +161,7 @@ jobs:
           echo "no_cache: ${{ inputs.no_cache }}"
           echo "extra_tags: ${{ steps.extra-tags.outputs.tags }}"
           echo "push_image: ${{ inputs.push_image }}"
-          echo "no_load: ${{ inputs.no_load }}"
+          echo "no_load: true"
 
       - name: Build Container
         id: build-image
@@ -186,7 +181,7 @@ jobs:
           no_cache: ${{ inputs.no_cache }}
           extra_tags: ${{ steps.extra-tags.outputs.tags }}
           push_image: ${{ inputs.push_image }}
-          no_load: ${{ inputs.no_load }}
+          no_load: true
       - name: Show summary
         shell: bash
         run: |
