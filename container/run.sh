@@ -264,10 +264,6 @@ get_options() {
             HF_HOME=$DEFAULT_HF_HOME
         fi
 
-        if [ -z "${PRIVILEGED}" ]; then
-            PRIVILEGED="TRUE"
-        fi
-
         ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
     fi
 
@@ -348,7 +344,7 @@ show_help() {
     echo "  [--image image]"
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--name name for launched container, default NONE]"
-    echo "  [--privileged whether to launch in privileged mode, default FALSE unless mounting workspace]"
+    echo "  [--privileged whether to launch in privileged mode, default FALSE]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--hf-home|--hf-cache directory to volume mount as the hf home, default is NONE unless mounting workspace]"
     echo "  [--gpus gpus to enable, default is 'all', 'none' disables gpu support]"

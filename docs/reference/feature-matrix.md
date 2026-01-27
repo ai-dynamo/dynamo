@@ -2,7 +2,7 @@
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
 
-*Updated for Dynamo v0.8.0*
+*Updated for Dynamo v0.9.0*
 
 **Legend:**
 *   ✅ : Supported

@@ -46,7 +46,7 @@ def _create_ext_modules():
 
 setup(
     name="gpu-memory-service",
-    version="0.8.0",
+    version="0.9.0",
     description="GPU Memory Service for Dynamo - CUDA VMM-based GPU memory allocation and sharing",
     author="NVIDIA Inc.",
     author_email="sw-dl-dynamo@nvidia.com",
@@ -71,6 +71,7 @@ setup(
         "gpu_memory_service.client",
         "gpu_memory_service.client.torch",
         "gpu_memory_service.client.torch.extensions",
+        "gpu_memory_service.vllm_integration",
     ],
     package_dir={
         "gpu_memory_service": ".",
@@ -80,6 +81,7 @@ setup(
         "gpu_memory_service.client": "client",
         "gpu_memory_service.client.torch": "client/torch",
         "gpu_memory_service.client.torch.extensions": "client/torch/extensions",
+        "gpu_memory_service.vllm_integration": "vllm_integration",
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],

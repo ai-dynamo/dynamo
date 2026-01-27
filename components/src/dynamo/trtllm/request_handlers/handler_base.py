@@ -67,6 +67,7 @@ class RequestHandlerConfig:
     ] = None  # DistributedRuntime reference for graceful shutdown
     metrics_collector: Optional[Any] = None  # TensorRT-LLM MetricsCollector
     kv_block_size: int = 32
+    shutdown_event: Optional[asyncio.Event] = None
 
 
 class HandlerBase:
@@ -88,6 +89,7 @@ class HandlerBase:
         # Store runtime reference for graceful shutdown
         self.runtime = config.runtime
         self.kv_block_size: int = config.kv_block_size
+        self.shutdown_event = config.shutdown_event
 
     def check_error(self, result: dict):
         """
@@ -170,18 +172,49 @@ class HandlerBase:
 
         return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
-    async def _handle_cancellation(
+    async def _handle_cancellation_and_shutdown(
         self, generation_result: GenerationResult, context: Context
     ):
-        """Background task to handle cancellation by monitoring context state."""
+        """
+        Background task to handle cancellation and shutdown by monitoring both signals.
+        Returns 'shutdown' if shutdown was triggered, 'cancelled' if cancelled, None otherwise.
+        """
         try:
-            # Wait asynchronously for cancellation signal instead of polling
-            await context.async_killed_or_stopped()
+            cancellation_task = context.async_killed_or_stopped()
+
+            # Build list of futures/tasks to wait for
+            wait_for = [cancellation_task]
+            shutdown_task = None
+
+            if self.shutdown_event:
+                # Create task for shutdown monitoring and add to wait list
+                shutdown_task = asyncio.create_task(self.shutdown_event.wait())
+                wait_for.append(shutdown_task)
+
+            # Wait for whichever happens first
+            done, pending = await asyncio.wait(
+                wait_for,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            # Cancel the pending task/future
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
             # Abort the generation
             generation_result.abort()
             logging.debug(f"Aborted Request ID: {context.id()}")
+
+            # Check which event triggered and return the reason
+            if shutdown_task and shutdown_task in done:
+                raise GeneratorExit("Engine was shut down during generation.")
+
         except asyncio.CancelledError:
-            # Task was cancelled, which is expected when generation completes
+            # Task was cancelled, which is expected when generation completes normally
             pass
 
     @asynccontextmanager
@@ -189,28 +222,32 @@ class HandlerBase:
         self, generation_result: GenerationResult, context: Context
     ) -> AsyncGenerator[asyncio.Task, None]:
         """
-        Context manager for monitoring request cancellation.
+        Context manager for monitoring request cancellation and shutdown.
 
-        Automatically creates a background task to monitor for cancellation and
-        cleans it up when the context exits.
+        Automatically creates a background task to monitor for cancellation
+        and shutdown events, cleaning it up when the context exits.
+
+        If shutdown event was triggered, raises GeneratorExit on exit.
 
         Yields:
-            asyncio.Task: The cancellation monitoring task
+            asyncio.Task: The monitoring task
         """
-        cancellation_task = asyncio.create_task(
-            self._handle_cancellation(generation_result, context)
+        monitor_task = asyncio.create_task(
+            self._handle_cancellation_and_shutdown(generation_result, context)
         )
 
         try:
-            yield cancellation_task
+            yield monitor_task
         finally:
-            # Clean up the background cancellation task
-            if not cancellation_task.done():
-                cancellation_task.cancel()
+            # Clean up the background monitoring task
+            if not monitor_task.done():
+                monitor_task.cancel()
                 try:
-                    await cancellation_task
+                    await monitor_task
                 except asyncio.CancelledError:
                     pass
+            else:
+                monitor_task.result()
 
     def _decode_disaggregated_params_from_prefill(
         self, prefill_result: dict
@@ -653,7 +690,7 @@ class HandlerBase:
                 trace_headers=trace_headers,
             )
 
-            # Use the context manager to handle cancellation monitoring
+            # Use the context manager to handle cancellation and shutdown monitoring
             async with self._cancellation_monitor(generation_result, context):
                 async for res in generation_result:
                     # TRTLLM engine needs to start generating tokens first before stats
