@@ -2507,6 +2507,7 @@ dependencies = [
  "notify",
  "nuid",
  "once_cell",
+ "oneshot",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
