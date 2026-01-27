@@ -23,19 +23,14 @@ from gpu_memory_service import (
 )
 from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
-
-logger = logging.getLogger(__name__)
-
-
-# Trigger model loader registration and utility patches on import
 from gpu_memory_service.integrations.common import patch_empty_cache
 from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
 from gpu_memory_service.integrations.vllm.patches import patch_memory_snapshot
 
-# Register model loader
-register_gms_loader()
+logger = logging.getLogger(__name__)
 
-# Apply utility patches
+# Trigger model loader registration and utility patches on import
+register_gms_loader()
 patch_empty_cache()
 patch_memory_snapshot()
 

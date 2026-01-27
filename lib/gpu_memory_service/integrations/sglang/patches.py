@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import torch
 from gpu_memory_service.common.utils import get_socket_path
@@ -54,7 +55,6 @@ def patch_torch_memory_saver() -> None:
             # Use our GPU Memory Service implementation
             from gpu_memory_service.integrations.sglang.memory_saver import (
                 GMSMemorySaverImpl,
-                set_gms_memory_saver_impl,
             )
             from torch_memory_saver.entrypoint import _TorchMemorySaverImpl
 
@@ -74,10 +74,7 @@ def patch_torch_memory_saver() -> None:
                 device_index=device_index,
             )
 
-            # Store reference for model loader to access
-            set_gms_memory_saver_impl(gms_impl)
-
-            # Set _impl directly
+            # Set _impl directly (accessible via gms_impl property)
             self._impl = gms_impl
             logger.info(
                 "[GMS] Using GMS mode (device=%d, socket=%s, mode=%s)",
@@ -92,6 +89,19 @@ def patch_torch_memory_saver() -> None:
             original_ensure_initialized(self)
 
     entrypoint_module.TorchMemorySaver._ensure_initialized = patched_ensure_initialized
+
+    # Add property to access GMS impl directly from the singleton
+    from gpu_memory_service.integrations.sglang.memory_saver import GMSMemorySaverImpl
+
+    @property
+    def gms_impl(self) -> Optional[GMSMemorySaverImpl]:
+        """Get the GMS impl if installed, None otherwise."""
+        if isinstance(self._impl, GMSMemorySaverImpl):
+            return self._impl
+        return None
+
+    entrypoint_module.TorchMemorySaver.gms_impl = gms_impl
+
     _torch_memory_saver_patched = True
     logger.debug("[GMS] Patched torch_memory_saver")
 

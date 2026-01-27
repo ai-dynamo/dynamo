@@ -39,11 +39,11 @@ def setup_gms(server_args) -> Type["GMSModelLoader"]:
     # Validate config - GMS provides its own VA-stable unmap/remap for weights
     if getattr(server_args, "enable_weights_cpu_backup", False):
         raise ValueError(
-            "Cannot use --enable-weights-cpu-backup with --load-format gms. "
+            "Cannot use --enable-weights-cpu-backup with --load-format gms."
         )
     if getattr(server_args, "enable_draft_weights_cpu_backup", False):
         raise ValueError(
-            "Cannot use --enable-draft-weights-cpu-backup with --load-format gms. "
+            "Cannot use --enable-draft-weights-cpu-backup with --load-format gms."
         )
 
     # Import triggers patches at module level

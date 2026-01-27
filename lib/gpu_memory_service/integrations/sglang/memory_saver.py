@@ -27,19 +27,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Module-level reference to the GMS impl (one per process)
-_gms_memory_saver_impl: Optional["GMSMemorySaverImpl"] = None
-
 
 def get_gms_memory_saver_impl() -> Optional["GMSMemorySaverImpl"]:
-    """Get the GMS memory saver impl if installed."""
-    return _gms_memory_saver_impl
+    """Get the GMS memory saver impl from the torch_memory_saver singleton."""
+    try:
+        import torch_memory_saver
 
-
-def set_gms_memory_saver_impl(impl: "GMSMemorySaverImpl") -> None:
-    """Set the GMS memory saver impl (called by patch)."""
-    global _gms_memory_saver_impl
-    _gms_memory_saver_impl = impl
+        return torch_memory_saver.torch_memory_saver.gms_impl
+    except (ImportError, AttributeError):
+        return None
 
 
 class GMSMemorySaverImpl:
