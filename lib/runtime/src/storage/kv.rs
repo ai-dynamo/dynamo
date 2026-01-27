@@ -315,9 +315,8 @@ impl Manager {
 
     fn get_kv_store(&self) -> Result<&KeyValueStoreEnum, StoreError> {
         let selector = self.selector.clone();
-        self.kv_store.get_or_try_init(|| {
-            selector
-                .build(self.runtime.clone())})
+        self.kv_store
+            .get_or_try_init(|| selector.build(self.runtime.clone()))
     }
 
     pub async fn get_or_create_bucket(
