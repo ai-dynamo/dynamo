@@ -22,7 +22,7 @@ Quick reference for Dynamo's CI/CD pipelines.
 | `pre-commit` | Every PR | Python formatting (black, isort), YAML validation |
 | `copyright-checks` | Every PR | Validates SPDX headers |
 | `DCO` | Every PR | Checks Developer Certificate of Origin signature |
-| `dynamo-status-check` | Every PR | Builds core container, runs Rust + pytest |
+| `dynamo-status-check` | Every PR | Builds core container, runs Rust (kvbm specific) + pytest |
 | `backend-status-check` | After copy-pr-bot | Builds framework containers (vLLM, SGLang, TRT-LLM) + tests |
 
 **For external PRs**: Only the first 4 run automatically. A maintainer must trigger `backend-status-check` via copy-pr-bot.
