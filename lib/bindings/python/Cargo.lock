@@ -1587,7 +1587,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
- "utoipa",
  "uuid",
 ]
 
@@ -1800,6 +1799,7 @@ dependencies = [
  "notify",
  "nuid",
  "once_cell",
+ "oneshot",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
@@ -7793,8 +7793,6 @@ dependencies = [
  "quote",
  "regex",
  "syn 2.0.110",
- "url",
- "uuid",
 ]
 
 [[package]]
