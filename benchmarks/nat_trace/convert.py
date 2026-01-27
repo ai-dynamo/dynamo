@@ -264,12 +264,7 @@ def convert_to_mooncake(
     all_texts = [entry[3] for entry in all_entries]
     print(f"Hashing {len(all_texts)} texts...")
 
-    try:
-        all_hash_ids = texts_to_hashes(tokenizer_name, all_texts, block_size)
-    except Exception as e:
-        print(f"Error: Hashing failed: {e}")
-        # Fall back to empty hash_ids for all
-        all_hash_ids = [[] for _ in all_texts]
+    all_hash_ids = texts_to_hashes(tokenizer_name, all_texts, block_size)
 
     # Phase 3: Build mooncake entries
     mooncake_data = []
