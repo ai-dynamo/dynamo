@@ -83,6 +83,8 @@ impl TransferSchedulerClient {
 pub struct WorkerSchedulerClient {
     slots: HashMap<String, WorkerSchedulerClientSlot>,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    /// Channel to receive failure notifications from the scheduler
+    failure_rx: mpsc::UnboundedReceiver<(String, uuid::Uuid)>,
     iteration: u64,
     iteration_complete: bool,
     layers_complete: u32,
@@ -91,15 +93,27 @@ pub struct WorkerSchedulerClient {
 impl WorkerSchedulerClient {
     pub fn new(
         scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+        failure_rx: mpsc::UnboundedReceiver<(String, uuid::Uuid)>,
         _cancel_token: CancellationToken,
     ) -> Self {
         Self {
             slots: HashMap::new(),
             scheduler_tx,
+            failure_rx,
             iteration: 0,
             iteration_complete: true,
             layers_complete: 0,
         }
+    }
+
+    /// Drain all pending failure notifications from the scheduler.
+    /// Returns a map of request_id -> set of failed operation uuids.
+    pub fn drain_failures(&mut self) -> HashMap<String, HashSet<uuid::Uuid>> {
+        let mut failures: HashMap<String, HashSet<uuid::Uuid>> = HashMap::new();
+        while let Ok((request_id, uuid)) = self.failure_rx.try_recv() {
+            failures.entry(request_id).or_default().insert(uuid);
+        }
+        failures
     }
 
     pub fn iteration(&self) -> u64 {
@@ -312,6 +326,10 @@ pub struct Scheduler {
 
     // Messages from the transfer client arrive on this channel
     transfer_rx: mpsc::Receiver<TransferToSchedulerMessage>,
+
+    // Channel to send failure notifications to the worker
+    failure_tx: mpsc::UnboundedSender<(String, uuid::Uuid)>,
+
     iteration: u64,
     layers_complete: u32,
     iteration_complete: bool,
@@ -323,7 +341,8 @@ impl Scheduler {
     ) -> (Self, WorkerSchedulerClient, TransferSchedulerClient) {
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (transfer_tx, transfer_rx) = mpsc::channel(128);
-        let worker_client = WorkerSchedulerClient::new(scheduler_tx, cancel_token);
+        let (failure_tx, failure_rx) = mpsc::unbounded_channel();
+        let worker_client = WorkerSchedulerClient::new(scheduler_tx, failure_rx, cancel_token);
         let transfer_client = TransferSchedulerClient::new(transfer_tx);
         (
             Scheduler {
@@ -333,6 +352,7 @@ impl Scheduler {
                 enqueued_requests: HashMap::new(),
                 worker_rx: scheduler_rx,
                 transfer_rx,
+                failure_tx,
                 iteration: 0,
                 layers_complete: 0,
                 iteration_complete: true,
@@ -508,6 +528,18 @@ impl Scheduler {
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]
     fn handle_immediate_result(&mut self, result: ImmediateTransferResult) {
+        // Check if this result indicates a failure
+        if result.status.is_err() {
+            tracing::warn!(
+                request_id = %result.request_id,
+                operation_id = %result.uuid,
+                error = ?result.status,
+                "immediate transfer failed; notifying worker"
+            );
+            // Send failure notification to worker (ignore send errors during shutdown)
+            let _ = self.failure_tx.send((result.request_id.clone(), result.uuid));
+        }
+
         match self.slots.get_mut(&result.request_id) {
             Some(slot) => {
                 slot.completed.fetch_add(1, Ordering::Relaxed);
