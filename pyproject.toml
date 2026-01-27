@@ -3,7 +3,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.8.0"
+version = "0.9.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -13,7 +13,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.8.0",
+    "ai-dynamo-runtime==0.9.0",
     "transformers>=4.56.0",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
