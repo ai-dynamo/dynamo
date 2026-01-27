@@ -236,12 +236,15 @@ impl Component {
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
-        Endpoint {
+        let endpoint = Endpoint {
             component: self.clone(),
             name: endpoint.into(),
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
-        }
+        };
+        self.get_metrics_registry()
+            .register_child_registry(endpoint.get_metrics_registry());
+        endpoint
     }
 
     pub async fn list_instances(&self) -> anyhow::Result<Vec<Instance>> {
@@ -453,27 +456,45 @@ impl std::fmt::Display for Namespace {
 
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String) -> anyhow::Result<Self> {
-        Ok(NamespaceBuilder::default()
+        let ns = NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name)
-            .build()?)
+            .build()?;
+        ns.drt()
+            .get_metrics_registry()
+            .register_child_registry(ns.get_metrics_registry());
+        Ok(ns)
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> anyhow::Result<Component> {
-        ComponentBuilder::from_runtime(self.runtime.clone())
+        let component = ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
-            .build()
+            .build()?;
+        // Attach component metrics under this namespace so namespace.metrics().prometheus_expfmt()
+        // includes component (and endpoint) metrics via recursive child traversal.
+        self.get_metrics_registry()
+            .register_child_registry(component.get_metrics_registry());
+        Ok(component)
     }
 
     /// Create a [`Namespace`] in the parent namespace
     pub fn namespace(&self, name: impl Into<String>) -> anyhow::Result<Namespace> {
-        Ok(NamespaceBuilder::default()
+        let child = NamespaceBuilder::default()
             .runtime(self.runtime.clone())
             .name(name.into())
             .parent(Some(Arc::new(self.clone())))
-            .build()?)
+            .build()?;
+        child
+            .drt()
+            .get_metrics_registry()
+            .register_child_registry(child.get_metrics_registry());
+        // Also attach child namespace under this namespace so namespace.metrics().prometheus_expfmt()
+        // includes descendants naturally.
+        self.get_metrics_registry()
+            .register_child_registry(child.get_metrics_registry());
+        Ok(child)
     }
 
     pub fn name(&self) -> String {
