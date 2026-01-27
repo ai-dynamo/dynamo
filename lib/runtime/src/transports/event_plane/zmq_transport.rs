@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 /// Default ZMQ HWM is 1000, which limits scalability.
 const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
+const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
 use super::codec::MsgpackCodec;
 use super::frame::Frame;
@@ -244,8 +245,8 @@ impl ZmqSubTransport {
             // Configure High Water Mark for better scalability
             socket.set_rcvhwm(ZMQ_RCVHWM)?;
 
-            // Set receive timeout to -1 (blocking)
-            socket.set_rcvtimeo(-1)?;
+            // Set receive timeout to avoid blocking forever (fixes test hangs)
+            socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
 
             // Connect to endpoint
             socket.connect(&endpoint_owned)?;
@@ -307,8 +308,8 @@ impl ZmqSubTransport {
             // Configure High Water Mark for better scalability
             socket.set_rcvhwm(ZMQ_RCVHWM)?;
 
-            // Set receive timeout to -1 (blocking)
-            socket.set_rcvtimeo(-1)?;
+            // Set receive timeout to avoid blocking forever (fixes test hangs)
+            socket.set_rcvtimeo(ZMQ_RCVTIMEOUT_MS)?;
 
             // Connect to all endpoints
             for endpoint in &endpoints_owned {
@@ -350,6 +351,7 @@ impl ZmqSubTransport {
     ///
     /// This task holds the socket lock only briefly during each recv operation,
     /// allowing multiple subscribers to receive concurrently via broadcast channel.
+    /// Uses finite timeout to avoid blocking forever (fixes test hangs from ZMQ "slow joiner" problem).
     fn start_socket_pump(
         socket: Arc<Mutex<zmq::Socket>>,
         broadcast_tx: tokio::sync::broadcast::Sender<Bytes>,
@@ -358,12 +360,16 @@ impl ZmqSubTransport {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result =
-                    tokio::task::spawn_blocking(move || -> Result<(Vec<u8>, u64, u64, Vec<u8>)> {
+                let result = tokio::task::spawn_blocking(
+                    move || -> Result<Option<(Vec<u8>, u64, u64, Vec<u8>)>> {
                         let socket = socket_clone.lock().unwrap();
 
-                        // Receive topic frame
-                        let topic = socket.recv_bytes(0)?;
+                        // Receive topic frame (may timeout with EAGAIN)
+                        let topic = match socket.recv_bytes(0) {
+                            Ok(data) => data,
+                            Err(zmq::Error::EAGAIN) => return Ok(None), // Timeout, retry
+                            Err(e) => return Err(e.into()),
+                        };
 
                         // Receive publisher_id frame (8 bytes, u64 big-endian)
                         let publisher_id_bytes = socket.recv_bytes(0)?;
@@ -389,12 +395,13 @@ impl ZmqSubTransport {
                         // Receive data frame
                         let data = socket.recv_bytes(0)?;
 
-                        Ok((topic, publisher_id, sequence, data))
-                    })
-                    .await;
+                        Ok(Some((topic, publisher_id, sequence, data)))
+                    },
+                )
+                .await;
 
                 match result {
-                    Ok(Ok((_topic, publisher_id, sequence, frame_bytes))) => {
+                    Ok(Ok(Some((_topic, publisher_id, sequence, frame_bytes)))) => {
                         // Log dedup metadata for debugging
                         tracing::trace!(
                             publisher_id = publisher_id,
@@ -415,6 +422,10 @@ impl ZmqSubTransport {
                                 continue;
                             }
                         }
+                    }
+                    Ok(Ok(None)) => {
+                        // Timeout (EAGAIN), continue polling
+                        continue;
                     }
                     Ok(Err(e)) => {
                         tracing::error!(error = %e, "ZMQ receive error in socket pump");
