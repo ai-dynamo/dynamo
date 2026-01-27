@@ -58,11 +58,10 @@ DYNAMO_PID=$!
 # harnesses can set one simple pair for disaggregated deployments.
 OTEL_SERVICE_NAME=dynamo-worker-prefill DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT1:-8081} \
 python3 -m dynamo.sglang \
-  --model-path silence09/DeepSeek-R1-Small-2layers \
-  --served-model-name silence09/DeepSeek-R1-Small-2layers \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
-  --tp 2 --dp-size 2 --enable-dp-attention \
-  --load-balance-method round_robin \
+  --tp 1 \
   --trust-remote-code \
   --disaggregation-mode prefill \
   --disaggregation-bootstrap-port 12345 \
@@ -75,12 +74,11 @@ PREFILL_PID=$!
 
 # run decode worker
 OTEL_SERVICE_NAME=dynamo-worker-decode DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT2:-8082} \
-CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang \
-  --model-path silence09/DeepSeek-R1-Small-2layers \
-  --served-model-name silence09/DeepSeek-R1-Small-2layers \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang \
+  --model-path Qwen/Qwen3-0.6B \
+  --served-model-name Qwen/Qwen3-0.6B \
   --page-size 16 \
-  --prefill-round-robin-balance \
-  --tp 2 --dp-size 2 --enable-dp-attention \
+  --tp 1 \
   --trust-remote-code \
   --disaggregation-mode decode \
   --disaggregation-bootstrap-port 12345 \

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import argparse
 import contextlib
+import json
 import logging
 import os
 import socket
@@ -107,7 +108,7 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "type": str,
         "choices": ["etcd", "file", "mem"],
         "default": os.environ.get("DYN_STORE_KV", "etcd"),
-        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     },
     "request-plane": {
         "flags": ["--request-plane"],
@@ -153,10 +154,16 @@ class DynamoArgs:
 
     # embedding options
     embedding_worker: bool = False
+
+    # diffusion language model options (derived from server_args.dllm_algorithm)
+    diffusion_worker: bool = False
+
     # config dump options
     dump_config_to: Optional[str] = None
     # local indexer option
     enable_local_indexer: bool = False
+    # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
+    use_kv_events: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -189,6 +196,7 @@ class Config:
 def _preprocess_for_encode_config(
     config: Config,
 ) -> Dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
@@ -369,15 +377,27 @@ async def parse_args(args: list[str]) -> Config:
             # Remove --config-key from args (not recognized by SGLang)
             args = args[:key_index] + args[key_index + 2 :]
 
-        # Extract boolean actions from the parser to handle them correctly in YAML
-        boolean_actions = []
-        for action in parser._actions:
-            if hasattr(action, "dest") and hasattr(action, "action"):
-                if action.action in ["store_true", "store_false"]:
-                    boolean_actions.append(action.dest)
+        # Merge config file arguments with CLI arguments.
+        # ConfigArgumentMerger API changed after SGLang v0.5.7:
+        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
+        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
+        # We use inspect.signature to detect the API rather than version checking
+        # since unreleased builds may have the new API while still reporting v0.5.7.
+        # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
+        # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
+        import inspect
 
-        # Merge config file arguments with CLI arguments
-        config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        sig = inspect.signature(ConfigArgumentMerger.__init__)
+        if "parser" in sig.parameters:
+            config_merger = ConfigArgumentMerger(parser=parser)
+        else:
+            # Legacy path: extract store_true actions manually
+            boolean_actions = [
+                action.dest
+                for action in parser._actions
+                if isinstance(action, argparse._StoreTrueAction)
+            ]
+            config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
         args = config_merger.merge_config_with_args(args)
 
     parsed_args = parser.parse_args(args)
@@ -469,6 +489,60 @@ async def parse_args(args: list[str]) -> Config:
                 f"Custom Jinja template file not found: {expanded_template_path}"
             )
 
+    model_path = parsed_args.model_path
+    # Name the model
+    if not parsed_args.served_model_name:
+        parsed_args.served_model_name = model_path
+    # Download the model if necessary using modelexpress.
+    # We don't set `parsed_args.model_path` to the local path fetch_llm returns
+    # because sglang will send this to its pipeline-parallel workers, which may
+    # not have the local path.
+    # sglang will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
+    if not os.path.exists(model_path):
+        await fetch_llm(model_path)
+
+    # TODO: sglang downloads the model in `from_cli_args`, which means we had to
+    # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
+    # contain code to download a model, it should only parse the args.
+    server_args = ServerArgs.from_cli_args(parsed_args)
+
+    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
+    # tokens since last output), not cumulative tokens. When stream_output=True,
+    # SGLang sends disjoint segments which Dynamo passes through directly.
+    # Force stream_output=True for optimal streaming performance.
+    server_args.stream_output = True
+
+    if parsed_args.use_sglang_tokenizer:
+        logging.info(
+            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
+        )
+        server_args.skip_tokenizer_init = False
+    else:
+        logging.info(
+            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
+        )
+        server_args.skip_tokenizer_init = True
+
+    # Derive use_kv_events from server_args.kv_events_config
+    # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)
+    use_kv_events = False
+    if server_args.kv_events_config:
+        try:
+            kv_cfg = json.loads(server_args.kv_events_config)
+            use_kv_events = kv_cfg.get("publisher", "null") != "null"
+        except json.JSONDecodeError:
+            logging.warning(
+                f"Failed to parse kv_events_config: {server_args.kv_events_config}"
+            )
+    logging.info(
+        f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
+    )
+
+    # Auto-detect diffusion worker mode if dllm_algorithm
+    diffusion_worker = server_args.dllm_algorithm is not None
+
     dynamo_args = DynamoArgs(
         namespace=parsed_namespace,
         component=parsed_component_name,
@@ -485,31 +559,12 @@ async def parse_args(args: list[str]) -> Config:
         multimodal_encode_worker=parsed_args.multimodal_encode_worker,
         multimodal_worker=parsed_args.multimodal_worker,
         embedding_worker=parsed_args.embedding_worker,
+        diffusion_worker=diffusion_worker,
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        use_kv_events=use_kv_events,
     )
     logging.debug(f"Dynamo args: {dynamo_args}")
-
-    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
-    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
-    model_path = parsed_args.model_path
-    if not parsed_args.served_model_name:
-        parsed_args.served_model_name = model_path
-    if not os.path.exists(model_path):
-        parsed_args.model_path = await fetch_llm(model_path)
-
-    server_args = ServerArgs.from_cli_args(parsed_args)
-
-    if parsed_args.use_sglang_tokenizer:
-        logging.info(
-            "Using SGLang's built in tokenizer. Setting skip_tokenizer_init to False"
-        )
-        server_args.skip_tokenizer_init = False
-    else:
-        logging.info(
-            "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
-        )
-        server_args.skip_tokenizer_init = True
 
     return Config(server_args, dynamo_args)
 

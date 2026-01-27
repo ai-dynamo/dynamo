@@ -873,14 +873,14 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "dynamo-config"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1364,7 +1364,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hello_world"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "service_metrics"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",
@@ -3650,7 +3650,7 @@ dependencies = [
 
 [[package]]
 name = "system_metrics"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "anyhow",
  "dynamo-runtime",

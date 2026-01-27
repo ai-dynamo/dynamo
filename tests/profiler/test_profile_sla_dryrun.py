@@ -74,6 +74,9 @@ class TestProfileSLADryRun:
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
                 # Provide minimal model_info to avoid HF queries
                 self.model_info = ModelInfo(
                     model_size=16384.0,
@@ -118,6 +121,9 @@ class TestProfileSLADryRun:
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
                 self.model_info = ModelInfo(
                     model_size=16384.0,
                     architecture="TestArchitecture",
@@ -183,6 +189,9 @@ class TestProfileSLADryRun:
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
                 self.model_info = ModelInfo(
                     model_size=16384.0,
                     architecture="TestArchitecture",
@@ -237,6 +246,10 @@ class TestProfileSLADryRun:
                 self.num_gpus_per_node = 8
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
+                # Added in newer profiler versions; keep Args compatible with search_space_autogen
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
                 self.model_info = ModelInfo(
                     model_size=65536.0,
                     architecture="TestMoEArchitecture",
@@ -315,6 +328,9 @@ class TestProfileSLADryRun:
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 self.enable_gpu_discovery = True
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
 
         return Args()
 
@@ -383,6 +399,9 @@ class TestProfileSLADryRun:
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 self.enable_gpu_discovery = True
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
 
         return Args()
 
@@ -451,6 +470,9 @@ class TestProfileSLADryRun:
                 self.deploy_after_profile = False
                 self.pick_with_webui = False
                 self.enable_gpu_discovery = True
+                self.model_cache_pvc_name = ""
+                self.model_cache_pvc_path = ""
+                self.model_cache_pvc_mount_path = "/opt/model-cache"
 
         return Args()
 

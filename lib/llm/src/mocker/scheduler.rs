@@ -28,7 +28,7 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
+use crate::kv_router::protocols::DpRank;
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::perf_model::PerfModel;
@@ -43,6 +43,13 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Simple metrics struct for mocker's internal use
+#[derive(Clone, Default, Debug)]
+pub struct MockerMetrics {
+    pub dp_rank: DpRank,
+    pub active_decode_blocks: u64,
+}
 
 /// Enum representing either a direct request or an active sequence
 pub enum Request {
@@ -238,7 +245,7 @@ impl SchedulerState {
 #[derive(Clone)]
 pub struct Scheduler {
     request_tx: mpsc::UnboundedSender<DirectRequest>,
-    metrics_rx: tokio::sync::watch::Receiver<ForwardPassMetrics>,
+    metrics_rx: tokio::sync::watch::Receiver<MockerMetrics>,
 }
 
 impl Scheduler {
@@ -259,10 +266,12 @@ impl Scheduler {
 
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
-        let mut initial_metrics = ForwardPassMetrics::default();
-        initial_metrics.worker_stats.data_parallel_rank = Some(dp_rank);
+        let initial_metrics = MockerMetrics {
+            dp_rank,
+            active_decode_blocks: 0,
+        };
         let (metrics_tx, metrics_rx) =
-            tokio::sync::watch::channel::<ForwardPassMetrics>(initial_metrics);
+            tokio::sync::watch::channel::<MockerMetrics>(initial_metrics);
 
         let cancel_token_clone = cancellation_token.unwrap_or_default().clone();
 
@@ -311,12 +320,10 @@ impl Scheduler {
                 let total_time = prefill_time + decode_time;
 
                 // 4. Send metrics once per forward pass (after all prefill and decode processing)
-                let _ = metrics_tx.send(get_fwd_pass_metrics(
-                    &state,
-                    &kv_manager,
-                    &hit_rates,
+                let _ = metrics_tx.send(MockerMetrics {
                     dp_rank,
-                ));
+                    active_decode_blocks: kv_manager.num_active_blocks() as u64,
+                });
 
                 // 5. Sleep to maintain target iteration timing
                 let target_duration =
@@ -345,7 +352,7 @@ impl Scheduler {
     }
 
     /// Get a watch receiver for forward pass metrics
-    pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<ForwardPassMetrics> {
+    pub fn metrics_receiver(&self) -> tokio::sync::watch::Receiver<MockerMetrics> {
         self.metrics_rx.clone()
     }
 }
@@ -492,52 +499,6 @@ fn simulate_decode(
     total_time
 }
 
-/// Calculate forward pass metrics from current state
-fn get_fwd_pass_metrics(
-    state: &SchedulerState,
-    kv_manager: &KvManager,
-    hit_rates: &RunningMean<f32>,
-    dp_rank: u32,
-) -> ForwardPassMetrics {
-    // Get state metrics
-    let request_active_slots = state.decode.len() as u64;
-    let num_requests_waiting = state.waiting.len() as u64;
-
-    // Get KV manager metrics
-    let active_blocks_count = kv_manager.num_active_blocks() as u64;
-    let total_capacity = kv_manager.max_capacity() as u64;
-    let gpu_cache_usage_perc = if total_capacity > 0 {
-        active_blocks_count as f32 / total_capacity as f32
-    } else {
-        0.0
-    };
-
-    // Get hit rate metrics - O(1) access
-    let gpu_prefix_cache_hit_rate = hit_rates.mean();
-
-    let worker_stats = WorkerStats {
-        data_parallel_rank: Some(dp_rank),
-        request_active_slots,
-        request_total_slots: 1024, // vllm max_num_seqs for gpu >= 70 vram, otherwise 256, fallback is 128
-        num_requests_waiting,
-    };
-
-    let kv_stats = KvStats {
-        kv_active_blocks: active_blocks_count,
-        kv_total_blocks: total_capacity,
-        gpu_cache_usage_perc,
-        gpu_prefix_cache_hit_rate,
-    };
-
-    let spec_decode_stats = None;
-
-    ForwardPassMetrics {
-        worker_stats,
-        kv_stats,
-        spec_decode_stats,
-    }
-}
-
 /// Attempts to schedule waiting requests from the state queue.
 /// Returns the number of requests successfully scheduled.
 fn try_schedule(
@@ -656,27 +617,12 @@ mod tests {
     use std::time::Duration;
     use tokio::time::interval;
 
-    /// Helper function to verify that the scheduler is idle (no active or waiting requests/resources)
-    fn assert_scheduler_idle(metrics: &ForwardPassMetrics) {
+    /// Helper function to verify that the scheduler is idle (no active KV blocks)
+    fn assert_scheduler_idle(metrics: &MockerMetrics) {
         assert_eq!(
-            metrics.worker_stats.request_active_slots, 0,
-            "Expected 0 active slots, got {}",
-            metrics.worker_stats.request_active_slots
-        );
-        assert_eq!(
-            metrics.worker_stats.num_requests_waiting, 0,
-            "Expected 0 waiting requests, got {}",
-            metrics.worker_stats.num_requests_waiting
-        );
-        assert_eq!(
-            metrics.kv_stats.kv_active_blocks, 0,
+            metrics.active_decode_blocks, 0,
             "Expected 0 active blocks, got {}",
-            metrics.kv_stats.kv_active_blocks
-        );
-        assert_eq!(
-            metrics.kv_stats.gpu_cache_usage_perc, 0.0,
-            "Expected 0% GPU cache usage, got {}",
-            metrics.kv_stats.gpu_cache_usage_perc
+            metrics.active_decode_blocks
         );
     }
 
@@ -893,21 +839,11 @@ mod tests {
         // Wait a bit for final metrics update
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Verify forward pass metrics
+        // Verify forward pass metrics - scheduler should be idle after completing all requests
         let metrics = metrics_rx.borrow().clone();
-
         assert_scheduler_idle(&metrics);
-        assert!(
-            metrics.kv_stats.gpu_prefix_cache_hit_rate > 0.8,
-            "Expected cache hit rate > 0.8, got {}",
-            metrics.kv_stats.gpu_prefix_cache_hit_rate
-        );
 
-        println!(
-            "Test passed! Cache hit rate: {:.3}",
-            metrics.kv_stats.gpu_prefix_cache_hit_rate
-        );
-        println!("Received {received_tokens} tokens");
+        println!("Test passed! Received {received_tokens} tokens");
     }
 
     #[tokio::test]

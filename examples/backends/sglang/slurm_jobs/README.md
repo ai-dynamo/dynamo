@@ -17,7 +17,7 @@ For this example, we will make some assumptions about your SLURM cluster:
    If your cluster supports similar container based plugins, you may be able to
    modify the template to use that instead.
 3. We assume you have already built a recent Dynamo+SGLang container image as
-   described [here](../../../../docs/backends/sglang/dsr1-wideep-gb200.md#instructions).
+   described [here](../../../../docs/backends/sglang/README.md#using-docker-containers).
    This is the image that can be passed to the `--container-image` argument in later steps.
 
 ## Scripts Overview

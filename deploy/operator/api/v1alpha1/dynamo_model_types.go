@@ -18,9 +18,12 @@
 package v1alpha1
 
 import (
+	"fmt"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // DynamoModelSpec defines the desired state of DynamoModel
@@ -143,4 +146,27 @@ func (m *DynamoModel) HasEndpoints() bool {
 // HasReadyEndpoints returns true if the model has any ready endpoints
 func (m *DynamoModel) HasReadyEndpoints() bool {
 	return m.Status.ReadyEndpoints > 0
+}
+
+// IsReady returns true if all endpoints are ready
+func (m *DynamoModel) IsReady() (bool, string) {
+	if m.Status.TotalEndpoints == 0 {
+		return false, "No endpoints configured"
+	}
+	if m.Status.ReadyEndpoints == 0 {
+		return false, "No endpoints ready"
+	}
+	if m.Status.ReadyEndpoints < m.Status.TotalEndpoints {
+		return false, fmt.Sprintf("Only %d/%d endpoints ready", m.Status.ReadyEndpoints, m.Status.TotalEndpoints)
+	}
+	return true, ""
+}
+
+// GetState returns "ready" or "not_ready" based on endpoint status
+func (m *DynamoModel) GetState() string {
+	ready, _ := m.IsReady()
+	if ready {
+		return consts.ResourceStateReady
+	}
+	return consts.ResourceStateNotReady
 }

@@ -68,11 +68,12 @@ Run the vLLM disaggregated script with tracing enabled:
 # Navigate to vLLM launch directory
 cd examples/backends/vllm/launch
 
-# Run disaggregated deployment (modify the script to export env vars first)
+# Export tracing env vars, then run the disaggregated deployment script.
 ./disagg.sh
 ```
 
-**Note:** You may need to modify `disagg.sh` to export the tracing environment variables before starting each component:
+**Note:** the example vLLM `disagg.sh` sets additional per-worker port environment variables (e.g., `DYN_VLLM_KV_EVENT_PORT`,
+`VLLM_NIXL_SIDE_CHANNEL_PORT`) to avoid ZMQ "Address already in use" conflicts when multiple workers run on the same host. If you run the components manually, make sure you mirror those port settings.
 
 ```bash
 #!/bin/bash
@@ -90,13 +91,16 @@ python -m dynamo.frontend --router-mode kv &
 
 # Run decode worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-decode
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
+DYN_SYSTEM_PORT=8081 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \
     --otlp-traces-endpoint="$OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" &
 
 # Run prefill worker, make sure to wait for start up
 export OTEL_SERVICE_NAME=dynamo-worker-prefill
+DYN_SYSTEM_PORT=8082 \
+DYN_VLLM_KV_EVENT_PORT=20081 \
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 \
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model Qwen/Qwen3-0.6B \
     --enforce-eager \

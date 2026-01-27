@@ -11,6 +11,8 @@ when given the same inputs with fixed seed and temperature=0.
 The test uses comprehensive server warmup (sending all test prompts
 before validation) to avoid server initialization effects that could
 impact determinism measurements.
+
+This is a TensorRTLLM only test.
 """
 
 import logging
@@ -24,7 +26,12 @@ from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import DynamoFrontendProcess, ManagedProcess
 from tests.utils.payloads import check_models_api
 
+from .common import check_module_available
+
 logger = logging.getLogger(__name__)
+
+
+HAS_TRTLLM = check_module_available("tensorrt_llm")
 
 # Just need a model to show the config works rather than any stress of the system.
 MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -151,9 +158,7 @@ def send_completion_request(
 @pytest.mark.nightly
 @pytest.mark.slow
 @pytest.mark.gpu_1
-@pytest.mark.skip(
-    reason="Enable these tests once `main` dynamo upgrades to TRTLLM 1.2+"
-)
+@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config not defined and
@@ -168,12 +173,12 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
     with DynamoFrontendProcess(request):
         logger.info("Frontend started.")
 
-        engine_config_with_cuda_graph_and_kvbm = (
-            "tests/kvbm/engine_config_without_cuda_graph_and_kvbm.yaml"
+        engine_config_without_cuda_graph_and_kvbm = (
+            "tests/kvbm_integration/engine_config_without_cuda_graph_and_kvbm.yaml"
         )
         logger.info("Starting worker...")
         with DynamoWorkerProcess(
-            request, "decode", engine_config_with_cuda_graph_and_kvbm
+            request, "decode", engine_config_without_cuda_graph_and_kvbm
         ) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
@@ -190,9 +195,7 @@ def test_kvbm_without_cuda_graph_enabled(request, runtime_services):
 @pytest.mark.slow
 @pytest.mark.nightly
 @pytest.mark.gpu_1
-@pytest.mark.skip(
-    reason="Enable these tests once dynamo `main` upgrades to TRTLLM 1.2+"
-)
+@pytest.mark.skipif(not HAS_TRTLLM, reason="requires tensorrt_llm")
 def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
     """
     End-to-end test for TRTLLM worker with cuda_graph_config defined and
@@ -208,7 +211,7 @@ def test_kvbm_with_cuda_graph_enabled(request, runtime_services):
         logger.info("Frontend started.")
 
         engine_config_with_cuda_graph_and_kvbm = (
-            "tests/kvbm/engine_config_with_cuda_graph_and_kvbm.yaml"
+            "tests/kvbm_integration/engine_config_with_cuda_graph_and_kvbm.yaml"
         )
         logger.info("Starting worker...")
         with DynamoWorkerProcess(

@@ -62,6 +62,8 @@ class Config:
         self.store_kv: str = ""
         self.request_plane: str = ""
         self.enable_local_indexer: bool = False
+        # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
+        self.use_kv_events: bool = False
 
     def __str__(self) -> str:
         return (
@@ -95,7 +97,8 @@ class Config:
             f"custom_jinja_template={self.custom_jinja_template}, "
             f"store_kv={self.store_kv}, "
             f"request_plane={self.request_plane}, "
-            f"enable_local_indexer={self.enable_local_indexer}"
+            f"enable_local_indexer={self.enable_local_indexer}, "
+            f"use_kv_events={self.use_kv_events}"
         )
 
 
@@ -103,10 +106,23 @@ class Config:
 def _preprocess_for_encode_config(
     obj: Config,
 ) -> dict:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return obj.__dict__
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
+    """Parse a Dynamo endpoint string into its components.
+
+    Args:
+        endpoint: Endpoint string in format 'namespace.component.endpoint'
+            or 'dyn://namespace.component.endpoint'.
+
+    Returns:
+        Tuple of (namespace, component, endpoint_name).
+
+    Raises:
+        ValueError: If endpoint format is invalid.
+    """
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
@@ -119,6 +135,11 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
 
 
 def cmd_line_args():
+    """Parse command-line arguments for the TensorRT-LLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = argparse.ArgumentParser(
         description="TensorRT-LLM server integrated with Dynamo LLM."
     )
@@ -278,6 +299,13 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
+    parser.add_argument(
+        "--connector",
+        type=str,
+        default="none",
+        choices=["none", "kvbm"],
+        help="Connector to use for the model.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-jinja-template",
@@ -296,7 +324,7 @@ def cmd_line_args():
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -375,6 +403,9 @@ def cmd_line_args():
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
+    # Derive use_kv_events from publish_events_and_metrics
+    config.use_kv_events = config.publish_events_and_metrics
+    config.connector = args.connector
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:

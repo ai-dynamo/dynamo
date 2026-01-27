@@ -246,6 +246,7 @@ impl OpenAIPreprocessor {
                 decode_worker_id: nvext.decode_worker_id,
                 dp_rank: None, // dp_rank is set later in the pipeline
                 enable_local_updates: nvext.enable_local_updates,
+                expected_output_tokens: nvext.expected_output_tokens,
             };
             builder.routing(Some(routing));
         }
@@ -293,31 +294,24 @@ impl OpenAIPreprocessor {
         request: &R,
         builder: &mut PreprocessedRequestBuilder,
     ) -> Result<()> {
-        let messages = request.messages();
-        let message_count = messages.len().unwrap_or(0);
         let mut media_map: MultimodalDataMap = HashMap::new();
         #[cfg(feature = "media-nixl")]
         let mut fetch_tasks: Vec<(String, ChatCompletionRequestUserMessageContentPart)> =
             Vec::new();
 
-        for idx in 0..message_count {
-            let msg = messages
-                .get_item_by_index(idx)
-                .map_err(|_| anyhow::Error::msg(format!("Cannot get message at index {idx}")))?;
-
-            let msg_json: serde_json::Value = serde_json::to_value(&msg)?;
-            let message: ChatCompletionRequestMessage = serde_json::from_value(msg_json)?;
-
-            let content_parts = match &message {
+        let Some(messages) = request.typed_messages() else {
+            return Ok(());
+        };
+        for message in messages.iter() {
+            let content_parts = match message {
                 ChatCompletionRequestMessage::User(u) => match &u.content {
                     ChatCompletionRequestUserMessageContent::Array(parts) => parts,
                     _ => continue,
                 },
                 _ => continue,
             };
-
             // Iterate over content parts
-            for content_part in content_parts {
+            for content_part in content_parts.iter() {
                 let (type_str, url) = match content_part {
                     ChatCompletionRequestUserMessageContentPart::ImageUrl(image_part) => {
                         ("image_url".to_string(), image_part.image_url.url.clone())
@@ -370,7 +364,7 @@ impl OpenAIPreprocessor {
 
             // Preserve original messages in extra_args for multimodal workers that need them
             // (e.g., TRT-LLM multimodal processor needs raw messages for proper tokenization)
-            let messages_json = serde_json::to_value(&messages)?;
+            let messages_json = serde_json::to_value(request.messages())?;
             let extra_args = serde_json::json!({
                 "messages": messages_json
             });
@@ -952,8 +946,11 @@ impl
 
         let mut response_generator = Box::new(response_generator);
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
@@ -1094,7 +1091,20 @@ impl
         let mut response_generator = Box::new(response_generator);
         // convert the chat completion request to a common completion request
         let mut builder = self.builder(&request)?;
-        let annotations = self.gather_tokens(&request, &mut builder, None)?;
+
+        // Check if embeddings are provided - skip tokenization path
+        let annotations = if let Some(ref prompt_embeds) = request.inner.prompt_embeds {
+            // Skip tokenization for embeddings
+            builder.token_ids(vec![]); // Empty token IDs
+            builder.prompt_embeds(Some(prompt_embeds.clone()));
+            // No token annotations
+            HashMap::new()
+        } else {
+            // Normal path: tokenize the prompt
+            self.gather_tokens(&request, &mut builder, None)?
+        };
+
+        // Gather multimodal data (works with both embeddings and text prompts)
         self.gather_multi_modal_data(&request, &mut builder).await?;
 
         let mut common_request = builder.build()?;
@@ -1102,8 +1112,11 @@ impl
         // Attach the timing tracker to the request so downstream components can record metrics
         common_request.tracker = response_generator.tracker();
 
-        // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        // Update ISL only for text prompts (embeddings get sequence length from tensor shape)
+        if common_request.prompt_embeds.is_none() {
+            let isl = common_request.token_ids.len() as u32;
+            response_generator.update_isl(isl);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);

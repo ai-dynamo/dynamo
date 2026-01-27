@@ -177,19 +177,43 @@ impl CommonExtProvider for NvCreateChatCompletionRequest {
             return Some(value);
         }
 
-        let tool_choice = self.inner.tool_choice.as_ref()?;
-        let tools = self.inner.tools.as_deref()?;
-
-        match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
-            Ok(schema) => schema,
-            Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    "failed to derive guided_json from tool_choice"
-                );
-                None
+        // 1) Tool-call guided decoding (highest precedence after explicit guided_json)
+        if let (Some(tool_choice), Some(tools)) =
+            (self.inner.tool_choice.as_ref(), self.inner.tools.as_deref())
+        {
+            match tools::get_json_schema_from_tools(Some(tool_choice), Some(tools)) {
+                Ok(Some(schema)) => return Some(schema),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to derive guided_json from tool_choice"
+                    );
+                }
             }
         }
+
+        // 2) OpenAI `response_format` (applies to assistant content, not tool calls)
+        if let Some(response_format) = self.inner.response_format.as_ref() {
+            use dynamo_async_openai::types::ResponseFormat;
+            match response_format {
+                ResponseFormat::Text => {}
+                ResponseFormat::JsonObject => {
+                    // Minimal JSON Schema for "any JSON object"
+                    return Some(serde_json::json!({
+                        "type": "object"
+                    }));
+                }
+                ResponseFormat::JsonSchema { json_schema } => {
+                    // validate_response_format ensures schema is present when type=json_schema
+                    if let Some(schema) = json_schema.schema.clone() {
+                        return Some(schema);
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn get_guided_regex(&self) -> Option<String> {
@@ -325,7 +349,7 @@ impl ValidateRequest for NvCreateChatCompletionRequest {
         // none for prediction
         // none for audio
         validate::validate_presence_penalty(self.inner.presence_penalty)?;
-        // none for response_format
+        validate::validate_response_format(&self.inner.response_format)?;
         // none for seed
         validate::validate_service_tier(&self.inner.service_tier)?;
         validate::validate_stop(&self.inner.stop)?;
