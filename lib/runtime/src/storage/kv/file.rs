@@ -3,12 +3,10 @@
 
 use std::cmp;
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
-use std::fs::OpenOptions;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -17,6 +15,7 @@ use std::{collections::HashMap, pin::Pin};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use filetime::FileTime;
 use futures::StreamExt;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event};
 use parking_lot::Mutex;
@@ -85,25 +84,33 @@ impl FileStore {
 
     /// The shortest TTL of any directory we are using.
     fn shortest_ttl(&self) -> Duration {
-        let mut ttl = DEFAULT_TTL;
-        let active_dirs = self.active_dirs.lock().clone();
-        for (_, dir) in active_dirs {
-            ttl = cmp::min(ttl, dir.ttl);
-        }
+        let active_dirs = self.active_dirs.lock();
+        let ttl = active_dirs
+            .values()
+            .map(|dir| dir.ttl)
+            .min()
+            .unwrap_or(DEFAULT_TTL);
         tracing::trace!("FileStore expiry shortest ttl {ttl:?}");
         ttl
     }
 
     fn keep_alive(&self) {
-        let active_dirs = self.active_dirs.lock().clone();
-        for (_, dir) in active_dirs {
+        // Collect directories while holding lock briefly, then release before I/O
+        let dirs: Vec<Directory> = self.active_dirs.lock().values().cloned().collect();
+        for dir in dirs {
             dir.keep_alive();
         }
     }
 
     fn delete_expired_files(&self) -> anyhow::Result<()> {
-        let active_dirs = self.active_dirs.lock().clone();
-        for (path, dir) in active_dirs {
+        // Collect while holding lock briefly, then release before I/O
+        let dirs: Vec<(PathBuf, Directory)> = self
+            .active_dirs
+            .lock()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (path, dir) in dirs {
             dir.delete_expired_files()
                 .with_context(|| path.display().to_string())?;
         }
@@ -206,17 +213,13 @@ impl Directory {
 
     /// touch the files we own so they don't get deleted by a different FileStore
     fn keep_alive(&self) {
-        let owned_files = self.owned_files.lock().clone();
+        // Collect paths while holding lock briefly, then release before I/O
+        let owned_files: Vec<PathBuf> = self.owned_files.lock().iter().cloned().collect();
+        let now = FileTime::now();
         for path in owned_files {
-            let file = match OpenOptions::new().write(true).open(&path) {
-                Ok(f) => f,
-                Err(err) => {
-                    tracing::error!(path = %path.display(), error = %err, "FileStore::keep_alive failed opening owned file");
-                    continue;
-                }
-            };
-            if let Err(err) = file.set_modified(SystemTime::now()) {
-                tracing::error!(path = %path.display(), error = %err, "FileStore::keep_alive failed set_modified on owned file");
+            // Use filetime::set_file_mtime - direct syscall without opening file handle
+            if let Err(err) = filetime::set_file_mtime(&path, now) {
+                tracing::error!(path = %path.display(), error = %err, "FileStore::keep_alive failed set_mtime on owned file");
                 continue;
             }
             tracing::trace!("FileStore keep_alive set {}", path.display());
@@ -301,10 +304,9 @@ impl Bucket for Directory {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
         self.owned_files.lock().insert(full_path.clone());
-        let str_path = full_path.display().to_string();
-        fs::write(&full_path, &value)
-            .context(str_path)
-            .map_err(a_to_fs_err)?;
+        tokio::fs::write(&full_path, &value)
+            .await
+            .map_err(|e| StoreError::FilesystemError(format!("{}: {e}", full_path.display())))?;
         Ok(StoreOutcome::Created(0))
     }
 
@@ -312,31 +314,35 @@ impl Bucket for Directory {
     async fn get(&self, key: &Key) -> Result<Option<bytes::Bytes>, StoreError> {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
-        if !full_path.exists() {
-            return Ok(None);
+        // Avoid TOCTOU race and double syscall - just try to read
+        match tokio::fs::read(&full_path).await {
+            Ok(data) => Ok(Some(data.into())),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StoreError::FilesystemError(format!(
+                "{}: {e}",
+                full_path.display()
+            ))),
         }
-        let str_path = full_path.display().to_string();
-        let data: bytes::Bytes = fs::read(&full_path)
-            .context(str_path)
-            .map_err(a_to_fs_err)?
-            .into();
-        Ok(Some(data))
     }
 
     /// Delete a file from the directory
     async fn delete(&self, key: &Key) -> Result<(), StoreError> {
         let safe_key = key.url_safe();
         let full_path = self.p.join(safe_key.as_ref());
-        let str_path = full_path.display().to_string();
-        if !full_path.exists() {
-            return Err(StoreError::MissingKey(str_path));
-        }
 
         self.owned_files.lock().remove(&full_path);
 
-        fs::remove_file(&full_path)
-            .context(str_path)
-            .map_err(a_to_fs_err)
+        // Avoid TOCTOU race - just try to remove
+        match tokio::fs::remove_file(&full_path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                Err(StoreError::MissingKey(full_path.display().to_string()))
+            }
+            Err(e) => Err(StoreError::FilesystemError(format!(
+                "{}: {e}",
+                full_path.display()
+            ))),
+        }
     }
 
     async fn watch(
@@ -401,7 +407,7 @@ impl Bucket for Directory {
 
                     match event.kind {
                         EventKind::Create(event::CreateKind::File) | EventKind::Modify(event::ModifyKind::Data(event::DataChange::Content)) => {
-                            let data: bytes::Bytes = match fs::read(&item_path) {
+                            let data: bytes::Bytes = match tokio::fs::read(&item_path).await {
                                 Ok(data) => data.into(),
                                 Err(err) => {
                                     tracing::warn!(error = %err, item = %item_path.display(), "Failed reading event item. Skipping.");
@@ -425,13 +431,24 @@ impl Bucket for Directory {
     }
 
     async fn entries(&self) -> Result<HashMap<Key, bytes::Bytes>, StoreError> {
-        let contents = fs::read_dir(&self.p)
-            .with_context(|| self.p.display().to_string())
-            .map_err(a_to_fs_err)?;
+        let mut read_dir = tokio::fs::read_dir(&self.p)
+            .await
+            .map_err(|e| StoreError::FilesystemError(format!("{}: {e}", self.p.display())))?;
+
         let mut out = HashMap::new();
-        for entry in contents {
-            let entry = entry.map_err(to_fs_err)?;
-            if !entry.path().is_file() {
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|e| StoreError::FilesystemError(format!("{}: {e}", self.p.display())))?
+        {
+            let file_type = match entry.file_type().await {
+                Ok(ft) => ft,
+                Err(err) => {
+                    tracing::warn!(error = %err, path = %entry.path().display(), "Failed to get file type. Skipping.");
+                    continue;
+                }
+            };
+            if !file_type.is_file() {
                 tracing::warn!(
                     path = %entry.path().display(),
                     "Unexpected entry, directory should only contain files."
@@ -440,11 +457,12 @@ impl Bucket for Directory {
             }
 
             // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
-            let canonical_entry_path = match entry.path().canonicalize() {
+            let entry_path = entry.path();
+            let canonical_entry_path = match entry_path.canonicalize() {
                 Ok(p) => p,
                 Err(err) => {
-                    tracing::warn!(error = %err, path = %entry.path().display(), "Failed to canonicalize path. Using original path.");
-                    entry.path()
+                    tracing::warn!(error = %err, path = %entry_path.display(), "Failed to canonicalize path. Using original path.");
+                    entry_path.clone()
                 }
             };
 
@@ -460,10 +478,13 @@ impl Bucket for Directory {
                     continue;
                 }
             };
-            let data: bytes::Bytes = fs::read(entry.path())
-                .with_context(|| self.p.display().to_string())
-                .map_err(a_to_fs_err)?
-                .into();
+            let data: bytes::Bytes = match tokio::fs::read(&entry_path).await {
+                Ok(d) => d.into(),
+                Err(err) => {
+                    tracing::warn!(error = %err, path = %entry_path.display(), "Failed to read file. Skipping.");
+                    continue;
+                }
+            };
             out.insert(key, data);
         }
         Ok(out)

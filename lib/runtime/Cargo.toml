@@ -75,6 +75,7 @@ console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
+filetime = { version = "0.2" }
 inotify = { version = "0.11" }
 libc = { version = "0.2" }
 local-ip-address = { version = "0.6.3" }
