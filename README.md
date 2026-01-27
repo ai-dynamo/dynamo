@@ -360,7 +360,7 @@ If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts
 [kv-routing]: docs/router/kv_cache_routing.md
 [planner]: docs/planner/sla_planner.md
 [kvbm]: docs/kvbm/kvbm_architecture.md
-[mm]: examples/multimodal/
+[mm]: examples/backends/vllm/
 [migration]: docs/fault_tolerance/request_migration.md
 [lora]: examples/backends/vllm/deploy/lora/README.md
 [tools]: docs/agents/tool-calling.md

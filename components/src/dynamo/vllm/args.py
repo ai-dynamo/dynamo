@@ -65,11 +65,14 @@ class Config:
     # TODO: Have a single processor for all cases and adopting rust based processor
     ec_processor: bool = False
     multimodal_encode_worker: bool = False
+    multimodal_audio_encode_worker: bool = False
+    multimodal_video_encode_worker: bool = False
     multimodal_worker: bool = False
     multimodal_decode_worker: bool = False
     enable_multimodal: bool = False
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+    num_frames_to_sample: int = 8
 
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
@@ -184,6 +187,16 @@ def parse_args() -> Config:
         help="Run as multimodal encode worker component for processing images/videos",
     )
     parser.add_argument(
+        "--multimodal-audio-encode-worker",
+        action="store_true",
+        help="Run as multimodal audio encode worker component for processing audio inputs",
+    )
+    parser.add_argument(
+        "--multimodal-video-encode-worker",
+        action="store_true",
+        help="Run as multimodal video encode worker component for processing video inputs",
+    )
+    parser.add_argument(
         "--multimodal-worker",
         action="store_true",
         help="Run as multimodal worker component for LLM inference with multimodal data",
@@ -215,6 +228,12 @@ def parse_args() -> Config:
             "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
             "'USER: <image> please describe the image ASSISTANT:'."
         ),
+    )
+    parser.add_argument(
+        "--num-frames-to-sample",
+        type=int,
+        default=8,
+        help="Number of video frames to sample for multimodal video encoding",
     )
     parser.add_argument(
         "--vllm-native-encoder-worker",
@@ -326,6 +345,8 @@ def parse_args() -> Config:
         int(bool(args.multimodal_processor))
         + int(bool(args.ec_processor))
         + int(bool(args.multimodal_encode_worker))
+        + int(bool(args.multimodal_audio_encode_worker))
+        + int(bool(args.multimodal_video_encode_worker))
         + int(bool(args.multimodal_worker))
         + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
@@ -333,7 +354,8 @@ def parse_args() -> Config:
     )
     if mm_flags > 1:
         raise ValueError(
-            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
+            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, "
+            "--multimodal-audio-encode-worker, --multimodal-video-encode-worker, --multimodal-worker, "
             "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
         )
 
@@ -358,6 +380,8 @@ def parse_args() -> Config:
     elif (
         args.vllm_native_encoder_worker
         or args.multimodal_encode_worker
+        or args.multimodal_audio_encode_worker
+        or args.multimodal_video_encode_worker
         or args.multimodal_encode_prefill_worker
     ):
         config.component = "encoder"
@@ -389,11 +413,14 @@ def parse_args() -> Config:
     config.multimodal_processor = args.multimodal_processor
     config.ec_processor = args.ec_processor
     config.multimodal_encode_worker = args.multimodal_encode_worker
+    config.multimodal_audio_encode_worker = args.multimodal_audio_encode_worker
+    config.multimodal_video_encode_worker = args.multimodal_video_encode_worker
     config.multimodal_worker = args.multimodal_worker
     config.multimodal_decode_worker = args.multimodal_decode_worker
     config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
     config.enable_multimodal = args.enable_multimodal
     config.mm_prompt_template = args.mm_prompt_template
+    config.num_frames_to_sample = args.num_frames_to_sample
     config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
     config.ec_connector_backend = args.ec_connector_backend
     config.ec_storage_path = args.ec_storage_path

@@ -24,7 +24,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
-            echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
+            echo "  --prompt-template <template> Specify the multi-modal prompt template to use."
             echo "  -h, --help           Show this help message"
             exit 0
             ;;
@@ -44,7 +44,6 @@ elif [[ "$MODEL_NAME" == "Qwen/Qwen2-Audio-7B-Instruct" ]]; then
 else
     echo "No multi-modal prompt template is defined for the model: $MODEL_NAME"
     echo "Please provide a prompt template using --prompt-template option."
-    echo "Example: --prompt-template 'USER: <image>\n<prompt> ASSISTANT:'"
     exit 1
 fi
 
@@ -52,7 +51,6 @@ fi
 echo "Checking audio multimodal dependencies..."
 DEPS_MISSING=false
 
-# Check for accelerate
 if ! python -c "import accelerate" &> /dev/null; then
     echo "  accelerate not found"
     DEPS_MISSING=true
@@ -60,12 +58,10 @@ else
     echo "  ✓ accelerate is installed"
 fi
 
-# Check for vllm with audio support
 if ! python -c "import vllm" &> /dev/null; then
     echo "  vllm not found"
     DEPS_MISSING=true
 else
-    # Check if audio dependencies are available (librosa is a key audio dependency)
     if ! python -c "import librosa" &> /dev/null; then
         echo "  vllm audio dependencies not found"
         DEPS_MISSING=true
@@ -74,7 +70,6 @@ else
     fi
 fi
 
-# Install missing dependencies
 if [ "$DEPS_MISSING" = true ]; then
     echo "Installing missing dependencies..."
     pip install 'vllm[audio]' accelerate
@@ -87,12 +82,12 @@ fi
 python -m dynamo.frontend --http-port 8000 &
 
 # run processor
-python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
+python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_NAME --mm-prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
-CUDA_VISIBLE_DEVICES=0 python3 components/audio_encode_worker.py --model $MODEL_NAME &
-DYN_VLLM_KV_EVENT_PORT=20081 VLLM_NIXL_SIDE_CHANNEL_PORT=20098 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill --enable-disagg &
-DYN_VLLM_KV_EVENT_PORT=20082 VLLM_NIXL_SIDE_CHANNEL_PORT=20099 CUDA_VISIBLE_DEVICES=2 python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20097 CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-audio-encode-worker --enable-multimodal --model $MODEL_NAME --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20080"}' &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20098 CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --is-prefill-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20081"}' &
+VLLM_NIXL_SIDE_CHANNEL_PORT=20099 CUDA_VISIBLE_DEVICES=2 python -m dynamo.vllm --multimodal-decode-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME --kv-events-config '{"publisher":"zmq","topic":"kv-events","endpoint":"tcp://*:20082"}' &
 
 # Wait for all background processes to complete
 wait

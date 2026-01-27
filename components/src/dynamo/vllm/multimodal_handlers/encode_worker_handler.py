@@ -1,14 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 import os
 import shutil
 import time
-from typing import AsyncGenerator, AsyncIterator
+from io import BytesIO
+from queue import Queue
+from typing import AsyncGenerator, AsyncIterator, Optional
 
+import av
 import safetensors
-from transformers import AutoImageProcessor
+import torch
+from transformers import (
+    AutoImageProcessor,
+    AutoProcessor,
+    Qwen2AudioForConditionalGeneration,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.multimodal.hasher import MultiModalHasher
@@ -18,13 +27,21 @@ import dynamo.nixl_connect as connect
 from dynamo.runtime import Client, DistributedRuntime
 
 from ..multimodal_utils import (
+    AudioLoader,
     ImageLoader,
     VLLMNativeEncoderRequest,
     VLLMNativeEncoderResponse,
+    calculate_frame_sampling_indices,
     encode_image_embeddings,
     get_embedding_hash,
     get_encoder_components,
+    get_video_metadata,
+    load_video_content,
     load_vision_model,
+    open_video_container,
+    prepare_tensor_for_rdma,
+    read_video_pyav,
+    resize_video_frames,
     vLLMMultimodalRequest,
 )
 
@@ -215,6 +232,237 @@ class EncodeWorkerHandler:
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
+
+
+class AudioEncodeWorkerHandler:
+    def __init__(
+        self,
+        engine_args: AsyncEngineArgs,
+        pd_worker_client: Client,
+    ) -> None:
+        self.pd_worker_client = pd_worker_client
+        self.engine_args = engine_args
+        self.model = self.engine_args.model
+
+        self.audio_loader = AudioLoader(cache_size=CACHE_SIZE_MAXIMUM)
+        self.audio_processor = AutoProcessor.from_pretrained(
+            self.model, trust_remote_code=True
+        )
+        self.audio_model = Qwen2AudioForConditionalGeneration.from_pretrained(
+            self.model, device_map="auto", torch_dtype=torch.float16
+        ).eval()
+
+        self._connector = None
+        self.readables = []
+
+    def _get_audio_embeddings(self, audio_features):
+        input_features, feature_attention_mask = (
+            audio_features.input_features,
+            audio_features.feature_attention_mask,
+        )
+        with torch.no_grad():
+            (
+                audio_feat_lengths,
+                audio_output_lengths,
+            ) = self.audio_model.audio_tower._get_feat_extract_output_lengths(
+                feature_attention_mask.sum(-1)
+            )
+            batch_size, _, max_mel_seq_len = input_features.shape
+            max_seq_len = (max_mel_seq_len - 2) // 2 + 1
+            seq_range = (
+                torch.arange(
+                    0,
+                    max_seq_len,
+                    dtype=audio_feat_lengths.dtype,
+                    device=audio_feat_lengths.device,
+                )
+                .unsqueeze(0)
+                .expand(batch_size, max_seq_len)
+            )
+            lengths_expand = audio_feat_lengths.unsqueeze(1).expand(
+                batch_size, max_seq_len
+            )
+            padding_mask = seq_range >= lengths_expand
+
+            audio_attention_mask_ = padding_mask.view(
+                batch_size, 1, 1, max_seq_len
+            ).expand(batch_size, 1, max_seq_len, max_seq_len)
+            audio_attention_mask = audio_attention_mask_.to(
+                dtype=self.audio_model.audio_tower.conv1.weight.dtype,
+                device=self.audio_model.audio_tower.conv1.weight.device,
+            )
+            audio_attention_mask[audio_attention_mask_] = float("-inf")
+
+            audio_outputs = self.audio_model.audio_tower(
+                input_features, attention_mask=audio_attention_mask
+            )
+            selected_audio_feature = audio_outputs.last_hidden_state
+            audio_features = self.audio_model.multi_modal_projector(
+                selected_audio_feature
+            )
+
+            num_audios, max_audio_tokens, embed_dim = audio_features.shape
+            audio_features_mask = torch.arange(
+                max_audio_tokens, device=audio_output_lengths.device
+            )[None, :]
+            audio_features_mask = audio_features_mask < audio_output_lengths[:, None]
+            audio_features = audio_features[audio_features_mask]
+
+            return audio_features
+
+    def cleanup(self):
+        pass
+
+    async def async_init(self, runtime: DistributedRuntime):
+        logger.info("Audio encode worker startup started.")
+        self._connector = connect.Connector()
+        logger.info("Audio encode worker startup completed.")
+
+    async def generate(
+        self, request: vLLMMultimodalRequest, context
+    ) -> AsyncIterator[str]:
+        logger.debug(f"Got raw request: {request}")
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
+        logger.debug(f"Received audio encode request: {{ id: {request.request_id} }}.")
+
+        request_id = request.request_id
+
+        try:
+            for idx, mm_group in enumerate(request.multimodal_inputs):
+                if not mm_group.multimodal_input.audio_url:
+                    raise ValueError(
+                        "audio_url is required for the audio encode worker."
+                    )
+
+                audio, _ = await self.audio_loader.load_audio(
+                    mm_group.multimodal_input.audio_url
+                )
+                audio_features = self.audio_processor(
+                    text="test<|AUDIO|>",
+                    audio=audio,
+                    return_tensors="pt",
+                    padding=False,
+                )
+                audio_embeddings = self._get_audio_embeddings(audio_features)
+                audio_embeddings = audio_embeddings.cpu()
+
+                descriptor = connect.Descriptor(audio_embeddings)
+                self.readables.append(await self._connector.create_readable(descriptor))
+
+                request.multimodal_inputs[idx].serialized_request = self.readables[
+                    -1
+                ].metadata()
+                request.multimodal_inputs[idx].multimodal_input.audio_url = None
+                request.multimodal_inputs[idx].embeddings_shape = tuple(
+                    audio_embeddings.shape
+                )
+
+            yield request.model_dump_json()
+
+        except Exception as e:
+            logger.error(f"Error processing request {request_id}: {e}")
+            raise
+
+
+class VideoEncodeWorkerHandler:
+    def __init__(
+        self,
+        engine_args: AsyncEngineArgs,
+        pd_worker_client: Client,
+        num_frames_to_sample: int = 8,
+    ) -> None:
+        self.pd_worker_client = pd_worker_client
+        self.engine_args = engine_args
+        self.model = self.engine_args.model
+        self.min_workers = 1
+
+        self.num_frames_to_sample = num_frames_to_sample
+        self.frame_height = 336
+        self.frame_width = 336
+        self.frame_channels = 3
+        self._video_content_cache: dict[str, BytesIO] = {}
+        self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
+
+        self._http_timeout = 60.0
+        self._connector = None
+        self.readables = []
+
+    def cleanup(self):
+        pass
+
+    async def async_init(self, runtime: DistributedRuntime):
+        logger.info("Video encode worker startup started.")
+        self._connector = connect.Connector()
+        logger.info("Video encode worker startup completed.")
+
+    async def generate(
+        self, request: vLLMMultimodalRequest, context
+    ) -> AsyncIterator[str]:
+        logger.debug(f"Got raw request: {request}")
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
+        logger.debug(f"Received video encode request: {{ id: {request.request_id} }}.")
+
+        request_id = request.request_id
+
+        for idx, mm_group in enumerate(request.multimodal_inputs):
+            video_url = mm_group.multimodal_input.video_url
+            if video_url is None:
+                raise ValueError("video_url is required for the video encode worker.")
+
+            container: Optional[av.container.InputContainer] = None
+            try:
+                video_content_stream = await load_video_content(
+                    video_url,
+                    self._video_content_cache,
+                    self._cache_queue,
+                    self._http_timeout,
+                )
+
+                container = await open_video_container(video_content_stream, video_url)
+                if not container or not container.streams.video:
+                    raise ValueError(f"No video stream in {video_url}.")
+
+                total_frames, duration_sec = get_video_metadata(container)
+                indices = calculate_frame_sampling_indices(
+                    total_frames, self.num_frames_to_sample, duration_sec, video_url
+                )
+
+                clip_np = await read_video_pyav(container, indices)
+                if clip_np.size == 0:
+                    raise ValueError(
+                        f"Failed to extract any video frames from {video_url} for indices {indices.tolist()}."
+                    )
+
+                frames_tensor_orig_res = torch.from_numpy(clip_np)
+                resized_frames_tensor_hwc = resize_video_frames(
+                    frames_tensor_orig_res, self.frame_height, self.frame_width
+                )
+                tensor_for_descriptor = prepare_tensor_for_rdma(
+                    resized_frames_tensor_hwc, request_id
+                )
+
+                request.multimodal_inputs[idx].embeddings_shape = tuple(
+                    tensor_for_descriptor.shape
+                )
+                descriptor = connect.Descriptor(tensor_for_descriptor)
+                self.readables.append(await self._connector.create_readable(descriptor))
+                request.multimodal_inputs[idx].serialized_request = self.readables[
+                    -1
+                ].metadata()
+                request.multimodal_inputs[idx].multimodal_input.video_url = None
+            finally:
+                if container:
+                    await asyncio.to_thread(container.close)
+
+        yield request.model_dump_json()
 
 
 class VLLMEncodeWorkerHandler:

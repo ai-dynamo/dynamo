@@ -96,7 +96,6 @@ documentation:
 multimodal:
   - changed-files:
       - any-glob-to-any-file:
-          - examples/multimodal/**
           - components/src/dynamo/vllm/multimodal_handlers/**
           - components/src/dynamo/vllm/multimodal_utils/**
           - components/src/dynamo/sglang/multimodal_utils/**

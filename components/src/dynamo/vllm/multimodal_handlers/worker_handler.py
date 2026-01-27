@@ -190,9 +190,11 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     # For video, load as image placeholder (vLLM will use EC cache)
                     multi_modal_data["image"].append(
                         await self.image_loader.load_image(
-                            request.multimodal_input.video_url
+                            mi.multimodal_input.video_url
                         )
                     )
+                elif mi.multimodal_input.audio_url:
+                    raise ValueError("ECConnector mode does not support audio URLs yet")
                 else:
                     raise ValueError(
                         "ECConnector mode requires multimodal_input with image/video URL"
@@ -200,6 +202,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
             elif (
                 mi.multimodal_input.image_url is None
                 and mi.multimodal_input.video_url is None
+                and mi.multimodal_input.audio_url is None
             ):
                 # Process embeddings using the connector
                 # Create a descriptor based on the embedding shape.
@@ -225,7 +228,14 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         mi.serialized_request, descriptor
                     )
                     await read_op.wait_for_completion()
-                if "video" in self.config.model.lower():
+                if "audio" in self.config.model.lower():
+                    mm_data = construct_mm_data(
+                        self.config.model,
+                        self.EMBEDDINGS_DTYPE,
+                        audio_embeds=embeddings,
+                    )
+                    multi_modal_data["audio"] = mm_data["audio"]
+                elif "video" in self.config.model.lower():
                     video_numpy = embeddings.numpy()
                     mm_data = construct_mm_data(
                         self.config.model,
@@ -267,17 +277,25 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                             multi_modal_data["image"] = torch.cat(
                                 (multi_modal_data["image"], mm_data["image"])
                             )
-            else:
+            elif mi.multimodal_input.image_url:
                 # Use PIL image instead of image embeddings
                 multi_modal_data["image"].append(
                     await self.image_loader.load_image(mi.multimodal_input.image_url)
+                )
+            elif mi.multimodal_input.audio_url:
+                raise ValueError(
+                    "Audio URL must be processed by the audio encode worker"
+                )
+            elif mi.multimodal_input.video_url:
+                raise ValueError(
+                    "Video URL must be processed by the video encode worker"
                 )
 
         # Remove the image features from the request as they are not required
         request.multimodal_inputs = None
 
-        logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
-        logger.info(f"{multi_modal_data}")
+        logger.info(f"Prepared multimodal data keys: {list(multi_modal_data.keys())}")
+        logger.debug(f"{multi_modal_data}")
 
         # Deepcopy the request to avoid modifying the original
         # when we adjust sampling params for prefill
