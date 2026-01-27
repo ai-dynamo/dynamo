@@ -808,6 +808,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Load,
             request_type: RequestType::Immediate,
+            block_ids: vec![],
         };
         worker_client.enqueue_request(worker_request);
         assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 1);
@@ -864,6 +865,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Load,
             request_type: RequestType::Immediate,
+            block_ids: vec![],
         };
 
         // immediate requests are not passed to the scheduler, but the completion will be automatically
@@ -949,6 +951,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Store,
             request_type: RequestType::Scheduled,
+            block_ids: vec![],
         };
 
         // worker arrives last
@@ -1005,6 +1008,7 @@ mod tests {
             uuid: operation_id,
             transfer_type: TransferType::Store,
             request_type: RequestType::Scheduled,
+            block_ids: vec![],
         };
 
         // worker arrives first

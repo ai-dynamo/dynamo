@@ -48,6 +48,9 @@ pub trait Worker: Send + Sync {
         &mut self,
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>);
+
+    /// Get block IDs that failed to load and clear the set.
+    fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32>;
 }
 
 pub struct KvConnectorWorker {
@@ -73,6 +76,9 @@ pub struct KvConnectorWorker {
 
     /// cuda events created by the python side
     layer_events: Vec<u64>,
+
+    /// Block IDs that failed to load
+    failed_block_ids: HashSet<u32>,
 }
 
 impl KvConnectorWorker {
@@ -111,6 +117,7 @@ impl KvConnectorWorker {
             layers_complete: 0,
             kv_cache_layers: Vec::new(),
             layer_events: Vec::new(),
+            failed_block_ids: HashSet::new(),
         })
     }
 }
@@ -458,6 +465,10 @@ impl Worker for KvConnectorWorker {
 
         (is_finished_offloading, is_finished_onboarding)
     }
+
+    fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
+        std::mem::take(&mut self.failed_block_ids)
+    }
 }
 
 #[pyclass]
@@ -540,6 +551,10 @@ impl PyKvConnectorWorker {
         finished_requests: HashSet<String>,
     ) -> (HashSet<String>, HashSet<String>) {
         self.connector_worker.get_finished(finished_requests)
+    }
+
+    pub fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
+        self.connector_worker.get_block_ids_with_load_errors()
     }
 }
 
