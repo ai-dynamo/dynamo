@@ -46,11 +46,11 @@ inputs:
   requests_memory:
     description: 'Memory requests for buildkit pods'
     required: false
-    default: '54Gi'
+    default: '28Gi'
   limits_memory:
     description: 'Memory limits for buildkit pods'
     required: false
-    default: '58Gi'
+    default: '29Gi'
   nodeselector:
     description: 'Node selector for buildkit pods (auto-detected from platform if not set)'
     required: false
