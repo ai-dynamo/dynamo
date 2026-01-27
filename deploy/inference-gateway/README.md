@@ -50,6 +50,7 @@ First, deploy an inference gateway service. In this example, we'll install `kgat
 
 ```bash
 cd deploy/inference-gateway
+export NAMESPACE=my-model # You can put the inference gateway into another namespace and then adjust your http-route.yaml
 ./scripts/install_gaie_crd_kgateway.sh
 ```
 **Note**: The manifest at `config/manifests/gateway/kgateway/gateway.yaml` uses `gatewayClassName: agentgateway`, but kGateway's helm chart creates a GatewayClass named `kgateway`. The patch command in the script fixes this mismatch.
@@ -65,7 +66,7 @@ kubectl get gateway inference-gateway
 ```
 
 
-### 3. Deploy Your Model ###
+### 3. Setup secrets ###
 
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
@@ -139,11 +140,32 @@ you could deploy it as a standalone pod
 
 ```bash
 kubectl apply -f operator-managed/examples/vllm_agg_qwen.yaml -n ${NAMESPACE}
+kubectl apply -f operator-managed/examples/http-route.yaml -n ${NAMESPACE}
 ```
+
+Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
+If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
+
 
 #### 5.b. Deploy as a standalone pod
 
-Install Dynamo GAIE helm chart
+##### 5.b.1 Deploy Your Model ###
+
+Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+
+Sample commands to deploy model:
+
+```bash
+cd <dynamo-source-root>
+cd examples/backends/vllm/deploy
+kubectl apply -f agg.yaml -n my-model
+```
+
+Take a note of or change the DYNAMO_IMAGE in the model deployment file.
+
+Do not forget docker registry secret if needed.
+
+##### 5.b.2 Install Dynamo GIE helm chart ###
 
 ```bash
 cd deploy/inference-gateway/standalone
