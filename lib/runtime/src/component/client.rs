@@ -9,7 +9,7 @@ use arc_swap::ArcSwap;
 use futures::StreamExt;
 use tokio::net::unix::pipe::Receiver;
 
-use crate::discovery::{DiscoveryEvent, DiscoveryInstance};
+use crate::discovery::{DiscoveryEvent, DiscoveryInstance, DiscoveryInstanceId};
 use crate::{
     component::{Endpoint, Instance},
     pipeline::async_trait,
@@ -255,8 +255,8 @@ impl Client {
                                 map.insert(instance.instance_id, instance);
                         }
                     }
-                    DiscoveryEvent::Removed(instance_id) => {
-                        map.remove(&instance_id);
+                    DiscoveryEvent::Removed(id) => {
+                        map.remove(&id.instance_id());
                     }
                 }
 

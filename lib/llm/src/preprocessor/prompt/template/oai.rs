@@ -213,6 +213,12 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
         Value::from_serialize(&messages_json)
     }
 
+    fn typed_messages(
+        &self,
+    ) -> Option<&[dynamo_async_openai::types::ChatCompletionRequestMessage]> {
+        Some(self.inner.messages.as_slice())
+    }
+
     fn tools(&self) -> Option<Value> {
         if self.inner.tools.is_none() {
             None
@@ -233,17 +239,19 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool {
-        // Only add generation prompt if the last message was not assistant (default to true when no last message)
-        self.inner
-            .messages
-            .last()
-            .map(|last| {
-                !matches!(
-                    last,
-                    dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
-                )
-            })
-            .unwrap_or(true)
+        // Using vLLM default behavior
+        true
+        // // Only add generation prompt if the last message was not assistant (default to true when no last message)
+        // self.inner
+        //     .messages
+        //     .last()
+        //     .map(|last| {
+        //         !matches!(
+        //             last,
+        //             dynamo_async_openai::types::ChatCompletionRequestMessage::Assistant(_)
+        //         )
+        //     })
+        //     .unwrap_or(true)
     }
 
     fn extract_text(&self) -> Option<TextInput> {
@@ -1181,9 +1189,6 @@ NORMAL MODE
     fn user() -> Msg {
         Msg::User(Default::default())
     }
-    fn asst() -> Msg {
-        Msg::Assistant(Default::default())
-    }
     fn tool() -> Msg {
         Msg::Tool(Default::default())
     }
@@ -1206,12 +1211,6 @@ NORMAL MODE
     fn add_after_tool() {
         let s = dummy_state(vec![tool()]);
         assert!(s.should_add_generation_prompt());
-    }
-
-    #[test]
-    fn no_after_assistant() {
-        let s = dummy_state(vec![asst()]);
-        assert!(!s.should_add_generation_prompt());
     }
 
     #[test]

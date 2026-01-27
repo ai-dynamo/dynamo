@@ -13,7 +13,6 @@ spec:
   services:
     Frontend:
       componentType: frontend
-      dynamoNamespace: disagg-router-6p-2d
       envs:
         - name: HF_HOME
           value: /home/dynamo/.cache/huggingface
@@ -27,7 +26,7 @@ spec:
             - python
             - -m
             - dynamo.frontend
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
       replicas: 1
       resources:
@@ -38,7 +37,6 @@ spec:
       subComponentType: null
     VllmDecodeWorker:
       componentType: worker
-      dynamoNamespace: disagg-router-6p-2d
       envFromSecret: hf-token-secret
       extraPodSpec:
         mainContainer:
@@ -62,7 +60,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
@@ -86,7 +84,6 @@ spec:
         useAsCompilationCache: true
     VllmPrefillWorker:
       componentType: worker
-      dynamoNamespace: disagg-router-6p-2d
       envFromSecret: hf-token-secret
       extraPodMetadata:
         annotations:
@@ -115,7 +112,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           env:
           - name: DYN_HEALTH_CHECK_ENABLED
             value: "false"

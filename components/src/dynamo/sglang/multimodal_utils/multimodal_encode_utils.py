@@ -82,7 +82,18 @@ def is_model_supported(model_name: str, supported_model: str) -> bool:
     normalized_name = normalize_model_name(model_name).lower()
     normalized_supported = normalize_model_name(supported_model).lower()
 
-    return normalized_name == normalized_supported
+    # Exact match
+    if normalized_name == normalized_supported:
+        return True
+
+    # Handle local path case: compare only the model name part (without organization)
+    # e.g., "qwen2.5-vl-7b-instruct" matches "qwen/qwen2.5-vl-7b-instruct"
+    if "/" in normalized_supported:
+        model_part = normalized_supported.split("/")[-1]
+        if normalized_name == model_part:
+            return True
+
+    return False
 
 
 def get_qwen_image_features(

@@ -858,6 +858,36 @@ var _ = Describe("DGDR Helper Functions", func() {
 			}
 			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
 		})
+
+		It("Should return false for AI Configurator profiling (useAiConfigurator=true camelCase)", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"useAiConfigurator": true,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeFalse())
+		})
+
+		It("Should return true for online profiling (useAiConfigurator=false camelCase)", func() {
+			dgdr := &nvidiacomv1alpha1.DynamoGraphDeploymentRequest{
+				Spec: nvidiacomv1alpha1.DynamoGraphDeploymentRequestSpec{
+					ProfilingConfig: nvidiacomv1alpha1.ProfilingConfigSpec{
+						Config: createTestConfig(map[string]interface{}{
+							"sweep": map[string]interface{}{
+								"useAiConfigurator": false,
+							},
+						}),
+					},
+				},
+			}
+			Expect(isOnlineProfiling(dgdr)).Should(BeTrue())
+		})
 	})
 })
 

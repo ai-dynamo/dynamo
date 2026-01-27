@@ -18,7 +18,7 @@ import json
 from typing import Any, List, Literal, Optional, Tuple, Union
 
 import msgspec
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 from pydantic_core import core_schema
 from typing_extensions import NotRequired
 from vllm.inputs.data import TokensPrompt
@@ -89,9 +89,13 @@ class vLLMGenerateRequest(BaseModel):
             return SamplingParams(**v)
         return v
 
+    @field_serializer("sampling_params")
+    def serialize_sampling_params(self, value: SamplingParams) -> dict[str, Any]:
+        """Serialize SamplingParams using msgspec and return as dict."""
+        return json.loads(msgspec.json.encode(value))
+
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
-        json_encoders={SamplingParams: lambda v: json.loads(msgspec.json.encode(v))},
     )
 
 
@@ -140,23 +144,32 @@ class MultiModalInput(BaseModel):
     video_url: Optional[str] = None
 
 
-class vLLMMultimodalRequest(vLLMGenerateRequest):
+class MultiModalGroup(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     multimodal_input: Optional[MultiModalInput] = Field(default_factory=MultiModalInput)
     image_grid_thw: Optional[List[Any]] = None
     embeddings_shape: Optional[
         Union[Tuple[int, int, int], Tuple[int, int, int, int]]
     ] = None
-    serialized_request: Optional[connect.RdmaMetadata] = None
+    serialized_request: Optional[connect.RdmaMetadata | str] = None
+
+
+class vLLMMultimodalRequest(vLLMGenerateRequest):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
 
 
 class VLLMNativeEncoderRequest(BaseModel):
     """Request for vLLM-native encoder worker using ECConnector"""
 
     request_id: str
-    multimodal_input: MultiModalInput
-    modality: Literal["image", "video", "audio"]
-    batch_items: Optional[List[MultiModalInput]] = None  # For future batch processing
+    token_ids: List[
+        int
+    ]  # Pre-tokenized prompt with placeholder tokens (for TokensPrompt)
+    multimodal_inputs: List[MultiModalGroup] = Field(default_factory=list)
+    modality: Optional[
+        Literal["image", "video", "audio"]
+    ] = None  # Can be inferred from inputs
 
 
 class VLLMNativeEncoderResponse(BaseModel):

@@ -208,6 +208,34 @@ spec:
                         rule: '!has(self.create) || self.create == false || (has(self.size) && has(self.storageClass) && has(self.volumeAccessMode))'
                   maxItems: 100
                   type: array
+                restart:
+                  description: Restart specifies the restart policy for the graph deployment.
+                  properties:
+                    id:
+                      description: |-
+                        ID is an arbitrary string that triggers a restart when changed.
+                        Any modification to this value will initiate a restart of the graph deployment according to the strategy.
+                      minLength: 1
+                      type: string
+                    strategy:
+                      description: Strategy specifies the restart strategy for the graph deployment.
+                      properties:
+                        order:
+                          description: Order specifies the order in which the services should be restarted.
+                          items:
+                            type: string
+                          type: array
+                        type:
+                          default: Sequential
+                          description: Type specifies the restart strategy type.
+                          enum:
+                            - Sequential
+                            - Parallel
+                          type: string
+                      type: object
+                  required:
+                    - id
+                  type: object
                 services:
                   additionalProperties:
                     properties:
@@ -10530,6 +10558,23 @@ spec:
                       - type
                     type: object
                   type: array
+                restart:
+                  description: Restart contains the status of the restart of the graph deployment.
+                  properties:
+                    inProgress:
+                      description: InProgress contains the names of the services that are currently being restarted.
+                      items:
+                        type: string
+                      type: array
+                    observedID:
+                      description: |-
+                        ObservedID is the restart ID that has been observed and is being processed.
+                        Matches the Restart.ID field in the spec.
+                      type: string
+                    phase:
+                      description: Phase is the phase of the restart.
+                      type: string
+                  type: object
                 services:
                   additionalProperties:
                     description: ServiceReplicaStatus contains replica information for a single service.

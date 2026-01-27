@@ -61,7 +61,7 @@ class Config:
 
     # multimodal options
     multimodal_processor: bool = False
-    # Emebdding Cache Processor is different from the regular processor
+    # Embedding Cache Processor is different from the regular processor
     # TODO: Have a single processor for all cases and adopting rust based processor
     ec_processor: bool = False
     multimodal_encode_worker: bool = False
@@ -84,6 +84,9 @@ class Config:
     # Use vLLM's tokenizer for pre/post processing
     use_vllm_tokenizer: bool = False
 
+    # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
+    use_kv_events: bool = False
+
     def has_connector(self, connector_name: str) -> bool:
         """
         Check if a specific connector is enabled.
@@ -99,10 +102,16 @@ class Config:
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
+    """Convert Config object to dictionary for encoding."""
     return config.__dict__
 
 
 def parse_args() -> Config:
+    """Parse command-line arguments for the vLLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = FlexibleArgumentParser(
         description="vLLM server integrated with Dynamo LLM."
     )
@@ -240,7 +249,7 @@ def parse_args() -> Config:
         type=str,
         choices=["etcd", "file", "mem"],
         default=os.environ.get("DYN_STORE_KV", "etcd"),
-        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
     )
     parser.add_argument(
         "--request-plane",
@@ -394,6 +403,7 @@ def parse_args() -> Config:
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -564,9 +574,13 @@ def overwrite_args(config):
     if kv_transfer_config:
         defaults["kv_transfer_config"] = kv_transfer_config
 
-    defaults["kv_events_config"] = create_kv_events_config(config)
+    kv_cfg = create_kv_events_config(config)
+    defaults["kv_events_config"] = kv_cfg
+    # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
+    config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
     logger.info(
-        f"Using kv_events_config for publishing vLLM kv events over zmq: {defaults['kv_events_config']}"
+        f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
+        f"(use_kv_events={config.use_kv_events})"
     )
 
     logger.debug("Setting Dynamo defaults for vLLM")

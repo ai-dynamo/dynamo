@@ -14,6 +14,8 @@ use crate::types::Annotated;
 
 use super::kserve;
 
+use validator::Validate;
+
 // [gluo NOTE] These are common utilities that should be shared between frontends
 use crate::http::service::metrics::InflightGuard;
 use crate::http::service::{
@@ -304,6 +306,9 @@ impl TryFrom<inference::ModelInferRequest> for NvCreateTensorRequest {
             }
             tensor_request.tensors.push(tensor);
         }
+        if let Err(validation_error) = tensor_request.validate() {
+            return Err(Status::invalid_argument(validation_error.to_string()));
+        }
         Ok(tensor_request)
     }
 }
@@ -530,6 +535,9 @@ impl TryFrom<ExtendedNvCreateTensorResponse> for inference::ModelInferResponse {
 
     fn try_from(extended_response: ExtendedNvCreateTensorResponse) -> Result<Self, Self::Error> {
         let response = extended_response.response;
+        if let Err(e) = response.validate() {
+            return Err(anyhow::anyhow!("Invalid NvCreateTensorResponse: {}", e));
+        }
 
         // Convert response-level parameters
         let parameters = convert_dynamo_to_kserve_params(&response.parameters);

@@ -6,7 +6,7 @@ use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::EventPublisher;
+use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -50,6 +50,9 @@ pub enum KvSchedulerError {
 
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
+
+    #[error("failed to initialize event publisher: {0}")]
+    InitFailed(String),
 }
 
 #[derive(Debug)]
@@ -99,7 +102,7 @@ impl KvScheduler {
         workers_with_configs: Arc<RuntimeConfigsWithNotify>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
-        router_uuid: String,
+        router_id: u64,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
@@ -111,13 +114,17 @@ impl KvScheduler {
             .map(|r| (*r.key(), r.value().clone()))
             .collect();
 
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            component.clone(),
-            block_size as usize,
-            initial_workers,
-            replica_sync,
-            router_uuid,
-        ));
+        let slots = Arc::new(
+            ActiveSequencesMultiWorker::new(
+                component.clone(),
+                block_size as usize,
+                initial_workers,
+                replica_sync,
+                router_id,
+            )
+            .await
+            .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
+        );
 
         // Spawn background task to sync slots with DashMap when notified of changes.
         // ModelManager's watcher updates the DashMap and notifies; we wait on notify here.
@@ -160,7 +167,10 @@ impl KvScheduler {
         let workers_scheduler = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
-        let ns_clone = component.namespace().clone();
+        let hit_rate_publisher =
+            EventPublisher::for_namespace(component.namespace(), KV_HIT_RATE_SUBJECT)
+                .await
+                .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -206,7 +216,7 @@ impl KvScheduler {
                             isl_blocks: selection.required_blocks as usize,
                             overlap_blocks: selection.overlap_blocks,
                         };
-                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                        if let Err(e) = hit_rate_publisher.publish(&event).await {
                             tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                         }
 
@@ -234,6 +244,7 @@ impl KvScheduler {
                                 request.token_seq,
                                 request.isl_tokens,
                                 selection.overlap_blocks,
+                                None, // expected_output_tokens not available in scheduler loop
                                 selection.worker,
                             )
                             .await
@@ -304,10 +315,18 @@ impl KvScheduler {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.slots
-            .add_request(request_id, token_sequence, isl, overlap, worker)
+            .add_request(
+                request_id,
+                token_sequence,
+                isl,
+                overlap,
+                expected_output_tokens,
+                worker,
+            )
             .await
     }
 
@@ -319,6 +338,16 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
+    }
+
+    pub async fn add_output_block(
+        &self,
+        request_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        self.slots
+            .add_output_block(&request_id.to_string(), decay_fraction)
+            .await
     }
 
     pub async fn get_potential_loads(

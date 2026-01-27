@@ -10335,8 +10335,6 @@ spec:
               properties:
                 conditions:
                   description: |-
-                    INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-                    Important: Run "make" to regenerate code after modifying this file
                     Conditions captures the latest observed state of the component (including
                     availability and readiness) using standard Kubernetes condition types.
                   items:
@@ -10393,6 +10391,10 @@ spec:
                       - type
                     type: object
                   type: array
+                observedGeneration:
+                  description: ObservedGeneration is the most recent generation observed by the controller.
+                  format: int64
+                  type: integer
                 podSelector:
                   additionalProperties:
                     type: string

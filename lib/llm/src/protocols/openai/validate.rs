@@ -507,6 +507,75 @@ pub fn validate_prompt(prompt: &dynamo_async_openai::types::Prompt) -> Result<()
     Ok(())
 }
 
+/// Validates prompt and prompt_embeds fields together.
+///
+/// This function consolidates all prompt-related validation:
+/// - Ensures at least one of prompt or prompt_embeds is provided
+/// - If prompt_embeds is provided, validates its format (base64, size limits)
+/// - If prompt_embeds is NOT provided, validates that prompt is non-empty
+///
+/// Format for prompt_embeds: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_or_embeds(
+    prompt: Option<&dynamo_async_openai::types::Prompt>,
+    prompt_embeds: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    // Check that at least one is provided
+    if prompt.is_none() && prompt_embeds.is_none() {
+        anyhow::bail!("At least one of 'prompt' or 'prompt_embeds' must be provided");
+    }
+
+    // If prompt_embeds is provided, validate it
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
+    } else if let Some(p) = prompt {
+        // Only validate prompt content if prompt_embeds is NOT provided
+        // When embeddings are present, prompt can be empty/placeholder
+        validate_prompt(p)?;
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds format (internal helper)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+fn validate_prompt_embeds_format(embeds: &str) -> Result<(), anyhow::Error> {
+    use base64::{Engine as _, engine::general_purpose};
+
+    // Validate base64 encoding first
+    let decoded = general_purpose::STANDARD
+        .decode(embeds)
+        .map_err(|_| anyhow::anyhow!("prompt_embeds must be valid base64-encoded data"))?;
+
+    // Check minimum size on decoded bytes (100 bytes)
+    const MIN_SIZE: usize = 100;
+    if decoded.len() < MIN_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data must be at least {MIN_SIZE} bytes, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    // Check maximum size on decoded bytes (10MB)
+    const MAX_SIZE: usize = 10 * 1024 * 1024;
+    if decoded.len() > MAX_SIZE {
+        anyhow::bail!(
+            "prompt_embeds decoded data exceeds maximum size of 10MB, got {} bytes",
+            decoded.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Validates prompt_embeds field (public wrapper for standalone validation)
+/// Format: PyTorch tensor serialized with torch.save() and base64-encoded
+pub fn validate_prompt_embeds(prompt_embeds: Option<&str>) -> Result<(), anyhow::Error> {
+    if let Some(embeds) = prompt_embeds {
+        validate_prompt_embeds_format(embeds)?;
+    }
+    Ok(())
+}
+
 /// Validates logprobs parameter (for completion requests)
 pub fn validate_logprobs(logprobs: Option<u8>) -> Result<(), anyhow::Error> {
     if let Some(value) = logprobs

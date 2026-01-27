@@ -75,8 +75,18 @@ extraPodSpec:
       - "python3"
       - "-m"
       - "dynamo.vllm"
-      # Model-specific arguments
+      - "--model"
+      - "Qwen/Qwen3-0.6B"
+      # Optional: Enable prompt embeddings feature
+      # - "--enable-prompt-embeds"
+      # Other model-specific arguments
 ```
+
+**Common vLLM Flags:**
+- `--enable-prompt-embeds`: Enable prompt embeddings feature
+- `--enable-multimodal`: Enable multimodal (vision) support
+- `--is-prefill-worker`: Prefill-only mode for disaggregated serving
+- `--connector [nixl|lmcache|kvbm|none]`: KV transfer backend selection
 
 ## Prerequisites
 

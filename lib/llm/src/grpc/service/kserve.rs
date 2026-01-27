@@ -361,7 +361,17 @@ impl GrpcInferenceService for KserveService {
                     let stream = tensor_response_stream(state.clone(), tensor_request, true).await?;
 
                     pin_mut!(stream);
-                    while let Some(response) = stream.next().await {
+                    while let Some(delta) = stream.next().await {
+                        let response = match delta.ok() {
+                            Err(e) => {
+                                yield ModelStreamInferResponse {
+                                    error_message: e.to_string(),
+                                    infer_response: None
+                                };
+                                continue;
+                            }
+                            Ok(response) => response,
+                        };
                         match response.data {
                             Some(data) => {
                                 let data = ExtendedNvCreateTensorResponse {response: data,
@@ -412,7 +422,17 @@ impl GrpcInferenceService for KserveService {
 
                 if streaming {
                     pin_mut!(stream);
-                    while let Some(response) = stream.next().await {
+                    while let Some(delta) = stream.next().await {
+                        let response = match delta.ok() {
+                            Err(e) => {
+                                yield ModelStreamInferResponse {
+                                    error_message: e.to_string(),
+                                    infer_response: None
+                                };
+                                continue;
+                            }
+                            Ok(response) => response,
+                        };
                         match response.data {
                             Some(data) => {
                                 let mut reply = ModelStreamInferResponse::try_from(data).map_err(|e| {

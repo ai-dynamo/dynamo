@@ -37,13 +37,19 @@
    kvbm/vllm-setup.md
    kvbm/trtllm-setup.md
    agents/tool-calling.md
-   guides/jail_stream_readme.md
-   guides/request_plane.md
+   development/jail_stream.md
 
    router/kv_cache_routing.md
+   router/kv_events.md
    planner/load_planner.md
+   fault_tolerance/README.md
    fault_tolerance/request_migration.md
    fault_tolerance/request_cancellation.md
+   fault_tolerance/graceful_shutdown.md
+   fault_tolerance/request_rejection.md
+   fault_tolerance/testing.md
+   design_docs/request_plane.md
+   design_docs/event_plane.md
 
    backends/trtllm/multinode/multinode-examples.md
    backends/trtllm/llama4_plus_eagle.md
@@ -54,6 +60,7 @@
 
    backends/sglang/expert-distribution-eplb.md
    backends/sglang/gpt-oss.md
+   backends/sglang/diffusion-lm.md
    backends/sglang/profiling.md
    backends/sglang/sgl-hicache-example.md
    backends/sglang/sglang-disaggregation.md
@@ -70,6 +77,7 @@
    backends/vllm/LMCache_Integration.md
    backends/vllm/multi-node.md
    backends/vllm/prometheus.md
+   backends/vllm/prompt-embeddings.md
    backends/vllm/speculative_decoding.md
 
    benchmarks/kv-router-ab-testing.md
@@ -79,5 +87,5 @@
 
 ..   TODO: architecture/distributed_runtime.md and architecture/dynamo_flow.md
      have some outdated names/references and need a refresh.
-..   TODO: Add an OpenAI frontend doc and then add top-level Frontends section
-     to index.rst pointing to both OpenAI HTTP and KServe GRPC docs.
+..   TODO: Add an OpenAI frontend doc to complement the KServe GRPC doc
+     in the Frontends section.
