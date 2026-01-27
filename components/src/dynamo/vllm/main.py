@@ -30,11 +30,13 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.vllm.multimodal_handlers import (
+    AudioEncodeWorkerHandler,
     ECProcessorHandler,
     EncodeWorkerHandler,
     MultimodalDecodeWorkerHandler,
     MultimodalPDWorkerHandler,
     PreprocessedHandler,
+    VideoEncodeWorkerHandler,
     VLLMEncodeWorkerHandler,
 )
 from dynamo.vllm.multimodal_utils.encode_utils import create_ec_transfer_config
@@ -125,6 +127,12 @@ async def worker():
     elif config.multimodal_encode_worker:
         await init_multimodal_encode_worker(runtime, config)
         logger.debug("init_multimodal_encode_worker completed")
+    elif config.multimodal_audio_encode_worker:
+        await init_multimodal_audio_encode_worker(runtime, config)
+        logger.debug("init_multimodal_audio_encode_worker completed")
+    elif config.multimodal_video_encode_worker:
+        await init_multimodal_video_encode_worker(runtime, config)
+        logger.debug("init_multimodal_video_encode_worker completed")
     elif (
         config.multimodal_worker
         or config.multimodal_decode_worker
@@ -778,6 +786,81 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
         )
     except Exception as e:
         logger.error(f"Failed to serve encode worker endpoint: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_audio_encode_worker(
+    runtime: DistributedRuntime, config: Config
+):
+    """Initialize multimodal audio encode worker component"""
+    component = runtime.namespace(config.namespace).component(config.component)
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    handler = AudioEncodeWorkerHandler(
+        config.engine_args,
+        pd_worker_client,
+    )
+    await handler.async_init(runtime)
+    logger.info("Waiting for PD Worker Instances ...")
+    await pd_worker_client.wait_for_instances()
+    logger.info("Starting to serve the audio encode worker endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve audio encode worker endpoint: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+async def init_multimodal_video_encode_worker(
+    runtime: DistributedRuntime, config: Config
+):
+    """Initialize multimodal video encode worker component"""
+    component = runtime.namespace(config.namespace).component(config.component)
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    pd_worker_client = (
+        await runtime.namespace(config.namespace)
+        .component("backend")
+        .endpoint("generate")
+        .client()
+    )
+
+    handler = VideoEncodeWorkerHandler(
+        config.engine_args,
+        pd_worker_client,
+        num_frames_to_sample=config.num_frames_to_sample,
+    )
+    await handler.async_init(runtime)
+    logger.info("Waiting for PD Worker Instances ...")
+    await pd_worker_client.wait_for_instances()
+    logger.info("Starting to serve the video encode worker endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(
+                handler.generate, metrics_labels=[("model", config.model)]
+            ),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve video encode worker endpoint: {e}")
         raise
     finally:
         handler.cleanup()

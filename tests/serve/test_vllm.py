@@ -424,7 +424,7 @@ vllm_configs = {
     # TODO: Update this test case when we have video multimodal support in vllm official components
     "multimodal_video_agg": VLLMConfig(
         name="multimodal_video_agg",
-        directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
+        directory=vllm_dir,
         script_name="video_agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -450,7 +450,7 @@ vllm_configs = {
     ),
     "multimodal_audio_agg": VLLMConfig(
         name="multimodal_audio_agg",
-        directory="/workspace/examples/multimodal",
+        directory=vllm_dir,
         script_name="audio_agg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.nightly],
         model="Qwen/Qwen2-Audio-7B-Instruct",
@@ -547,7 +547,7 @@ vllm_configs = {
     # TODO: Enable this test case when we have 4 GPUs runners.
     # "multimodal_disagg": VLLMConfig(
     #     name="multimodal_disagg",
-    #     directory=os.path.join(WORKSPACE_DIR, "examples/multimodal"),
+    #     directory=vllm_dir,
     #     script_name="disagg.sh",
     #     marks=[pytest.mark.gpu_4, pytest.mark.vllm],
     #     model="llava-hf/llava-1.5-7b-hf",

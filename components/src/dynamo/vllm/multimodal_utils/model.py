@@ -140,9 +140,13 @@ def construct_mm_data(
     embeddings_dtype: torch.dtype,
     image_embeds: Optional[torch.Tensor] = None,
     video_numpy: Optional[Any] = None,
+    audio_embeds: Optional[torch.Tensor] = None,
     image_grid_thw: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
+
+    if audio_embeds is not None:
+        return {"audio": audio_embeds.to(embeddings_dtype)}
 
     # Handle video models
     if is_model_supported(model, SupportedModels.LLAVA_NEXT_VIDEO_7B):

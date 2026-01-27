@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dynamo.vllm.multimodal_utils.audio_loader import AudioLoader
 from dynamo.vllm.multimodal_utils.chat_message_utils import extract_user_text
 from dynamo.vllm.multimodal_utils.chat_processor import (
     ChatProcessor,
@@ -29,16 +30,33 @@ from dynamo.vllm.multimodal_utils.protocol import (
     VLLMNativeEncoderResponse,
     vLLMMultimodalRequest,
 )
+from dynamo.vllm.multimodal_utils.video_utils import (
+    calculate_frame_sampling_indices,
+    get_video_metadata,
+    load_video_content,
+    open_video_container,
+    prepare_tensor_for_rdma,
+    read_video_pyav,
+    resize_video_frames,
+)
 
 __all__ = [
     "ChatProcessor",
     "CompletionsProcessor",
     "ProcessMixIn",
+    "AudioLoader",
     "encode_image_embeddings",
     "extract_user_text",
     "get_encoder_components",
     "get_http_client",
     "ImageLoader",
+    "calculate_frame_sampling_indices",
+    "get_video_metadata",
+    "load_video_content",
+    "open_video_container",
+    "prepare_tensor_for_rdma",
+    "read_video_pyav",
+    "resize_video_frames",
     "SupportedModels",
     "construct_mm_data",
     "load_vision_model",

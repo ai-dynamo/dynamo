@@ -288,7 +288,7 @@ bash launch/disagg_multimodal_llama.sh
 
 **Components:**
 
-- workers: [VideoEncodeWorker](../../examples/multimodal/components/video_encode_worker.py) for decoding video into frames, and [VllmPDWorker](../../examples/multimodal/components/worker.py) for prefilling and decoding.
+- workers: [VideoEncodeWorkerHandler](../../components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for decoding video into frames, and [MultimodalPDWorkerHandler](../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the VideoEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
@@ -309,7 +309,7 @@ flowchart LR
 **Launch:**
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/video_agg.sh
 ```
 
@@ -363,7 +363,7 @@ flowchart LR
 **Launch:**
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/video_disagg.sh
 ```
 
@@ -373,7 +373,7 @@ bash launch/video_disagg.sh
 
 **Components:**
 
-- workers: [AudioEncodeWorker](../../examples/multimodal/components/audio_encode_worker.py) for decoding audio into embeddings, and [VllmPDWorker](../../examples/multimodal/components/worker.py) for prefilling and decoding.
+- workers: [AudioEncodeWorkerHandler](../../components/src/dynamo/vllm/multimodal_handlers/encode_worker_handler.py) for decoding audio into embeddings, and [MultimodalPDWorkerHandler](../../components/src/dynamo/vllm/multimodal_handlers/worker_handler.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the AudioEncodeWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
@@ -393,7 +393,7 @@ flowchart LR
 
 ```bash
 pip install vllm["audio"] accelerate # multimodal audio models dependency
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/audio_agg.sh
 ```
 
@@ -449,7 +449,7 @@ flowchart LR
 
 ```bash
 pip install vllm["audio"] accelerate # multimodal audio models dependency
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/backends/vllm
 bash launch/audio_disagg.sh
 ```
 

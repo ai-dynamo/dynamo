@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: agg-qwen
+  name: agg-llava
 spec:
   backendFramework: vllm
   services:
@@ -24,12 +24,12 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/examples/multimodal
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/encode_worker.py --model Qwen/Qwen2.5-VL-7B-Instruct
+            - python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model llava-hf/llava-1.5-7b-hf
     VLMWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -40,12 +40,12 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/examples/multimodal
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/worker.py --model Qwen/Qwen2.5-VL-7B-Instruct --worker-type prefill
+            - python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model llava-hf/llava-1.5-7b-hf
     Processor:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -56,9 +56,9 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/examples/multimodal
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - 'python3 components/processor.py --model Qwen/Qwen2.5-VL-7B-Instruct --prompt-template "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"'
+            - python -m dynamo.vllm --multimodal-processor --enable-multimodal --model llava-hf/llava-1.5-7b-hf

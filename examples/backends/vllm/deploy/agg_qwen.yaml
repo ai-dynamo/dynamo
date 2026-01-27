@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: agg-llava
+  name: agg-qwen
 spec:
   backendFramework: vllm
   services:
@@ -24,12 +24,12 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/examples/multimodal
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf
+            - python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model Qwen/Qwen2.5-VL-7B-Instruct
     VLMWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -40,12 +40,12 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/examples/multimodal
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type prefill
+            - python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model Qwen/Qwen2.5-VL-7B-Instruct
     Processor:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -56,9 +56,9 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/examples/multimodal
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - 'python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-template "USER: <image>\n<prompt> ASSISTANT:"'
+            - python -m dynamo.vllm --multimodal-processor --enable-multimodal --model Qwen/Qwen2.5-VL-7B-Instruct

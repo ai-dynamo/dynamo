@@ -13,7 +13,6 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Examples
 /examples/ @ai-dynamo/Devops @ai-dynamo/dynamo-rust-codeowners @ai-dynamo/python-codeowners
-/examples/multimodal/ @ai-dynamo/python-codeowners @ai-dynamo/Devops
 
 # Dynamo deploy
 /deploy/ @ai-dynamo/dynamo-deploy-codeowners
