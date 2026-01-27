@@ -9,8 +9,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::mocker::perf_model::PerfModel;
-use dynamo_tokens::blocks::UniqueBlock;
 use crate::tokens::{BlockHash, SequenceHash, Token};
+use dynamo_tokens::blocks::UniqueBlock;
 
 pub type NumBlocks = usize;
 
