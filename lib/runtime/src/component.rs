@@ -242,8 +242,9 @@ impl Component {
             labels: Vec::new(),
             metrics_registry: crate::MetricsRegistry::new(),
         };
+        // Attach endpoint registry so scrapes traverse separate registries (avoids collisions).
         self.get_metrics_registry()
-            .register_child_registry(endpoint.get_metrics_registry());
+            .add_child_registry(endpoint.get_metrics_registry());
         endpoint
     }
 
@@ -460,9 +461,10 @@ impl Namespace {
             .runtime(Arc::new(runtime))
             .name(name)
             .build()?;
+        // Attach namespace registry so scrapes traverse separate registries (avoids collisions).
         ns.drt()
             .get_metrics_registry()
-            .register_child_registry(ns.get_metrics_registry());
+            .add_child_registry(ns.get_metrics_registry());
         Ok(ns)
     }
 
@@ -472,10 +474,9 @@ impl Namespace {
             .name(name)
             .namespace(self.clone())
             .build()?;
-        // Attach component metrics under this namespace so namespace.metrics().prometheus_expfmt()
-        // includes component (and endpoint) metrics via recursive child traversal.
+        // Attach component registry so scrapes traverse separate registries (avoids collisions).
         self.get_metrics_registry()
-            .register_child_registry(component.get_metrics_registry());
+            .add_child_registry(component.get_metrics_registry());
         Ok(component)
     }
 
@@ -486,14 +487,9 @@ impl Namespace {
             .name(name.into())
             .parent(Some(Arc::new(self.clone())))
             .build()?;
-        child
-            .drt()
-            .get_metrics_registry()
-            .register_child_registry(child.get_metrics_registry());
-        // Also attach child namespace under this namespace so namespace.metrics().prometheus_expfmt()
-        // includes descendants naturally.
+        // Attach child namespace registry so scrapes traverse separate registries (avoids collisions).
         self.get_metrics_registry()
-            .register_child_registry(child.get_metrics_registry());
+            .add_child_registry(child.get_metrics_registry());
         Ok(child)
     }
 

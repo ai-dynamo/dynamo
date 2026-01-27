@@ -369,10 +369,6 @@ pub fn create_metric<T: PrometheusMetric, H: MetricsHierarchy + ?Sized>(
         T::with_opts(opts)?
     };
 
-    // Register the metric only at this hierarchy level.
-    //
-    // NOTE: We intentionally do NOT register at parent levels here. The system status
-    // server is responsible for merging output across registries when exposing /metrics.
     let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
     hierarchy.get_metrics_registry().add_metric(collector)?;
 
@@ -616,10 +612,19 @@ pub struct MetricsRegistry {
     /// Arc-wrapped so clones share the same registry (metrics registered on clones are visible everywhere).
     pub prometheus_registry: Arc<std::sync::RwLock<prometheus::Registry>>,
 
-    /// Child registries included when emitting combined /metrics output.
+    /// Child registries included when emitting combined `/metrics` output.
     ///
-    /// This enables a multi-registry model (e.g., one registry per endpoint) while still exposing a
-    /// single /metrics payload by gathering and merging families across registries.
+    /// Why this exists:
+    /// - Previously, `create_metric()` registered every collector into *all* parent registries
+    ///   (Endpoint → Component → Namespace → DRT) so scraping the root registry included everything.
+    /// - That fan-out caused Prometheus collisions when different endpoints tried to register the
+    ///   same metric name with different const-labels (descriptor mismatch).
+    ///
+    /// We now register metrics only into the local hierarchy registry to avoid collisions.
+    /// `child_registries` rebuilds “what to scrape” as a tree of registries so `/metrics` can:
+    /// - traverse registries recursively,
+    /// - merge metric families into one exposition payload,
+    /// - warn/drop exact duplicate series, while allowing same metric name with different labels.
     child_registries: Arc<std::sync::RwLock<Vec<MetricsRegistry>>>,
 
     /// Update callbacks invoked before metrics are scraped.
@@ -665,10 +670,10 @@ impl MetricsRegistry {
         }
     }
 
-    /// Register a child registry to be included in combined /metrics output.
+    /// Add a child registry to be included in combined /metrics output.
     ///
     /// Dedup is by underlying Prometheus registry pointer, so repeated registration via clones is safe.
-    pub fn register_child_registry(&self, child: &MetricsRegistry) {
+    pub fn add_child_registry(&self, child: &MetricsRegistry) {
         let child_ptr = Arc::as_ptr(&child.prometheus_registry);
         let mut guard = self.child_registries.write().unwrap();
         if guard
