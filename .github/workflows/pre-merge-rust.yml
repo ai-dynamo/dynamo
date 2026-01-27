@@ -28,6 +28,7 @@ on:
     - '**.rs'
     - 'Cargo.toml'
     - 'Cargo.lock'
+    - 'deny.toml'
 
 # Cancel any previous check runs for the same pull request to avoid redundant workflows.
 concurrency:
