@@ -132,10 +132,9 @@ pub trait Store: Send + Sync {
 }
 
 #[derive(Clone, Debug, Default)]
-#[allow(clippy::large_enum_variant)]
 pub enum Selector {
     // Box it because it is significantly bigger than the other variants
-    Etcd(etcd_transport::ClientOptions),
+    Etcd(Box<etcd_transport::ClientOptions>),
     File(PathBuf),
     #[default]
     Memory,
@@ -149,10 +148,9 @@ impl Selector {
                 if let Some(runtime) = runtime {
                     let (tx, rx) = oneshot::channel();
                     runtime.primary().spawn(async move {
-                        let etcd_client =
-                            etcd_transport::Client::new(opts.clone(), runtime.clone())
-                                .await
-                                .map_err(StoreError::from);
+                        let etcd_client = etcd_transport::Client::new(*opts, runtime.clone())
+                            .await
+                            .map_err(StoreError::from);
                         tx.send(etcd_client).unwrap();
                     });
 
@@ -202,7 +200,7 @@ impl FromStr for Selector {
 
     fn from_str(s: &str) -> anyhow::Result<Selector> {
         match s {
-            "etcd" => Ok(Self::Etcd(etcd_transport::ClientOptions::default())),
+            "etcd" => Ok(Self::Etcd(Box::default())),
             "file" => {
                 let root = env::var("DYN_FILE_KV")
                     .map(PathBuf::from)
