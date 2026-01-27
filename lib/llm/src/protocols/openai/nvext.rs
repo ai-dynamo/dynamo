@@ -11,12 +11,16 @@ pub use crate::protocols::common::timing::TimingInfo;
 
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
+/// Header to disable local bookkeeping updates (for GAIE Stage 2)
+/// When set to "false", the router skips add_request, mark_prefill_completed, and free calls.
+pub const HEADER_ENABLE_LOCAL_UPDATES: &str = "x-enable-local-updates";
 
 /// Apply routing overrides from HTTP headers to nvext.
 ///
 /// Header mappings:
 /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
 /// - `x-prefill-instance-id` -> `prefill_worker_id`
+/// - `x-enable-local-updates` -> `enable_local_updates` (set to false to disable router bookkeeping)
 ///
 /// Headers take priority over existing nvext values when present.
 /// If no headers are present, returns the original nvext unchanged.
@@ -31,7 +35,17 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.parse::<u64>().ok());
 
-    if worker_id.is_none() && prefill_id.is_none() {
+    // Parse enable_local_updates header: "true" or "false"
+    let enable_local_updates = headers
+        .get(HEADER_ENABLE_LOCAL_UPDATES)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        });
+
+    if worker_id.is_none() && prefill_id.is_none() && enable_local_updates.is_none() {
         return nvext;
     }
 
@@ -42,6 +56,9 @@ pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap)
     }
     if let Some(id) = prefill_id {
         ext.prefill_worker_id = Some(id);
+    }
+    if let Some(enabled) = enable_local_updates {
+        ext.enable_local_updates = Some(enabled);
     }
     Some(ext)
 }

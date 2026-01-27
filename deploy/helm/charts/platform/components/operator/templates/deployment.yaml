@@ -95,7 +95,7 @@ spec:
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
-        {{- else }}
+        {{- else if and .Values.etcd .Values.etcd.enabled }}
           - --etcdAddr={{ .Release.Name }}-etcd.{{ .Release.Namespace }}.svc.cluster.local:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}

@@ -7,6 +7,7 @@
 //! These are the low-level building blocks for the distributed system.
 
 pub mod etcd;
+pub mod event_plane;
 pub mod nats;
 pub mod tcp;
 mod utils;

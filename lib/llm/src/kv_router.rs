@@ -498,7 +498,7 @@ impl KvRouter {
         let isl_tokens = tokens.len();
 
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         // Compute seq_hashes only if scheduler needs it for active blocks tracking
         let maybe_seq_hashes = self
@@ -596,7 +596,7 @@ impl KvRouter {
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
+        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
 
         let maybe_seq_hashes = self
             .kv_router_config

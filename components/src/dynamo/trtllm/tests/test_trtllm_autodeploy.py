@@ -89,4 +89,4 @@ async def test_get_llm_engine_forwards_backend(backend):
         async with get_llm_engine(engine_args=engine_args):
             pass
 
-    mocked_engine.assert_called_once_with(engine_args)
+    mocked_engine.assert_called_once_with(engine_args, None)

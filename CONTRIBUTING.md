@@ -33,7 +33,7 @@ This guide will help you get started. If you have questions, join us on [Discord
 
 If this is your first contribution, here's the recommended path:
 
-1. **Set up** your development environment using the [Developing Locally](README.md#developing-locally) guide
+1. **Set up** your development environment using the [Building from Source](README.md#building-from-source) guide
 2. **Find an issue** — Browse [open issues](https://github.com/ai-dynamo/dynamo/issues) or look for:
 
    | Issue Type | Description |
@@ -120,7 +120,7 @@ Issues labeled `good-first-issue` are sized for new contributors. We provide ext
 ## Quick Start for Contributors
 
 1. [Fork the repository](https://github.com/ai-dynamo/dynamo/fork) on GitHub
-2. Clone your fork and set up your development environment following the [Developing Locally](README.md#developing-locally) guide
+2. Clone your fork and set up your development environment following the [Building from Source](README.md#building-from-source) guide
 3. Set up pre-commit hooks: `pip install pre-commit && pre-commit install`
 
 ---

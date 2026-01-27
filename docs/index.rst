@@ -43,6 +43,8 @@ Quickstart
    Quickstart <self>
    Installation <_sections/installation>
    Support Matrix <reference/support-matrix.md>
+   Feature Matrix <reference/feature-matrix.md>
+   Release Artifacts <reference/release-artifacts.md>
    Examples <_sections/examples>
 
 .. toctree::

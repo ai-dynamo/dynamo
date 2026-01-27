@@ -13,9 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+if "PYTHONHASHSEED" not in os.environ:
+    os.environ["PYTHONHASHSEED"] = "0"
 
 import logging
-import os
 import uuid
 from typing import AsyncGenerator, Optional
 
