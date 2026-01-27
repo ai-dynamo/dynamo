@@ -48,7 +48,7 @@ huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "m
 
 Set the container image:
 ```bash
-export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:my-tag
+export DYNAMO_CONTAINER_IMAGE=nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0
 ```
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:

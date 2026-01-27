@@ -24,7 +24,7 @@ else
     PLATFORMS ?= linux/amd64
 endif
 # Docker proxy for avoiding rate limits (e.g., ECR mirror)
-# Set DOCKER_PROXY to prefix base images, e.g., DOCKER_PROXY=my-registry.com/dockerhub/
+# Set DOCKER_PROXY to prefix base images, e.g., DOCKER_PROXY=nvcr.io/nvidia/ai-dynamo.com/dockerhub/
 DOCKER_PROXY ?=
 
 DOCKER_BUILDX_CMD ?= docker buildx

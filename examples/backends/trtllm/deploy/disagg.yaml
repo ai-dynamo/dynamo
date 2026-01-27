@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0
     TRTLLMPrefillWorker:
       envFromSecret: hf-token-secret
       componentType: worker
@@ -23,7 +23,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0
           workingDir: /workspace/
           command:
           - python3
@@ -48,7 +48,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: my-registry/tensorrtllm-runtime:my-tag
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.9.0
           workingDir: /workspace/
           command:
           - python3
