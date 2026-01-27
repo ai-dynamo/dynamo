@@ -423,31 +423,20 @@ impl KvRouter {
             let transport_kind = EventTransportKind::from_env_or_default();
 
             // Start subscriber - setup runs synchronously, then spawns background loop internally
-            if transport_kind == EventTransportKind::Zmq && all_local_indexer {
-                if kv_router_config.router_snapshot_threshold.is_some()
-                    || kv_router_config.router_reset_states
-                {
-                    tracing::warn!(
-                        "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+            if all_local_indexer {
+                if transport_kind == EventTransportKind::Zmq {
+                    if kv_router_config.router_snapshot_threshold.is_some()
+                        || kv_router_config.router_reset_states
+                    {
+                        tracing::warn!(
+                            "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
                     );
                 }
-
-                start_kv_router_background_event_plane(
-                    component.clone(),
-                    kv_indexer.event_sender(),
-                    kv_indexer.remove_worker_sender(),
-                    cancellation_token.clone(),
-                    worker_query::WorkerQueryClient::new(
-                        component.clone(),
-                        runtime_configs_rx.clone(),
-                    ),
-                    transport_kind,
-                )
-                .await?;
-            } else if all_local_indexer {
-                tracing::info!(
-                    "All {count} workers have local_indexer enabled, using NATS Core subscription"
-                );
 
                 start_kv_router_background_event_plane(
                     component.clone(),
