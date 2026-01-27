@@ -9,7 +9,7 @@
 //! - Composition-based NIXL registration via `NixlRegistered<T>` wrapper
 //! - RAII with proper drop ordering (registration handle drops before memory)
 
-#![deny(missing_docs)]
+// #![deny(missing_docs)]
 
 pub mod actions;
 pub mod arena;

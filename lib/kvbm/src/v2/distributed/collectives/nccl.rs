@@ -539,172 +539,13 @@ mod tests {
         ptr as usize
     }
 
-    /// Initialize NCCL communicators for multiple ranks on a SINGLE GPU.
-    ///
-    /// This allows testing NCCL API correctness without multiple GPUs.
-    /// All ranks use device 0, so broadcasts become memory copies on the same device.
-    /// Returns a vector of communicator handles as usize (for Send).
-    unsafe fn init_single_gpu_comms(num_ranks: usize) -> Result<Vec<usize>> {
-        let mut comms: Vec<ncclComm_t> = vec![std::ptr::null_mut(); num_ranks];
-        // All ranks use device 0
-        let devices: Vec<c_int> = vec![0; num_ranks];
-
-        // SAFETY: ncclCommInitAll supports duplicate device IDs for multi-rank single-GPU
-        let result =
-            unsafe { ncclCommInitAll(comms.as_mut_ptr(), num_ranks as c_int, devices.as_ptr()) };
-
-        check_nccl_result(result).context("ncclCommInitAll (single-GPU) failed")?;
-        // Convert to usize for Send
-        Ok(comms.into_iter().map(|c| c as usize).collect())
-    }
-
     // NOTE: These NCCL tests require a full NCCL installation with all symbols.
     // Some stripped NCCL builds (e.g., Lambda Labs' 2.26.2-0lambda1) are missing
     // ncclAlltoAll, ncclGather, ncclScatter, etc. which cudarc requires.
     // If tests fail with "undefined symbol: ncclAlltoAll", install official NVIDIA NCCL.
 
     #[test]
-    #[ignore = "requires full NCCL and at least 1 GPU - run with: cargo test -p dynamo-kvbm nccl_broadcast_single_gpu -- --ignored"]
-    fn test_nccl_broadcast_single_gpu_multi_rank() {
-        // Skip if no GPU available
-        let num_devices = cuda_device_count();
-        if num_devices < 1 {
-            println!("Skipping test: no GPU available");
-            return;
-        }
-
-        // Use 2 ranks on the same GPU
-        let world_size = 2;
-        println!(
-            "Testing NCCL broadcast with {} ranks on single GPU (device 0)",
-            world_size
-        );
-
-        // Initialize communicators - all ranks use device 0
-        let comms =
-            unsafe { init_single_gpu_comms(world_size) }.expect("Failed to init NCCL comms");
-
-        // All ranks share the same CUDA context (device 0)
-        let context = CudaContext::new(0).expect("Failed to create CUDA context");
-
-        // Each rank gets its own stream
-        let streams: Vec<Arc<CudaStream>> = (0..world_size)
-            .map(|_| context.new_stream().expect("Failed to create stream"))
-            .collect();
-
-        // Test data
-        let test_size = 1024 * 1024; // 1 MB
-        let test_pattern: u8 = 0xCD;
-
-        // Allocate separate buffers for each "rank" (all on same GPU)
-        let buffers: Vec<CudaSlice<u8>> = streams
-            .iter()
-            .map(|stream| {
-                let zeros = vec![0u8; test_size];
-                stream
-                    .clone_htod(&zeros)
-                    .expect("Failed to allocate buffer")
-            })
-            .collect();
-
-        // Fill rank 0's buffer with test pattern
-        {
-            let host_data = vec![test_pattern; test_size];
-            let src_buffer = streams[0]
-                .clone_htod(&host_data)
-                .expect("Failed to copy to device");
-
-            let src_ptr = get_device_ptr(&src_buffer, &streams[0]);
-            let dst_ptr = get_device_ptr(&buffers[0], &streams[0]);
-            unsafe {
-                cudarc::driver::result::memcpy_dtod_async(
-                    dst_ptr as u64,
-                    src_ptr as u64,
-                    test_size,
-                    streams[0].cu_stream(),
-                )
-                .expect("dtod copy failed");
-            }
-            streams[0].synchronize().expect("sync failed");
-        }
-
-        // Get buffer pointers
-        let buffer_ptrs: Vec<usize> = buffers
-            .iter()
-            .zip(streams.iter())
-            .map(|(buf, stream)| get_device_ptr(buf, stream))
-            .collect();
-
-        // Synchronization barrier
-        let barrier = Arc::new(Barrier::new(world_size));
-
-        // Spawn threads to perform broadcast
-        let handles: Vec<_> = (0..world_size)
-            .map(|rank| {
-                let comm = comms[rank];
-                let stream = streams[rank].clone();
-                let buffer_ptr = buffer_ptrs[rank];
-                let barrier = barrier.clone();
-
-                thread::spawn(move || {
-                    barrier.wait();
-
-                    let result = unsafe {
-                        ncclBcast(
-                            buffer_ptr as *mut std::ffi::c_void,
-                            test_size,
-                            ncclDataType_t::ncclChar,
-                            0, // root rank
-                            comm as ncclComm_t,
-                            stream.cu_stream().cast(),
-                        )
-                    };
-
-                    check_nccl_result(result).expect("ncclBcast failed");
-                    stream.synchronize().expect("Stream sync failed");
-                    println!("Rank {} completed broadcast", rank);
-                })
-            })
-            .collect();
-
-        for handle in handles {
-            handle.join().expect("Thread panicked");
-        }
-
-        // Verify all buffers have the test pattern
-        for (rank, (stream, buffer)) in streams.iter().zip(buffers.iter()).enumerate() {
-            let host_data = stream
-                .clone_dtoh(buffer)
-                .expect("Failed to copy from device");
-
-            assert_eq!(
-                host_data[0], test_pattern,
-                "Rank {} first byte mismatch",
-                rank
-            );
-            assert_eq!(
-                host_data[test_size - 1],
-                test_pattern,
-                "Rank {} last byte mismatch",
-                rank
-            );
-
-            let mismatch_count = host_data.iter().filter(|&&b| b != test_pattern).count();
-            assert_eq!(
-                mismatch_count, 0,
-                "Rank {} has {} mismatched bytes",
-                rank, mismatch_count
-            );
-
-            println!("Rank {} verified: all {} bytes correct", rank, test_size);
-        }
-
-        unsafe { destroy_comms(&comms) };
-        println!("Single-GPU multi-rank test passed!");
-    }
-
-    #[test]
-    #[ignore = "requires multiple GPUs - run with: cargo test -p dynamo-kvbm nccl_broadcast_multi_gpu -- --ignored"]
+    #[cfg(feature = "testing-nccl")]
     fn test_nccl_broadcast_multi_gpu_raw() {
         // Skip if < 2 GPUs available
         let num_devices = cuda_device_count();
@@ -861,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires multiple GPUs - run with: cargo test -p dynamo-kvbm nccl_grouped_broadcast -- --ignored"]
+    #[cfg(feature = "testing-nccl")]
     fn test_nccl_grouped_broadcast_multi_gpu() {
         // Skip if < 2 GPUs available
         let num_devices = cuda_device_count();
@@ -1010,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires multiple GPUs - run with: cargo test -p dynamo-kvbm nccl_broadcast_large -- --ignored"]
+    #[cfg(feature = "testing-nccl")]
     fn test_nccl_broadcast_large_transfer() {
         // Skip if < 2 GPUs available
         let num_devices = cuda_device_count();

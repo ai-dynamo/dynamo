@@ -14,7 +14,7 @@ dynamo-nova = { workspace = true }
 dynamo-tokens = { workspace = true }
 dynamo-config = { workspace = true }
 dynamo-kvbm-config = { workspace = true }
-dynamo-kvbm-kernels = { workspace = true }
+dynamo-kvbm-kernels = { workspace = true, features = ["static-kernels"] }
 dynamo-memory = { workspace = true }
 
 anyhow = { workspace = true }
@@ -78,6 +78,7 @@ s3 = ["dep:aws-sdk-s3", "dep:aws-config", "dep:rayon", "dep:tokio-rayon", "dep:c
 nvtx = ["dep:nvtx", "dynamo-kvbm-config/nvtx"]
 collectives = ["dep:nixl-sys", "nccl"]  # Enable NIXL transfers and NCCL collective support
 nccl = []  # Enable NCCL collective operations (via cudarc)
+testing-nccl = ["collectives"]  # Enable NCCL tests (requires 2+ GPUs)
 nats = ["dep:async-nats", "dep:flume"]  # Enable NATS pubsub implementation
 
 [dev-dependencies]

@@ -564,7 +564,8 @@ impl RadixTree {
 
         // Process root's children first
         let root_borrow = self.root.borrow();
-        let empty_parent_hashes = Rc::new(HashMap::new());
+        let empty_parent_hashes =
+            Rc::new(HashMap::<WorkerWithDpRank, ExternalSequenceBlockHash>::new());
         for (tokens_hash, child_block) in &root_borrow.children {
             queue.push_back((child_block.clone(), None, *tokens_hash));
         }

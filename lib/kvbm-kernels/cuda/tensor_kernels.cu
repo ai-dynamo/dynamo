@@ -15,11 +15,7 @@
 #define STRINGIFY(x) #x
 #define TOSTRING(x) STRINGIFY(x)
 #if CUDART_VERSION >= 13000
-#pragma message("Building with CUDA 13.0+ (CUDART_VERSION=" TOSTRING( \
-        CUDART_VERSION) ") - cudaMemcpyBatchAsync available (8-param API, no failIdx)")
 #elif CUDART_VERSION >= 12090
-#pragma message("Building with CUDA 12.9 (CUDART_VERSION=" TOSTRING( \
-        CUDART_VERSION) ") - cudaMemcpyBatchAsync available (9-param API with failIdx)")
 #else
 #pragma message("Building with CUDA " TOSTRING(CUDART_VERSION) " - cudaMemcpyBatchAsync NOT available (requires 12.9+)")
 #endif
@@ -784,13 +780,18 @@ kvbm_kernels_memcpy_batch(
   // CUDA 12.9: Use 9-parameter API (with failIdx)
   std::vector<size_t> sizes(num_copies, size_per_copy);
   size_t fail_idx = 0;
+  size_t attrs_idx = 0;  // Attribute 0 applies starting from copy index 0
+
+  // CUDA 12.9 requires valid srcAccessOrder for each copy
+  cudaMemcpyAttributes attr = {};
+  attr.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
 
   return cudaMemcpyBatchAsync(
       const_cast<void**>(dst_ptrs_host), const_cast<const void**>(src_ptrs_host), sizes.data(), num_copies,
-      nullptr,    // attrs
-      nullptr,    // attrsIdxs
-      0,          // numAttrs
-      &fail_idx,  // failIdx - included in CUDA 12.9
+      &attr,       // Single attribute applied to all copies
+      &attrs_idx,  // Required: points to {0} per CUDA 12.9 docs
+      1,           // numAttrs = 1
+      &fail_idx,   // failIdx - included in CUDA 12.9
       stream);
 
 #else

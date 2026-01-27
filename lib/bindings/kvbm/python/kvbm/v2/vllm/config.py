@@ -9,21 +9,16 @@ the Dynamo scheduler connector.
 """
 
 import logging
+from multiprocessing import Value
 from typing import Any, Dict
 
 from vllm.config import VllmConfig
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.version import __version_tuple__
 
-from . import KvbmVllmConfig
+from . import KvbmVllmConfig, version_check
 
-if __version_tuple__ >= (0, 12, 2):
-    raise ImportError("vLLM versions after 0.12.2 are not yet supported")
-
-if __version_tuple__ <= (0, 11, 0):
-    raise ImportError("vLLM versions before 0.11 are not supported")
-
-
+version_check()
 logger = logging.getLogger(__name__)
 
 

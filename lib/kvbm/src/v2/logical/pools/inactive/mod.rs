@@ -97,7 +97,7 @@ impl<T: BlockMetadata + Sync> InactivePool<T> {
                 Ok(block) => {
                     let block_id = block.block_id();
                     inner.backend.insert(block);
-                    tracing::info!(?seq_hash, block_id, "Block stored in inactive pool");
+                    tracing::trace!(?seq_hash, block_id, "Block stored in inactive pool");
                 }
                 Err(_block) => {
                     tracing::warn!(

@@ -11,10 +11,12 @@ integrating with the Dynamo KVBM library.
 try:
     from kvbm._core import v2 as _v2
 
+    from .version_check import version_check
+
     KvbmVllmConfig = _v2.KvbmVllmConfig
 except ImportError:
     from kvbm._feature_stubs import _make_feature_stub
 
     KvbmVllmConfig = _make_feature_stub("KvbmVllmConfig", "v2")
 
-__all__ = ["KvbmVllmConfig"]
+__all__ = ["KvbmVllmConfig", "version_check"]
