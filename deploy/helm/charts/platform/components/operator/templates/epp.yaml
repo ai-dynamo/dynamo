@@ -36,22 +36,25 @@ metadata:
   labels:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
-# Gateway API Inference resources (stable v1 API per PR #5592)
+# Gateway API inference resources
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferencepools", "inferenceobjectives", "inferencemodelrewrites"]
+  verbs: ["get", "watch", "list"]
 - apiGroups: ["inference.networking.k8s.io"]
-  resources: ["inferencepools", "inferencepools/status"]
-  verbs: ["get", "list", "watch"]
-# Pod discovery for InferencePool backends
+  resources: ["inferencepools"]
+  verbs: ["get", "watch", "list"]
+# Core resources for pod discovery
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get", "list", "watch"]
-# EndpointSlices for service discovery
+  verbs: ["get", "watch", "list"]
+# Dynamo k8s service discovery - endpointslices
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
   verbs: ["get", "list", "watch"]
-# DynamoWorkerMetadata for KV-aware routing
+# Dynamo k8s service discovery - worker metadata CRs
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -78,20 +81,36 @@ metadata:
   labels:
     {{- include "dynamo-operator.labels" . | nindent 4 }}
 rules:
-# Gateway API Inference resources (stable v1 API per PR #5592)
+# Gateway API inference resources
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferencepools", "inferenceobjectives", "inferencemodelrewrites"]
+  verbs: ["get", "watch", "list"]
 - apiGroups: ["inference.networking.k8s.io"]
-  resources: ["inferencepools", "inferencepools/status"]
-  verbs: ["get", "list", "watch"]
-# Pod discovery for InferencePool backends
+  resources: ["inferencepools"]
+  verbs: ["get", "watch", "list"]
+# Core resources for pod discovery
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get", "list", "watch"]
-# EndpointSlices for service discovery
+  verbs: ["get", "watch", "list"]
+# Dynamo k8s service discovery - endpointslices
 - apiGroups: ["discovery.k8s.io"]
   resources: ["endpointslices"]
   verbs: ["get", "list", "watch"]
-# DynamoWorkerMetadata for KV-aware routing
+# Dynamo k8s service discovery - worker metadata CRs
 - apiGroups: ["nvidia.com"]
   resources: ["dynamoworkermetadatas"]
-  verbs: ["get", "list", "watch"]
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+# Authentication/authorization
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
 {{- end }}
