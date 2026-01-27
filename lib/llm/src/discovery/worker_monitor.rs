@@ -193,9 +193,11 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                 card.runtime_config
             });
 
-        // Subscribe to KV metrics events using EventSubscriber
+        // Subscribe to KV metrics events using EventSubscriber (Msgpack payloads)
         let mut kv_metrics_rx =
-            EventSubscriber::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?;
+            EventSubscriber::for_namespace(component.namespace(), KV_METRICS_SUBJECT)
+                .await?
+                .typed::<ActiveLoad>();
 
         let worker_load_states = self.worker_load_states.clone();
         let client = self.client.clone();
@@ -235,23 +237,17 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
 
                     // Handle KV metrics updates (ActiveLoad)
                     kv_event = kv_metrics_rx.next() => {
-                        let Some(envelope_result) = kv_event else {
+                        let Some(event_result) = kv_event else {
                             tracing::debug!("KV metrics stream closed");
                             break;
                         };
 
-                        let envelope = match envelope_result {
-                            Ok(env) => env,
+                        let active_load = match event_result {
+                            Ok((_envelope, event)) => event,
                             Err(e) => {
                                 tracing::error!("Error receiving KV metrics event: {:?}", e);
                                 continue;
                             }
-                        };
-
-                        let Ok(active_load) =
-                            serde_json::from_slice::<ActiveLoad>(&envelope.payload)
-                        else {
-                            continue;
                         };
 
                         let worker_id = active_load.worker_id;
