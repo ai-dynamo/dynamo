@@ -143,3 +143,4 @@ rust:
   - '**/*.rs'
   - '**/Cargo.toml'
   - '**/Cargo.lock'
+  - 'deny.toml'
