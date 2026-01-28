@@ -212,7 +212,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 out = {}
                 finish_reason = res["meta_info"]["finish_reason"]
                 if finish_reason:
-                    out["finish_reason"] = finish_reason["type"]
+                    if finish_reason["type"] == "abort":
+                        # Map 'abort' to 'error: <message>' so it can be parsed as FinishReason::Error
+                        msg = finish_reason.get("message", "Aborted")
+                        out["finish_reason"] = f"error: {msg}"
+                    else:
+                        out["finish_reason"] = finish_reason["type"]
 
                 # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
@@ -277,7 +282,14 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 text = res.get("text", "")
 
                 finish_reason = res["meta_info"]["finish_reason"]
-                finish_reason_type = finish_reason["type"] if finish_reason else None
+                finish_reason_type = None
+                if finish_reason:
+                    if finish_reason["type"] == "abort":
+                        # Map 'abort' to 'error: <message>' so it can be parsed as FinishReason::Error
+                        msg = finish_reason.get("message", "Aborted")
+                        finish_reason_type = f"error: {msg}"
+                    else:
+                        finish_reason_type = finish_reason["type"]
                 next_count = len(text)
                 delta = text[count:]
 
