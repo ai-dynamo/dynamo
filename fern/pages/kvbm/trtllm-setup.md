@@ -8,13 +8,12 @@ This guide explains how to leverage KVBM (KV Block Manager) to manage KV cache a
 
 To learn what KVBM is, please check [here](kvbm-architecture.md)
 
-<Note>
-- Ensure that `etcd` and `nats` are running before starting.
-- KVBM only supports TensorRT-LLM's PyTorch backend.
-- Disable partial reuse `enable_partial_reuse: false` in the LLM API config's `kv_connector_config` to increase offloading cache hits.
-- KVBM requires TensorRT-LLM v1.2.0rc2 or newer.
-- Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
-</Note>
+> [!NOTE]
+> - Ensure that `etcd` and `nats` are running before starting.
+> - KVBM only supports TensorRT-LLM's PyTorch backend.
+> - Disable partial reuse `enable_partial_reuse: false` in the LLM API config's `kv_connector_config` to increase offloading cache hits.
+> - KVBM requires TensorRT-LLM v1.2.0rc2 or newer.
+> - Enabling KVBM metrics with TensorRT-LLM is still a work in progress.
 
 ## Quick Start
 
@@ -50,10 +49,9 @@ export DYN_KVBM_DISK_CACHE_GB=8
 # DYN_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS to specify exact block counts instead of GB
 ```
 
-<Note>
-When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
-To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
-</Note>
+> [!NOTE]
+> When disk offloading is enabled, to extend SSD lifespan, disk offload filtering would be enabled by default. The current policy is only offloading KV blocks from CPU to disk if the blocks have frequency equal or more than `2`. Frequency is determined via doubling on cache hit (init with 1) and decrement by 1 on each time decay step.
+> To disable disk offload filtering, set `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` to true or 1.
 
 ```bash
 # write an example LLM API config

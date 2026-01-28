@@ -65,11 +65,10 @@ For local/bare-metal development, start etcd and optionally NATS using [Docker C
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
-<Note>
-- **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
-- **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
-- **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
-</Note>
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Build container
 
@@ -97,9 +96,8 @@ apt-get update && apt-get -y install git git-lfs
 
 ## Single Node Examples
 
-<Warning>
-Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
-</Warning>
+> [!WARNING]
+> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
 For detailed information about the architecture and how KV-aware routing works, see the [KV Cache Routing documentation](../../router/kv-cache-routing.md).
 
@@ -124,9 +122,8 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 
 ### Disaggregated with KV Routing
 
-<Warning>
-In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
-</Warning>
+> [!WARNING]
+> In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
 
 ```bash
 cd $DYNAMO_HOME/examples/backends/trtllm
@@ -188,9 +185,8 @@ You can enable [request migration](../../fault-tolerance/request-migration.md) t
 python3 -m dynamo.trtllm ... --migration-limit=3
 ```
 
-<Warning>
-**Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
-</Warning>
+> [!WARNING]
+> **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
 
 See the [Request Migration Architecture](../../fault-tolerance/request-migration.md) documentation for details on how this works.
 

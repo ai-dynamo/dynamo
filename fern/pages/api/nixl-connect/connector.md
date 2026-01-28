@@ -23,10 +23,9 @@ provides NIXL metadata ([RdmaMetadata](rdma-metadata.md)) via its `.metadata()` 
 The NIXL metadata must be provided to the remote worker expected to complete the operation.
 The metadata contains required information (identifiers, keys, etc.) which enables the remote worker to interact with the provided memory.
 
-<Warning>
-NIXL metadata contains a worker's address as well as security keys to access specific registered memory descriptors.
-This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
-</Warning>
+> [!WARNING]
+> NIXL metadata contains a worker's address as well as security keys to access specific registered memory descriptors.
+> This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
 
 
 ## Example Usage
@@ -37,11 +36,10 @@ This data provides direct memory access between workers, and should be considere
       self.connector = dynamo.nixl_connect.Connector()
 ```
 
-<Tip>
-See [`ReadOperation`](read-operation.md#example-usage), [`ReadableOperation`](readable-operation.md#example-usage),
-[`WritableOperation`](writable-operation.md#example-usage), and [`WriteOperation`](write-operation.md#example-usage)
-for additional examples.
-</Tip>
+> [!TIP]
+> See [`ReadOperation`](read-operation.md#example-usage), [`ReadableOperation`](readable-operation.md#example-usage),
+> [`WritableOperation`](writable-operation.md#example-usage), and [`WriteOperation`](write-operation.md#example-usage)
+> for additional examples.
 
 
 ## Methods

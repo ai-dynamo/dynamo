@@ -6,11 +6,10 @@ title: "Welcome to NVIDIA Dynamo"
 
 The NVIDIA Dynamo Platform is a high-performance, low-latency inference framework designed to serve all AI models—across any framework, architecture, or deployment scale.
 
-<Tip>
-**Discover the Latest Developments!**
-
-This guide is a snapshot of a specific point in time. For the latest information, examples, and Release Assets, see the [Dynamo GitHub repository](https://github.com/ai-dynamo/dynamo/releases/latest).
-</Tip>
+> [!TIP]
+> **Discover the Latest Developments!**
+> 
+> This guide is a snapshot of a specific point in time. For the latest information, examples, and Release Assets, see the [Dynamo GitHub repository](https://github.com/ai-dynamo/dynamo/releases/latest).
 
 ## Quickstart
 

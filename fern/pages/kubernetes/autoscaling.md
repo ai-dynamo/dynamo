@@ -50,9 +50,8 @@ Dynamo provides flexible autoscaling through the `DynamoGraphDeploymentScalingAd
 | **Dynamo Planner** | LLM-aware autoscaling with SLA optimization | Production LLM workloads |
 | **Custom Controllers** | Any scale-subresource-compatible controller | Custom requirements |
 
-<Warning>
-**Deprecation Notice:** The `spec.services[X].autoscaling` field in DGD is **deprecated and ignored**. Use DGDSA with HPA, KEDA, or Planner instead. If you have existing DGDs with `autoscaling` configured, you'll see a warning. Remove the field to silence the warning.
-</Warning>
+> [!WARNING]
+> **Deprecation Notice:** The `spec.services[X].autoscaling` field in DGD is **deprecated and ignored**. Use DGDSA with HPA, KEDA, or Planner instead. If you have existing DGDs with `autoscaling` configured, you'll see a warning. Remove the field to silence the warning.
 
 ## Architecture
 
