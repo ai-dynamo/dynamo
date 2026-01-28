@@ -136,19 +136,30 @@ class Planner:
             self.runtime = runtime
             self.namespace = args.namespace
 
+            # Set planner mode
+            self.planner_mode = getattr(args, "planner_mode", "local")
+            self.remote_client = None
+
+            if self.planner_mode == "delegating":
+                # Will be initialized in _async_init
+                self._global_planner_namespace = args.global_planner_namespace
+                self._global_planner_component = args.global_planner_component
+
             if not args.no_operation:
-                if args.environment == "kubernetes":
-                    self.connector = KubernetesConnector(
-                        self.namespace, self.model_name
-                    )
-                elif args.environment == "virtual":
-                    self.connector = VirtualConnector(
-                        runtime,
-                        self.namespace,
-                        args.model_name,
-                    )
-                else:
-                    raise ValueError(f"Invalid environment: {args.environment}")
+                if self.planner_mode == "local":
+                    # Initialize connector only in local mode
+                    if args.environment == "kubernetes":
+                        self.connector = KubernetesConnector(
+                            self.namespace, self.model_name
+                        )
+                    elif args.environment == "virtual":
+                        self.connector = VirtualConnector(
+                            runtime,
+                            self.namespace,
+                            args.model_name,
+                        )
+                    else:
+                        raise ValueError(f"Invalid environment: {args.environment}")
 
             self.prometheus_api_client = PrometheusAPIClient(
                 args.metric_pulling_prometheus_endpoint,
@@ -264,12 +275,20 @@ class Planner:
 
     async def _async_init(self):
         """Async initialization for components that need it"""
-        if (
-            not self.dryrun
-            and hasattr(self, "connector")
-            and hasattr(self.connector, "_async_init")
-        ):
-            await self.connector._async_init()
+        if not self.dryrun:
+            if self.planner_mode == "delegating":
+                from dynamo.planner.remote_planner_client import RemotePlannerClient
+
+                self.remote_client = RemotePlannerClient(
+                    self.runtime,
+                    self._global_planner_namespace,
+                    self._global_planner_component,
+                )
+                logger.info(
+                    f"Delegating mode: will send requests to GlobalPlanner at {self._global_planner_namespace}.{self._global_planner_component}"
+                )
+            elif hasattr(self, "connector") and hasattr(self.connector, "_async_init"):
+                await self.connector._async_init()
 
     async def get_workers_info(self):
         if self.runtime is None:
@@ -523,6 +542,60 @@ class Planner:
 
         return next_num_p, next_num_d
 
+    async def _delegate_scaling(self, num_p_workers: int, num_d_workers: int):
+        """Send scaling request to centralized planner (Mode A)"""
+        import os
+
+        from dynamo.planner.scale_protocol import ScaleRequest, TargetReplicaRequest
+
+        target_replicas = [
+            TargetReplicaRequest(
+                sub_component_type=SubComponentType.PREFILL,
+                desired_replicas=num_p_workers,
+            ),
+            TargetReplicaRequest(
+                sub_component_type=SubComponentType.DECODE,
+                desired_replicas=num_d_workers,
+            ),
+        ]
+
+        request = ScaleRequest(
+            caller_namespace=self.namespace,
+            graph_deployment_name=os.environ.get("DYN_PARENT_DGD_K8S_NAME", "unknown"),
+            k8s_namespace=os.environ.get("POD_NAMESPACE", "default"),
+            target_replicas=target_replicas,
+            blocking=False,
+            timestamp=time.time(),
+            predicted_load={
+                "num_requests": getattr(self, "last_predicted_num_req", None),
+                "isl": getattr(self, "last_predicted_isl", None),
+                "osl": getattr(self, "last_predicted_osl", None),
+            },
+        )
+
+        response = await self.remote_client.send_scale_request(request)
+
+        if response.status == "success":
+            logger.info(f"Remote scaling successful: {response.message}")
+        else:
+            logger.error(f"Remote scaling failed: {response.message}")
+
+    async def _execute_local_scaling(self, num_p_workers: int, num_d_workers: int):
+        """Execute scaling locally via connector (Mode Local)"""
+        target_replicas = [
+            TargetReplica(
+                sub_component_type=SubComponentType.PREFILL,
+                component_name=self.prefill_component_name,
+                desired_replicas=num_p_workers,
+            ),
+            TargetReplica(
+                sub_component_type=SubComponentType.DECODE,
+                component_name=self.decode_component_name,
+                desired_replicas=num_d_workers,
+            ),
+        ]
+        await self.connector.set_component_replicas(target_replicas, blocking=False)
+
     async def make_adjustments(self):
         # Skip adjustment if no traffic
         if not self.last_metrics.is_valid():
@@ -572,6 +645,11 @@ class Planner:
         next_num_req, next_isl, next_osl = self.predict_load()
 
         if next_num_req is not None and next_isl is not None and next_osl is not None:
+            # Store predictions for delegation
+            self.last_predicted_num_req = next_num_req
+            self.last_predicted_isl = next_isl
+            self.last_predicted_osl = next_osl
+
             # Update predicted load metrics in Prometheus
             if self.prometheus_port != 0:
                 self.prometheus_metrics.predicted_request_rate.set(
@@ -594,25 +672,18 @@ class Planner:
                 return
 
         if not self.args.no_operation:
-            target_replicas = [
-                TargetReplica(
-                    sub_component_type=SubComponentType.PREFILL,
-                    component_name=self.prefill_component_name,
-                    desired_replicas=next_num_p,
-                ),
-                TargetReplica(
-                    sub_component_type=SubComponentType.DECODE,
-                    component_name=self.decode_component_name,
-                    desired_replicas=next_num_d,
-                ),
-            ]
-            await self.connector.set_component_replicas(target_replicas, blocking=False)
+            # Execute scaling based on mode
+            if self.planner_mode == "delegating":
+                await self._delegate_scaling(next_num_p, next_num_d)
+            else:
+                await self._execute_local_scaling(next_num_p, next_num_d)
 
     async def run(self):
         """Main loop for the planner"""
 
-        if not self.args.no_operation:
+        if not self.args.no_operation and self.planner_mode != "delegating":
             # Fail fast if the deployment is not valid
+            # Skip validation in delegating mode since we don't have a local connector
             logger.info("Validating deployment...")
 
             # TODO: still supporting framework component names for backwards compatibility
@@ -791,6 +862,16 @@ class Planner:
 
 
 async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespace):
+    # Validate planner mode configuration
+    planner_mode = getattr(args, "planner_mode", "local")
+    if planner_mode == "delegating" and not getattr(
+        args, "global_planner_namespace", None
+    ):
+        raise ValueError(
+            "--global-planner-namespace required for delegating mode. "
+            "Please specify the namespace where GlobalPlanner is running."
+        )
+
     planner = Planner(runtime, args)
     await planner._async_init()
     await planner.run()
