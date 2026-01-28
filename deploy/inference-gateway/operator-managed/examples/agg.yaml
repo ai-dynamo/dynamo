@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:op-mgr-5
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:op-mgr-6
           env:
             - name: DYNAMO_KV_BLOCK_SIZE
               value: "16"
@@ -40,6 +40,7 @@ spec:
                   weight: 1
                 - pluginRef: picker
     Frontend:
+      envFromSecret: hf-token-secret
       componentType: frontend
       replicas: 1
       extraPodSpec:
