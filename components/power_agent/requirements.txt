@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+kubernetes>=30.1.0
+nvidia-ml-py==12.535.133
+urllib3>=2.6.3

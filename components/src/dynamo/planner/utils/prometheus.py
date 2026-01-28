@@ -95,8 +95,8 @@ class PrometheusAPIClient:
                 return 0
             return sum(values) / len(values)
 
-        except Exception as e:
-            logger.error(f"Error getting {operation_name}: {e}")
+        except Exception:
+            logger.exception(f"Error getting {operation_name}")
             return 0
 
     def get_avg_inter_token_latency(self, interval: str, model_name: str):
@@ -148,8 +148,8 @@ class PrometheusAPIClient:
                 ):
                     total_count += container.value[1]
             return total_count
-        except Exception as e:
-            logger.error(f"Error getting avg request count: {e}")
+        except Exception:
+            logger.exception("Error getting avg request count")
             return 0
 
     def get_avg_input_sequence_tokens(self, interval: str, model_name: str):
@@ -168,6 +168,61 @@ class PrometheusAPIClient:
             model_name,
         )
 
+    def get_power_by_component(self) -> dict[str, float]:
+        """
+        Get average GPU power consumption grouped by component type.
+
+        This query joins DCGM hardware metrics with kube-state-metrics pod labels.
+        It avoids the need to manually map GPU UUIDs to Pods via kubectl exec.
+
+        Returns:
+            Dict[str, float]: Mapping of component name to average watts.
+            Example: {'VllmPrefillWorker': 245.5, 'VllmDecodeWorker': 180.2}
+        """
+        query = """
+        avg(
+          DCGM_FI_DEV_POWER_USAGE
+          * on(pod, namespace) group_left(label_nvidia_com_dynamo_component)
+          kube_pod_labels{label_nvidia_com_dynamo_component=~".+"}
+        ) by (label_nvidia_com_dynamo_component)
+        """
+
+        try:
+            results = self.prom.custom_query(query)
+
+            power_map = {}
+            for r in results:
+                try:
+                    component = r["metric"].get("label_nvidia_com_dynamo_component")
+                    if component:
+                        power_watts = float(r["value"][1])
+                        power_map[component] = power_watts
+                except (KeyError, ValueError, IndexError) as e:
+                    logger.warning(f"Error parsing Prometheus result entry: {e}")
+                    continue
+
+            logger.debug(f"Power consumption by component: {power_map}")
+            return power_map
+
+        except Exception:
+            logger.exception("Failed to query power by component")
+            return {}
+
+    def get_total_cluster_power(self) -> float:
+        """
+        Get total GPU power consumption across the entire cluster.
+        Used for hard budget enforcement.
+        """
+        query = "sum(DCGM_FI_DEV_POWER_USAGE)"
+        try:
+            result = self.prom.custom_query(query)
+            if result and len(result) > 0:
+                return float(result[0]["value"][1])
+            return 0.0
+        except Exception:
+            logger.exception("Failed to query total power")
+            return 0.0
+
 
 def parse_frontend_metric_containers(
     result: list[dict],
@@ -176,7 +231,7 @@ def parse_frontend_metric_containers(
     for res in result:
         try:
             metrics_containers.append(FrontendMetricContainer.model_validate(res))
-        except ValidationError as e:
-            logger.error(f"Error parsing frontend metric container: {e}")
+        except ValidationError:
+            logger.exception("Error parsing frontend metric container")
             continue
     return metrics_containers
