@@ -10,16 +10,17 @@ The relaxed registration comes with some performance overheads, but simplifies t
 Especially for larger data transfer operations, such as between models in a multi-model graph, the overhead would be marginal.
 The `dynamo.nixl_connect` library can be imported by any Dynamo container hosted application.
 
-> [!Note]
-> Dynamo NIXL Connect will pick the best available method of data transfer available to it.
-> The available methods depend on the hardware and software configuration of the machines and network running the graph.
-> GPU Direct RDMA operations require that both ends of the operation have:
-> - NIC and GPU capable of performing RDMA operations
-> - Device drivers that support GPU-NIC direct interactions (aka "zero copy") and RDMA operations
-> - Network that supports InfiniBand or RoCE
->
-> With any of the above not satisfied, GPU Direct RDMA will not be available to the graph's workers, and less-optimal methods will be utilized to ensure basic functionality.
-> For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect_RDMA.pdf) document.
+<Note>
+Dynamo NIXL Connect will pick the best available method of data transfer available to it.
+The available methods depend on the hardware and software configuration of the machines and network running the graph.
+GPU Direct RDMA operations require that both ends of the operation have:
+- NIC and GPU capable of performing RDMA operations
+- Device drivers that support GPU-NIC direct interactions (aka "zero copy") and RDMA operations
+- Network that supports InfiniBand or RoCE
+
+With any of the above not satisfied, GPU Direct RDMA will not be available to the graph's workers, and less-optimal methods will be utilized to ensure basic functionality.
+For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect_RDMA.pdf) document.
+</Note>
 
 ```python
 import dynamo.nixl_connect
@@ -85,8 +86,9 @@ flowchart LR
   e2@{ animate: true; }
 ```
 
-> [!Note]
-> When RDMA isn't available, the NIXL data transfer will still complete using non-accelerated methods.
+<Note>
+When RDMA isn't available, the NIXL data transfer will still complete using non-accelerated methods.
+</Note>
 
 ### Multimodal Example
 
@@ -134,9 +136,10 @@ flowchart LR
   o2@{ animate: true; }
 ```
 
-> [!Note]
-> In this example, it is the data transfer between the Prefill Worker and the Encode Worker that utilizes the Dynamo NIXL Connect library.
-> The KV Cache transfer between Decode Worker and Prefill Worker utilizes a different connector that also uses the NIXL-based I/O subsystem underneath.
+<Note>
+In this example, it is the data transfer between the Prefill Worker and the Encode Worker that utilizes the Dynamo NIXL Connect library.
+The KV Cache transfer between Decode Worker and Prefill Worker utilizes a different connector that also uses the NIXL-based I/O subsystem underneath.
+</Note>
 
 #### Code Examples
 

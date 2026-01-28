@@ -44,7 +44,9 @@ The `DistributedRuntime` supports two service discovery backends, configured via
 
 - **Kubernetes Discovery** (`DYN_DISCOVERY_BACKEND=kubernetes`): Uses native Kubernetes resources (DynamoWorkerMetadata CRD, EndpointSlices) for service discovery. **Must be explicitly set.** The Dynamo operator automatically sets this environment variable for Kubernetes deployments. **No etcd required.**
 
-> **Note:** There is no automatic detection of the deployment environment. The runtime always defaults to `kv_store`. For Kubernetes deployments, the operator injects `DYN_DISCOVERY_BACKEND=kubernetes` into pod environments.
+<Note>
+There is no automatic detection of the deployment environment. The runtime always defaults to `kv_store`. For Kubernetes deployments, the operator injects `DYN_DISCOVERY_BACKEND=kubernetes` into pod environments.
+</Note>
 
 When using Kubernetes discovery, the KV store backend automatically switches to in-memory storage since etcd is not needed.
 

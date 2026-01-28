@@ -8,17 +8,19 @@ A Pydantic type intended to provide JSON serialized NIXL metadata about a [`Read
 NIXL metadata contains detailed information about a worker process and how to access memory regions registered with the corresponding agent.
 This data is required to perform data transfers using the NIXL-based I/O subsystem.
 
-> [!Warning]
-> NIXL metadata contains information to connect corresponding backends across agents, as well as identification keys to access specific registered memory regions.
-> This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
+<Warning>
+NIXL metadata contains information to connect corresponding backends across agents, as well as identification keys to access specific registered memory regions.
+This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
+</Warning>
 
 Use the respective class's `.metadata()` method to generate an `RdmaMetadata` object for an operation.
 
-> [!Tip]
-> Classes using `RdmaMetadata` objects must be paired correctly.
-> [`ReadableOperation`](readable-operation.md) with [`ReadOperation`](read-operation.md), and
-> [`WritableOperation`](write-operation.md) with [`WriteOperation`](write-operation.md).
-> Incorrect pairing will result in an error being raised.
+<Tip>
+Classes using `RdmaMetadata` objects must be paired correctly.
+[`ReadableOperation`](readable-operation.md) with [`ReadOperation`](read-operation.md), and
+[`WritableOperation`](writable-operation.md) with [`WriteOperation`](write-operation.md).
+Incorrect pairing will result in an error being raised.
+</Tip>
 
 
 ## Related Classes

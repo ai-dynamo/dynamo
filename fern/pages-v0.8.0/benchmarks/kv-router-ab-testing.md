@@ -15,7 +15,9 @@ Dynamo's KV Smart Router intelligently routes requests based on KV cache affinit
 2. Run controlled benchmarks using AIPerf
 3. Compare performance metrics to evaluate KV router effectiveness
 
-**Prerequisites:** Kubernetes cluster with GPUs, kubectl, helm
+<Prerequisites>
+Kubernetes cluster with GPUs, kubectl, helm
+</Prerequisites>
 
 ---
 
@@ -520,7 +522,9 @@ kubectl -n benchmark exec ${POD_NAME} -- bash -lc '
 '
 ```
 
-**Note:** This will take 3-5 minutes. The terminal output includes a summary table.
+<Note>
+This will take 3-5 minutes. The terminal output includes a summary table.
+</Note>
 
 ### Step 5.2: Benchmark Router-ON (KV Smart Router)
 
@@ -640,7 +644,9 @@ kubectl delete namespace benchmark
 
 ### Issue: Pods Stuck in Pending
 
-**Cause:** Insufficient GPU resources
+<Cause>
+Insufficient GPU resources
+</Cause>
 
 **Solution:**
 ```bash
@@ -653,7 +659,9 @@ kubectl edit dynamographdeployment -n <namespace>
 
 ### Issue: ImagePullBackOff Errors
 
-**Cause:** Version mismatch or missing credentials
+<Cause>
+Version mismatch or missing credentials
+</Cause>
 
 **Solution:**
 ```bash
@@ -665,7 +673,9 @@ kubectl get pods -n dynamo-system -o yaml | grep image:
 
 ### Issue: Operator Not Processing Deployment
 
-**Cause:** Namespace restrictions
+<Cause>
+Namespace restrictions
+</Cause>
 
 **Solution:**
 - Ensure Dynamo platform is Helm-installed in the namespace
@@ -674,7 +684,9 @@ kubectl get pods -n dynamo-system -o yaml | grep image:
 
 ### Issue: Workers Not Becoming Ready
 
-**Cause:** Model download failures or probe configuration
+<Cause>
+Model download failures or probe configuration
+</Cause>
 
 **Solution:**
 ```bash
@@ -689,7 +701,9 @@ kubectl logs -n <namespace> <worker-pod-name>
 
 ### Issue: Workers Restarting in CrashLoopBackOff
 
-**Cause:** Startup probe timeout - workers killed before finishing initialization
+<Cause>
+Startup probe timeout - workers killed before finishing initialization
+</Cause>
 
 **Symptoms:**
 - Pods show "Container main failed startup probe, will be restarted"
@@ -724,7 +738,9 @@ startupProbe:
 
 ### Issue: Unequal Worker Health
 
-**Cause:** Resource constraints, image pull issues, or configuration errors
+<Cause>
+Resource constraints, image pull issues, or configuration errors
+</Cause>
 
 **Solution:**
 ```bash
@@ -797,5 +813,7 @@ For questions or issues, consult the [Dynamo documentation](https://github.com/a
 - `prepare-dataset.sh`: Dataset preparation script
 - Results CSVs: Detailed metrics from AIPerf
 
-**Repository:** [https://github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)
+<Repository>
+[https://github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo)
+</Repository>
 

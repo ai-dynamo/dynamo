@@ -149,7 +149,9 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$
 helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE} --create-namespace
 ```
 
-> **Note:** For shared/multi-tenant clusters or testing scenarios, see [Deployment Modes](#deployment-modes) above for namespace-scoped and hybrid configurations.
+<Note>
+For shared/multi-tenant clusters or testing scenarios, see [Deployment Modes](#deployment-modes) above for namespace-scoped and hybrid configurations.
+</Note>
 
 ### Building from Source
 

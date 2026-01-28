@@ -85,7 +85,9 @@ flowchart LR
   pd_worker --> encode_worker
 ```
 
-> **Note:** Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct. Disaggregated serving is currently only confirmed for LLaVA.
+<Note>
+Aggregated serving supports LLaVA 1.5 7B and Qwen2.5-VL-7B-Instruct. Disaggregated serving is currently only confirmed for LLaVA.
+</Note>
 
 **Launch:**
 

@@ -46,7 +46,9 @@ All webhook types (validating, mutating, conversion, etc.) share the same **webh
   - `DynamoGraphDeployment` validation
   - `DynamoModel` validation
 
-**Note:** Future releases may add mutating webhooks (for defaults/transformations) and conversion webhooks (for CRD version migrations). All will use the same certificate infrastructure described in this document.
+<Note>
+Future releases may add mutating webhooks (for defaults/transformations) and conversion webhooks (for CRD version migrations). All will use the same certificate infrastructure described in this document.
+</Note>
 
 ---
 
@@ -100,7 +102,9 @@ dynamo-operator:
 - In environments where admission webhooks are not supported
 - When troubleshooting validation issues
 
-**Note:** When webhooks are disabled, controllers perform validation during reconciliation (defense in depth).
+<Note>
+When webhooks are disabled, controllers perform validation during reconciliation (defense in depth).
+</Note>
 
 ---
 
@@ -167,7 +171,9 @@ webhook:
   failurePolicy: Ignore
 ```
 
-**Recommendation:** Use `Fail` in production to ensure validation is always enforced. Only use `Ignore` if you need high availability and can tolerate occasional invalid resources.
+<Recommendation>
+Use `Fail` in production to ensure validation is always enforced. Only use `Ignore` if you need high availability and can tolerate occasional invalid resources.
+</Recommendation>
 
 #### Namespace Filtering
 
@@ -189,7 +195,9 @@ webhook:
       values: ["disabled"]
 ```
 
-**Note:** For **namespace-restricted operators**, the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
+<Note>
+For **namespace-restricted operators**, the namespace selector is automatically set to validate only the operator's namespace. This configuration is ignored in namespace-restricted mode.
+</Note>
 
 ---
 

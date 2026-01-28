@@ -4,7 +4,7 @@
 title: "Running Deepseek R1 with Wide EP"
 ---
 
-Dynamo supports running Deepseek R1 with data parallel attention and wide expert parallelism. Each data parallel attention rank is a seperate dynamo component that will emit its own KV Events and Metrics. vLLM controls the expert parallelism using the flag `--enable-expert-parallel`
+Dynamo supports running Deepseek R1 with data parallel attention and wide expert parallelism. Each data parallel attention rank is a separate dynamo component that will emit its own KV Events and Metrics. vLLM controls the expert parallelism using the flag `--enable-expert-parallel`
 
 ## Instructions
 
