@@ -380,8 +380,7 @@ impl KvRouter {
         // Uses a subscriber from workers_with_configs
         let worker_query_client = worker_query::WorkerQueryClient::new(
             component.clone(),
-            workers_with_configs.configs.clone(),
-            workers_with_configs.subscribe().change_rx,
+            workers_with_configs.subscribe(),
         );
         tracing::info!("Worker query client initialized");
 
@@ -391,21 +390,9 @@ impl KvRouter {
         {
             // Wait for at least one worker with a known runtime config (not None)
             // This ensures we have actual config data to make routing decisions
-            let mut config_rx = workers_with_configs.subscribe().change_rx;
-            while !workers_with_configs
-                .configs
-                .iter()
-                .any(|r| r.value().is_some())
-            {
-                tracing::info!("KV router waiting for at least one worker with runtime config...");
-                let _ = config_rx.changed().await;
-            }
+            let ready_workers = workers_with_configs.subscribe().wait_for_some().await;
+            let count = ready_workers.len();
 
-            let count = workers_with_configs
-                .configs
-                .iter()
-                .filter(|r| r.value().is_some())
-                .count();
             let all_local_indexer = workers_with_configs
                 .configs
                 .iter()
@@ -439,8 +426,7 @@ impl KvRouter {
                     cancellation_token.clone(),
                     worker_query::WorkerQueryClient::new(
                         component.clone(),
-                        workers_with_configs.configs.clone(),
-                        workers_with_configs.subscribe().change_rx,
+                        workers_with_configs.subscribe(),
                     ),
                     transport_kind,
                 )

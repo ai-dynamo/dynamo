@@ -762,7 +762,7 @@ pub async fn start_kv_router_background_event_plane(
     kv_events_tx: mpsc::Sender<RouterEvent>,
     remove_worker_tx: mpsc::Sender<WorkerId>,
     cancellation_token: CancellationToken,
-    worker_query_client: WorkerQueryClient,
+    mut worker_query_client: WorkerQueryClient,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
     // Subscribe to KV events using the selected event plane transport

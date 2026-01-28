@@ -4,20 +4,19 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use dashmap::DashMap;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::pipeline::{
     AsyncEngine, AsyncEngineContextProvider, ManyOut, PushRouter, ResponseStream, RouterMode,
     SingleIn, async_trait, network::Ingress,
 };
 use dynamo_runtime::protocols::maybe_error::MaybeError;
-use tokio::sync::{OnceCell, watch};
+use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 
+use crate::discovery::RuntimeConfigsSubscriber;
 use crate::kv_router::WORKER_KV_INDEXER_QUERY_ENDPOINT;
 use crate::kv_router::indexer::{LocalKvIndexer, WorkerKvQueryRequest, WorkerKvQueryResponse};
 use crate::kv_router::protocols::WorkerId;
-use crate::local_model::runtime_config::ModelRuntimeConfig;
 use dynamo_runtime::stream;
 
 /// Router-side client for querying worker local KV indexers
@@ -27,52 +26,31 @@ use dynamo_runtime::stream;
 /// The client is spawned by KvRouter; it uses a subscriber from RuntimeConfigs.
 pub struct WorkerQueryClient {
     component: Component,
-    /// Shared runtime configs (lock-free read access)
-    configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
-    /// Watch receiver for config change notifications (needs interior mutability)
-    change_rx: tokio::sync::Mutex<watch::Receiver<u64>>,
+    /// Subscriber for runtime configs (includes shared configs DashMap)
+    subscriber: RuntimeConfigsSubscriber,
     router: OnceCell<Arc<PushRouter<WorkerKvQueryRequest, WorkerKvQueryResponse>>>,
 }
 
 impl WorkerQueryClient {
-    /// Create a new WorkerQueryClient with shared configs and a watch receiver
-    pub fn new(
-        component: Component,
-        configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
-        change_rx: watch::Receiver<u64>,
-    ) -> Self {
+    /// Create a new WorkerQueryClient with a subscriber to runtime configs
+    pub fn new(component: Component, subscriber: RuntimeConfigsSubscriber) -> Self {
         Self {
             component,
-            configs,
-            change_rx: tokio::sync::Mutex::new(change_rx),
+            subscriber,
             router: OnceCell::new(),
         }
     }
 
     /// Wait until at least one worker has a known runtime config (Some).
     /// Returns the list of worker IDs that have configs.
-    pub async fn wait_for_ready(&self) -> Vec<WorkerId> {
-        let mut rx = self.change_rx.lock().await;
-        loop {
-            let ready_workers: Vec<WorkerId> = self
-                .configs
-                .iter()
-                .filter(|r| r.value().is_some())
-                .map(|r| *r.key())
-                .collect();
-
-            if !ready_workers.is_empty() {
-                return ready_workers;
-            }
-
-            // changed() won't miss notifications since watch tracks seen state per receiver
-            let _ = rx.changed().await;
-        }
+    pub async fn wait_for_ready(&mut self) -> Vec<WorkerId> {
+        self.subscriber.wait_for_some().await
     }
 
     /// Check if a worker has local indexer enabled
     pub fn has_local_indexer(&self, worker_id: WorkerId) -> bool {
-        self.configs
+        self.subscriber
+            .configs
             .get(&worker_id)
             .and_then(|entry| entry.value().as_ref().map(|c| c.enable_local_indexer))
             .unwrap_or(false)

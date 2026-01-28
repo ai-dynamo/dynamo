@@ -130,6 +130,27 @@ impl RuntimeConfigsSubscriber {
     pub async fn wait_for_change(&mut self) -> Result<(), watch::error::RecvError> {
         self.change_rx.changed().await
     }
+
+    /// Wait until at least one worker has a Some config.
+    /// Returns the list of worker IDs that have configs.
+    /// This is race-safe: checks the DashMap first, only waits if empty.
+    pub async fn wait_for_some(&mut self) -> Vec<WorkerId> {
+        loop {
+            let ready: Vec<WorkerId> = self
+                .configs
+                .iter()
+                .filter(|r| r.value().is_some())
+                .map(|r| *r.key())
+                .collect();
+
+            if !ready.is_empty() {
+                return ready;
+            }
+
+            // Wait for next change; ignore RecvError (sender dropped = shutdown)
+            let _ = self.change_rx.changed().await;
+        }
+    }
 }
 
 impl Default for ModelManager {
