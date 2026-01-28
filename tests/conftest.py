@@ -326,8 +326,34 @@ class NatsServer(ManagedProcess):
             terminate_existing=not use_random_port,  # Disabled for parallel test execution with random ports
             data_dir=data_dir,
             health_check_ports=[port],
+            health_check_funcs=[self._nats_ready],
             log_dir=request.node.name,
         )
+
+    def _nats_ready(self, timeout: float = 5) -> bool:
+        """Verify NATS server is ready by connecting and optionally checking JetStream."""
+        import asyncio
+
+        import nats
+
+        async def check():
+            try:
+                nc = await nats.connect(
+                    f"nats://localhost:{self.port}",
+                    connect_timeout=min(timeout, 2),
+                )
+                try:
+                    if not self._disable_jetstream:
+                        # Verify JetStream is initialized
+                        js = nc.jetstream()
+                        await js.account_info()
+                    return True
+                finally:
+                    await nc.close()
+            except Exception:
+                return False
+
+        return asyncio.run(check())
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when server exits."""
@@ -371,7 +397,8 @@ class NatsServer(ManagedProcess):
             self.command.extend(["-js", "--store_dir", self.data_dir])
 
         self._start_process()
-        self._check_ports(self._timeout)
+        elapsed = self._check_ports(self._timeout)
+        self._check_funcs(self._timeout - elapsed)
 
 
 class SharedManagedProcess:
