@@ -139,6 +139,7 @@ frontend:
   - 'deploy/inference-gateway/**'
 
 rust:
+  - '.github/workflows/pre-merge.yml'
   - '**/*.rs'
   - '**/Cargo.toml'
   - '**/Cargo.lock'
