@@ -147,7 +147,7 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
         # which require more GPU memory than needed.
         vllm_model = LLM(
             model=model_id,
-            enforce_eager=False,
+            enforce_eager=True,
             gpu_memory_utilization=0.4,
             max_model_len=10,
         )
