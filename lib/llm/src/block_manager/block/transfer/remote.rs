@@ -10,7 +10,7 @@
 //! - [`RemoteTransferHandle`] - Handle for async transfer operations
 //!
 use std::fmt::{self, Debug};
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;

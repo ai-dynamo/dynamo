@@ -74,7 +74,7 @@ pub mod torch;
 
 pub use cuda::*;
 pub use disk::*;
-pub use object::{ObjectStorage, RemoteStorage, RemoteStorageError};
+pub use object::{ObjectStorage, RemoteStorage};
 use torch::*;
 
 use std::{

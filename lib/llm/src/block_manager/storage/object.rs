@@ -8,13 +8,13 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use dynamo_llm::block_manager::storage::{RemoteStorage, ObjectStorage};
+//! use dynamo_llm::block_manager::storage::RemoteStorage;
 //! use dynamo_llm::block_manager::block::transfer::remote::RemoteKey;
 //!
-//! // Create an object storage region (legacy style)
-//! let storage = ObjectStorage::new("my-bucket", 0x1234567890abcdef, 4096 * 128);
+//! // Create from sequence hash
+//! let storage = RemoteStorage::new("my-bucket", 0x1234567890abcdef, 4096 * 128);
 //!
-//! // Create from RemoteKey (new unified style)
+//! // Create from RemoteKey
 //! let key = RemoteKey::object("my-bucket", "block-001");
 //! let storage = RemoteStorage::from_remote_key(&key, 4096 * 128);
 //!
@@ -24,30 +24,6 @@
 use std::fmt;
 
 use crate::block_manager::block::transfer::remote::RemoteKey;
-
-/// Result type for RemoteStorage operations.
-pub type Result<T> = std::result::Result<T, RemoteStorageError>;
-
-/// Error type for RemoteStorage operations.
-#[derive(Debug)]
-pub struct RemoteStorageError(String);
-
-impl RemoteStorageError {
-    pub fn new(msg: impl Into<String>) -> Self {
-        Self(msg.into())
-    }
-}
-
-impl std::fmt::Display for RemoteStorageError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "RemoteStorageError: {}", self.0)
-    }
-}
-
-impl std::error::Error for RemoteStorageError {}
-
-/// Legacy error type alias for backward compatibility.
-pub type ObjectStorageError = RemoteStorageError;
 
 /// Remote storage region for NIXL transfers.
 ///
@@ -91,19 +67,6 @@ impl RemoteStorage {
             size,
             device_id: remote_key.nixl_device_id(),
         }
-    }
-
-    /// Create an object storage region (legacy API).
-    ///
-    /// # Arguments
-    /// * `bucket` - Object bucket name
-    /// * `key` - Object key (u64 numeric identifier, typically a sequence hash)
-    /// * `size` - Size of the region in bytes
-    ///
-    /// # Returns
-    /// `Result<Self>` for API consistency
-    pub fn new_object(bucket: impl Into<String>, key: u64, size: usize) -> Result<Self> {
-        Ok(Self::new(bucket, key, size))
     }
 
     /// Get the bucket name.
@@ -196,24 +159,13 @@ impl super::Remote for RemoteStorage {}
 /// New code should use `RemoteStorage` directly.
 pub type ObjectStorage = RemoteStorage;
 
-// Legacy constructor wrapper for backward compatibility
-impl ObjectStorage {
-    /// Create a new object storage region (legacy API).
-    ///
-    /// This is equivalent to `RemoteStorage::new_object()`.
-    #[allow(clippy::new_ret_no_self)]
-    pub fn new(bucket: impl Into<String>, key: u64, size: usize) -> Result<RemoteStorage> {
-        RemoteStorage::new_object(bucket, key, size)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_object_storage_creation() {
-        let storage = ObjectStorage::new("test-bucket", 0x1234, 4096).unwrap();
+        let storage = ObjectStorage::new("test-bucket", 0x1234, 4096);
         assert_eq!(storage.bucket(), "test-bucket");
         assert_eq!(storage.key_str(), "0000000000001234");
         assert_eq!(storage.device_id(), 0x1234);
