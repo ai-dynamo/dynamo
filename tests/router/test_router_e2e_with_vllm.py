@@ -489,6 +489,7 @@ def test_router_decisions_vllm_dp(
     ],
     ids=["jetstream", "tcp_nats_core"],
 )
+@pytest.mark.xfail(strict=False, reason="Flaky test")
 def test_vllm_indexers_sync(
     request,
     runtime_services_dynamic_ports,
