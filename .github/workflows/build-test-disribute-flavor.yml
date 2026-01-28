@@ -214,8 +214,8 @@ jobs:
     env:
       FRAMEWORK: ${{ inputs.framework }}
     steps:
-      - name: Stop job if trtllm and arm64
-        if: inputs.framework == 'trtllm' && matrix.platform.arch == 'arm64'
+      - name: Stop  arm64
+        if: matrix.platform.arch == 'arm64'
         run: |
           echo "Stopping job because trtllm Tests on arm64 are not supported"
           exit 0
