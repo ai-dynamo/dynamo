@@ -682,7 +682,7 @@ func (r *DynamoGraphDeploymentRequestReconciler) createDGD(ctx context.Context, 
 	dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 		Name:      dgdName,
 		Namespace: dgdNamespace,
-		State:     "Pending",
+		State:     string(DGDStatePending),
 		Created:   true,
 	}
 
