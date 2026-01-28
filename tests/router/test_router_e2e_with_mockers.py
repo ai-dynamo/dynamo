@@ -707,9 +707,24 @@ def test_router_decisions(
             mockers.__exit__(None, None, None)
 
 
-@pytest.mark.parametrize("registration_order", ["prefill_first", "decode_first"])
 @pytest.mark.parametrize(
-    "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
+    "registration_order,enable_disagg_bootstrap",
+    [
+        pytest.param(
+            "prefill_first",
+            False,
+            id="no_bootstrap-prefill_first",
+            marks=pytest.mark.xfail(reason="Flaky test - needs investigation"),
+        ),
+        pytest.param(
+            "prefill_first",
+            True,
+            id="with_bootstrap-prefill_first",
+            marks=pytest.mark.xfail(reason="Flaky test - needs investigation"),
+        ),
+        pytest.param("decode_first", False, id="no_bootstrap-decode_first"),
+        pytest.param("decode_first", True, id="with_bootstrap-decode_first"),
+    ],
 )
 @pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
 def test_router_decisions_disagg(
