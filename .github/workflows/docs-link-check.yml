@@ -26,7 +26,7 @@ jobs:
           restore-keys: cache-lychee-
 
       - name: Check documentation links with lychee
-        uses: lycheeverse/lychee-action@v2
+        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.0.2
         with:
           args: >-
             --cache
