@@ -332,7 +332,7 @@ def test_mocker_kv_router(
     Tests both NATS and TCP request planes.
     """
 
-    # runtime_services_session provides shared etcd and nats instances
+    # runtime_services_session provides shared etcd and nats instances (persistent across tests)
     logger.info(f"Starting mocker KV router test with request_plane={request_plane}")
 
     # Create mocker args dictionary
@@ -386,7 +386,7 @@ def test_mocker_two_kv_router(
     Tests with both etcd and file storage backends.
     """
 
-    # runtime_services_session provides shared etcd and nats instances
+    # runtime_services_session provides shared etcd and nats instances (persistent across tests)
     logger.info(
         f"Starting mocker two KV router test with {store_backend} storage backend"
     )
@@ -650,7 +650,7 @@ def test_router_decisions(
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     """
-    # runtime_services_session provides shared NATS and etcd instances
+    # runtime_services_session provides shared NATS and etcd (persistent across tests)
     if not use_kv_events:
         mode = "Approximate (no-kv-events)"
     elif use_nats_core:
@@ -727,7 +727,7 @@ def test_router_decisions_disagg(
     - registration_order: prefill_first vs decode_first
     - enable_disagg_bootstrap: without vs with bootstrap rendezvous
     """
-    # runtime_services_session provides shared NATS and etcd instances
+    # runtime_services_session provides shared NATS and etcd (persistent across tests)
     logger.info(
         f"Starting disaggregated router prefix reuse test "
         f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
@@ -840,7 +840,7 @@ def test_busy_threshold_endpoint(
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
-    # runtime_services_session provides shared NATS and etcd instances
+    # runtime_services_session provides shared NATS and etcd (persistent across tests)
     logger.info(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )

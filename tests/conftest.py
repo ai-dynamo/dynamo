@@ -375,11 +375,11 @@ class NatsServer(ManagedProcess):
 
 
 class SharedManagedProcess:
-    """Base class for ManagedProcess with file-based reference counting for multi-process sharing.
+    """Base class for persistent shared processes across pytest-xdist workers.
 
-    Supports dynamic port allocation: when start_port is provided, the first worker
-    allocates a dynamic port and stores it in the ref file. Subsequent workers read
-    the allocated port from the ref file.
+    Simplified design: first worker starts the process on a dynamic port, it lives forever
+    (until the container dies). No ref counting, no teardown. Subsequent workers just
+    reuse via port check. This eliminates race conditions and simplifies the logic.
     """
 
     def __init__(
@@ -396,90 +396,73 @@ class SharedManagedProcess:
         self.timeout = timeout
         self.resource_name = resource_name
         self._server: Optional[ManagedProcess] = None
-        self._owns_process = False
 
-        root_tmp = Path(tempfile.gettempdir()) / "pytest_ref_counting"
+        root_tmp = Path(tempfile.gettempdir()) / "pytest_shared_services"
         root_tmp.mkdir(parents=True, exist_ok=True)
 
-        # Use resource_name only (not port) since port is dynamic
-        self.ref_file = root_tmp / f"pytest_{resource_name}_shared_ref"
-        self.lock_file = str(self.ref_file) + ".lock"
+        self.port_file = root_tmp / f"{resource_name}_port"
+        self.lock_file = str(self.port_file) + ".lock"
 
     def _create_server(self, port: int) -> ManagedProcess:
         """Create the underlying server instance. Must be implemented by subclasses."""
         raise NotImplementedError
 
-    def _read_ref_data(self) -> dict:
-        """Read ref data (count and port) from file."""
-        if self.ref_file.exists():
+    def _is_port_in_use(self, port: int) -> bool:
+        """Check if a port is in use (i.e., a process is listening on it)."""
+        import socket
+
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(("localhost", port))
+            sock.close()
+            return result == 0  # 0 means connection succeeded (port in use)
+        except Exception:
+            return False
+
+    def _read_port(self) -> Optional[int]:
+        """Read stored port from file."""
+        if self.port_file.exists():
             try:
-                import json
-
-                data = json.loads(self.ref_file.read_text().strip())
-                if isinstance(data, dict):
-                    return data
-                # Handle legacy format (just an int)
-                return {"ref_count": int(data), "port": None}
+                return int(self.port_file.read_text().strip())
             except (ValueError, IOError):
-                return {"ref_count": 0, "port": None}
-        return {"ref_count": 0, "port": None}
+                return None
+        return None
 
-    def _write_ref_data(self, ref_count: int, port: Optional[int]):
-        """Write ref data atomically."""
-        import json
-
-        self.ref_file.write_text(json.dumps({"ref_count": ref_count, "port": port}))
+    def _write_port(self, port: int):
+        """Write port to file."""
+        self.port_file.write_text(str(port))
 
     def __enter__(self):
         with FileLock(self.lock_file):
-            data = self._read_ref_data()
-            ref_count = data["ref_count"] + 1
+            stored_port = self._read_port()
 
-            if ref_count == 1:
-                # First reference - allocate port and start the process
-                self.port = allocate_port(self.start_port)
-                self._write_ref_data(ref_count, self.port)
-                self._server = self._create_server(self.port)
-                self._server.__enter__()
-                self._owns_process = True
+            # Check if a process is already running on the stored port
+            if stored_port is not None and self._is_port_in_use(stored_port):
+                # Reuse existing process
+                self.port = stored_port
                 logging.info(
-                    f"[{self.resource_name}] Started process on port {self.port} (ref_count=1)"
+                    f"[{self.resource_name}] Reusing existing process on port {self.port}"
                 )
             else:
-                # Process already running - read port from ref file
-                self.port = data["port"]
-                self._write_ref_data(ref_count, self.port)
-                self._owns_process = False
+                # Start new process
+                if stored_port is not None:
+                    logging.warning(
+                        f"[{self.resource_name}] Stale port file: port {stored_port} not in use, starting fresh"
+                    )
+                self.port = allocate_port(self.start_port)
+                self._write_port(self.port)
+                self._server = self._create_server(self.port)
+                self._server.__enter__()
                 logging.info(
-                    f"[{self.resource_name}] Reusing existing process on port {self.port} (ref_count={ref_count})"
+                    f"[{self.resource_name}] Started process on port {self.port}"
                 )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        with FileLock(self.lock_file):
-            data = self._read_ref_data()
-            ref_count = max(0, data["ref_count"] - 1)
-            port = data["port"]
-
-            if ref_count == 0:
-                if self._owns_process:
-                    # Last reference and we own it - stop the process
-                    if self._server:
-                        self._server.__exit__(exc_type, exc_val, exc_tb)
-                    # Deallocate the port
-                    if port is not None:
-                        deallocate_port(port)
-                    logging.info(
-                        f"[{self.resource_name}] Stopped process on port {port} (ref_count=0)"
-                    )
-                # Clean up ref file
-                if self.ref_file.exists():
-                    self.ref_file.unlink()
-            else:
-                self._write_ref_data(ref_count, port)
-                logging.info(
-                    f"[{self.resource_name}] Released reference (ref_count={ref_count})"
-                )
+        # Never tear down - let the process live until the container dies.
+        # This avoids race conditions and simplifies the logic.
+        pass
 
 
 class SharedEtcdServer(SharedManagedProcess):
@@ -614,9 +597,9 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
 def runtime_services_session(request, tmp_path_factory):
     """Session-scoped fixture that provides shared NATS and etcd instances for all tests.
 
-    Uses file-based reference counting to coordinate between pytest-xdist worker processes.
-    Only the first worker starts services, and only the last worker tears them down.
-    Dynamically allocates ports to avoid conflicts.
+    Uses file locking to coordinate between pytest-xdist worker processes.
+    First worker starts services on dynamic ports, subsequent workers reuse them.
+    Services are never torn down (live until container dies) to avoid race conditions.
 
     This fixture is xdist-safe when tests use unique namespaces (e.g. random suffixes)
     and do not assume exclusive access to global streams/keys.
