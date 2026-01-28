@@ -554,15 +554,44 @@ where
         let snapshot = self.snapshot.load_latest().await?.unwrap_or_default();
 
         // Replay WAL entries after snapshot
-        let wal_entries = self.wal.replay().await?;
+        let all_wal_entries = self.wal.replay().await?;
 
-        // Update sequence
-        self.wal.set_seq(snapshot.sequence + 1);
+        // Filter wal_entries to only those with entry.seq > snapshot.sequence
+        // Entries with seq <= snapshot.sequence are already reflected in the snapshot
+        let wal_entries: Vec<WalEntry<K, V, M>> = all_wal_entries
+            .into_iter()
+            .filter(|entry| {
+                let seq = match entry {
+                    WalEntry::Register { seq, .. } => *seq,
+                    WalEntry::Remove { seq, .. } => *seq,
+                    WalEntry::Touch { seq, .. } => *seq,
+                    WalEntry::Checkpoint { seq, .. } => *seq,
+                };
+                seq > snapshot.sequence
+            })
+            .collect();
+
+        // Set WAL sequence to one more than the highest seq of filtered entries,
+        // or to snapshot.sequence + 1 if no filtered entries remain
+        let next_seq = wal_entries
+            .iter()
+            .map(|entry| match entry {
+                WalEntry::Register { seq, .. } => *seq,
+                WalEntry::Remove { seq, .. } => *seq,
+                WalEntry::Touch { seq, .. } => *seq,
+                WalEntry::Checkpoint { seq, .. } => *seq,
+            })
+            .max()
+            .map(|max_seq| max_seq + 1)
+            .unwrap_or(snapshot.sequence + 1);
+
+        self.wal.set_seq(next_seq);
 
         if !wal_entries.is_empty() {
             tracing::info!(
                 snapshot_seq = snapshot.sequence,
                 wal_entries = wal_entries.len(),
+                next_seq = next_seq,
                 "Recovery: loaded snapshot + {} WAL entries to apply",
                 wal_entries.len()
             );
