@@ -641,6 +641,18 @@ impl Slot for VllmConnectorSlot {
 
                 if candidate_start >= new_blocks_start {
                     let prio_offset = candidate_start - new_blocks_start;
+                    debug_assert!(
+                        prio_offset + num_candidate_blocks <= prios.len(),
+                        "prio_offset ({}) + num_candidate_blocks ({}) > prios.len() ({}); \
+                         candidate_start={}, new_blocks_start={}, device_blocks.len()={}, block_ids.len()={}",
+                        prio_offset,
+                        num_candidate_blocks,
+                        prios.len(),
+                        candidate_start,
+                        new_blocks_start,
+                        self.device_blocks.len(),
+                        block_ids.len()
+                    );
                     prios
                         .iter()
                         .skip(prio_offset)
