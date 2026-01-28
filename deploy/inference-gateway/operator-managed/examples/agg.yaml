@@ -8,7 +8,7 @@ metadata:
 spec:
   services:
     Epp:
-      componentType: Epp
+      componentType: epp
       replicas: 1
       extraPodSpec:
         mainContainer:
