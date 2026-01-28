@@ -143,7 +143,9 @@ Some components expose additional metrics specific to their functionality:
 
 ### Frontend Metrics
 
-**Important:** The frontend and backend workers are separate components that expose metrics on different ports. See [Backend Component Metrics](#backend-component-metrics) for backend metrics.
+<Important>
+The frontend and backend workers are separate components that expose metrics on different ports. See [Backend Component Metrics](#backend-component-metrics) for backend metrics.
+</Important>
 
 The Dynamo HTTP Frontend (`python -m dynamo.frontend`) exposes `dynamo_frontend_*` metrics on port 8000 by default (configurable via `--http-port` or `DYN_HTTP_PORT`) at the `/metrics` endpoint. Most metrics include `model` labels containing the model name:
 
