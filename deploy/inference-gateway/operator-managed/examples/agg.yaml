@@ -14,7 +14,7 @@ spec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/frontend-image:my-tag
           env:
-            - name: DYNAMO_KV_BLOCK_SIZE
+            - name: DYN_KV_BLOCK_SIZE
               value: "16"
             - name: DYNAMO_MODEL
               value: "Qwen/Qwen3-0.6B"  # Match your model

@@ -235,22 +235,22 @@ func loadDynamoConfig() {
 	ffiOverlapScoreWeight = getEnvFloatOrDefault("DYNAMO_OVERLAP_SCORE_WEIGHT", -1.0)
 	ffiRouterTemperature = getEnvFloatOrDefault("DYNAMO_ROUTER_TEMPERATURE", -1.0)
 
-	kvBlockSizeStr := os.Getenv("DYNAMO_KV_BLOCK_SIZE")
+	kvBlockSizeStr := os.Getenv("DYN_KV_BLOCK_SIZE")
 	if kvBlockSizeStr == "" {
-		panic("DYNAMO_KV_BLOCK_SIZE is required and must match the model card's kv_cache_block_size")
+		panic("DYN_KV_BLOCK_SIZE is required and must match the model card's kv_cache_block_size")
 	}
 	var tmp int64
 	if n, err := fmt.Sscanf(kvBlockSizeStr, "%d", &tmp); err != nil || n != 1 {
-		panic(fmt.Sprintf("DYNAMO_KV_BLOCK_SIZE='%s' is not a valid integer", kvBlockSizeStr))
+		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE='%s' is not a valid integer", kvBlockSizeStr))
 	}
 	ffiKvBlockSize = uint32(tmp)
 	if ffiKvBlockSize < 16 || ffiKvBlockSize > 8192 {
-		panic(fmt.Sprintf("DYNAMO_KV_BLOCK_SIZE=%d outside [16,8192]", ffiKvBlockSize))
+		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE=%d outside [16,8192]", ffiKvBlockSize))
 	}
 	if (ffiKvBlockSize & (ffiKvBlockSize - 1)) != 0 {
-		panic(fmt.Sprintf("DYNAMO_KV_BLOCK_SIZE=%d must be a power of 2", ffiKvBlockSize))
+		panic(fmt.Sprintf("DYN_KV_BLOCK_SIZE=%d must be a power of 2", ffiKvBlockSize))
 	}
-	fmt.Printf("Dynamo KV Scorer: Loaded DYNAMO_KV_BLOCK_SIZE=%d\n", ffiKvBlockSize)
+	fmt.Printf("Dynamo KV Scorer: Loaded DYN_KV_BLOCK_SIZE=%d\n", ffiKvBlockSize)
 }
 
 func getEnvOrDefault(key, def string) string {

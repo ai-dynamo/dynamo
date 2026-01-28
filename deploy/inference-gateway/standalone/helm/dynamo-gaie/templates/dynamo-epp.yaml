@@ -116,7 +116,7 @@ spec:
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
           - name: DYN_NAMESPACE
             value: "{{ $ns }}"
-          - name: DYNAMO_KV_BLOCK_SIZE
+          - name: DYN_KV_BLOCK_SIZE
             value: "{{ $kv }}"
           - name: DYNAMO_ROUTER_REPLICA_SYNC
             value: "true"
