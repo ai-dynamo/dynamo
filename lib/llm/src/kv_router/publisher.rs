@@ -1890,7 +1890,6 @@ mod test_integration_publisher {
     use crate::kv_router::protocols::ActiveLoad;
     use dynamo_runtime::distributed_test_utils::create_test_drt_async;
     use dynamo_runtime::transports::event_plane::EventSubscriber;
-    use futures::StreamExt;
 
     #[tokio::test]
     #[ignore] // Mark as ignored as requested, because CI's integrations still don't have NATS
