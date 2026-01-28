@@ -90,19 +90,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Name:  "RUST_LOG",
 			Value: "debug,dynamo_llm::kv_router=trace",
 		},
-		{
-			// HF_TOKEN is needed to download model config files from HuggingFace without rate limiting
-			Name: "HF_TOKEN",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: "hf-token-secret",
-					},
-					Key:      "HF_TOKEN",
-					Optional: ptr.To(true),
-				},
-			},
-		},
 	}...)
 
 	// EPP default args
