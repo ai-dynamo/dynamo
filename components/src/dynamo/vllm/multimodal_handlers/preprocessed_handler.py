@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import uuid
 from collections import defaultdict
 from enum import Enum
@@ -85,8 +86,11 @@ class PreprocessedHandler(ProcessMixIn):
             multimodal_inputs=[],
         )
 
-        # [gluo WIP] experiment with batching..
-        ENCODE_BATCH_SIZE = 1
+        # [gluo WIP] batching helps for encoding step to fully utilize GPU,
+        # should handle dispatch in a more intelligent way, i.e. splitting
+        # jobs based on availability of encode worker, rather than fixed mm
+        # mm item size per request.
+        ENCODE_BATCH_SIZE = int(os.getenv("ENCODE_BATCH_SIZE", 10))
         encode_res_gen = []
         for mm_type, urls in multimodal_inputs.items():
             for url in urls:

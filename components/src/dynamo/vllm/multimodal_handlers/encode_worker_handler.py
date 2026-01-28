@@ -23,11 +23,11 @@ from ..multimodal_utils import (
     VLLMNativeEncoderRequest,
     VLLMNativeEncoderResponse,
     encode_image_embeddings,
-    get_embedding_hash,
     get_encoder_components,
     load_vision_model,
     vLLMMultimodalRequest,
 )
+from ..multimodal_utils.embedding_cache import EmbeddingCache
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ class EncodeWorkerHandler:
         self._accumulated_time = 0.0
         self._processed_requests = 0
         self.readables = []
-        self.cached_embeddings = {}
+        self.embedding_cache = EmbeddingCache()
 
     def cleanup(self):
         pass
@@ -112,35 +112,59 @@ class EncodeWorkerHandler:
 
         try:
             time_start = time.perf_counter()
+            # Before batch process images, check cache first
+            embedding_lists = [None] * len(request.multimodal_inputs)
             for idx in range(len(request.multimodal_inputs)):
                 if not request.multimodal_inputs[idx].multimodal_input.image_url:
                     raise ValueError("image_url is required for the encode worker.")
 
                 image_url = request.multimodal_inputs[idx].multimodal_input.image_url
                 # see if we have local cache
-                if image_url in self.cached_embeddings:
-                    (
+                embedding_key = self.embedding_cache.generate_hash_key(image_url)
+                if self.embedding_cache.has_key(embedding_key):
+                    (image_grid_thw, embeddings_cpu) = self.embedding_cache.get(
+                        embedding_key
+                    )
+                    embedding_lists[idx] = [
                         embedding_key,
                         image_grid_thw,
-                        embeddings_shape,
-                    ) = self.cached_embeddings[image_url]
-                    # [gluo FIXME] need mechanism to clean up local files
-                    request.multimodal_inputs[
-                        idx
-                    ].serialized_request = (
-                        f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                        embeddings_cpu,
+                        None,
+                    ]
+                # compute
+                else:
+                    embedding_lists[idx] = [embedding_key, None, None, image_url]
+
+            # Load and generate image tensors
+            image_futures = []
+            image_to_load = []
+            for idx in range(len(embedding_lists)):
+                if embedding_lists[idx][3] is not None:
+                    image_futures.append(
+                        self.image_loader.load_image(embedding_lists[idx][3])
                     )
-                    request.multimodal_inputs[idx].multimodal_input.image_url = None
-                    request.multimodal_inputs[idx].image_grid_thw = image_grid_thw
-                    request.multimodal_inputs[idx].embeddings_shape = embeddings_shape
+                    image_to_load.append(embedding_lists[idx][3])
+            results = await asyncio.gather(*image_futures, return_exceptions=True)
+            loaded_images = []
+            collective_exceptions = ""
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    url = image_to_load[i]
+                    logger.error(f"Failed to load image from {url[:80]}...: {result}")
+                    collective_exceptions += (
+                        f"Failed to load image from {url[:80]}...: {result}\n"
+                    )
                     continue
-
-                image = await self.image_loader.load_image(image_url)
-
-                logger.debug(
-                    f"Processing image {image_url} for request: {{ id: {request_id} }}"
+                loaded_images.append(result)
+            if collective_exceptions:
+                raise ValueError(
+                    f"Errors occurred during image loading:\n{collective_exceptions}"
                 )
-                image_embeds = self.image_processor(images=image, return_tensors="pt")
+
+            if loaded_images:
+                image_embeds = self.image_processor(
+                    images=loaded_images, return_tensors="pt"
+                )
 
                 # Encode the image embeddings using model-specific encoder
                 embeddings = await asyncio.to_thread(
@@ -151,55 +175,71 @@ class EncodeWorkerHandler:
                     projector=self.projector,
                 )
 
+                logger.info(f"Encoded embeddings shape: {embeddings.shape}")
+                logger.info(f"Encoded embeddings : {embeddings}")
+
+                # Split concatenated embeddings for each image item.
+                merge_size = self.vision_encoder.spatial_merge_size
+                sizes = (
+                    image_embeds["image_grid_thw"].prod(-1) // merge_size // merge_size
+                ).tolist()
+                splitted_embeddings = embeddings.cpu().squeeze(0).split(sizes)
+                logger.info(
+                    f"Splitted embeddings lengths: {[e.shape for e in splitted_embeddings]}"
+                )
+
                 image_grid_thw = (
                     image_embeds["image_grid_thw"].tolist()
                     if "image_grid_thw" in image_embeds
                     else None
                 )
-                logger.debug(
-                    f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
+
+            # cache
+            splitted_idx = 0
+            for idx in range(len(embedding_lists)):
+                if embedding_lists[idx][3] is not None:
+                    embedding_lists[idx][1] = [image_grid_thw[splitted_idx]]
+                    embedding_lists[idx][2] = splitted_embeddings[
+                        splitted_idx
+                    ].unsqueeze(0)
+                    splitted_idx += 1
+                self.embedding_cache.set(
+                    embedding_lists[idx][0],
+                    (embedding_lists[idx][1], embedding_lists[idx][2]),
                 )
 
-                # Move embeddings to CPU for NIXL transfer to avoid UCX/InfiniBand issues
-                embeddings_cpu = embeddings.cpu()
-
-                request.multimodal_inputs[idx].image_grid_thw = image_grid_thw
+                # Update request for transfer metadata
+                request.multimodal_inputs[idx].multimodal_input.image_url = None
+                request.multimodal_inputs[idx].image_grid_thw = embedding_lists[idx][1]
                 request.multimodal_inputs[idx].embeddings_shape = tuple(
-                    embeddings.shape
+                    embedding_lists[idx][2].shape
                 )
 
+                # Prepare transfer
                 if TRANSFER_LOCAL:
-                    embedding_key = get_embedding_hash(image_url)
                     logger.debug(
-                        f"ENCODER: saving local safetensors file with key {embedding_key}, {embeddings_cpu.numel()} * {embeddings_cpu.element_size()} bytes"
+                        f"ENCODER: saving local safetensors file with key {embedding_lists[idx][0]}, {embedding_lists[idx][2].numel()} * {embedding_lists[idx][2].element_size()} bytes"
                     )
-                    tensors = {"ec_cache": embeddings_cpu}
+                    tensors = {"ec_cache": embedding_lists[idx][2]}
                     safetensors.torch.save_file(
-                        tensors, f"/tmp/encoder_cache.{embedding_key}.safetensors"
+                        tensors,
+                        f"/tmp/encoder_cache.{embedding_lists[idx][0]}.safetensors",
                     )
                     # [gluo FIXME] need mechanism to clean up local files
                     request.multimodal_inputs[
                         idx
                     ].serialized_request = (
-                        f"/tmp/encoder_cache.{embedding_key}.safetensors"
-                    )
-                    self.cached_embeddings[image_url] = (
-                        embedding_key,
-                        request.multimodal_inputs[idx].image_grid_thw,
-                        request.multimodal_inputs[idx].embeddings_shape,
+                        f"/tmp/encoder_cache.{embedding_lists[idx][0]}.safetensors"
                     )
                 else:
                     # [gluo FIXME] nixl_connector path needs to be update to handle multiple embeddings
-                    descriptor = connect.Descriptor(embeddings_cpu)
+                    descriptor = connect.Descriptor(embedding_lists[idx][2])
                     self.readables.append(
                         await self._connector.create_readable(descriptor)
                     )
                     request.multimodal_inputs[idx].serialized_request = self.readables[
                         -1
                     ].metadata()
-
-                # Clear the image URL as hint that the image is passed as embeddings.
-                request.multimodal_inputs[idx].multimodal_input.image_url = None
 
             logger.debug(f"Request: {request.model_dump_json()}")
 
