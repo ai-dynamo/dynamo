@@ -281,6 +281,13 @@ def cmd_line_args():
         choices=get_reasoning_parser_names(),
         help="Reasoning parser name for the model. If not specified, no reasoning parsing is performed.",
     )
+    parser.add_argument(
+        "--connector",
+        type=str,
+        default="none",
+        choices=["none", "kvbm"],
+        help="Connector to use for the model.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-jinja-template",
@@ -380,6 +387,7 @@ def cmd_line_args():
     config.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     # Derive use_kv_events from publish_events_and_metrics
     config.use_kv_events = config.publish_events_and_metrics
+    config.connector = args.connector
 
     # Handle custom jinja template path expansion (environment variables and home directory)
     if args.custom_jinja_template:
