@@ -94,10 +94,7 @@ impl RuntimeConfigs {
 
     /// Spawn background task to watch runtime configs via discovery.
     /// Does not block - consumers should use `subscribe().wait_for_some()` if they need workers.
-    pub(crate) async fn start_watcher(
-        self: &Arc<Self>,
-        endpoint: &Endpoint,
-    ) -> anyhow::Result<()> {
+    pub(crate) async fn start_watcher(self: &Arc<Self>, endpoint: &Endpoint) -> anyhow::Result<()> {
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
 
