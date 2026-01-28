@@ -298,7 +298,7 @@ class EtcdServer(ManagedProcess):
 
 
 class NatsServer(ManagedProcess):
-    def __init__(self, request, port=4222, timeout=300):
+    def __init__(self, request, port=4222, timeout=300, disable_jetstream=False):
         # Allocate a free port if port is 0
         use_random_port = port == 0
         if use_random_port:
@@ -309,16 +309,16 @@ class NatsServer(ManagedProcess):
         self.use_random_port = use_random_port  # Track if we allocated the port
         self._request = request  # Store for restart
         self._timeout = timeout
-        data_dir = tempfile.mkdtemp(prefix="nats_")
+        self._disable_jetstream = disable_jetstream
+        data_dir = tempfile.mkdtemp(prefix="nats_") if not disable_jetstream else None
         command = [
             "nats-server",
-            "-js",
             "--trace",
-            "--store_dir",
-            data_dir,
             "-p",
             str(port),
         ]
+        if not disable_jetstream:
+            command.extend(["-js", "--store_dir", data_dir])
         super().__init__(
             command=command,
             timeout=timeout,
@@ -354,21 +354,21 @@ class NatsServer(ManagedProcess):
     def start(self):
         """Restart a stopped NATS server with fresh state."""
         _logger.info(f"Starting NATS server on port {self.port} with fresh state")
-        # Clean up old data directory and create fresh one
-        if self.data_dir:
-            shutil.rmtree(self.data_dir, ignore_errors=True)
-        self.data_dir = tempfile.mkdtemp(prefix="nats_")
+        # Clean up old data directory and create fresh one (only if JetStream enabled)
+        if not self._disable_jetstream:
+            if self.data_dir:
+                shutil.rmtree(self.data_dir, ignore_errors=True)
+            self.data_dir = tempfile.mkdtemp(prefix="nats_")
 
-        # Rebuild command with new data_dir
+        # Rebuild command
         self.command = [
             "nats-server",
-            "-js",
             "--trace",
-            "--store_dir",
-            self.data_dir,
             "-p",
             str(self.port),
         ]
+        if not self._disable_jetstream:
+            self.command.extend(["-js", "--store_dir", self.data_dir])
 
         self._start_process()
         self._check_ports(self._timeout)
@@ -484,14 +484,27 @@ class SharedEtcdServer(SharedManagedProcess):
 class SharedNatsServer(SharedManagedProcess):
     """NatsServer with file-based reference counting for multi-process sharing."""
 
-    def __init__(self, request, tmp_path_factory, start_port=4223, timeout=300):
+    def __init__(
+        self,
+        request,
+        tmp_path_factory,
+        start_port=4223,
+        timeout=300,
+        disable_jetstream=False,
+    ):
         super().__init__(request, tmp_path_factory, "nats", start_port, timeout)
         # Create a log directory for session-scoped servers
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
+        self._disable_jetstream = disable_jetstream
 
     def _create_server(self, port: int) -> ManagedProcess:
         """Create NatsServer instance."""
-        server = NatsServer(self.request, port=port, timeout=self.timeout)
+        server = NatsServer(
+            self.request,
+            port=port,
+            timeout=self.timeout,
+            disable_jetstream=self._disable_jetstream,
+        )
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
@@ -523,6 +536,27 @@ def request_plane(request):
     return getattr(request, "param", "nats")
 
 
+@pytest.fixture
+def use_nats_core(request):
+    """
+    Whether to use NATS Core mode (local indexer) instead of JetStream. Defaults to False.
+
+    When True:
+    - NATS server starts without JetStream (-js flag omitted) for faster startup
+    - Tests should use enable_local_indexer=True in mocker_args
+
+    When False (default):
+    - NATS server starts with JetStream for KV event distribution
+    - Tests use JetStream-based indexer synchronization
+
+    To use NATS Core mode:
+        @pytest.mark.parametrize("use_nats_core", [True], indirect=True)
+        def test_example(runtime_services_dynamic_ports):
+            ...
+    """
+    return getattr(request, "param", False)
+
+
 @pytest.fixture()
 def runtime_services(request, store_kv, request_plane):
     """
@@ -549,7 +583,7 @@ def runtime_services(request, store_kv, request_plane):
 
 
 @pytest.fixture()
-def runtime_services_dynamic_ports(request, store_kv, request_plane):
+def runtime_services_dynamic_ports(request, store_kv, request_plane, use_nats_core):
     """Provide NATS and Etcd servers with truly dynamic ports per test.
 
     This fixture actually allocates dynamic ports by passing port=0 to the servers.
@@ -564,6 +598,7 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     - If store_kv != "etcd", etcd is not started (returns None)
     - NATS is always started when etcd is used, because KV events require NATS
       regardless of the request_plane (tcp/nats only affects request transport)
+    - JetStream is enabled by default; disabled when use_nats_core=True for faster startup
 
     Returns a tuple of (nats_process, etcd_process) where each has a .port attribute.
     """
@@ -571,8 +606,11 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
 
     # Port cleanup is now handled in NatsServer and EtcdServer __exit__ methods
     # Always start NATS when etcd is used - KV events require NATS regardless of request_plane
+    # When use_nats_core=True, disable JetStream for faster startup
     if store_kv == "etcd":
-        with NatsServer(request, port=0) as nats_process:
+        with NatsServer(
+            request, port=0, disable_jetstream=use_nats_core
+        ) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
                 # Save original env vars (may be set by session-scoped fixture)
                 orig_nats = os.environ.get("NATS_SERVER")
@@ -594,7 +632,9 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
                 else:
                     os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
-        with NatsServer(request, port=0) as nats_process:
+        with NatsServer(
+            request, port=0, disable_jetstream=use_nats_core
+        ) as nats_process:
             orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None
