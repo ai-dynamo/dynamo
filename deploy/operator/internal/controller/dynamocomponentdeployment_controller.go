@@ -1344,14 +1344,23 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 	}
 
 	var servicePort corev1.ServicePort
-	if opt.dynamoComponentDeployment.IsFrontendComponent() {
+	switch opt.dynamoComponentDeployment.Spec.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
 			Port:       commonconsts.DynamoServicePort,
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else { // TODO: only for worker components
+	case commonconsts.ComponentTypeEPP:
+		// EPP exposes the gRPC endpoint for InferencePool communication
+		servicePort = corev1.ServicePort{
+			Name:       commonconsts.EPPGRPCPortName,
+			Port:       commonconsts.EPPGRPCPort,
+			TargetPort: intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:   corev1.ProtocolTCP,
+		}
+	default:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,

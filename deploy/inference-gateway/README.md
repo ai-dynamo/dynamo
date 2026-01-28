@@ -259,7 +259,7 @@ a. User minikube tunnel to expose the gateway to the host
 ```bash
 # in first terminal
 ps aux | grep "minikube tunnel" | grep -v grep # make sure minikube tunnel is not already running.
-minikube tunnel & # start the tunnel
+minikube tunnel # start the tunnel
 
 # in second terminal where you want to send inference requests
 GATEWAY_URL=$(kubectl get svc inference-gateway -n my-model -o jsonpath='{.spec.clusterIP}')
