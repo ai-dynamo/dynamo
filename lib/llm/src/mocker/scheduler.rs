@@ -297,20 +297,16 @@ impl Scheduler {
                     break;
                 }
 
-                // Start timing for this forward pass (schedule + simulate)
-                let iteration_start = std::time::Instant::now();
-
                 // 2. Schedule waiting requests (once per iteration)
                 try_schedule(&mut state, &kv_manager, &mut hit_rates, &args);
 
                 // 3. Simulate prefill + decode
-                let prefill_time = simulate_prefill(
+                simulate_prefill(
                     &mut state,
                     &mut kv_manager,
                     &args.perf_model,
                     args.worker_type,
                     args.speedup_ratio,
-                    iteration_start,
                 )
                 .await;
                 simulate_decode(
@@ -320,8 +316,6 @@ impl Scheduler {
                     &args.perf_model,
                     args.block_size,
                     args.speedup_ratio,
-                    iteration_start
-                        + Duration::from_secs_f64(prefill_time.as_secs_f64() / args.speedup_ratio),
                 )
                 .await;
 
@@ -395,8 +389,8 @@ async fn simulate_prefill(
     perf_model: &PerfModel,
     worker_type: WorkerType,
     speedup_ratio: f64,
-    iteration_start: std::time::Instant,
 ) -> Duration {
+    let start_time = std::time::Instant::now();
     let mut total_time = Duration::ZERO;
 
     while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
@@ -422,7 +416,7 @@ async fn simulate_prefill(
     }
 
     // Compute elapsed time and adjust sleep duration for accuracy
-    let elapsed = iteration_start.elapsed();
+    let elapsed = start_time.elapsed();
     let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
     let sleep_duration = expected_sleep.saturating_sub(elapsed);
     if sleep_duration > Duration::ZERO {
@@ -440,8 +434,8 @@ async fn simulate_decode(
     perf_model: &PerfModel,
     block_size: usize,
     speedup_ratio: f64,
-    decode_start: std::time::Instant,
 ) -> Duration {
+    let start_time = std::time::Instant::now();
     // Compute decode timing
     let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
     // Compute average context length across all active decode requests
@@ -463,7 +457,7 @@ async fn simulate_decode(
     state.reset_active_tokens();
 
     // Compute elapsed time and adjust sleep duration for accuracy
-    let elapsed = decode_start.elapsed();
+    let elapsed = start_time.elapsed();
     let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
     let sleep_duration = expected_sleep.saturating_sub(elapsed);
     if sleep_duration > Duration::ZERO {
