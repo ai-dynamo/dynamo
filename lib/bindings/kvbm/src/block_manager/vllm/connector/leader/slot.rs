@@ -536,6 +536,17 @@ impl Slot for VllmConnectorSlot {
         num_scheduled_tokens: usize,
         priorities: Option<&[u32]>,
     ) -> Result<(), SlotError> {
+        // Validate contract: priorities must match block_ids length when provided
+        if let Some(prios) = priorities {
+            assert_eq!(
+                prios.len(),
+                block_ids.len(),
+                "priorities length ({}) must match block_ids length ({})",
+                prios.len(),
+                block_ids.len()
+            );
+        }
+
         if !tokens.is_empty() {
             tracing::debug!(
                 "appending {} newly decoded tokens to sequence",
