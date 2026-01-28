@@ -65,6 +65,8 @@ class Config:
         self.enable_local_indexer: bool = False
         # Whether to enable NATS for KV events (derived from publish_events_and_metrics)
         self.use_kv_events: bool = False
+        # Guided decoding backend for structured output (xgrammar or llguidance)
+        self.guided_decoding_backend: Optional[str] = None
 
     def __str__(self) -> str:
         return (
@@ -100,7 +102,8 @@ class Config:
             f"request_plane={self.request_plane}, "
             f"event_plane={self.event_plane}, "
             f"enable_local_indexer={self.enable_local_indexer}, "
-            f"use_kv_events={self.use_kv_events}"
+            f"use_kv_events={self.use_kv_events}, "
+            f"guided_decoding_backend={self.guided_decoding_backend}"
         )
 
 
@@ -308,6 +311,13 @@ def cmd_line_args():
         choices=["none", "kvbm"],
         help="Connector to use for the model.",
     )
+    parser.add_argument(
+        "--dyn-guided-decoding-backend",
+        type=str,
+        default=None,
+        choices=["xgrammar", "llguidance"],
+        help="Backend for guided decoding (constrained output). Enables JSON schema enforcement in structured output. 'xgrammar' is recommended for most use cases.",
+    )
     add_config_dump_args(parser)
     parser.add_argument(
         "--custom-jinja-template",
@@ -407,6 +417,7 @@ def cmd_line_args():
 
     config.reasoning_parser = args.dyn_reasoning_parser
     config.tool_call_parser = args.dyn_tool_call_parser
+    config.guided_decoding_backend = args.dyn_guided_decoding_backend
     config.dump_config_to = args.dump_config_to
     config.dyn_endpoint_types = args.dyn_endpoint_types
     config.store_kv = args.store_kv
