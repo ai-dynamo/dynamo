@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Sphinx README Validation Workflow
+# Purpose: When README files change, run Sphinx in CI to catch documentation errors early.
+# Any Sphinx warnings or errors will block the merge to ensure documentation quality.
+#
+# This workflow runs on:
+# - Pull requests that modify README files (any README.md or README.rst)
+# - Can be manually triggered via workflow_dispatch
+#
+# The Sphinx build uses the -W flag (warnings as errors) to ensure strict validation.
+
+name: Sphinx README Check
+
+on:
+  pull_request:
+    paths:
+      - '**/README.md'
+      - '**/README.rst'
+      - 'docs/**'
+      - 'container/Dockerfile.docs'
+      - '.github/workflows/sphinx-readme-check.yml'
+  workflow_dispatch:
+
+jobs:
+  sphinx-build:
+    name: Build Documentation with Sphinx
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build documentation and check for warnings/errors
+        env:
+          DOCS_VERSION: dev
+        run: |
+          echo "Building Sphinx documentation with strict warning checks..."
+          echo "Any warnings or errors will cause this job to fail."
+          
+          # Build the docs using the Dockerfile which runs Sphinx with -W flag
+          # The -W flag in docs/Makefile treats warnings as errors
+          docker build -t docs-builder \
+            --build-arg DYNAMO_DOCS_VERSION="${DOCS_VERSION}" \
+            -f container/Dockerfile.docs . || {
+            echo "❌ Sphinx build failed!"
+            echo "Please fix the documentation errors/warnings before merging."
+            exit 1
+          }
+          
+          echo "✅ Sphinx build completed successfully with no warnings or errors!"
+
+      - name: Copy documentation out of container for verification
+        if: success()
+        run: |
+          docker create --name docs-container docs-builder
+          docker cp docs-container:/workspace/dynamo/docs/build/html docs-output/
+          echo "Documentation built successfully at docs-output/"
+
+      - name: Remove documentation container
+        if: always()
+        run: |
+          docker rm docs-container || true
+
+      - name: Upload documentation artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sphinx-readme-check-docs-${{ github.run_id }}
+          path: docs-output
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ $? -eq 0 ]; then
+            echo "## ✅ Sphinx Documentation Check Passed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All README files and documentation were successfully validated by Sphinx." >> $GITHUB_STEP_SUMMARY
+            echo "No warnings or errors were found." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ❌ Sphinx Documentation Check Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Sphinx found warnings or errors in the documentation." >> $GITHUB_STEP_SUMMARY
+            echo "Please review the build logs above and fix all issues before merging." >> $GITHUB_STEP_SUMMARY
+          fi
