@@ -1,57 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Utility patches for GPU Memory Service vLLM integration.
+"""vLLM-specific patches for GPU Memory Service integration.
 
-This module contains non-Worker patches that are applied when the GMSWorker
+This module contains vLLM-specific patches that are applied when the GMSWorker
 module is imported:
-- torch.cuda.empty_cache patch (prevents segfaults with VMM allocations)
 - MemorySnapshot.measure patch (adjusts free memory for read mode)
+
+Note: The torch.cuda.empty_cache patch is in integrations/common/patches.py
 """
 
 from __future__ import annotations
 
 import logging
 
-import torch
 from gpu_memory_service import get_gms_client_memory_manager
 from gpu_memory_service.common.types import GrantedLockType
 
 logger = logging.getLogger(__name__)
 
-
-_empty_cache_patched = False
 _memory_snapshot_patched = False
-
-
-def patch_empty_cache() -> None:
-    """Patch torch.cuda.empty_cache to prevent segfaults with VMM allocations.
-
-    Must be called at module import time before any empty_cache calls.
-    """
-    global _empty_cache_patched
-
-    if _empty_cache_patched:
-        return
-
-    _original_empty_cache = torch.cuda.empty_cache
-
-    def safe_empty_cache() -> None:
-        """Safe replacement for torch.cuda.empty_cache that skips when VMM allocations exist.
-
-        When weights are allocated through our VMM-based pluggable allocator, calling
-        torch.cuda.empty_cache() causes segfaults because the native caching allocator
-        tries to release blocks that were allocated through VMM APIs.
-        """
-        manager = get_gms_client_memory_manager()
-        if manager is not None and len(manager.mappings) > 0:
-            return
-
-        _original_empty_cache()
-
-    torch.cuda.empty_cache = safe_empty_cache
-    _empty_cache_patched = True
-    logger.info("[GMS Patch] Patched torch.cuda.empty_cache")
 
 
 def patch_memory_snapshot() -> None:

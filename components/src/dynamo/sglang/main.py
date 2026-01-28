@@ -70,6 +70,12 @@ async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
 
+    # Setup GPU Memory Service if --load-format gms is used
+    if config.server_args.load_format == "gms":
+        from gpu_memory_service.integrations.sglang import setup_gms
+
+        config.server_args.load_format = setup_gms(config.server_args)
+
     loop = asyncio.get_running_loop()
 
     # Set DYN_EVENT_PLANE environment variable based on config

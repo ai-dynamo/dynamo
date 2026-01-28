@@ -7,7 +7,7 @@ This module provides a custom Worker class that properly integrates with
 GPU Memory Service for VA-stable weight sharing and unmap/remap functionality.
 
 Usage:
-    Set --worker-cls=gpu_memory_service.vllm_integration.worker:GMSWorker
+    Set --worker-cls=gpu_memory_service.integrations.vllm.worker:GMSWorker
 """
 
 from __future__ import annotations
@@ -23,23 +23,14 @@ from gpu_memory_service import (
 )
 from gpu_memory_service.common.types import RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.integrations.common import patch_empty_cache
+from gpu_memory_service.integrations.vllm.model_loader import register_gms_loader
+from gpu_memory_service.integrations.vllm.patches import patch_memory_snapshot
 
 logger = logging.getLogger(__name__)
 
-
 # Trigger model loader registration and utility patches on import
-from gpu_memory_service.vllm_integration.model_loader import (  # noqa: E402
-    register_gms_loader,
-)
-from gpu_memory_service.vllm_integration.patches import (  # noqa: E402
-    patch_empty_cache,
-    patch_memory_snapshot,
-)
-
-# Register model loader
 register_gms_loader()
-
-# Apply utility patches
 patch_empty_cache()
 patch_memory_snapshot()
 
@@ -86,7 +77,7 @@ class GMSWorker(Worker):
 
         # Correct memory accounting for GMS-imported weights
         try:
-            from gpu_memory_service.vllm_integration.model_loader import (
+            from gpu_memory_service.integrations.vllm.model_loader import (
                 get_imported_weights_bytes,
             )
 

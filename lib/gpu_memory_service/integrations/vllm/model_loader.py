@@ -16,12 +16,13 @@ from typing import TYPE_CHECKING
 
 import torch
 from gpu_memory_service import get_or_create_gms_client_memory_manager
-from gpu_memory_service.client.torch.module import (
-    materialize_module_from_gms,
-    register_module_tensors,
-)
+from gpu_memory_service.client.torch.module import materialize_module_from_gms
 from gpu_memory_service.common.types import GrantedLockType, RequestedLockType
 from gpu_memory_service.common.utils import get_socket_path
+from gpu_memory_service.integrations.common.utils import (
+    finalize_gms_write,
+    setup_meta_tensor_workaround,
+)
 
 if TYPE_CHECKING:
     from gpu_memory_service.client.memory_manager import GMSClientMemoryManager
@@ -146,22 +147,11 @@ def _load_write_mode(
             process_weights_after_loading(model, model_config, target_device)
             torch.cuda.empty_cache()
 
-    # Update GMS metadata store with model tensors
-    register_module_tensors(gms_client, model)
-    _last_imported_weights_bytes = gms_client.total_bytes
-
-    # Ensure all writes to GPU memory are finished before we unmap
-    torch.cuda.synchronize()
-
-    if not gms_client.commit():
-        raise RuntimeError("Allocation Server commit failed")
-
-    gms_client.switch_to_read()
+    _last_imported_weights_bytes = finalize_gms_write(gms_client, model)
 
     logger.info(
-        "[GMS] Write mode: published %.2f GiB (%d mappings)",
+        "[GMS] Write mode: published %.2f GiB",
         _last_imported_weights_bytes / (1 << 30),
-        len(gms_client._mappings),
     )
     return model.eval()
 
@@ -174,15 +164,8 @@ def _create_meta_model(vllm_config, model_config) -> torch.nn.Module:
     )
     from vllm.utils.torch_utils import set_default_torch_dtype
 
+    setup_meta_tensor_workaround()
     meta_device = torch.device("meta")
-
-    # Enable meta tensor workaround for torch.nonzero() etc.
-    try:
-        import torch.fx.experimental._config as fx_config
-
-        fx_config.meta_nonzero_assume_all_nonzero = True
-    except (ImportError, AttributeError):
-        pass
 
     with set_default_torch_dtype(model_config.dtype):
         with meta_device:
