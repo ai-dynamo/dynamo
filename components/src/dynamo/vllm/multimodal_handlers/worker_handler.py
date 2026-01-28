@@ -4,7 +4,6 @@
 import copy
 import logging
 import os
-from collections import defaultdict
 
 import safetensors
 import torch
@@ -80,8 +79,18 @@ class MultimodalDecodeWorkerHandler(BaseWorkerHandler):
         # values prevent incorrect prefix cache matches between different images.
         multi_modal_data = None
         if is_qwen_vl_model(self.config.model):
+            # Extract image_grid_thw and embeddings_shape from multimodal_inputs
+            image_grid_thw = []
+            embeddings_shape = None
+            for mi in (request.multimodal_inputs or []):
+                if mi.image_grid_thw:
+                    image_grid_thw.extend(mi.image_grid_thw)
+                if mi.embeddings_shape and embeddings_shape is None:
+                    embeddings_shape = mi.embeddings_shape
             multi_modal_data = construct_qwen_decode_mm_data(
-                request.image_grid_thw, request.embeddings_shape, request.request_id
+                image_grid_thw if image_grid_thw else None,
+                embeddings_shape,
+                request.request_id
             )
 
         gen = self.engine_client.generate(
@@ -169,8 +178,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
-        multi_modal_data = defaultdict(list)
-        for mi in request.multimodal_inputs:
+        multi_modal_data = {}
+        for mi in (request.multimodal_inputs or []):
             # ECConnector consumer mode: vLLM loads embeddings automatically from disk
             # We need to pass multimodal_input so vLLM can generate mm_hash and look up cache
             if self.config.ec_consumer_mode:
@@ -181,6 +190,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                 # Use PIL image loading - vLLM will detect it's already in EC cache
                 # and load from disk instead of reprocessing
                 if mi.multimodal_input.image_url:
+                    if "image" not in multi_modal_data:
+                        multi_modal_data["image"] = []
                     multi_modal_data["image"].append(
                         await self.image_loader.load_image(
                             mi.multimodal_input.image_url
@@ -188,6 +199,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     )
                 elif mi.multimodal_input.video_url:
                     # For video, load as image placeholder (vLLM will use EC cache)
+                    if "image" not in multi_modal_data:
+                        multi_modal_data["image"] = []
                     multi_modal_data["image"].append(
                         await self.image_loader.load_image(
                             request.multimodal_input.video_url
@@ -232,6 +245,8 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         self.EMBEDDINGS_DTYPE,
                         video_numpy=video_numpy,
                     )
+                    if "video" not in multi_modal_data:
+                        multi_modal_data["video"] = []
                     multi_modal_data["video"].append(mm_data["video"])
                 else:
                     mm_data = construct_mm_data(
@@ -241,7 +256,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                         image_grid_thw=mi.image_grid_thw,
                     )
                     if isinstance(mm_data["image"], dict):
-                        if multi_modal_data["image"] == []:
+                        if "image" not in multi_modal_data:
                             multi_modal_data["image"] = mm_data["image"]
                         else:
                             # [gluo FIXME] need to understand how Qwen consumes multi-image embeddings
@@ -261,7 +276,7 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                     else:
                         logger.info(f"Get embedding of shape {mm_data['image'].shape}")
                         # [gluo FIXME] embedding with multiple images?
-                        if multi_modal_data["image"] == []:
+                        if "image" not in multi_modal_data:
                             multi_modal_data["image"] = mm_data["image"]
                         else:
                             multi_modal_data["image"] = torch.cat(
@@ -269,14 +284,22 @@ class MultimodalPDWorkerHandler(BaseWorkerHandler):
                             )
             else:
                 # Use PIL image instead of image embeddings
+                if "image" not in multi_modal_data:
+                    multi_modal_data["image"] = []
                 multi_modal_data["image"].append(
                     await self.image_loader.load_image(mi.multimodal_input.image_url)
                 )
 
-        # Remove the image features from the request as they are not required
-        request.multimodal_inputs = None
+        # Clear heavy data from multimodal_inputs but keep metadata (image_grid_thw, embeddings_shape)
+        # needed by Decode Worker for Qwen VL models
+        for mi in (request.multimodal_inputs or []):
+            if mi.multimodal_input:
+                mi.multimodal_input.image_url = None
+                mi.multimodal_input.video_url = None
+            mi.serialized_request = None
 
-        logger.info(f"Prepared multimodal data size: {len(multi_modal_data['image'])}")
+        mm_size = len(multi_modal_data.get('image', [])) if not isinstance(multi_modal_data.get('image'), dict) else 1
+        logger.info(f"Prepared multimodal data size: {mm_size}")
         logger.info(f"{multi_modal_data}")
 
         # Deepcopy the request to avoid modifying the original
