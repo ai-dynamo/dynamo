@@ -382,7 +382,7 @@ impl Leader for KvConnectorLeader {
                 .unwrap_or(&0);
 
             slot.apply_scheduler_output(
-                &new_req.prompt_token_ids,
+                &[],
                 &new_req.block_ids,
                 new_req.num_computed_tokens,
                 scheduled_tokens,

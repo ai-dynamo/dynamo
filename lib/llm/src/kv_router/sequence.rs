@@ -29,8 +29,7 @@ use dashmap::DashMap;
 use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
-use futures::StreamExt;
+use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -410,17 +409,21 @@ pub struct ActiveSequencesMultiWorker {
     block_size: usize,
     component: Component,
     router_id: u64,
+    /// Publisher for sequence events
+    event_publisher: EventPublisher,
+    /// Publisher for metrics (namespace-scoped)
+    metrics_publisher: EventPublisher,
     replica_sync: bool,
 }
 
 impl ActiveSequencesMultiWorker {
-    pub fn new(
+    pub async fn new(
         component: Component,
         block_size: usize,
         workers_with_configs: HashMap<u64, Option<ModelRuntimeConfig>>,
         replica_sync: bool,
         router_id: u64,
-    ) -> Self {
+    ) -> Result<Self> {
         assert!(block_size > 1, "block_size must be greater than 1");
 
         let senders = Arc::new(DashMap::new());
@@ -441,12 +444,19 @@ impl ActiveSequencesMultiWorker {
             }
         }
 
+        let event_publisher =
+            EventPublisher::for_component(&component, ACTIVE_SEQUENCES_SUBJECT).await?;
+        let metrics_publisher =
+            EventPublisher::for_namespace(component.namespace(), KV_METRICS_SUBJECT).await?;
+
         let multi_worker = Self {
             senders: senders.clone(),
             request_to_worker: request_to_worker.clone(),
             handles,
             block_size,
             component: component.clone(),
+            event_publisher,
+            metrics_publisher,
             router_id,
             replica_sync,
         };
@@ -475,7 +485,7 @@ impl ActiveSequencesMultiWorker {
             });
         }
 
-        multi_worker
+        Ok(multi_worker)
     }
 
     /// Helper method to start a worker task
@@ -597,9 +607,9 @@ impl ActiveSequencesMultiWorker {
         router_id: u64,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        let mut subscriber = component
-            .subscribe_with_type::<ActiveSequenceEvent>(ACTIVE_SEQUENCES_SUBJECT)
-            .await?;
+        let mut subscriber = EventSubscriber::for_component(&component, ACTIVE_SEQUENCES_SUBJECT)
+            .await?
+            .typed::<ActiveSequenceEvent>();
 
         loop {
             tokio::select! {
@@ -610,7 +620,7 @@ impl ActiveSequencesMultiWorker {
                         break;
                     };
 
-                    let Ok(event) = result else {
+                    let Ok((_envelope, event)) = result else {
                         tracing::error!(
                             "Error receiving active sequence event: {}",
                             result.unwrap_err()
@@ -770,9 +780,7 @@ impl ActiveSequencesMultiWorker {
                 },
                 router_id: self.router_id,
             };
-            self.component
-                .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
-                .await?;
+            self.event_publisher.publish(&event).await?;
         }
 
         // Update local state with full WorkerWithDpRank
@@ -831,9 +839,7 @@ impl ActiveSequencesMultiWorker {
                 data: ActiveSequenceEventData::Free,
                 router_id: self.router_id,
             };
-            self.component
-                .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
-                .await?;
+            self.event_publisher.publish(&event).await?;
         }
 
         // Update local state
@@ -882,9 +888,7 @@ impl ActiveSequencesMultiWorker {
                 data: ActiveSequenceEventData::MarkPrefillCompleted,
                 router_id: self.router_id,
             };
-            self.component
-                .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
-                .await?;
+            self.event_publisher.publish(&event).await?;
         }
 
         // Update local state
@@ -999,12 +1003,7 @@ impl ActiveSequencesMultiWorker {
             active_prefill_tokens: Some(active_tokens as u64),
         };
 
-        if let Err(e) = self
-            .component
-            .namespace()
-            .publish(KV_METRICS_SUBJECT, &active_load)
-            .await
-        {
+        if let Err(e) = self.metrics_publisher.publish(&active_load).await {
             tracing::warn!("Failed to publish ActiveLoad for worker {worker:?}: {e:?}");
         }
     }
@@ -1236,20 +1235,20 @@ mod tests {
         let config_worker_1 = crate::local_model::runtime_config::ModelRuntimeConfig::new();
         workers_with_configs.insert(1, Some(config_worker_1));
 
-        let seq_manager_1 = Arc::new(ActiveSequencesMultiWorker::new(
-            component.clone(),
-            block_size,
-            workers_with_configs.clone(),
-            true,
-            1,
-        ));
-        let seq_manager_2 = Arc::new(ActiveSequencesMultiWorker::new(
-            component,
-            block_size,
-            workers_with_configs,
-            true,
-            2,
-        ));
+        let seq_manager_1 = Arc::new(
+            ActiveSequencesMultiWorker::new(
+                component.clone(),
+                block_size,
+                workers_with_configs.clone(),
+                true,
+                1,
+            )
+            .await?,
+        );
+        let seq_manager_2 = Arc::new(
+            ActiveSequencesMultiWorker::new(component, block_size, workers_with_configs, true, 2)
+                .await?,
+        );
 
         // Give some time for the subscription loops to start
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -1395,20 +1394,20 @@ mod tests {
         workers_with_configs.insert(1, None);
         workers_with_configs.insert(2, None);
 
-        let seq_manager_1 = Arc::new(ActiveSequencesMultiWorker::new(
-            component.clone(),
-            block_size,
-            workers_with_configs.clone(),
-            true,
-            1,
-        ));
-        let seq_manager_2 = Arc::new(ActiveSequencesMultiWorker::new(
-            component,
-            block_size,
-            workers_with_configs,
-            true,
-            2,
-        ));
+        let seq_manager_1 = Arc::new(
+            ActiveSequencesMultiWorker::new(
+                component.clone(),
+                block_size,
+                workers_with_configs.clone(),
+                true,
+                1,
+            )
+            .await?,
+        );
+        let seq_manager_2 = Arc::new(
+            ActiveSequencesMultiWorker::new(component, block_size, workers_with_configs, true, 2)
+                .await?,
+        );
 
         // Give some time for the subscription loops to start
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;

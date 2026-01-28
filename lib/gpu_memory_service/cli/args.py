@@ -7,6 +7,8 @@ import argparse
 import logging
 from dataclasses import dataclass
 
+from gpu_memory_service.common.utils import get_socket_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +16,6 @@ logger = logging.getLogger(__name__)
 class Config:
     """Configuration for GPU Memory Service server."""
 
-    # GPU Memory Service specific
     device: int
     socket_path: str
     verbose: bool
@@ -26,7 +27,6 @@ def parse_args() -> Config:
         description="GPU Memory Service allocation server."
     )
 
-    # GPU Memory Service specific arguments
     parser.add_argument(
         "--device",
         type=int,
@@ -37,8 +37,7 @@ def parse_args() -> Config:
         "--socket-path",
         type=str,
         default=None,
-        help="Path for Unix domain socket. Default: /tmp/gpu_memory_service_{device}.sock. "
-        "Supports {device} placeholder for multi-GPU setups.",
+        help="Path for Unix domain socket. Default uses GPU UUID for stability.",
     )
     parser.add_argument(
         "--verbose",
@@ -49,18 +48,11 @@ def parse_args() -> Config:
 
     args = parser.parse_args()
 
-    # Generate default socket path if not provided
-    socket_path = args.socket_path
-    if socket_path is None:
-        socket_path = f"/tmp/gpu_memory_service_{args.device}.sock"
-    else:
-        # Expand {device} placeholder
-        socket_path = socket_path.format(device=args.device)
+    # Use UUID-based socket path by default (stable across CUDA_VISIBLE_DEVICES)
+    socket_path = args.socket_path or get_socket_path(args.device)
 
-    config = Config(
+    return Config(
         device=args.device,
         socket_path=socket_path,
         verbose=args.verbose,
     )
-
-    return config

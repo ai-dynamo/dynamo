@@ -27,6 +27,7 @@ cuda = ["dep:cudarc"]
 integration = ["dynamo-runtime/integration"]
 media-nixl = ["dep:nixl-sys", "dep:dynamo-memory"]
 media-ffmpeg = ["dep:video-rs", "dep:ffmpeg-next", "dep:memfile", "media-nixl"]
+kv-router-stress = ["dep:clap", "dep:indicatif"]
 
 [[bench]]
 name = "tokenizer"
@@ -69,7 +70,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tmq = "0.5.0"
+tmq = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
@@ -206,3 +207,9 @@ tonic-build = { version = "0.13.1" }
 name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
+
+[[bench]]
+name = "radix_tree_microbench"
+path = "benches/radix_tree_microbench.rs"
+harness = false
+required-features = ["kv-router-stress"]
