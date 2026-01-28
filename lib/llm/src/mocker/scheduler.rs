@@ -390,7 +390,7 @@ async fn simulate_prefill(
     worker_type: WorkerType,
     speedup_ratio: f64,
 ) -> Duration {
-    let start_time = std::time::Instant::now();
+    let start_time = tokio::time::Instant::now();
     let mut total_time = Duration::ZERO;
 
     while let Some((prefill_compute, maybe_creation_signal, is_full_prefill)) =
@@ -415,13 +415,9 @@ async fn simulate_prefill(
         }
     }
 
-    // Compute elapsed time and adjust sleep duration for accuracy
-    let elapsed = start_time.elapsed();
-    let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-    let sleep_duration = expected_sleep.saturating_sub(elapsed);
-    if sleep_duration > Duration::ZERO {
-        tokio::time::sleep(sleep_duration).await;
-    }
+    let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    tokio::time::sleep_until(deadline).await;
+
     total_time
 }
 
@@ -435,7 +431,7 @@ async fn simulate_decode(
     block_size: usize,
     speedup_ratio: f64,
 ) -> Duration {
-    let start_time = std::time::Instant::now();
+    let start_time = tokio::time::Instant::now();
     // Compute decode timing
     let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
     // Compute average context length across all active decode requests
@@ -498,13 +494,8 @@ async fn simulate_decode(
         }
     }
 
-    // Compute elapsed time and adjust sleep duration for accuracy
-    let elapsed = start_time.elapsed();
-    let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-    let sleep_duration = expected_sleep.saturating_sub(elapsed);
-    if sleep_duration > Duration::ZERO {
-        tokio::time::sleep(sleep_duration).await;
-    }
+    let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    tokio::time::sleep_until(deadline).await;
 
     total_time
 }
