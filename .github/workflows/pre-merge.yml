@@ -80,9 +80,13 @@ jobs:
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
         PB_REL="https://github.com/protocolbuffers/protobuf/releases"
-        curl -LO $PB_REL/download/v30.2/protoc-30.2-linux-x86_64.zip
-        unzip protoc-30.2-linux-x86_64.zip -d $HOME/.local
-        rm protoc-30.2-linux-x86_64.zip
+        PROTOC_VER="30.2"
+        PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+        PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+        curl -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+        echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+        unzip "${PROTOC_ZIP}" -d $HOME/.local
+        rm "${PROTOC_ZIP}"
         export PATH="$PATH:$HOME/.local/bin"
         protoc --version
 
@@ -134,9 +138,13 @@ jobs:
       run: |
         # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
         PB_REL="https://github.com/protocolbuffers/protobuf/releases"
-        curl -LO $PB_REL/download/v30.2/protoc-30.2-linux-x86_64.zip
-        unzip protoc-30.2-linux-x86_64.zip -d $HOME/.local
-        rm protoc-30.2-linux-x86_64.zip
+        PROTOC_VER="30.2"
+        PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+        PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+        curl -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+        echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+        unzip "${PROTOC_ZIP}" -d $HOME/.local
+        rm "${PROTOC_ZIP}"
         export PATH="$PATH:$HOME/.local/bin"
         protoc --version
     - name: Cache cargo artifacts
