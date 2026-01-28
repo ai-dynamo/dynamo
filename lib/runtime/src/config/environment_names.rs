@@ -313,6 +313,26 @@ pub mod event_plane {
     pub const DYN_EVENT_PLANE_CODEC: &str = "DYN_EVENT_PLANE_CODEC";
 }
 
+/// ZMQ Broker environment variables
+pub mod zmq_broker {
+    /// Explicit ZMQ broker URL (takes precedence over discovery)
+    /// Format: "xsub=<url1>[;<url2>...] , xpub=<url1>[;<url2>...]"
+    /// Example: "xsub=tcp://broker:5555 , xpub=tcp://broker:5556"
+    pub const DYN_ZMQ_BROKER_URL: &str = "DYN_ZMQ_BROKER_URL";
+
+    /// Enable ZMQ broker discovery mode
+    pub const DYN_ZMQ_BROKER_ENABLED: &str = "DYN_ZMQ_BROKER_ENABLED";
+
+    /// XSUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XSUB_BIND: &str = "ZMQ_BROKER_XSUB_BIND";
+
+    /// XPUB bind address (broker binary only)
+    pub const ZMQ_BROKER_XPUB_BIND: &str = "ZMQ_BROKER_XPUB_BIND";
+
+    /// Namespace for broker discovery registration
+    pub const ZMQ_BROKER_NAMESPACE: &str = "ZMQ_BROKER_NAMESPACE";
+}
+
 /// CUDA and GPU environment variables
 pub mod cuda {
     /// Path to custom CUDA fatbin file
@@ -419,6 +439,12 @@ mod tests {
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
+            // ZMQ Broker
+            zmq_broker::DYN_ZMQ_BROKER_URL,
+            zmq_broker::DYN_ZMQ_BROKER_ENABLED,
+            zmq_broker::ZMQ_BROKER_XSUB_BIND,
+            zmq_broker::ZMQ_BROKER_XPUB_BIND,
+            zmq_broker::ZMQ_BROKER_NAMESPACE,
             // CUDA
             cuda::DYNAMO_FATBIN_PATH,
             // Build
