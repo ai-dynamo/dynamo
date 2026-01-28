@@ -273,7 +273,7 @@ jobs:
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', env.FRAMEWORK) || format('pre_merge and {0} and gpu_0', env.FRAMEWORK) }}
+          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', inputs.framework ) || format('pre_merge and {0} and gpu_0', inputs.framework ) }}
           framework: ${{ inputs.framework }}
           test_type: "pre_merge"
           platform_arch: ${{ matrix.platform.arch }}
