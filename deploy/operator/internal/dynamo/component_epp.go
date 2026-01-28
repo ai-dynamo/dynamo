@@ -72,10 +72,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	}
 
 	// EPP-specific environment variables
-	// Note: Platform-specific env vars (NATS_SERVER, ETCD_ENDPOINTS) are added by the controller
-	// Note: DYN_NAMESPACE and DYN_COMPONENT are set by getCommonContainer() in component_common.go
-	// and are used by the dynamo_kv_scorer plugin to find the ModelDeploymentCard
-	// Note: DYNAMO_MODEL must be set by user via extraPodSpec.mainContainer.env
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYNAMO_KV_BLOCK_SIZE",
@@ -83,7 +79,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		},
 		{
 			// DYNAMO_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
-			// Default is 10s which is often too short; 300s (5 min) gives workers time to start
 			Name:  "DYNAMO_DISCOVERY_TIMEOUT_SEC",
 			Value: "300",
 		},
@@ -97,7 +92,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		},
 		{
 			// HF_TOKEN is needed to download model config files from HuggingFace without rate limiting
-			// Uses the same secret as workers (hf-token-secret), optional to avoid failures if not present
 			Name: "HF_TOKEN",
 			ValueFrom: &corev1.EnvVarSource{
 				SecretKeyRef: &corev1.SecretKeySelector{

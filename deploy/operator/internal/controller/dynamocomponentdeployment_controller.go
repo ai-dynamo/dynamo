@@ -742,7 +742,6 @@ func (r *DynamoComponentDeploymentReconciler) FinalizeResource(ctx context.Conte
 	// Only delete etcd keys if using etcd discovery backend
 	// When using Kubernetes discovery (the default), skip etcd cleanup to avoid hangs
 	if r.Config.DiscoveryBackend != "etcd" {
-		logger.Info("Skipping etcd cleanup - using Kubernetes discovery backend")
 		return nil
 	}
 

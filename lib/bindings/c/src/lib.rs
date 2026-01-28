@@ -58,8 +58,7 @@ pub enum DynamoLlmResult {
 }
 
 /// Default timeout for discovery sync (seconds).
-/// Can be overridden via DYNAMO_DISCOVERY_TIMEOUT_SEC env var.
-const DEFAULT_DISCOVERY_TIMEOUT_SECS: u64 = 10;
+const DEFAULT_DISCOVERY_TIMEOUT_SECS: u64 = 300;
 
 /// Get discovery timeout from environment variable or use default.
 /// Reads DYNAMO_DISCOVERY_TIMEOUT_SEC env var (in seconds).
