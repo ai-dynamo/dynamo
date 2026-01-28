@@ -1,0 +1,75 @@
+# Dynamo Team Members - GitHub to Linear Mapping
+#
+# Format: github_username:linear_uuid
+# Used by Linear Issue Matcher to:
+#   1. Check if PR author is a Dynamo team member
+#   2. Fetch Linear issues assigned to the PR author
+#
+# Lines without a colon are treated as username-only (no Linear UUID).
+# Lines starting with # are comments.
+#
+# Included teams: DYN, DIS, LLM, DEP, OPS
+# Source: dag_local_files/release_tools/data/team_roster.yaml
+# Last updated: 2026-01-21
+
+# === DIS Team (Distributed Inference) ===
+statiraju:33fbcfb6-dd1c-4238-beb1-edc4b74fc69a
+grahamking:a1d3e2a1-862d-46ea-8d2a-2bc7ec98e479
+GuanLuo:e2336cd2-8965-42c7-98e1-995510a42498
+indrajit96:f70a8124-81f0-4b19-a70d-8555f05b3bfa
+kthui:63d0a78d-c0b8-4675-ba13-86300ce251fb
+jiehao-nv:01c59357-d5cc-41a8-8074-3745ed9449e1
+keivenchang:ff5585c4-0103-4388-9300-03c81a9d21d8
+krishung5:0b44c6d6-ec03-4909-8942-6c98380965ad
+KrishnanPrash:b8d8feda-c1a2-4eb2-b55a-15974d773748
+nv-kmcgill53:84cd0276-8b7f-4c1f-b8ad-936821ab2d8a
+oandreeva-nv:dbf958b4-e7a0-4171-9efb-9c20e50a16a5
+qiw-nv:ad526d14-9b58-4e70-91e5-f93383134d9f
+richardhuo-nv:343eb9c7-6b2f-4705-8f04-2c85ae0dedcf
+rmccorm4:f979ba84-0d6d-42cf-9804-8cc08fca6716
+tanmayv25:a4a45615-e718-41fa-a06c-9fde99ee63bc
+tzulingk:5c65aaa0-a602-4d83-8687-d3d0990fe6e7
+nv-yna:0449356f-5282-4211-b824-504b19d3588b
+zhongdaor-nv:1a74ff8b-0ab0-4029-96a4-e7bacb8fa700
+ziqifan617:b165a75c-02f3-402d-a04c-2c07a964bbfa
+ryanolson:36f1989f-d428-4ed4-bb28-0efe9a51f8ab
+nealvaidya:7279b7a9-3199-47cf-9199-50fe16ab3810
+cheese-head:dfa02cb8-92ce-438c-9825-d35c53c4682e
+hhzhang16:c6cb38c1-0544-4b73-aa0c-59b110e5f425
+
+# === DEP Team (Deploy/Kubernetes) ===
+atchernych:cc6a7971-8f62-4fe4-aea9-10a85decf92b
+biswapanda:b6f27028-7f74-4017-87d2-fb56b86468a8
+JanelleCai:eb74aac5-4226-4f2d-afd0-51e363c0c564
+julienmancuso:091ee517-c6d7-4ff3-bd96-71228c8177f6
+mohammedabdulwahhab:29c599e1-8405-4cca-a4b5-8bc06953794d
+tmonty12:79db5ab1-8508-4a2b-917b-6fb6ef367809
+ptarasiewiczNV:519b6e9e-a8f7-4c2e-89b3-3c403ebebd00
+dmitry-tokarev-nv:f419aebe-5297-47ce-b1f2-2598be8848eb
+
+# === LLM Team (LLM Engine/Rust) ===
+kkranen:b762ac72-e6bf-403a-9d6a-8ece1cbad453
+alec-flowers:4170c824-964c-4d12-8180-c75495868f40
+tedzhouhk:900e8649-038e-437f-b122-585be578d208
+ishandhanani:e9f318f3-0a91-4fa2-a822-949a7cc82754
+jthomson04:00629a4c-8714-4b22-b04d-0ed4b85586e5
+karen-sy:67ab3080-364f-4400-9b4b-4205a80a3fbb
+PeaBrane:22d9444e-4777-4551-8ef4-405f7cb4be50
+sshchoi:8320cb7a-34fa-4e48-bb35-68147dee8171
+w1ldptr:996a8dd9-9bb6-4a88-b1b3-52ba56f3466f
+gleon99:33a928b1-b429-4582-921b-e9b90f7c170a
+
+# === OPS Team (Operations) ===
+nvda-mesharma:f2a0be03-65cc-4ac5-a430-d49201571dff
+nv-anants:ddf17a63-c2db-4baa-b0e3-fd471891aba4
+dillon-cullinan:3818e98c-2cb7-4f72-98c3-87d7075ecfb9
+saturley-hall:7a4d53eb-cc71-4480-92ee-804b5ac5af5c
+nv-nmailhot:1a8d036a-8e7a-4ca9-9d38-8eb9dc2a505b
+pvijayakrish:341701f4-0f5a-46c4-a632-8e385cb72563
+nv-tusharma:d6370be0-3066-4c65-a909-a08f992b905f
+
+# === DYN (Leadership/Management) ===
+alaydshah:1acb6e99-264d-4f4a-a7f2-8d27b3966868
+nvrohanv:1a0cbac1-82b3-4ca4-bf6b-1457f68e8d34
+nnshah1:1acb6e99-264d-4f4a-a7f2-8d27b3966868
+dagil_nvidia:7065cc1f-8e43-465a-9717-05a02fbfaaa3
