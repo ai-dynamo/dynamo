@@ -226,8 +226,8 @@ var (
 )
 
 func loadDynamoConfig() {
-	ffiNamespace = getEnvOrDefault("DYNAMO_NAMESPACE", "vllm-agg")
-	ffiComponent = getEnvOrDefault("DYNAMO_COMPONENT", "backend")
+	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
+	ffiComponent = getEnvOrDefault("DYN_COMPONENT", "backend")
 	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
 	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)

@@ -73,23 +73,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 	// EPP-specific environment variables
 	// Note: Platform-specific env vars (NATS_SERVER, ETCD_ENDPOINTS) are added by the controller
-	// Note: DYNAMO_* env vars are for the dynamo_kv_scorer plugin (different from DYN_* runtime vars)
+	// Note: DYN_NAMESPACE and DYN_COMPONENT are set by getCommonContainer() in component_common.go
+	// and are used by the dynamo_kv_scorer plugin to find the ModelDeploymentCard
+	// Note: DYNAMO_MODEL must be set by user via extraPodSpec.mainContainer.env
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYNAMO_KV_BLOCK_SIZE",
 			Value: "16",
-		},
-		{
-			// DYNAMO_NAMESPACE is used by the dynamo_kv_scorer plugin to find model cards
-			// It must match the namespace where backend workers register their ModelDeploymentCard
-			Name:  "DYNAMO_NAMESPACE",
-			Value: context.DynamoNamespace,
-		},
-		{
-			// DYNAMO_COMPONENT is used by the dynamo_kv_scorer plugin
-			// Backend workers typically register under "backend" component
-			Name:  "DYNAMO_COMPONENT",
-			Value: "backend",
 		},
 		{
 			Name:  "USE_STREAMING",
@@ -98,6 +88,20 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		{
 			Name:  "RUST_LOG",
 			Value: "debug,dynamo_llm::kv_router=trace",
+		},
+		{
+			// HF_TOKEN is needed to download model config files from HuggingFace without rate limiting
+			// Uses the same secret as workers (hf-token-secret), optional to avoid failures if not present
+			Name: "HF_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: "hf-token-secret",
+					},
+					Key:      "HF_TOKEN",
+					Optional: ptr.To(true),
+				},
+			},
 		},
 	}...)
 

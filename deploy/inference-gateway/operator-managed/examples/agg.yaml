@@ -16,6 +16,8 @@ spec:
           env:
             - name: DYNAMO_KV_BLOCK_SIZE
               value: "16"
+            - name: DYNAMO_MODEL
+              value: "Qwen/Qwen3-0.6B"  # Match your model
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
