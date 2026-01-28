@@ -229,9 +229,21 @@ class HandlerBase:
 
         If shutdown event was triggered, raises GeneratorExit on exit.
 
+        Note: Cancellation monitoring is disabled for DECODE workers to avoid
+        engine hangs when requests are cancelled in disaggregated setups.
+
         Yields:
-            asyncio.Task: The monitoring task
+            asyncio.Task: The monitoring task (or None if monitoring is disabled)
         """
+        # Disable cancellation monitoring for DECODE workers to prevent engine hangs
+        # in disaggregated setups where abort() can cause the engine to get stuck
+        if self.disaggregation_mode == DisaggregationMode.DECODE:
+            logging.debug(
+                "Cancellation monitoring disabled for DECODE worker to prevent engine hangs"
+            )
+            yield None
+            return
+
         monitor_task = asyncio.create_task(
             self._handle_cancellation_and_shutdown(generation_result, context)
         )
@@ -690,7 +702,7 @@ class HandlerBase:
                 trace_headers=trace_headers,
             )
 
-            # Use the context manager to handle cancellation and shutdown monitoring
+            # Monitor for cancellation triggers and cancel by calling generation_result.abort()
             async with self._cancellation_monitor(generation_result, context):
                 async for res in generation_result:
                     # TRTLLM engine needs to start generating tokens first before stats
