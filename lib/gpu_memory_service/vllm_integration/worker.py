@@ -113,6 +113,10 @@ class GMSWorker(Worker):
         NOTE: `level` is a no-op here: weights are only unmapped (but remain in GPU memory).
         NOTE: We do NOT call super().sleep() because it tries to copy GPU buffers to CPU,
               which segfaults on already-unmapped GMS memory.
+
+        Handles two cases for KV cache:
+        1. Normal: KV cache was allocated, sleep via CuMemAllocator
+        2. Shadow: KV cache was skipped at startup, nothing to do
         """
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -125,8 +129,13 @@ class GMSWorker(Worker):
         manager.unmap()
 
         # Sleep KV cache via CuMemAllocator (discard, no CPU backup)
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=tuple())
+        # If KV cache was never allocated (shadow engine mode), this is a no-op
+        kv_caches = getattr(self.model_runner, "kv_caches", None)
+        if kv_caches:
+            allocator = CuMemAllocator.get_instance()
+            allocator.sleep(offload_tags=tuple())
+        else:
+            logger.info("[GMS] KV cache not allocated (shadow mode), skipping sleep")
 
         free_bytes_after, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after - free_bytes_before
@@ -138,7 +147,12 @@ class GMSWorker(Worker):
         )
 
     def wake_up(self, tags: Optional[List[str]] = None) -> None:
-        """vLLM wake implementation with GMS integration."""
+        """vLLM wake implementation with GMS integration.
+
+        Handles two cases for KV cache:
+        1. Normal: KV cache was allocated at startup, reallocate via CuMemAllocator
+        2. Shadow: KV cache was skipped at startup, allocate via allocate_kv_cache_on_wake()
+        """
         from vllm.device_allocator.cumem import CuMemAllocator
 
         if tags is None:
@@ -152,8 +166,23 @@ class GMSWorker(Worker):
             torch.cuda.synchronize()
 
         if "kv_cache" in tags:
-            allocator = CuMemAllocator.get_instance()
-            allocator.wake_up(tags=["kv_cache"])
+            # Check if KV cache was skipped at startup (shadow engine mode)
+            kv_caches = getattr(self.model_runner, "kv_caches", None)
+            if not kv_caches:
+                # KV cache was not allocated at startup - allocate now
+                if hasattr(self.model_runner, "allocate_kv_cache_on_wake"):
+                    logger.info("[GMS] KV cache not allocated - allocating on wake")
+                    self.model_runner.allocate_kv_cache_on_wake()
+                    logger.info("[GMS] Successfully allocated KV cache on wake")
+                else:
+                    logger.warning(
+                        "[GMS] KV cache empty but allocate_kv_cache_on_wake not available. "
+                        "Make sure vLLM has the shadow engine patch applied."
+                    )
+            else:
+                # Normal case: KV cache was allocated, reallocate via CuMemAllocator
+                allocator = CuMemAllocator.get_instance()
+                allocator.wake_up(tags=["kv_cache"])
 
             # Reinitialize FP8 KV scales if needed
             if self.cache_config.cache_dtype.startswith("fp8") and hasattr(
