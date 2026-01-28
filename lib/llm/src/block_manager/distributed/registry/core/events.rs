@@ -282,6 +282,27 @@ pub fn spawn_event_handler<H: EventHandler + 'static>(
     })
 }
 
+/// Error type for event bus configuration.
+#[derive(Debug, Clone)]
+pub struct EventBusConfigError {
+    /// The unsupported backend name
+    pub backend: String,
+    /// Error message
+    pub message: String,
+}
+
+impl std::fmt::Display for EventBusConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Unsupported event bus backend '{}': {}",
+            self.backend, self.message
+        )
+    }
+}
+
+impl std::error::Error for EventBusConfigError {}
+
 /// Configuration for the event bus.
 #[derive(Debug, Clone)]
 pub struct EventBusConfig {
@@ -329,10 +350,34 @@ impl EventBusConfig {
     }
 
     /// Build an event bus from this configuration.
-    pub fn build(&self) -> Box<dyn EventBus> {
-        // Future: Add ZMQ, NATS, Redis backends based on self.backend
-        let _ = self.backend.as_str(); // Reserved for future backend selection
-        Box::new(InProcessEventBus::new(self.channel_capacity))
+    ///
+    /// # Errors
+    ///
+    /// Returns `EventBusConfigError` if the specified backend is not supported.
+    /// Currently only "in_process" is implemented; "zmq", "nats", and "redis"
+    /// are reserved for future implementation.
+    pub fn build(&self) -> std::result::Result<Box<dyn EventBus>, EventBusConfigError> {
+        match self.backend.as_str() {
+            "in_process" => Ok(Box::new(InProcessEventBus::new(self.channel_capacity))),
+            "zmq" => Err(EventBusConfigError {
+                backend: self.backend.clone(),
+                message: "ZMQ event bus backend is not yet implemented".to_string(),
+            }),
+            "nats" => Err(EventBusConfigError {
+                backend: self.backend.clone(),
+                message: "NATS event bus backend is not yet implemented".to_string(),
+            }),
+            "redis" => Err(EventBusConfigError {
+                backend: self.backend.clone(),
+                message: "Redis event bus backend is not yet implemented".to_string(),
+            }),
+            other => Err(EventBusConfigError {
+                backend: other.to_string(),
+                message: format!(
+                    "Unknown backend. Supported: 'in_process'. Reserved: 'zmq', 'nats', 'redis'"
+                ),
+            }),
+        }
     }
 }
 
@@ -407,5 +452,57 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         assert_eq!(handler.count.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn test_event_bus_config_in_process() {
+        let config = EventBusConfig::default();
+        assert_eq!(config.backend, "in_process");
+
+        let result = config.build();
+        assert!(result.is_ok(), "in_process backend should succeed");
+    }
+
+    #[test]
+    fn test_event_bus_config_unsupported_backends() {
+        // ZMQ - reserved but not implemented
+        let config = EventBusConfig {
+            backend: "zmq".to_string(),
+            ..Default::default()
+        };
+        let result = config.build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.backend, "zmq");
+        assert!(err.message.contains("not yet implemented"));
+
+        // NATS - reserved but not implemented
+        let config = EventBusConfig {
+            backend: "nats".to_string(),
+            ..Default::default()
+        };
+        let result = config.build();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().backend, "nats");
+
+        // Redis - reserved but not implemented
+        let config = EventBusConfig {
+            backend: "redis".to_string(),
+            ..Default::default()
+        };
+        let result = config.build();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().backend, "redis");
+
+        // Unknown backend
+        let config = EventBusConfig {
+            backend: "unknown_backend".to_string(),
+            ..Default::default()
+        };
+        let result = config.build();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.backend, "unknown_backend");
+        assert!(err.message.contains("Unknown backend"));
     }
 }

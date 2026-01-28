@@ -70,6 +70,6 @@ pub use persistence::{
 
 // Event Bus
 pub use events::{
-    EventBus, EventBusConfig, EventHandler, EventReceiver, EventTopic, EvictionReason,
-    InProcessEventBus, RegistryEvent, StorageTier, StorageType,
+    EventBus, EventBusConfig, EventBusConfigError, EventHandler, EventReceiver, EventTopic,
+    EvictionReason, InProcessEventBus, RegistryEvent, StorageTier, StorageType,
 };

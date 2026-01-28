@@ -8,7 +8,7 @@ When running distributed workloads where multiple workers may store data to shar
 
 The **Distributed Registry** solves this by providing a centralized catalog that tracks which blocks have been stored, enabling **cross-worker deduplication**.
 
-```
+```text
 +-------------+     +-------------+     +-------------+
 |  Worker 1   |     |  Worker 2   |     |  Worker 3   |
 +------+------+     +------+------+     +------+------+
@@ -66,7 +66,7 @@ println!("Leases expired: {}", stats.lease_stats.expired);
 
 The registry uses a **pluggable architecture** with trait-based abstractions:
 
-```
+```text
 +-----------------------------------------------------------+
 |                        Client                              |
 |  +---------+  +---------+  +---------+  +------------+    |
@@ -105,7 +105,7 @@ The registry uses a **pluggable architecture** with trait-based abstractions:
 
 ### ZMQ Communication Pattern
 
-```
+```text
 Client                              Hub
   |                                  |
   |<------- DEALER/ROUTER --------->|  (Queries: request/response)
@@ -256,7 +256,7 @@ let config = ZmqTransportConfig::new(query_addr, push_addr)
 
 The wire protocol includes a version byte:
 
-```
+```text
 [version:1][type:1][count:4][...data...]
 ```
 
@@ -291,7 +291,7 @@ match result {
 
 For sequence-based data where blocks form chains:
 
-```
+```text
 Block 1 -> Block 2 -> Block 3 -> Block 4
 (root)                          (leaf)
 ```
@@ -323,7 +323,7 @@ cargo test --lib -- test_zmq --ignored
 
 ## Module Structure
 
-```
+```text
 registry/
 +-- mod.rs              # Module exports
 +-- config.rs           # Configuration structs

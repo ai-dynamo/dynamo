@@ -193,6 +193,7 @@ where
 
         leaves.retain(|e| &e.key != key);
 
+        // Update parent's children set
         if let Some(parent_key) = parent
             && let Some(parent_children) = children.get_mut(&parent_key)
         {
@@ -209,21 +210,45 @@ where
             }
         }
 
-        if let Some(my_children) = children.remove(key) {
-            for child in my_children {
-                if let Some(child_parent) = parents.get_mut(&child) {
-                    *child_parent = None;
+        // Handle children: recursively update depths for entire subtree
+        if let Some(direct_children) = children.remove(key) {
+            // BFS to update all descendants
+            let mut queue: std::collections::VecDeque<(K, u64)> = direct_children
+                .into_iter()
+                .map(|c| (c, 0u64)) // Direct children become depth 0 (new roots)
+                .collect();
+
+            while let Some((descendant, new_depth)) = queue.pop_front() {
+                // Clear parent pointer for direct children only
+                if new_depth == 0 {
+                    if let Some(desc_parent) = parents.get_mut(&descendant) {
+                        *desc_parent = None;
+                    }
                 }
-                // Remove old eviction entry with stale priority
-                leaves.retain(|e| e.key != child);
-                if let Some(child_depth) = depths.get_mut(&child) {
-                    *child_depth = 0;
-                    // Re-insert with updated priority (depth 0)
+
+                // Update depth
+                if let Some(old_depth) = depths.get_mut(&descendant) {
+                    *old_depth = new_depth;
+                }
+
+                // Remove old eviction entry and re-insert with updated priority
+                leaves.retain(|e| e.key != descendant);
+
+                // Check if this descendant is now a leaf (has no children)
+                let is_leaf = !children.contains_key(&descendant);
+                if is_leaf {
                     leaves.insert(EvictionEntry {
-                        priority: 0,
+                        priority: -(new_depth as i64),
                         insertion_id: self.insertion_counter.fetch_add(1, Ordering::Relaxed),
-                        key: child,
+                        key: descendant,
                     });
+                }
+
+                // Enqueue grandchildren with incremented depth
+                if let Some(grandchildren) = children.get(&descendant) {
+                    for &grandchild in grandchildren {
+                        queue.push_back((grandchild, new_depth + 1));
+                    }
                 }
             }
         }
@@ -600,6 +625,50 @@ mod tests {
 
         let evicted = evictable.evict(1);
         assert_eq!(evicted, vec![1]);
+    }
+
+    #[test]
+    fn test_remove_updates_entire_subtree_depths() {
+        // Test that removing a non-leaf node updates depths for ALL descendants,
+        // not just direct children.
+        let storage = HashMapStorage::new();
+        let evictable = TailEviction::new(storage, 100);
+
+        // Build a tree: 1 -> 2 -> 3 -> 4
+        // Depths: 1=0, 2=1, 3=2, 4=3
+        evictable.insert_with_parent(1, 100, None);
+        evictable.insert_with_parent(2, 200, Some(1));
+        evictable.insert_with_parent(3, 300, Some(2));
+        evictable.insert_with_parent(4, 400, Some(3));
+
+        // Remove node 2. After removal:
+        // - Node 3 should become a root (depth 0)
+        // - Node 4 should have depth 1 (child of new root 3)
+        evictable.remove(&2);
+
+        // Evict 1 entry - should evict node 1 (depth 0, oldest root)
+        // or node 3 (also depth 0, but newer). With tail eviction, deepest first.
+        // After removing 2, nodes are: 1 (depth 0), 3 (depth 0), 4 (depth 1)
+        // Node 4 is the deepest leaf, so it should be evicted first.
+        let evicted = evictable.evict(1);
+        assert_eq!(
+            evicted,
+            vec![4],
+            "Should evict deepest leaf (node 4 at depth 1)"
+        );
+
+        // After evicting 4, node 3 becomes a leaf at depth 0
+        // Evict again - should evict node 3 (leaf at depth 0)
+        let evicted = evictable.evict(1);
+        assert_eq!(
+            evicted,
+            vec![3],
+            "Should evict node 3 (now a leaf at depth 0)"
+        );
+
+        // Finally evict node 1
+        let evicted = evictable.evict(1);
+        assert_eq!(evicted, vec![1], "Should evict node 1 (leaf at depth 0)");
     }
 
     // PositionalEviction tests

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Registry hub (server-side) implementation.
+//!
+//! The hub uses simple `(K, V)` pairs. If you need metadata, compose it into
+//! your Value type. For example: `V = (StorageLocation, PositionMetadata)`.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -15,7 +18,6 @@ use super::codec::{OffloadStatus, QueryType, RegistryCodec, ResponseType};
 use super::hub_transport::{ClientId, HubMessage, HubTransport};
 use super::key::RegistryKey;
 use super::lease::{LeaseManager, LeaseStats};
-use super::metadata::RegistryMetadata;
 use super::storage::Storage;
 use super::value::RegistryValue;
 
@@ -47,29 +49,30 @@ impl Default for HubConfig {
 ///
 /// Handles incoming queries and registrations from clients.
 /// Now includes lease-based claiming to prevent race conditions.
-pub struct RegistryHub<K, V, M, S, C>
+///
+/// If you need metadata, compose it into your Value type:
+/// `V = (ActualValue, Metadata)` or define a struct that includes both.
+pub struct RegistryHub<K, V, S, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V>,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     storage: S,
     codec: C,
     lease_manager: Arc<LeaseManager<K>>,
     queries_received: AtomicU64,
     registrations_received: AtomicU64,
-    _phantom: PhantomData<(K, V, M)>,
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, M, S, C> RegistryHub<K, V, M, S, C>
+impl<K, V, S, C> RegistryHub<K, V, S, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V>,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     /// Create a new registry hub with the given storage and codec.
     pub fn new(storage: S, codec: C) -> Self {
@@ -209,7 +212,7 @@ where
             QueryType::Match(keys) => {
                 let entries: Vec<_> = keys
                     .iter()
-                    .filter_map(|k| self.storage.get(k).map(|v| (*k, v, M::default())))
+                    .filter_map(|k| self.storage.get(k).map(|v| (*k, v)))
                     .collect();
 
                 debug!(
@@ -229,6 +232,8 @@ where
                 let mut removed_count = 0usize;
                 for key in &keys {
                     if self.storage.remove(key).is_some() {
+                        // Release any active lease for this key to prevent stale "Leased" responses
+                        self.lease_manager.release(key);
                         removed_count += 1;
                     }
                 }
@@ -286,7 +291,7 @@ where
         };
 
         let count = entries.len();
-        for (key, value, _metadata) in entries {
+        for (key, value) in entries {
             // Release any lease for this key
             self.lease_manager.release(&key);
             // Store the entry
@@ -330,12 +335,11 @@ where
 
 /// Create a simple hub with HashMap storage and binary codec.
 #[allow(clippy::type_complexity)]
-pub fn simple_hub<K, V, M>()
--> RegistryHub<K, V, M, super::storage::HashMapStorage<K, V>, super::codec::BinaryCodec<K, V, M>>
+pub fn simple_hub<K, V>()
+-> RegistryHub<K, V, super::storage::HashMapStorage<K, V>, super::codec::BinaryCodec<K, V>>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
 {
     RegistryHub::new(
         super::storage::HashMapStorage::new(),
@@ -347,9 +351,7 @@ where
 mod tests {
     use super::*;
     use crate::block_manager::distributed::registry::core::hub_transport::InProcessHubTransport;
-    use crate::block_manager::distributed::registry::core::{
-        BinaryCodec, HashMapStorage, NoMetadata,
-    };
+    use crate::block_manager::distributed::registry::core::{BinaryCodec, HashMapStorage};
 
     #[tokio::test]
     async fn test_hub_can_offload() {
@@ -357,7 +359,7 @@ mod tests {
         storage.insert(1, 100);
         storage.insert(2, 200);
 
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let hub = RegistryHub::new(storage, codec);
 
         let (mut transport, handle) = InProcessHubTransport::new();
@@ -369,15 +371,14 @@ mod tests {
         });
 
         // Client query
-        let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let client_codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let mut query_buf = Vec::new();
         client_codec
             .encode_query(&QueryType::CanOffload(vec![1, 2, 3, 4]), &mut query_buf)
             .unwrap();
 
         let response = handle.request(&query_buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> =
-            client_codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = client_codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
@@ -397,7 +398,7 @@ mod tests {
     #[tokio::test]
     async fn test_hub_lease_conflict() {
         let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let hub = RegistryHub::new(storage, codec);
 
         // First client acquires lease for key 1
@@ -411,15 +412,14 @@ mod tests {
             hub
         });
 
-        let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let client_codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let mut query_buf = Vec::new();
         client_codec
             .encode_query(&QueryType::CanOffload(vec![1, 2]), &mut query_buf)
             .unwrap();
 
         let response = handle.request(&query_buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> =
-            client_codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = client_codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
@@ -438,7 +438,7 @@ mod tests {
     #[tokio::test]
     async fn test_hub_registration_releases_lease() {
         let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let hub = RegistryHub::new(storage, codec);
 
         // Client acquires lease
@@ -453,10 +453,10 @@ mod tests {
         });
 
         // Register the key
-        let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let client_codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let mut reg_buf = Vec::new();
         client_codec
-            .encode_register(&[(1, 100, NoMetadata)], &mut reg_buf)
+            .encode_register(&[(1, 100)], &mut reg_buf)
             .unwrap();
 
         handle.publish(&reg_buf).unwrap();
@@ -475,7 +475,7 @@ mod tests {
         storage.insert(2, 200);
         storage.insert(3, 300);
 
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let hub = RegistryHub::new(storage, codec);
 
         let (mut transport, handle) = InProcessHubTransport::new();
@@ -485,21 +485,20 @@ mod tests {
             hub
         });
 
-        let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let client_codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let mut query_buf = Vec::new();
         client_codec
             .encode_query(&QueryType::Match(vec![1, 2, 5]), &mut query_buf)
             .unwrap();
 
         let response = handle.request(&query_buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> =
-            client_codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = client_codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::Match(entries) => {
                 assert_eq!(entries.len(), 2); // Only 1 and 2 exist
-                assert_eq!(entries[0], (1, 100, NoMetadata));
-                assert_eq!(entries[1], (2, 200, NoMetadata));
+                assert_eq!(entries[0], (1, 100));
+                assert_eq!(entries[1], (2, 200));
             }
             _ => panic!("Wrong response type"),
         }
@@ -510,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn test_hub_registration() {
         let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let hub = RegistryHub::new(storage, codec);
 
         assert!(hub.is_empty());
@@ -522,10 +521,10 @@ mod tests {
             hub
         });
 
-        let client_codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let client_codec: BinaryCodec<u64, u64> = BinaryCodec::new();
         let mut reg_buf = Vec::new();
         client_codec
-            .encode_register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)], &mut reg_buf)
+            .encode_register(&[(1, 100), (2, 200)], &mut reg_buf)
             .unwrap();
 
         handle.publish(&reg_buf).unwrap();

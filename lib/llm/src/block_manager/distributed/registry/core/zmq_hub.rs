@@ -5,6 +5,9 @@
 //!
 //! Uses separate tasks for queries and registrations to avoid
 //! issues with tokio::select! and ZMQ streams.
+//!
+//! Uses simple `(K, V)` pairs. If you need metadata, compose it into
+//! your Value type: `V = (ActualValue, Metadata)`.
 
 use std::collections::VecDeque;
 use std::marker::PhantomData;
@@ -19,7 +22,6 @@ use tracing::{debug, error, info, warn};
 
 use super::codec::{OffloadStatus, QueryType, RegistryCodec, ResponseType};
 use super::key::RegistryKey;
-use super::metadata::RegistryMetadata;
 use super::storage::Storage;
 use super::value::RegistryValue;
 
@@ -59,27 +61,25 @@ impl Default for ZmqHubConfig {
 }
 
 /// ZMQ-based registry hub.
-pub struct ZmqHub<K, V, M, S, C>
+pub struct ZmqHub<K, V, S, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V> + Send + Sync + 'static,
-    C: RegistryCodec<K, V, M> + Send + Sync + 'static,
+    C: RegistryCodec<K, V> + Send + Sync + 'static,
 {
     config: ZmqHubConfig,
     storage: Arc<S>,
     codec: Arc<C>,
-    _phantom: PhantomData<(K, V, M)>,
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, M, S, C> ZmqHub<K, V, M, S, C>
+impl<K, V, S, C> ZmqHub<K, V, S, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V> + Send + Sync + 'static,
-    C: RegistryCodec<K, V, M> + Send + Sync + 'static,
+    C: RegistryCodec<K, V> + Send + Sync + 'static,
 {
     pub fn new(config: ZmqHubConfig, storage: S, codec: C) -> Self {
         Self {
@@ -385,7 +385,7 @@ where
             QueryType::Match(keys) => {
                 let entries: Vec<_> = keys
                     .iter()
-                    .filter_map(|k| storage.get(k).map(|v| (*k, v, M::default())))
+                    .filter_map(|k| storage.get(k).map(|v| (*k, v)))
                     .collect();
 
                 debug!(
@@ -393,7 +393,7 @@ where
                     keys = ?keys,
                     requested = keys.len(),
                     matched = entries.len(),
-                    matched_keys = ?entries.iter().map(|(k, _, _)| k).collect::<Vec<_>>(),
+                    matched_keys = ?entries.iter().map(|(k, _)| k).collect::<Vec<_>>(),
                     miss = keys.len() - entries.len(),
                     storage_size = storage.len(),
                     "Query processed"
@@ -461,16 +461,15 @@ where
         let prev_total = storage.len();
 
         // Log each entry being registered
-        for (key, value, metadata) in &entries {
+        for (key, value) in &entries {
             debug!(
                 key = ?key,
                 value = ?value,
-                metadata = ?metadata,
                 "Registering entry"
             );
         }
 
-        for (key, value, _metadata) in entries {
+        for (key, value) in entries {
             storage.insert(key, value);
         }
         let new_total = storage.len();
@@ -489,9 +488,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_manager::distributed::registry::core::{
-        BinaryCodec, HashMapStorage, NoMetadata,
-    };
+    use crate::block_manager::distributed::registry::core::{BinaryCodec, HashMapStorage};
     use std::time::Duration;
 
     #[test]
@@ -513,7 +510,7 @@ mod tests {
         storage.insert(1, 100);
         storage.insert(2, 200);
 
-        let hub = ZmqHub::new(config, storage, BinaryCodec::<u64, u64, NoMetadata>::new());
+        let hub = ZmqHub::new(config, storage, BinaryCodec::<u64, u64>::new());
         let cancel = CancellationToken::new();
 
         // Start hub
@@ -528,14 +525,14 @@ mod tests {
             .expect("Failed to connect");
 
         // Test query
-        let codec = BinaryCodec::<u64, u64, NoMetadata>::new();
+        let codec = BinaryCodec::<u64, u64>::new();
         let mut buf = Vec::new();
         codec
             .encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf)
             .unwrap();
 
         let response = transport.request(&buf).await.expect("Request failed");
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::CanOffload(statuses) => {

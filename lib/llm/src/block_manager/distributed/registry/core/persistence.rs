@@ -376,11 +376,21 @@ where
     }
 
     /// Log a WAL entry.
+    ///
+    /// The WAL assigns the sequence number - any seq value in the entry is overwritten.
     pub async fn log(&self, entry: WalEntry<K, V, M>) -> Result<u64> {
         let seq = self.current_seq.fetch_add(1, Ordering::SeqCst);
 
+        // Update the entry's seq field to match the assigned sequence
+        let entry_with_seq = match entry {
+            WalEntry::Register { entries, .. } => WalEntry::Register { seq, entries },
+            WalEntry::Remove { keys, .. } => WalEntry::Remove { seq, keys },
+            WalEntry::Touch { keys, .. } => WalEntry::Touch { seq, keys },
+            WalEntry::Checkpoint { snapshot_seq, .. } => WalEntry::Checkpoint { seq, snapshot_seq },
+        };
+
         // Serialize with length prefix for safe recovery
-        let data = bincode::serde::encode_to_vec(&entry, config::standard())?;
+        let data = bincode::serde::encode_to_vec(&entry_with_seq, config::standard())?;
         let mut buf = Vec::with_capacity(4 + data.len());
         buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
         buf.extend_from_slice(&data);

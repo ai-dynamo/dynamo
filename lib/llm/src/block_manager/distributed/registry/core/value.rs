@@ -49,25 +49,32 @@ pub struct StorageLocation {
 impl RegistryValue for StorageLocation {
     fn to_bytes(&self) -> Vec<u8> {
         let path_bytes = self.path.as_bytes();
-        let mut buf = Vec::with_capacity(1 + 2 + path_bytes.len() + 8);
+        // Validate path length fits in u32 to prevent silent truncation
+        let path_len: u32 = path_bytes
+            .len()
+            .try_into()
+            .expect("StorageLocation path length exceeds u32::MAX");
+        let mut buf = Vec::with_capacity(1 + 4 + path_bytes.len() + 8);
         buf.push(self.backend as u8);
-        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&path_len.to_le_bytes());
         buf.extend_from_slice(path_bytes);
         buf.extend_from_slice(&self.size_bytes.to_le_bytes());
         buf
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 11 {
+        // Minimum size: 1 (backend) + 4 (path_len) + 8 (size_bytes) = 13
+        if bytes.len() < 13 {
             return None;
         }
         let backend = StorageBackend::try_from(bytes[0]).ok()?;
-        let path_len = u16::from_le_bytes(bytes[1..3].try_into().ok()?) as usize;
-        if bytes.len() < 3 + path_len + 8 {
+        let path_len = u32::from_le_bytes(bytes[1..5].try_into().ok()?) as usize;
+        // Validate total length before slicing
+        if bytes.len() < 1 + 4 + path_len + 8 {
             return None;
         }
-        let path = String::from_utf8(bytes[3..3 + path_len].to_vec()).ok()?;
-        let size_bytes = u64::from_le_bytes(bytes[3 + path_len..3 + path_len + 8].try_into().ok()?);
+        let path = String::from_utf8(bytes[5..5 + path_len].to_vec()).ok()?;
+        let size_bytes = u64::from_le_bytes(bytes[5 + path_len..5 + path_len + 8].try_into().ok()?);
         Some(Self {
             backend,
             path,

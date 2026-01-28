@@ -33,10 +33,11 @@ impl RegistryKey for Key128 {
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 16 {
+        // Require exact length to reject malformed/trailing bytes
+        if bytes.len() != 16 {
             return None;
         }
-        Some(Self(u128::from_le_bytes(bytes[0..16].try_into().ok()?)))
+        Some(Self(u128::from_le_bytes(bytes.try_into().ok()?)))
     }
 }
 
@@ -56,7 +57,8 @@ impl RegistryKey for CompositeKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 16 {
+        // Require exact length to reject malformed/trailing bytes
+        if bytes.len() != 16 {
             return None;
         }
         Some(Self {
@@ -84,7 +86,8 @@ impl RegistryKey for PositionalKey {
     }
 
     fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 20 {
+        // Require exact length to reject malformed/trailing bytes
+        if bytes.len() != 20 {
             return None;
         }
         Some(Self {
@@ -113,10 +116,26 @@ mod tests {
     }
 
     #[test]
+    fn test_u64_rejects_wrong_length() {
+        // Too short
+        assert_eq!(u64::from_bytes(&[1, 2, 3, 4, 5, 6, 7]), None);
+        // Too long
+        assert_eq!(u64::from_bytes(&[1, 2, 3, 4, 5, 6, 7, 8, 9]), None);
+    }
+
+    #[test]
     fn test_key128_roundtrip() {
         let key = Key128(0x123456789ABCDEF0_FEDCBA9876543210);
         let bytes = key.to_bytes();
         assert_eq!(Key128::from_bytes(&bytes), Some(key));
+    }
+
+    #[test]
+    fn test_key128_rejects_wrong_length() {
+        // Too short
+        assert_eq!(Key128::from_bytes(&[0; 15]), None);
+        // Too long - should be rejected (not silently truncated)
+        assert_eq!(Key128::from_bytes(&[0; 17]), None);
     }
 
     #[test]
@@ -130,6 +149,14 @@ mod tests {
     }
 
     #[test]
+    fn test_composite_key_rejects_wrong_length() {
+        // Too short
+        assert_eq!(CompositeKey::from_bytes(&[0; 15]), None);
+        // Too long - should be rejected (not silently truncated)
+        assert_eq!(CompositeKey::from_bytes(&[0; 17]), None);
+    }
+
+    #[test]
     fn test_positional_key_roundtrip() {
         let key = PositionalKey {
             worker_id: 123,
@@ -138,5 +165,13 @@ mod tests {
         };
         let bytes = key.to_bytes();
         assert_eq!(PositionalKey::from_bytes(&bytes), Some(key));
+    }
+
+    #[test]
+    fn test_positional_key_rejects_wrong_length() {
+        // Too short
+        assert_eq!(PositionalKey::from_bytes(&[0; 19]), None);
+        // Too long - should be rejected (not silently truncated)
+        assert_eq!(PositionalKey::from_bytes(&[0; 21]), None);
     }
 }

@@ -2,12 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Codec trait and implementations.
+//!
+//! The wire protocol uses simple `(K, V)` pairs. If you need metadata,
+//! compose it into your Key or Value type. For example:
+//! - `V = (StorageLocation, PositionMetadata)` embeds metadata in value
+//! - `K = (u64, SomeContext)` embeds context in key
 
 use std::marker::PhantomData;
 
 use super::error::{RegistryError, RegistryResult};
 use super::key::RegistryKey;
-use super::metadata::RegistryMetadata;
 use super::value::RegistryValue;
 
 /// Current protocol version.
@@ -83,9 +87,9 @@ pub enum QueryType<K> {
 }
 
 #[derive(Debug, Clone)]
-pub enum ResponseType<K, V, M> {
+pub enum ResponseType<K, V> {
     CanOffload(Vec<OffloadStatus>),
-    Match(Vec<(K, V, M)>),
+    Match(Vec<(K, V)>),
     /// Number of entries removed.
     Remove(usize),
     /// Number of entries touched (acknowledged).
@@ -96,27 +100,26 @@ pub enum ResponseType<K, V, M> {
     Error(String),
 }
 
-pub trait RegistryCodec<K, V, M>: Send + Sync
+pub trait RegistryCodec<K, V>: Send + Sync
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
 {
-    fn encode_register(&self, entries: &[(K, V, M)], buf: &mut Vec<u8>) -> RegistryResult<()>;
-    fn decode_register(&self, data: &[u8]) -> Option<Vec<(K, V, M)>>;
+    fn encode_register(&self, entries: &[(K, V)], buf: &mut Vec<u8>) -> RegistryResult<()>;
+    fn decode_register(&self, data: &[u8]) -> Option<Vec<(K, V)>>;
 
     fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>) -> RegistryResult<()>;
     fn decode_query(&self, data: &[u8]) -> Option<QueryType<K>>;
 
     fn encode_response(
         &self,
-        response: &ResponseType<K, V, M>,
+        response: &ResponseType<K, V>,
         buf: &mut Vec<u8>,
     ) -> RegistryResult<()>;
-    fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V, M>>;
+    fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V>>;
 
     /// Decode with detailed error information.
-    fn decode_register_result(&self, data: &[u8]) -> RegistryResult<Vec<(K, V, M)>> {
+    fn decode_register_result(&self, data: &[u8]) -> RegistryResult<Vec<(K, V)>> {
         self.decode_register(data)
             .ok_or_else(|| RegistryError::DecodeError {
                 context: "register",
@@ -136,7 +139,7 @@ where
     }
 
     /// Decode response with detailed error information.
-    fn decode_response_result(&self, data: &[u8]) -> RegistryResult<ResponseType<K, V, M>> {
+    fn decode_response_result(&self, data: &[u8]) -> RegistryResult<ResponseType<K, V>> {
         self.decode_response(data)
             .ok_or_else(|| RegistryError::DecodeError {
                 context: "response",
@@ -152,11 +155,13 @@ where
 /// ```text
 /// [version:1][type:1][count:4][...entries...]
 /// ```
-pub struct BinaryCodec<K, V, M> {
-    _phantom: PhantomData<(K, V, M)>,
+///
+/// Each entry is: `[key_len:2][key][value_len:2][value]`
+pub struct BinaryCodec<K, V> {
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, M> BinaryCodec<K, V, M> {
+impl<K, V> BinaryCodec<K, V> {
     pub fn new() -> Self {
         Self {
             _phantom: PhantomData,
@@ -187,19 +192,18 @@ impl<K, V, M> BinaryCodec<K, V, M> {
     }
 }
 
-impl<K, V, M> Default for BinaryCodec<K, V, M> {
+impl<K, V> Default for BinaryCodec<K, V> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K, V, M> RegistryCodec<K, V, M> for BinaryCodec<K, V, M>
+impl<K, V> RegistryCodec<K, V> for BinaryCodec<K, V>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
 {
-    fn encode_register(&self, entries: &[(K, V, M)], buf: &mut Vec<u8>) -> RegistryResult<()> {
+    fn encode_register(&self, entries: &[(K, V)], buf: &mut Vec<u8>) -> RegistryResult<()> {
         if entries.len() > u32::MAX as usize {
             return Err(RegistryError::EncodeError {
                 context: "entry count exceeds u32::MAX",
@@ -208,10 +212,9 @@ where
         buf.push(PROTOCOL_VERSION);
         buf.push(MessageType::Register as u8);
         buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-        for (k, v, m) in entries {
+        for (k, v) in entries {
             let kb = k.to_bytes();
             let vb = v.to_bytes();
-            let mb = m.to_bytes();
             if kb.len() > u16::MAX as usize {
                 return Err(RegistryError::EncodeError {
                     context: "key size exceeds u16::MAX",
@@ -222,22 +225,15 @@ where
                     context: "value size exceeds u16::MAX",
                 });
             }
-            if mb.len() > u16::MAX as usize {
-                return Err(RegistryError::EncodeError {
-                    context: "metadata size exceeds u16::MAX",
-                });
-            }
             buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
             buf.extend_from_slice(&kb);
             buf.extend_from_slice(&(vb.len() as u16).to_le_bytes());
             buf.extend_from_slice(&vb);
-            buf.extend_from_slice(&(mb.len() as u16).to_le_bytes());
-            buf.extend_from_slice(&mb);
         }
         Ok(())
     }
 
-    fn decode_register(&self, data: &[u8]) -> Option<Vec<(K, V, M)>> {
+    fn decode_register(&self, data: &[u8]) -> Option<Vec<(K, V)>> {
         Self::check_version(data)?;
         let offset = Self::header_offset(data);
         let data = &data[offset..];
@@ -272,18 +268,7 @@ where
             let v = V::from_bytes(&data[pos..pos + vlen])?;
             pos += vlen;
 
-            if pos + 2 > data.len() {
-                return None;
-            }
-            let mlen = u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?) as usize;
-            pos += 2;
-            if pos + mlen > data.len() {
-                return None;
-            }
-            let m = M::from_bytes(&data[pos..pos + mlen])?;
-            pos += mlen;
-
-            entries.push((k, v, m));
+            entries.push((k, v));
         }
 
         Some(entries)
@@ -361,7 +346,7 @@ where
 
     fn encode_response(
         &self,
-        response: &ResponseType<K, V, M>,
+        response: &ResponseType<K, V>,
         buf: &mut Vec<u8>,
     ) -> RegistryResult<()> {
         buf.push(PROTOCOL_VERSION);
@@ -386,10 +371,9 @@ where
                 }
                 buf.push(MessageType::MatchResponse as u8);
                 buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-                for (k, v, m) in entries {
+                for (k, v) in entries {
                     let kb = k.to_bytes();
                     let vb = v.to_bytes();
-                    let mb = m.to_bytes();
                     if kb.len() > u16::MAX as usize {
                         return Err(RegistryError::EncodeError {
                             context: "key size exceeds u16::MAX",
@@ -400,17 +384,10 @@ where
                             context: "value size exceeds u16::MAX",
                         });
                     }
-                    if mb.len() > u16::MAX as usize {
-                        return Err(RegistryError::EncodeError {
-                            context: "metadata size exceeds u16::MAX",
-                        });
-                    }
                     buf.extend_from_slice(&(kb.len() as u16).to_le_bytes());
                     buf.extend_from_slice(&kb);
                     buf.extend_from_slice(&(vb.len() as u16).to_le_bytes());
                     buf.extend_from_slice(&vb);
-                    buf.extend_from_slice(&(mb.len() as u16).to_le_bytes());
-                    buf.extend_from_slice(&mb);
                 }
             }
             ResponseType::Remove(count) => {
@@ -436,7 +413,7 @@ where
         Ok(())
     }
 
-    fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V, M>> {
+    fn decode_response(&self, data: &[u8]) -> Option<ResponseType<K, V>> {
         Self::check_version(data)?;
         let offset = Self::header_offset(data);
         let data = &data[offset..];
@@ -524,18 +501,7 @@ where
                     let v = V::from_bytes(&data[pos..pos + vlen])?;
                     pos += vlen;
 
-                    if pos + 2 > data.len() {
-                        return None;
-                    }
-                    let mlen = u16::from_le_bytes(data[pos..pos + 2].try_into().ok()?) as usize;
-                    pos += 2;
-                    if pos + mlen > data.len() {
-                        return None;
-                    }
-                    let m = M::from_bytes(&data[pos..pos + mlen])?;
-                    pos += mlen;
-
-                    entries.push((k, v, m));
+                    entries.push((k, v));
                 }
 
                 Some(ResponseType::Match(entries))
@@ -548,12 +514,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_manager::distributed::registry::core::metadata::NoMetadata;
 
     #[test]
     fn test_register_roundtrip() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
-        let entries = vec![(1u64, 100u64, NoMetadata), (2, 200, NoMetadata)];
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
+        let entries = vec![(1u64, 100u64), (2, 200)];
 
         let mut buf = Vec::new();
         codec.encode_register(&entries, &mut buf).unwrap();
@@ -571,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_query_roundtrip() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let query = QueryType::CanOffload(vec![1u64, 2, 3]);
         let mut buf = Vec::new();
@@ -598,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_response_roundtrip() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let response = ResponseType::CanOffload(vec![
             OffloadStatus::Granted,
@@ -611,7 +576,7 @@ mod tests {
         // Check version byte is present
         assert_eq!(buf[0], PROTOCOL_VERSION);
 
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&buf).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&buf).unwrap();
         match decoded {
             ResponseType::CanOffload(statuses) => {
                 assert_eq!(statuses.len(), 3);
@@ -622,11 +587,10 @@ mod tests {
             _ => panic!("wrong type"),
         }
 
-        let response: ResponseType<u64, u64, NoMetadata> =
-            ResponseType::Match(vec![(1, 100, NoMetadata), (2, 200, NoMetadata)]);
+        let response: ResponseType<u64, u64> = ResponseType::Match(vec![(1, 100), (2, 200)]);
         buf.clear();
         codec.encode_response(&response, &mut buf).unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&buf).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&buf).unwrap();
         match decoded {
             ResponseType::Match(entries) => {
                 assert_eq!(entries.len(), 2);
@@ -639,7 +603,7 @@ mod tests {
 
     #[test]
     fn test_decode_result_error() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let result = codec.decode_register_result(&[]);
         assert!(result.is_err());

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Generic registry client.
+//!
+//! Uses simple `(K, V)` pairs. If you need metadata, compose it into
+//! your Value type: `V = (ActualValue, Metadata)`.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -13,7 +16,6 @@ use tokio::sync::Mutex;
 
 use super::codec::{BinaryCodec, OffloadStatus, QueryType, RegistryCodec, ResponseType};
 use super::key::RegistryKey;
-use super::metadata::RegistryMetadata;
 use super::transport::RegistryTransport;
 use super::value::RegistryValue;
 
@@ -35,15 +37,14 @@ impl<K> Default for OffloadResult<K> {
 }
 
 #[async_trait]
-pub trait Registry<K, V, M>: Send + Sync
+pub trait Registry<K, V>: Send + Sync
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
 {
-    async fn register(&self, entries: &[(K, V, M)]) -> Result<()>;
+    async fn register(&self, entries: &[(K, V)]) -> Result<()>;
     async fn can_offload(&self, keys: &[K]) -> Result<OffloadResult<K>>;
-    async fn match_prefix(&self, keys: &[K]) -> Result<Vec<(K, V, M)>>;
+    async fn match_prefix(&self, keys: &[K]) -> Result<Vec<(K, V)>>;
     async fn flush(&self) -> Result<()>;
 
     /// Remove/invalidate entries from the registry by key.
@@ -62,13 +63,13 @@ where
 }
 
 /// Pending batch state.
-struct PendingBatch<K, V, M> {
-    entries: Vec<(K, V, M)>,
+struct PendingBatch<K, V> {
+    entries: Vec<(K, V)>,
     /// When the first entry was added to this batch.
     first_entry_time: Option<tokio::time::Instant>,
 }
 
-impl<K, V, M> Default for PendingBatch<K, V, M> {
+impl<K, V> Default for PendingBatch<K, V> {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
@@ -77,15 +78,15 @@ impl<K, V, M> Default for PendingBatch<K, V, M> {
     }
 }
 
-impl<K: Clone, V: Clone, M: Clone> PendingBatch<K, V, M> {
-    fn add(&mut self, entries: &[(K, V, M)]) {
+impl<K: Clone, V: Clone> PendingBatch<K, V> {
+    fn add(&mut self, entries: &[(K, V)]) {
         if self.first_entry_time.is_none() && !entries.is_empty() {
             self.first_entry_time = Some(tokio::time::Instant::now());
         }
         self.entries.extend(entries.iter().cloned());
     }
 
-    fn take(&mut self) -> Vec<(K, V, M)> {
+    fn take(&mut self) -> Vec<(K, V)> {
         self.first_entry_time = None;
         std::mem::take(&mut self.entries)
     }
@@ -106,29 +107,27 @@ impl<K: Clone, V: Clone, M: Clone> PendingBatch<K, V, M> {
     }
 }
 
-pub struct RegistryClient<K, V, M, T, C>
+pub struct RegistryClient<K, V, T, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     transport: T,
     codec: C,
-    pending: Arc<Mutex<PendingBatch<K, V, M>>>,
+    pending: Arc<Mutex<PendingBatch<K, V>>>,
     batch_size: usize,
     batch_timeout: Duration,
-    _phantom: PhantomData<(K, V, M)>,
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, M, T, C> RegistryClient<K, V, M, T, C>
+impl<K, V, T, C> RegistryClient<K, V, T, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     pub fn new(transport: T, codec: C) -> Self {
         Self {
@@ -161,7 +160,6 @@ where
     where
         K: 'static,
         V: 'static,
-        M: 'static,
         T: 'static,
         C: 'static,
     {
@@ -200,15 +198,14 @@ where
 }
 
 #[async_trait]
-impl<K, V, M, T, C> Registry<K, V, M> for RegistryClient<K, V, M, T, C>
+impl<K, V, T, C> Registry<K, V> for RegistryClient<K, V, T, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
-    async fn register(&self, entries: &[(K, V, M)]) -> Result<()> {
+    async fn register(&self, entries: &[(K, V)]) -> Result<()> {
         let should_flush = {
             let mut pending = self.pending.lock().await;
             pending.add(entries);
@@ -261,7 +258,7 @@ where
         }
     }
 
-    async fn match_prefix(&self, keys: &[K]) -> Result<Vec<(K, V, M)>> {
+    async fn match_prefix(&self, keys: &[K]) -> Result<Vec<(K, V)>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -341,11 +338,10 @@ where
 }
 
 /// Create a simple registry client with binary codec.
-pub fn simple_client<K, V, M, T>(transport: T) -> RegistryClient<K, V, M, T, BinaryCodec<K, V, M>>
+pub fn simple_client<K, V, T>(transport: T) -> RegistryClient<K, V, T, BinaryCodec<K, V>>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
 {
     RegistryClient::new(transport, BinaryCodec::new())
@@ -355,12 +351,11 @@ where
 mod tests {
     use super::*;
     use crate::block_manager::distributed::registry::core::codec::BinaryCodec;
-    use crate::block_manager::distributed::registry::core::metadata::NoMetadata;
     use crate::block_manager::distributed::registry::core::transport::InProcessTransport;
 
     #[tokio::test]
     async fn test_registry_client_can_offload() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let (transport, _rx) = InProcessTransport::new(move |data| {
             let query = codec.decode_query(data);
@@ -386,7 +381,7 @@ mod tests {
             }
         });
 
-        let client: RegistryClient<u64, u64, NoMetadata, _, _> =
+        let client: RegistryClient<u64, u64, _, _> =
             RegistryClient::new(transport, BinaryCodec::new());
 
         let result = client.can_offload(&[1, 2, 3, 4]).await.unwrap();
@@ -397,7 +392,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_client_leased_status() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let (transport, _rx) = InProcessTransport::new(move |data| {
             let query = codec.decode_query(data);
@@ -423,7 +418,7 @@ mod tests {
             }
         });
 
-        let client: RegistryClient<u64, u64, NoMetadata, _, _> =
+        let client: RegistryClient<u64, u64, _, _> =
             RegistryClient::new(transport, BinaryCodec::new());
 
         let result = client.can_offload(&[1, 2, 3]).await.unwrap();
@@ -434,17 +429,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_registry_client_match() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let (transport, _rx) = InProcessTransport::new(move |data| {
             let query = codec.decode_query(data);
             match query {
                 Some(QueryType::Match(keys)) => {
-                    let entries: Vec<_> = keys
-                        .into_iter()
-                        .take(2)
-                        .map(|k| (k, k * 100, NoMetadata))
-                        .collect();
+                    let entries: Vec<_> = keys.into_iter().take(2).map(|k| (k, k * 100)).collect();
                     let mut buf = Vec::new();
                     codec
                         .encode_response(&ResponseType::Match(entries), &mut buf)
@@ -455,14 +446,14 @@ mod tests {
             }
         });
 
-        let client: RegistryClient<u64, u64, NoMetadata, _, _> =
+        let client: RegistryClient<u64, u64, _, _> =
             RegistryClient::new(transport, BinaryCodec::new());
 
         let result = client.match_prefix(&[1, 2, 3, 4]).await.unwrap();
 
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0], (1, 100, NoMetadata));
-        assert_eq!(result[1], (2, 200, NoMetadata));
+        assert_eq!(result[0], (1, 100));
+        assert_eq!(result[1], (2, 200));
     }
 
     #[tokio::test]
@@ -482,19 +473,16 @@ mod tests {
             }
         });
 
-        let client: RegistryClient<u64, u64, NoMetadata, _, _> =
+        let client: RegistryClient<u64, u64, _, _> =
             RegistryClient::new(transport, BinaryCodec::new()).with_batch_size(3);
 
         // Add 2 entries (below threshold)
-        client
-            .register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)])
-            .await
-            .unwrap();
+        client.register(&[(1, 100), (2, 200)]).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         assert_eq!(flush_count.load(Ordering::SeqCst), 0);
 
         // Add 1 more (reaches threshold of 3)
-        client.register(&[(3, 300, NoMetadata)]).await.unwrap();
+        client.register(&[(3, 300)]).await.unwrap();
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         assert_eq!(flush_count.load(Ordering::SeqCst), 1);
     }
@@ -517,7 +505,7 @@ mod tests {
         });
 
         let client = Arc::new(
-            RegistryClient::<u64, u64, NoMetadata, _, _>::new(transport, BinaryCodec::new())
+            RegistryClient::<u64, u64, _, _>::new(transport, BinaryCodec::new())
                 .with_batch_size(100) // High batch size
                 .with_batch_timeout(Duration::from_millis(50)), // Short timeout
         );
@@ -526,7 +514,7 @@ mod tests {
         let _task = client.start_batch_flush_task(cancel.clone());
 
         // Add entries (below batch size threshold)
-        client.register(&[(1, 100, NoMetadata)]).await.unwrap();
+        client.register(&[(1, 100)]).await.unwrap();
 
         // Wait for timeout to trigger flush
         tokio::time::sleep(Duration::from_millis(100)).await;

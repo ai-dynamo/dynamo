@@ -102,16 +102,25 @@ pub struct ZmqTransport {
 }
 
 impl ZmqTransport {
+    /// Create a new DEALER socket connected to the query address.
+    ///
+    /// This is extracted as a helper method so it can be reused both during
+    /// initial connection and when resetting the socket after a timeout.
+    fn create_dealer(config: &ZmqTransportConfig) -> Result<dealer::Dealer> {
+        let context = Context::new();
+        dealer::dealer(&context)
+            .set_sndhwm(config.dealer_hwm)
+            .set_rcvhwm(config.dealer_hwm)
+            .connect(&config.query_addr)
+            .map_err(|e| anyhow!("Failed to connect DEALER to {}: {}", config.query_addr, e))
+    }
+
     /// Connect to a registry hub.
     pub fn connect(config: ZmqTransportConfig) -> Result<Self> {
         let context = Context::new();
 
         // Create DEALER socket with HWM
-        let dealer = dealer::dealer(&context)
-            .set_sndhwm(config.dealer_hwm)
-            .set_rcvhwm(config.dealer_hwm)
-            .connect(&config.query_addr)
-            .map_err(|e| anyhow!("Failed to connect DEALER to {}: {}", config.query_addr, e))?;
+        let dealer = Self::create_dealer(&config)?;
 
         // Create PUSH socket with HWM
         let pusher = push::push(&context)
@@ -176,7 +185,7 @@ impl RegistryTransport for ZmqTransport {
             .await
             .map_err(|e| anyhow!("Failed to send request: {}", e))?;
 
-        let response = tokio::time::timeout(self.config.request_timeout, async {
+        let timeout_result = tokio::time::timeout(self.config.request_timeout, async {
             match socket.next().await {
                 Some(Ok(msg)) => {
                     let frames: Vec<_> = msg.iter().collect();
@@ -190,10 +199,43 @@ impl RegistryTransport for ZmqTransport {
                 None => Err(anyhow!("Socket closed")),
             }
         })
-        .await
-        .map_err(|_| anyhow!("Request timed out after {:?}", self.config.request_timeout))??;
+        .await;
 
-        Ok(response)
+        match timeout_result {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // Timeout occurred. The DEALER socket may have stale messages queued
+                // from a late response. We must reset the socket to prevent subsequent
+                // calls from reading these stale frames.
+                tracing::warn!(
+                    timeout = ?self.config.request_timeout,
+                    query_addr = %self.config.query_addr,
+                    "Request timed out, resetting DEALER socket to clear stale messages"
+                );
+
+                // Recreate the dealer socket to clear any pending messages.
+                // The old socket is dropped when we replace it, which closes it cleanly.
+                match Self::create_dealer(&self.config) {
+                    Ok(new_dealer) => {
+                        *socket = new_dealer;
+                        tracing::debug!("DEALER socket reset successfully after timeout");
+                    }
+                    Err(e) => {
+                        // Log the error but still return the timeout error to the caller.
+                        // The socket may be in a bad state, but the caller should retry.
+                        tracing::error!(
+                            error = %e,
+                            "Failed to reset DEALER socket after timeout, socket may have stale messages"
+                        );
+                    }
+                }
+
+                Err(anyhow!(
+                    "Request timed out after {:?}",
+                    self.config.request_timeout
+                ))
+            }
+        }
     }
 
     async fn publish(&self, data: &[u8]) -> Result<()> {

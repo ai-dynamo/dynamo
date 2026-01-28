@@ -9,9 +9,8 @@ mod integration {
     use std::time::Duration;
 
     use crate::block_manager::distributed::registry::core::{
-        BinaryCodec, HashMapStorage, InProcessHubTransport, InProcessTransport, NoMetadata,
-        OffloadStatus, QueryType, Registry, RegistryCodec, RegistryTransport, ResponseType,
-        Storage, client, hub,
+        BinaryCodec, HashMapStorage, InProcessHubTransport, InProcessTransport, OffloadStatus,
+        QueryType, Registry, RegistryCodec, RegistryTransport, ResponseType, Storage, client, hub,
     };
 
     /// Full end-to-end test: Client <-> Hub using in-process transport.
@@ -22,7 +21,7 @@ mod integration {
         storage.insert(1, 100);
         storage.insert(2, 200);
 
-        let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
+        let registry_hub = hub::<u64, u64, _>(storage)
             .lease_ttl(Duration::from_secs(30))
             .build();
 
@@ -36,7 +35,7 @@ mod integration {
             }
         });
 
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         // Test can_offload
         let mut buf = Vec::new();
@@ -44,7 +43,7 @@ mod integration {
             .encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf)
             .unwrap();
         let response = client_handle.request(&buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&response).unwrap();
         match decoded {
             ResponseType::CanOffload(statuses) => {
                 assert_eq!(statuses[0], OffloadStatus::AlreadyStored);
@@ -59,12 +58,12 @@ mod integration {
             .encode_query(&QueryType::Match(vec![1, 2]), &mut buf)
             .unwrap();
         let response = client_handle.request(&buf).await.unwrap();
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&response).unwrap();
         match decoded {
             ResponseType::Match(entries) => {
                 assert_eq!(entries.len(), 2);
-                assert_eq!(entries[0], (1, 100, NoMetadata));
-                assert_eq!(entries[1], (2, 200, NoMetadata));
+                assert_eq!(entries[0], (1, 100));
+                assert_eq!(entries[1], (2, 200));
             }
             _ => panic!("Wrong response"),
         }
@@ -88,7 +87,7 @@ mod integration {
         hub_storage.insert(3, 300);
 
         let (transport, _rx) = InProcessTransport::new(move |data| {
-            let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+            let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
             if let Some(query) = codec.decode_query(data) {
                 let mut buf = Vec::new();
@@ -111,7 +110,7 @@ mod integration {
                     QueryType::Match(keys) => {
                         let entries: Vec<_> = keys
                             .iter()
-                            .filter_map(|k| hub_storage.get(k).map(|v| (*k, v, NoMetadata)))
+                            .filter_map(|k| hub_storage.get(k).map(|v| (*k, v)))
                             .collect();
                         codec
                             .encode_response(&ResponseType::Match(entries), &mut buf)
@@ -138,9 +137,7 @@ mod integration {
         });
 
         // Build client using the builder
-        let registry_client = client::<u64, u64, NoMetadata, _>(transport)
-            .batch_size(100)
-            .build();
+        let registry_client = client::<u64, u64, _>(transport).batch_size(100).build();
 
         // Test can_offload
         let result = registry_client.can_offload(&[1, 2, 5, 6]).await.unwrap();
@@ -172,13 +169,15 @@ mod integration {
             }
         });
 
-        // Build client with custom batch size using the builder
-        let registry_client = client::<u64, u64, NoMetadata, _>(transport)
+        // Build client with custom batch size using the builder.
+        // Use a long batch_timeout to prevent auto-flush from firing before the explicit flush.
+        let registry_client = client::<u64, u64, _>(transport)
             .batch_size(10)
+            .batch_timeout(std::time::Duration::from_secs(60))
             .build();
 
         registry_client
-            .register(&[(1, 100, NoMetadata), (2, 200, NoMetadata)])
+            .register(&[(1, 100), (2, 200)])
             .await
             .unwrap();
 
@@ -237,7 +236,7 @@ mod integration {
         storage.insert(1, 100);
         storage.insert(2, 200);
 
-        let hub = ZmqHub::new(config, storage, BinaryCodec::<u64, u64, NoMetadata>::new());
+        let hub = ZmqHub::new(config, storage, BinaryCodec::<u64, u64>::new());
         let cancel = CancellationToken::new();
 
         // Start hub
@@ -252,7 +251,7 @@ mod integration {
             .expect("Failed to connect");
 
         // Test query directly with transport
-        let codec = BinaryCodec::<u64, u64, NoMetadata>::new();
+        let codec = BinaryCodec::<u64, u64>::new();
 
         // Test can_offload
         let mut buf = Vec::new();
@@ -260,7 +259,7 @@ mod integration {
             .encode_query(&QueryType::CanOffload(vec![1, 3]), &mut buf)
             .unwrap();
         let response = transport.request(&buf).await.expect("Request failed");
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
@@ -276,13 +275,13 @@ mod integration {
             .encode_query(&QueryType::Match(vec![1, 2]), &mut buf)
             .unwrap();
         let response = transport.request(&buf).await.expect("Match request failed");
-        let decoded: ResponseType<u64, u64, NoMetadata> = codec.decode_response(&response).unwrap();
+        let decoded: ResponseType<u64, u64> = codec.decode_response(&response).unwrap();
 
         match decoded {
             ResponseType::Match(entries) => {
                 assert_eq!(entries.len(), 2);
-                assert_eq!(entries[0], (1, 100, NoMetadata));
-                assert_eq!(entries[1], (2, 200, NoMetadata));
+                assert_eq!(entries[0], (1, 100));
+                assert_eq!(entries[1], (2, 200));
             }
             _ => panic!("Wrong response type"),
         }

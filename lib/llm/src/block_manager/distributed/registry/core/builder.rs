@@ -5,6 +5,9 @@
 //!
 //! Provides ergonomic construction of registry clients and hubs with
 //! sensible defaults and fluent configuration.
+//!
+//! Uses simple `(K, V)` pairs. If you need metadata, compose it into
+//! your Value type: `V = (ActualValue, Metadata)`.
 
 use std::marker::PhantomData;
 use std::time::Duration;
@@ -15,7 +18,6 @@ use super::codec::{BinaryCodec, RegistryCodec};
 use super::hub::RegistryHub;
 use super::hub_transport::HubTransport;
 use super::key::RegistryKey;
-use super::metadata::RegistryMetadata;
 use super::registry::RegistryClient;
 use super::storage::Storage;
 use super::transport::RegistryTransport;
@@ -31,28 +33,26 @@ use super::value::RegistryValue;
 ///     .batch_timeout(Duration::from_millis(20))
 ///     .build();
 /// ```
-pub struct ClientBuilder<K, V, M, T, C>
+pub struct ClientBuilder<K, V, T, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     transport: T,
     codec: C,
     batch_size: usize,
     batch_timeout: Duration,
-    _phantom: PhantomData<(K, V, M)>,
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, M, T, C> ClientBuilder<K, V, M, T, C>
+impl<K, V, T, C> ClientBuilder<K, V, T, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     /// Create a new client builder with the given transport and codec.
     pub fn new(transport: T, codec: C) -> Self {
@@ -84,7 +84,7 @@ where
     }
 
     /// Build the registry client.
-    pub fn build(self) -> RegistryClient<K, V, M, T, C> {
+    pub fn build(self) -> RegistryClient<K, V, T, C> {
         RegistryClient::new(self.transport, self.codec)
             .with_batch_size(self.batch_size)
             .with_batch_timeout(self.batch_timeout)
@@ -100,27 +100,25 @@ where
 ///     .lease_ttl(Duration::from_secs(60))
 ///     .build();
 /// ```
-pub struct HubBuilder<K, V, M, S, C>
+pub struct HubBuilder<K, V, S, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V>,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     storage: S,
     codec: C,
     lease_ttl: Duration,
-    _phantom: PhantomData<(K, V, M)>,
+    _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, M, S, C> HubBuilder<K, V, M, S, C>
+impl<K, V, S, C> HubBuilder<K, V, S, C>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V>,
-    C: RegistryCodec<K, V, M>,
+    C: RegistryCodec<K, V>,
 {
     /// Create a new hub builder with the given storage and codec.
     pub fn new(storage: S, codec: C) -> Self {
@@ -145,7 +143,7 @@ where
     ///
     /// Note: To enable periodic lease cleanup, spawn `lease_cleanup_task`
     /// with the hub's `lease_manager()` and your desired cleanup interval.
-    pub fn build(self) -> RegistryHub<K, V, M, S, C> {
+    pub fn build(self) -> RegistryHub<K, V, S, C> {
         use super::hub::HubConfig;
         let config = HubConfig {
             lease_ttl: self.lease_ttl,
@@ -171,11 +169,10 @@ where
 ///     .batch_size(50)
 ///     .build();
 /// ```
-pub fn client<K, V, M, T>(transport: T) -> ClientBuilder<K, V, M, T, BinaryCodec<K, V, M>>
+pub fn client<K, V, T>(transport: T) -> ClientBuilder<K, V, T, BinaryCodec<K, V>>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     T: RegistryTransport,
 {
     ClientBuilder::new(transport, BinaryCodec::new())
@@ -190,11 +187,10 @@ where
 ///     .lease_ttl(Duration::from_secs(60))
 ///     .build();
 /// ```
-pub fn hub<K, V, M, S>(storage: S) -> HubBuilder<K, V, M, S, BinaryCodec<K, V, M>>
+pub fn hub<K, V, S>(storage: S) -> HubBuilder<K, V, S, BinaryCodec<K, V>>
 where
     K: RegistryKey,
     V: RegistryValue,
-    M: RegistryMetadata,
     S: Storage<K, V>,
 {
     HubBuilder::new(storage, BinaryCodec::new())
@@ -204,13 +200,12 @@ where
 mod tests {
     use super::*;
     use crate::block_manager::distributed::registry::core::{
-        HashMapStorage, InProcessTransport, NoMetadata, OffloadStatus, QueryType, Registry,
-        ResponseType,
+        HashMapStorage, InProcessTransport, OffloadStatus, QueryType, Registry, ResponseType,
     };
 
     #[tokio::test]
     async fn test_client_builder() {
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let (transport, _rx) = InProcessTransport::new(move |data| {
             let query = codec.decode_query(data);
@@ -227,7 +222,7 @@ mod tests {
             }
         });
 
-        let built_client: RegistryClient<u64, u64, NoMetadata, _, _> = client(transport)
+        let built_client: RegistryClient<u64, u64, _, _> = client(transport)
             .batch_size(50)
             .batch_timeout(Duration::from_millis(20))
             .build();
@@ -240,7 +235,7 @@ mod tests {
     fn test_hub_builder() {
         let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
 
-        let built_hub: RegistryHub<u64, u64, NoMetadata, _, _> =
+        let built_hub: RegistryHub<u64, u64, _, _> =
             hub(storage).lease_ttl(Duration::from_secs(60)).build();
 
         assert!(built_hub.is_empty());
@@ -252,7 +247,7 @@ mod tests {
     #[test]
     fn test_builder_with_custom_codec() {
         let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
-        let codec: BinaryCodec<u64, u64, NoMetadata> = BinaryCodec::new();
+        let codec: BinaryCodec<u64, u64> = BinaryCodec::new();
 
         let built_hub = HubBuilder::new(storage, codec)
             .lease_ttl(Duration::from_secs(120))
