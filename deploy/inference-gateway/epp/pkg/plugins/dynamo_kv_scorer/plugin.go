@@ -228,7 +228,7 @@ var (
 func loadDynamoConfig() {
 	ffiNamespace = getEnvOrDefault("DYN_NAMESPACE", "vllm-agg")
 	ffiComponent = "backend" // The pipeline uses backend not DYN_COMPONENT which is epp
-	ffiModel = getEnvOrDefault("DYNAMO_MODEL", "Qwen/Qwen3-0.6B")
+	ffiModel = getEnvOrDefault("DYN_MODEL", "Qwen/Qwen3-0.6B")
 	ffiWorkerID = getEnvInt64OrDefault("DYNAMO_WORKER_ID", 1)
 	ffiEnforceDisagg = getEnvBoolOrDefault("DYNAMO_ENFORCE_DISAGG", false)
 

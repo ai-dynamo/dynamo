@@ -61,9 +61,9 @@ pub enum DynamoLlmResult {
 const DEFAULT_DISCOVERY_TIMEOUT_SECS: u64 = 300;
 
 /// Get discovery timeout from environment variable or use default.
-/// Reads DYNAMO_DISCOVERY_TIMEOUT_SEC env var (in seconds).
+/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
 fn get_discovery_timeout_secs() -> u64 {
-    std::env::var("DYNAMO_DISCOVERY_TIMEOUT_SEC")
+    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SECS)

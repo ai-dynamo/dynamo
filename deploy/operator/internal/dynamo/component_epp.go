@@ -78,8 +78,8 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: "16",
 		},
 		{
-			// DYNAMO_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
-			Name:  "DYNAMO_DISCOVERY_TIMEOUT_SEC",
+			// DYN_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
+			Name:  "DYN_DISCOVERY_TIMEOUT_SEC",
 			Value: "300",
 		},
 		{
