@@ -69,11 +69,13 @@ python -m dynamo.vllm --multimodal-processor --enable-multimodal --model $MODEL_
 if [[ "$SINGLE_GPU" == "true" ]]; then
     # Single GPU mode: both workers share GPU 0 with reduced memory
     CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
-    sleep 20  # Ensure encode worker and PD worker are not initialized concurrently [gluo WAR]
+    # Now that encode worker and PD worker are vLLM engine, need to ensure encode worker and PD worker are not initialized concurrently
+    # on the same GPU to avoid influencing each other's startup process (checks and allocations).
+    sleep 20
     CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
 else
-    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
-    CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+    CUDA_VISIBLE_DEVICES=0 python -m dynamo.vllm --multimodal-worker --enable-multimodal --enable-mm-embeds --model $MODEL_NAME $EXTRA_ARGS &
+    CUDA_VISIBLE_DEVICES=1 python -m dynamo.vllm --multimodal-encode-worker --enable-multimodal --model $MODEL_NAME $EXTRA_ARGS &
 fi
 
 # Wait for all background processes to complete
