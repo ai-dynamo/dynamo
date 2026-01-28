@@ -82,6 +82,12 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 			Value: "16",
 		},
 		{
+			// DYNAMO_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
+			// Default is 10s which is often too short; 300s (5 min) gives workers time to start
+			Name:  "DYNAMO_DISCOVERY_TIMEOUT_SEC",
+			Value: "300",
+		},
+		{
 			Name:  "USE_STREAMING",
 			Value: "true",
 		},

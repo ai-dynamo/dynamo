@@ -18,6 +18,8 @@ spec:
               value: "16"
             - name: DYNAMO_MODEL
               value: "Qwen/Qwen3-0.6B"  # Match your model
+            - name: DYNAMO_DISCOVERY_TIMEOUT
+              value: "300"
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:

@@ -57,6 +57,19 @@ pub enum DynamoLlmResult {
     ERR = 1,
 }
 
+/// Default timeout for discovery sync (seconds).
+/// Can be overridden via DYNAMO_DISCOVERY_TIMEOUT_SEC env var.
+const DEFAULT_DISCOVERY_TIMEOUT_SECS: u64 = 10;
+
+/// Get discovery timeout from environment variable or use default.
+/// Reads DYNAMO_DISCOVERY_TIMEOUT_SEC env var (in seconds).
+fn get_discovery_timeout_secs() -> u64 {
+    std::env::var("DYNAMO_DISCOVERY_TIMEOUT_SEC")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SECS)
+}
+
 /// Wait for the discovery daemon to sync and return at least one instance.
 /// This ensures list() calls will have data available.
 /// Returns the number of instances found, or 0 if timed out.
@@ -120,7 +133,9 @@ pub unsafe extern "C" fn dynamo_llm_init(
                 // This is needed because dynamo_create_worker_selection_pipeline() is called
                 // immediately after, and it needs discovery.list() to return data
                 // the discovery daemon takes time to query K8s and returns async, so we need to wait.
-                let instance_count = wait_for_discovery_sync(drt, 10).await;
+                let timeout_secs = get_discovery_timeout_secs();
+                tracing::info!("Using discovery timeout of {} seconds", timeout_secs);
+                let instance_count = wait_for_discovery_sync(drt, timeout_secs).await;
                 if instance_count == 0 {
                     tracing::error!(
                         "Discovery sync failed: no worker instances found. Is the backend running?"
@@ -1424,7 +1439,9 @@ pub async fn create_worker_selection_pipeline_chat(
     // Only wait for discovery sync if we just initialized the DRT
     // (dynamo_llm_init already does this when it initializes)
     if needs_sync {
-        let instance_count = wait_for_discovery_sync(distributed_runtime, 10).await;
+        let timeout_secs = get_discovery_timeout_secs();
+        tracing::info!("Using discovery timeout of {} seconds", timeout_secs);
+        let instance_count = wait_for_discovery_sync(distributed_runtime, timeout_secs).await;
         if instance_count == 0 {
             return Err(anyhow::anyhow!(
                 "Discovery sync failed: no worker instances found. Is the backend running?"
