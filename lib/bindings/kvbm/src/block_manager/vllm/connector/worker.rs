@@ -160,7 +160,7 @@ impl KvConnectorWorker {
         self.maybe_finished_onboarding.remove(request_id);
         self.request_to_blocks.remove(request_id);
         if self.connector.has_slot(request_id) {
-            self.connector.remove_slot(request_id);
+            self.connector.remove_slot(&request_id.to_string());
         }
     }
 }
