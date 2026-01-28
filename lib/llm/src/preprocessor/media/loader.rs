@@ -145,7 +145,7 @@ impl MediaLoader {
                         })?;
 
                         let url = &video_part.video_url.url;
-                        self.check_if_url_allowed(url)?;
+                        self.media_fetcher.check_if_url_allowed(url)?;
                         let data = EncodedMediaData::from_url(url, &self.http_client).await?;
 
                         // Use runtime decoder if provided, with MDC limits enforced
