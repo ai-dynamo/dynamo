@@ -64,19 +64,12 @@ impl RuntimeMetrics {
             })
         });
 
-        // Register the callback at this hierarchy level
+        // Register the callback at this hierarchy level only.
+        // Do NOT register on parent hierarchies - combined scrapes automatically
+        // traverse child registries and include their callbacks.
         self.hierarchy
             .get_metrics_registry()
             .add_expfmt_callback(callback_arc.clone());
-
-        // Also register at all parent hierarchy levels so the callback is accessible
-        // when prometheus_expfmt() is called on any parent (e.g., DRT)
-        let parents = self.hierarchy.parent_hierarchies();
-        for parent in parents.iter() {
-            parent
-                .get_metrics_registry()
-                .add_expfmt_callback(callback_arc.clone());
-        }
 
         Ok(())
     }
