@@ -74,8 +74,8 @@ jobs:
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
-        cargo-deny --version || cargo install cargo-deny@0.16.4
-        cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+        cargo-deny --version || cargo install cargo-deny@0.19.0
+        cargo-deny -L error --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
