@@ -110,6 +110,14 @@ jobs:
           echo "Created fern/pages-$TAG/"
           ls -la "fern/pages-$TAG/" | head -20
 
+      - name: Convert GitHub admonitions to Fern format
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Converting GitHub-style admonitions to Fern format in pages-$TAG/..."
+          python3 fern/convert_admonitions.py --dir "fern/pages-$TAG"
+          echo "Admonition conversion complete."
+
       - name: Create version config file
         run: |
           TAG="${{ steps.version.outputs.tag }}"
