@@ -757,8 +757,16 @@ extract_trtllm_wheel_from_image() {
     fi
     docker rm -f "$container_id" >/dev/null
 
+    # Portable copy: prefer cp -n, fallback to plain cp if unsupported.
+    _cp_no_clobber() {
+        if cp -n "$1" "$2" 2>/dev/null; then
+            return 0
+        fi
+        cp "$1" "$2"
+    }
+    export -f _cp_no_clobber
     find "$dest_dir/raw" \( -name "*.whl" -o -name "*.txt" \) \
-        -exec cp --update=none {} "$dest_dir/flat/" \;
+        -exec bash -c '_cp_no_clobber "$0" "$1"' {} "$dest_dir/flat/" \;
     return 0
 }
 
