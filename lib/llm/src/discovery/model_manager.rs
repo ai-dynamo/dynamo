@@ -700,29 +700,8 @@ impl ModelManager {
         let client = endpoint.client().await?;
         let mut instance_ids_rx = client.instance_avail_watcher();
 
-        // Wait for at least one worker with runtime config before proceeding.
-        // This ensures the DashMap is populated before KvScheduler starts.
-        tracing::info!("ModelManager: Waiting for at least one worker with runtime config...");
-        runtime_configs_rx
-            .changed()
-            .await
-            .map_err(|_| anyhow::anyhow!("runtime configs watch sender shutdown while waiting"))?;
-
-        // Populate initial state
-        {
-            let instance_ids = instance_ids_rx.borrow();
-            let configs = runtime_configs_rx.borrow();
-            for worker_id in instance_ids.iter() {
-                let config = configs.get(worker_id).cloned();
-                inner.configs.insert(*worker_id, config);
-            }
-            tracing::info!(
-                "ModelManager: Found {} workers, proceeding",
-                inner.configs.len()
-            );
-        }
-
-        // Spawn background task to update configs for future changes
+        // Spawn background task to watch for config changes
+        // Note: We don't block here - consumers should wait on notify for configs they need
         let cancel_token = cancellation_token.clone();
         tokio::spawn(async move {
             tracing::trace!("ModelManager runtime config watcher started");
@@ -756,26 +735,37 @@ impl ModelManager {
                 let current_workers: HashSet<WorkerId> =
                     inner.configs.iter().map(|r| *r.key()).collect();
                 let new_workers: HashSet<WorkerId> = new_instance_ids.iter().copied().collect();
+                let mut worker_removed = false;
                 for removed_worker in current_workers.difference(&new_workers) {
                     inner.configs.remove(removed_worker);
+                    worker_removed = true;
                 }
 
                 // Then, add/update workers
+                // Track if any config became Some (for notify)
+                let mut config_added = false;
                 for worker_id in &new_instance_ids {
                     let config = new_configs.get(worker_id).cloned();
                     if config.is_some() {
                         let prev_config = inner.configs.get(worker_id);
-                        if prev_config.as_ref().map(|r| r.value()) != Some(&config) {
+                        let was_none = prev_config
+                            .as_ref()
+                            .map(|r| r.value().is_none())
+                            .unwrap_or(true);
+                        if was_none {
                             tracing::info!(
                                 "ModelManager: Runtime config found for worker_id: {worker_id}"
                             );
+                            config_added = true;
                         }
                     }
                     inner.configs.insert(*worker_id, config);
                 }
 
-                // Notify waiters that configs have changed
-                inner.notify.notify_waiters();
+                // Notify when a config with Some value is added OR a worker is removed
+                if config_added || worker_removed {
+                    inner.notify.notify_waiters();
+                }
 
                 tracing::trace!(
                     "ModelManager: Updated runtime_configs with {} workers",
