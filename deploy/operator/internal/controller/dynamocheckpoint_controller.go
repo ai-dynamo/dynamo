@@ -311,6 +311,21 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 				Name:  consts.EnvCheckpointReadyFile,
 				Value: consts.CheckpointReadyFilePath,
 			},
+			// Checkpoint hash: For idempotency check
+			corev1.EnvVar{
+				Name:  consts.EnvCheckpointHash,
+				Value: ckpt.Status.IdentityHash,
+			},
+			// Checkpoint location: For idempotency check
+			corev1.EnvVar{
+				Name:  consts.EnvCheckpointLocation,
+				Value: ckpt.Status.Location,
+			},
+			// Storage type: For idempotency check (pvc, s3, oci)
+			corev1.EnvVar{
+				Name:  consts.EnvCheckpointStorageType,
+				Value: string(ckpt.Status.StorageType),
+			},
 		)
 
 		// Add signal volume mount (required for DaemonSet communication)

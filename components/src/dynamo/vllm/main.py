@@ -150,6 +150,27 @@ async def worker():
     pre_created_engine = None
     is_restored = False
     if is_checkpoint_mode:
+        # Check if checkpoint already exists (idempotency - PVC storage only)
+        storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
+        checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
+        
+        if storage_type == "pvc" and checkpoint_location:
+            done_marker = f"{checkpoint_location}/checkpoint.done"
+            
+            if os.path.exists(done_marker):
+                logger.info("=" * 60)
+                logger.info("CHECKPOINT ALREADY EXISTS")
+                logger.info("=" * 60)
+                logger.info(f"Storage type: {storage_type}")
+                logger.info(f"Found existing checkpoint: {checkpoint_location}")
+                logger.info(f"Marker file: {done_marker}")
+                logger.info("Skipping checkpoint creation (idempotent)")
+                logger.info("=" * 60)
+                return
+            else:
+                logger.info(f"No existing checkpoint found at: {checkpoint_location}")
+                logger.info("Will create new checkpoint")
+        
         # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
         logger.info(
             f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
