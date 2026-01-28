@@ -84,10 +84,10 @@ def _build_planners(args, prometheus_client):
     prefill_planner.model_name = "test-model"
     decode_planner.model_name = "test-model"
 
-    async def mock_get_workers_info(include_prefill=True, include_decode=True):
+    async def mock_get_workers_info(require_prefill=True, require_decode=True):
         return (
-            ["prefill-0"] if include_prefill else [],
-            ["decode-0"] if include_decode else [],
+            ["prefill-0"] if require_prefill else [],
+            ["decode-0"] if require_decode else [],
         )
 
     prefill_planner.get_workers_info = mock_get_workers_info
@@ -127,7 +127,7 @@ def _expected_decode(args, decode_planner, sample):
 
 def _run_interval(prefill_planner, decode_planner, shared_state):
     asyncio.run(
-        prefill_planner.observe_metrics(include_prefill=True, include_decode=True)
+        prefill_planner.observe_metrics(require_prefill=True, require_decode=True)
     )
     decode_planner.update_predictors_from_metrics(shared_state.last_metrics)
     next_num_p = prefill_planner.plan_adjustment()

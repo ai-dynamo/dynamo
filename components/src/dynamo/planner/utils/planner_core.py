@@ -394,7 +394,7 @@ class BasePlanner:
         return client
 
     async def get_workers_info(
-        self, include_prefill: bool = True, include_decode: bool = True
+        self, require_prefill: bool = True, require_decode: bool = True
     ):
         if self.runtime is None:
             raise RuntimeError("Runtime is not initialized")
@@ -403,7 +403,7 @@ class BasePlanner:
         d_endpoints = []
         worker_names = WORKER_COMPONENT_NAMES[self.args.backend]
 
-        if include_prefill:
+        if require_prefill:
             try:
                 if self.prefill_client is None:
                     self.prefill_client = await self._get_or_create_client(
@@ -417,7 +417,7 @@ class BasePlanner:
                     "No prefill workers found, aggregated mode is not supported yet"
                 )
 
-        if include_decode:
+        if require_decode:
             try:
                 if self.workers_client is None:
                     self.workers_client = await self._get_or_create_client(
@@ -431,10 +431,10 @@ class BasePlanner:
         return p_endpoints, d_endpoints
 
     async def observe_metrics(
-        self, include_prefill: bool = True, include_decode: bool = True
+        self, require_prefill: bool = True, require_decode: bool = True
     ):
         p_endpoints, d_endpoints = await self.get_workers_info(
-            include_prefill=include_prefill, include_decode=include_decode
+            require_prefill=require_prefill, require_decode=require_decode
         )
         self.shared_state.p_endpoints = p_endpoints
         self.shared_state.d_endpoints = d_endpoints
@@ -647,8 +647,6 @@ class BasePlanner:
             )  # normalize model name to lowercase (MDC)
 
         self.shared_state.last_adjustment_time = time.time()
-        include_prefill = self.component_type == SubComponentType.PREFILL
-        include_decode = self.component_type == SubComponentType.DECODE
 
         while True:
             current_time = time.time()
@@ -661,7 +659,7 @@ class BasePlanner:
                 logger.info("New adjustment interval started!")
 
                 await self.observe_metrics(
-                    include_prefill=include_prefill, include_decode=include_decode
+                    require_prefill=require_prefill, require_decode=require_decode
                 )
                 desired_replicas = self.plan_adjustment()
                 if desired_replicas is not None:
@@ -833,7 +831,7 @@ class DisaggPlanner:
                 logger.info("New adjustment interval started!")
 
                 await self.prefill_planner.observe_metrics(
-                    include_prefill=True, include_decode=True
+                    require_prefill=True, require_decode=True
                 )
                 self.decode_planner.update_predictors_from_metrics(
                     self.shared_state.last_metrics
