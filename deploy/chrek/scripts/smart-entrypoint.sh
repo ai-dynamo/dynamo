@@ -69,7 +69,7 @@ if should_restore_checkpoint; then
   log "Location: $CHECKPOINT_PATH/$CHECKPOINT_HASH"
   log "Invoking restore-entrypoint..."
   log "=========================================="
-  
+
   # Execute restore-entrypoint
   # Any args passed to this script are forwarded (though restore-entrypoint ignores them)
   exec /restore-entrypoint "$@"
@@ -77,7 +77,7 @@ else
   log "=========================================="
   log "COLD START MODE"
   log "=========================================="
-  
+
   # No checkpoint found or not requested - fall back to cold start
   if [ $# -eq 0 ]; then
     # No args provided - this is likely an error
@@ -85,11 +85,11 @@ else
     log "Set DYN_CHECKPOINT_HASH to restore a checkpoint, or provide a command to run"
     exit 1
   fi
-  
+
   log "No checkpoint to restore"
   log "Executing command: $*"
   log "=========================================="
-  
+
   # Execute the provided command
   exec "$@"
 fi

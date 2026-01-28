@@ -81,9 +81,7 @@ async def wait_for_checkpoint_signal_file(signal_file: str) -> bool:
         False if signal file detected (should exit)
     """
     # Get restore marker file path (created by restore entrypoint before CRIU restore)
-    restore_marker = os.environ.get(
-        "DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored"
-    )
+    restore_marker = os.environ.get("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored")
 
     logger.info("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
     logger.info(f"CHECKPOINT_READY: Waiting for signal file: {signal_file}")

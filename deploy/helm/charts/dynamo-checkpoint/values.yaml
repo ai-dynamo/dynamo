@@ -7,7 +7,7 @@
 storage:
   # Storage type: pvc (default), s3, or oci
   type: pvc
-  
+
   # PVC configuration (when type=pvc)
   pvc:
     # Create a new PVC (set to false if using existing PVC)
