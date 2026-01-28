@@ -122,13 +122,6 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 curl http://localhost:8081/metrics
 ```
 
-### KV Router Metrics (kvrouter)
-
-KV router/indexer metrics are exposed on the backend system status port (default: 8081, configurable via `DYN_SYSTEM_PORT`) with the `dynamo_component_*` prefix:
-
-- `dynamo_component_kv_cache_events_applied`: Total number of KV cache events applied to the index (counter)
-  - Labels: `event_type` (`stored`, `removed`, `cleared`), `status` (`ok`, `parent_block_not_found`, `block_not_found`, `invalid_block`)
-
 ### Specialized Component Metrics
 
 Some components expose additional metrics specific to their functionality:
