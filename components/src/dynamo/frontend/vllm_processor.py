@@ -69,17 +69,22 @@ class VllmProcessor:
         elif "max_tokens" in request:
             max_tokens = request["max_tokens"]
         else:
-            max_tokens = 8192  # TODO what does rest of Dynamo do?
+            max_tokens = 8192
+
+        sampling_params = SamplingParams(
+            output_kind=RequestOutputKind.DELTA,
+            max_tokens=max_tokens,
+        )
+        for (k, v) in request.items():
+            if hasattr(sampling_params, k):
+                setattr(sampling_params, k, v)
 
         request_id = random_uuid()
+        # This calls update_from_generation_config and update_from_tokenizer on SamplingParams
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
             templated,
-            SamplingParams(
-                output_kind=RequestOutputKind.DELTA,
-                max_tokens=max_tokens,
-                # TODO: so many sampling params user could set
-            ),
+            sampling_params,
             # arrival_time: float | None = None,
             # lora_request: LoRARequest | None = None,
             # tokenization_kwargs: dict[str, Any] | None = None,
