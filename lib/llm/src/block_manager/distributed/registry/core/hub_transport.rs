@@ -274,6 +274,7 @@ impl HubTransport for ZmqHubTransport {
     async fn respond(&mut self, client: &ClientId, data: &[u8]) -> Result<()> {
         let mut msg = VecDeque::new();
         msg.push_back(Message::from(client.as_bytes().to_vec()));
+        msg.push_back(Message::from(vec![])); // empty delimiter frame
         msg.push_back(Message::from(data.to_vec()));
 
         self.router

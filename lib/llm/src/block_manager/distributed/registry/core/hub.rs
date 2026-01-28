@@ -33,15 +33,12 @@ pub struct HubStats {
 pub struct HubConfig {
     /// Lease TTL for can_offload claims.
     pub lease_ttl: Duration,
-    /// Interval for cleaning up expired leases.
-    pub lease_cleanup_interval: Duration,
 }
 
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
             lease_ttl: Duration::from_secs(30),
-            lease_cleanup_interval: Duration::from_secs(5),
         }
     }
 }

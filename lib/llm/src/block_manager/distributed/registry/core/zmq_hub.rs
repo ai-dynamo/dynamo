@@ -126,34 +126,51 @@ where
         // Wait for either to finish or cancellation
         let mut query_handle = query_handle;
         let mut pull_handle = pull_handle;
+
         tokio::select! {
             result = &mut query_handle => {
                 // Query handler finished first, cancel the other and await it
                 cancel.cancel();
-                match result {
-                    Err(e) => error!(error = %e, "Query handler panicked"),
-                    Ok(Err(e)) => error!(error = %e, "Query handler failed"),
-                    Ok(Ok(())) => {}
-                }
+                let handler_error = match result {
+                    Err(e) => {
+                        error!(error = %e, "Query handler panicked");
+                        Some(anyhow::anyhow!("Query handler panicked: {}", e))
+                    }
+                    Ok(Err(e)) => {
+                        error!(error = %e, "Query handler failed");
+                        Some(e)
+                    }
+                    Ok(Ok(())) => None,
+                };
                 match pull_handle.await {
                     Err(e) => error!(error = %e, "Pull handler panicked during shutdown"),
                     Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
                     Ok(Ok(())) => {}
                 }
+                info!(entries = self.storage.len(), "ZMQ hub stopped");
+                return handler_error.map_or(Ok(()), Err);
             }
             result = &mut pull_handle => {
                 // Pull handler finished first, cancel the other and await it
                 cancel.cancel();
-                match result {
-                    Err(e) => error!(error = %e, "Pull handler panicked"),
-                    Ok(Err(e)) => error!(error = %e, "Pull handler failed"),
-                    Ok(Ok(())) => {}
-                }
+                let handler_error = match result {
+                    Err(e) => {
+                        error!(error = %e, "Pull handler panicked");
+                        Some(anyhow::anyhow!("Pull handler panicked: {}", e))
+                    }
+                    Ok(Err(e)) => {
+                        error!(error = %e, "Pull handler failed");
+                        Some(e)
+                    }
+                    Ok(Ok(())) => None,
+                };
                 match query_handle.await {
                     Err(e) => error!(error = %e, "Query handler panicked during shutdown"),
                     Ok(Err(e)) => error!(error = %e, "Query handler failed during shutdown"),
                     Ok(Ok(())) => {}
                 }
+                info!(entries = self.storage.len(), "ZMQ hub stopped");
+                return handler_error.map_or(Ok(()), Err);
             }
             _ = cancel.cancelled() => {
                 info!("Hub received shutdown signal");
@@ -168,11 +185,10 @@ where
                     Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
                     Ok(Ok(())) => {}
                 }
+                info!(entries = self.storage.len(), "ZMQ hub stopped");
+                return Ok(());
             }
         }
-
-        info!(entries = self.storage.len(), "ZMQ hub stopped");
-        Ok(())
     }
 
     /// Run the query handler (ROUTER socket).
@@ -203,6 +219,7 @@ where
                     Some((identity, response)) = rx.recv() => {
                         let mut frames = VecDeque::new();
                         frames.push_back(Message::from(identity));
+                        frames.push_back(Message::from(vec![])); // empty delimiter frame
                         frames.push_back(Message::from(response));
 
                         if let Err(e) = send_half.send(Multipart(frames)).await {

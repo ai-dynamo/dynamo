@@ -111,7 +111,6 @@ where
     storage: S,
     codec: C,
     lease_ttl: Duration,
-    lease_cleanup_interval: Duration,
     _phantom: PhantomData<(K, V, M)>,
 }
 
@@ -129,7 +128,6 @@ where
             storage,
             codec,
             lease_ttl: Duration::from_secs(30),
-            lease_cleanup_interval: Duration::from_secs(5),
             _phantom: PhantomData,
         }
     }
@@ -143,21 +141,14 @@ where
         self
     }
 
-    /// Set the lease cleanup interval.
-    ///
-    /// Expired leases are cleaned up at this interval.
-    /// Default: 5 seconds
-    pub fn lease_cleanup_interval(mut self, interval: Duration) -> Self {
-        self.lease_cleanup_interval = interval;
-        self
-    }
-
     /// Build the registry hub.
+    ///
+    /// Note: To enable periodic lease cleanup, spawn `lease_cleanup_task`
+    /// with the hub's `lease_manager()` and your desired cleanup interval.
     pub fn build(self) -> RegistryHub<K, V, M, S, C> {
         use super::hub::HubConfig;
         let config = HubConfig {
             lease_ttl: self.lease_ttl,
-            lease_cleanup_interval: self.lease_cleanup_interval,
         };
         RegistryHub::with_config(self.storage, self.codec, config)
     }
@@ -251,7 +242,6 @@ mod tests {
 
         let built_hub: RegistryHub<u64, u64, NoMetadata, _, _> = hub(storage)
             .lease_ttl(Duration::from_secs(60))
-            .lease_cleanup_interval(Duration::from_secs(10))
             .build();
 
         assert!(built_hub.is_empty());

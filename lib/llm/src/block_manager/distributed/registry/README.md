@@ -53,7 +53,6 @@ use std::time::Duration;
 let storage = HashMapStorage::<u64, u64>::new();
 let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
     .lease_ttl(Duration::from_secs(60))
-    .lease_cleanup_interval(Duration::from_secs(10))
     .build();
 
 // Access lease stats
@@ -139,7 +138,6 @@ let registry_client = client::<u64, u64, NoMetadata, _>(transport)
 let storage = HashMapStorage::<u64, u64>::new();
 let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
     .lease_ttl(Duration::from_secs(60))
-    .lease_cleanup_interval(Duration::from_secs(10))
     .build();
 ```
 
