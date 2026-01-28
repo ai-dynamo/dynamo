@@ -406,7 +406,7 @@ class GMSClientMemoryManager:
         self._va_preserved = True
 
         # Ensure all CUDA VMM unmap operations complete before releasing the lock.
-        # This prevents race conditions where wake_up() may be called before
+        # This prevents race conditions where remap() may be called before
         # physical memory is fully released.
         if torch.cuda.is_available():
             torch.cuda.synchronize()
