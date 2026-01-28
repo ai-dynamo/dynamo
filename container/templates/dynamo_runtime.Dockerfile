@@ -2,7 +2,7 @@
 ########## Runtime image ##############
 #######################################
 
-FROM base AS runtime
+FROM dynamo_base AS runtime
 
 ARG ARCH_ALT
 ARG PYTHON_VERSION

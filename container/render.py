@@ -59,5 +59,9 @@ def main():
 
     render(args, context, script_dir)
 
+    if args.target == "local-dev":
+        print("INFO: Remember to add --build-arg values for USER_UID and USER_GID when building a local-dev image!")
+        print("      Recommendation: --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g)")
+
 if __name__ == "__main__":
     main()
