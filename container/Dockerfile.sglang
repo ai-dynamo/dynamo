@@ -158,6 +158,9 @@ RUN dnf install -y almalinux-release-synergy && \
         make \
         # Install GCC toolset 14 (CUDA compatible, max version 14)
         rpm-build \
+        rpm-sign \
+        # Debugging tools
+        strace \
         # Build tools
         cmake \
         ninja-build \

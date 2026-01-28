@@ -169,6 +169,9 @@ RUN dnf install -y almalinux-release-synergy && \
         make \
         # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
         rpm-build \
+        rpm-sign \
+        # Debugging tools
+        strace \
         # Build tools
         cmake \
         ninja-build \
