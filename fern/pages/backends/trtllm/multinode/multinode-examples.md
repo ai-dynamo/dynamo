@@ -148,10 +148,9 @@ Assuming you have at least 8 nodes allocated (4 for prefill, 4 for decode)
 following the setup above, follow these steps below to launch a **disaggregated**
 deployment across 8 nodes:
 
-<Tip>
-Make sure you have a fresh environment and don't still have the aggregated
-example above still deployed on the same set of nodes.
-</Tip>
+> [!TIP]
+> Make sure you have a fresh environment and don't still have the aggregated
+> example above still deployed on the same set of nodes.
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
@@ -176,10 +175,9 @@ example above still deployed on the same set of nodes.
 ./srun_disaggregated.sh
 ```
 
-<Tip>
-To launch multiple replicas of the configured prefill/decode workers, you can set
-NUM_PREFILL_WORKERS and NUM_DECODE_WORKERS respectively (default: 1).
-</Tip>
+> [!TIP]
+> To launch multiple replicas of the configured prefill/decode workers, you can set
+> NUM_PREFILL_WORKERS and NUM_DECODE_WORKERS respectively (default: 1).
 
 ## Understanding the Output
 

@@ -15,9 +15,8 @@ Dynamo's coordination layer adapts to the deployment environment:
 | **Kubernetes** (with operator) | Native K8s (CRDs, EndpointSlices) | NATS (optional) | TCP |
 | **Bare metal / Local** (default) | etcd | NATS (optional) | TCP |
 
-<Note>
-The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
-</Note>
+> [!NOTE]
+> The runtime always defaults to `kv_store` (etcd) for service discovery. Kubernetes deployments must explicitly set `DYN_DISCOVERY_BACKEND=kubernetes` - the Dynamo operator handles this automatically.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -51,9 +50,8 @@ The operator explicitly sets:
 DYN_DISCOVERY_BACKEND=kubernetes
 ```
 
-<Warning>
-This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
-</Warning>
+> [!WARNING]
+> This must be explicitly configured. The runtime defaults to `kv_store` in all environments.
 
 ### How It Works
 

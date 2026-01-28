@@ -21,9 +21,8 @@ The following table shows the backend framework versions included with each Dyna
 
 **main (ToT)** reflects the current development branch. **v0.8.1.post1** is a patch release for PyPI wheels and TRT-LLM container only (no GitHub release).
 
-<Warning>
-Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] Python wheel will fail.
-</Warning>
+> [!WARNING]
+> Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] Python wheel will fail.
 
 | **Dynamo Version** | **SGLang**                | **TensorRT-LLM** | **vLLM**                 |
 | :----------------- | :------------------------ | :--------------- | :----------------------- |
@@ -69,9 +68,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 Wheels are built using a manylinux_2_28-compatible environment and validated on CentOS Stream 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but not officially verified.
 
-<Error>
-KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
-</Error>
+> [!CAUTION]
+> KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
 
 ## Software Compatibility
 
@@ -120,9 +118,8 @@ For extended driver compatibility beyond the minimum versions listed above, cons
 | :------------------------ | :---------- | :--------------- | :--------- |
 | **Amazon Linux**          | 2023        | x86_64           | Supported  |
 
-<Error>
-**AL2023 TensorRT-LLM Limitation:** There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
-</Error>
+> [!CAUTION]
+> **AL2023 TensorRT-LLM Limitation:** There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
 
 ## Build Support
 

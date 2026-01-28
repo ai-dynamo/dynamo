@@ -46,14 +46,12 @@ export DYN_KVBM_NIXL_BACKEND_GDS=false
 - `true`, `1`, `on`, `yes` - Enable the backend
 - `false`, `0`, `off`, `no` - Disable the backend
 
-<Note>
-If no `DYN_KVBM_NIXL_BACKEND_*` environment variables are set, UCX is used as the default backend.
-</Note>
+> [!NOTE]
+> If no `DYN_KVBM_NIXL_BACKEND_*` environment variables are set, UCX is used as the default backend.
 
 ## Alternative Method: UCX
 
 TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. To enable UCX as the KV cache transfer backend, set `cache_transceiver_config.backend: UCX` in your engine configuration YAML file.
 
-<Note>
-The environment variable `TRTLLM_USE_UCX_KV_CACHE=1` with `cache_transceiver_config.backend: DEFAULT` does not enable UCX. You must explicitly set `backend: UCX` in the configuration.
-</Note>
+> [!NOTE]
+> The environment variable `TRTLLM_USE_UCX_KV_CACHE=1` with `cache_transceiver_config.backend: DEFAULT` does not enable UCX. You must explicitly set `backend: UCX` in the configuration.
