@@ -25,56 +25,26 @@ jobs:
           key: cache-lychee-${{ github.sha }}
           restore-keys: cache-lychee-
 
-      # https://github.com/lycheeverse/lychee/issues/1487
-      - name: Install CA Certificates for lychee
-        run: |
-          sudo apt-get install ca-certificates
-
-      - name: Install lychee
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.local/bin"
-          cd "$RUNNER_TEMP"
-          # TODO: Lychee v0.19.1 doesn't support regex in --exclude-path, so use nightly
-          # release until there is a released version containing regex support.
-          curl -sSL -o lychee.tar.gz \
-            https://github.com/lycheeverse/lychee/releases/download/nightly/lychee-x86_64-unknown-linux-gnu.tar.gz
-          tar -xzf lychee.tar.gz
-          BIN_PATH=$(find . -maxdepth 2 -type f -name lychee | head -n1)
-          install -m 0755 "$BIN_PATH" "$HOME/.local/bin/lychee"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          lychee --version
-
       - name: Check documentation links with lychee
-        env:
-          # Set GITHUB_TOKEN to avoid github rate limits on URL checks
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          # Set offline mode for pull requests, full check for pushes to main
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "Running lychee in offline mode (internal links only) for PR check"
-            OFFLINE_FLAG="--offline"
-          else
-            echo "Running lychee in full mode (all links) for main branch"
-            OFFLINE_FLAG=""
-          fi
-
-          # Run lychee against all files in repo
-          lychee \
-            --cache \
-            --no-progress \
-            --max-retries 2 \
-            --retry-wait-time 2 \
-            --timeout 20 \
-            --root-dir "${{ github.workspace }}" \
-            --exclude-path ".*ATTRIBUTIONS.*" \
-            --exclude-path "./lib/llm/tests/data/.*" \
-            --accept "200..=299, 403, 429" \
-            --exclude-all-private --exclude 0.0.0.0 \
-            $OFFLINE_FLAG \
+        uses: lycheeverse/lychee-action@a8c4c7cb88f0c7386610c35eb25108e448569cb0 # v2.0.2
+        with:
+          args: >-
+            --cache
+            --no-progress
+            --max-retries 2
+            --retry-wait-time 2
+            --timeout 20
+            --root-dir ${{ github.workspace }}
+            --exclude-path ".*ATTRIBUTIONS.*"
+            --exclude-path "./lib/llm/tests/data/.*"
+            --accept "200..=299, 403, 429"
+            --exclude-all-private
+            --exclude 0.0.0.0
+            ${{ github.event_name == 'pull_request' && '--offline' || '' }}
             .
+          fail: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   broken-links-check:
     name: Check for broken markdown links
