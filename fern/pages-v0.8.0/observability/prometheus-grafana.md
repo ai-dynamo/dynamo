@@ -70,7 +70,9 @@ Other interfaces:
 - **Prometheus**: `http://localhost:9090`
 - **Tempo** (tracing): Accessible through Grafana's Explore view. See [Tracing Guide](tracing.md) for details.
 
-**Note:** If accessing from another machine, replace `localhost` with the machine's hostname or IP address, and ensure firewall rules allow access to these ports (3000, 9090).
+<Note>
+If accessing from another machine, replace `localhost` with the machine's hostname or IP address, and ensure firewall rules allow access to these ports (3000, 9090).
+</Note>
 
 ---
 

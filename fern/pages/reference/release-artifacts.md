@@ -165,7 +165,7 @@ For a complete list of known issues, refer to the release notes for each patch:
 |---------|--------------|--------|------|
 | `v0.8.1` | Jan 23, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.8.1/index.html) |
 | `v0.8.0` | Jan 15, 2026 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.8.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.8.0/index.html) |
-| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.7.1/index.html) |
+| `v0.7.1` | Dec 15, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.1) | — |
 | `v0.7.0` | Nov 26, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.7.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.7.0/index.html) |
 | `v0.6.1` | Nov 6, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.1) | [Docs](https://docs.nvidia.com/dynamo/archive/0.6.1/index.html) |
 | `v0.6.0` | Oct 28, 2025 | [Release](https://github.com/ai-dynamo/dynamo/releases/tag/v0.6.0) | [Docs](https://docs.nvidia.com/dynamo/archive/0.6.0/index.html) |

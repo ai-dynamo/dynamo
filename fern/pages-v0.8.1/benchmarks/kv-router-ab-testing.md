@@ -520,7 +520,9 @@ kubectl -n benchmark exec ${POD_NAME} -- bash -lc '
 '
 ```
 
-**Note:** This will take 3-5 minutes. The terminal output includes a summary table.
+<Note>
+This will take 3-5 minutes. The terminal output includes a summary table.
+</Note>
 
 ### Step 5.2: Benchmark Router-ON (KV Smart Router)
 

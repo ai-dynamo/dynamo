@@ -76,7 +76,9 @@ sglang:generation_tokens_total{model_name="meta-llama/Llama-3.1-8B-Instruct"} 75
 sglang:cache_hit_rate{model_name="meta-llama/Llama-3.1-8B-Instruct"} 0.0075
 ```
 
-**Note:** The specific metrics shown above are examples and may vary depending on your SGLang version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.sglang.ai/references/production_metrics.html) for the current list.
+<Note>
+The specific metrics shown above are examples and may vary depending on your SGLang version. Always inspect your actual `/metrics` endpoint or refer to the [official documentation](https://docs.sglang.ai/references/production_metrics.html) for the current list.
+</Note>
 
 ### Metric Categories
 
@@ -87,7 +89,9 @@ SGLang provides metrics in the following categories (all prefixed with `sglang:`
 - **Latency metrics** - Request and token latency measurements
 - **Disaggregation metrics** - Metrics specific to disaggregated deployments (when enabled)
 
-**Note:** Specific metrics are subject to change between SGLang versions. Always refer to the [official documentation](https://docs.sglang.ai/references/production_metrics.html) or inspect the `/metrics` endpoint for your SGLang version.
+<Note>
+Specific metrics are subject to change between SGLang versions. Always refer to the [official documentation](https://docs.sglang.ai/references/production_metrics.html) or inspect the `/metrics` endpoint for your SGLang version.
+</Note>
 
 ## Available Metrics
 

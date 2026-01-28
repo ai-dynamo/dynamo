@@ -31,7 +31,9 @@ Dynamo has **two independent communication planes**:
 - **Request plane** (**`DYN_REQUEST_PLANE`**): how **RPC requests** flow between components (frontend → router → worker), via `tcp`, `http`, or `nats`.
 - **KV event plane** (currently only **NATS** is supported): how **KV cache events** (and optional router replica sync) are distributed/persisted for KV-aware routing.
 
-**Note:** If you are using `tcp` or `http` request plane with KV events enabled (default), NATS is automatically initialized. You can optionally configure `NATS_SERVER` environment variable (e.g., `NATS_SERVER=nats://nats-hostname:port`) to specify a custom NATS server; otherwise, it defaults to `localhost:4222`. To completely disable NATS, use `--no-kv-events` on the frontend.
+<Note>
+If you are using `tcp` or `http` request plane with KV events enabled (default), NATS is automatically initialized. You can optionally configure `NATS_SERVER` environment variable (e.g., `NATS_SERVER=nats://nats-hostname:port`) to specify a custom NATS server; otherwise, it defaults to `localhost:4222`. To completely disable NATS, use `--no-kv-events` on the frontend.
+</Note>
 
 Because they are independent, you can mix them.
 
@@ -83,7 +85,9 @@ DYN_REQUEST_PLANE=tcp python -m dynamo.frontend --http-port=8000 &
 DYN_REQUEST_PLANE=tcp python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
-**Note:** By default, TCP uses an OS-assigned free port (port 0). This is ideal for environments where multiple services may run on the same machine or when you want to avoid port conflicts. If you need a specific port (e.g., for firewall rules), set `DYN_TCP_RPC_PORT` explicitly.
+<Note>
+By default, TCP uses an OS-assigned free port (port 0). This is ideal for environments where multiple services may run on the same machine or when you want to avoid port conflicts. If you need a specific port (e.g., for firewall rules), set `DYN_TCP_RPC_PORT` explicitly.
+</Note>
 
 **When to use TCP:**
 - Simple deployments with direct service-to-service communication (e.g. frontend to backend)
@@ -176,7 +180,9 @@ See [`examples/backends/vllm/launch/agg_request_planes.sh`](https://github.com/a
 
 The Dynamo repository includes a complete example demonstrating all three request planes:
 
-**Location:** `examples/backends/vllm/launch/agg_request_planes.sh`
+<Location>
+`examples/backends/vllm/launch/agg_request_planes.sh`
+</Location>
 
 ```bash
 cd examples/backends/vllm/launch
@@ -252,7 +258,9 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Issue: Services Can't Communicate
 
-**Symptoms:** Requests timeout or fail to reach the backend
+<Symptoms>
+Requests timeout or fail to reach the backend
+</Symptoms>
 
 **Solutions:**
 - Verify all services use the same `DYN_REQUEST_PLANE` setting
@@ -262,7 +270,9 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Issue: "Invalid request plane mode" Error
 
-**Symptoms:** Service fails to start with configuration error
+<Symptoms>
+Service fails to start with configuration error
+</Symptoms>
 
 **Solutions:**
 - Check `DYN_REQUEST_PLANE` spelling (valid values: `nats`, `tcp`, `http`)
@@ -271,7 +281,9 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### Issue: Port Conflicts
 
-**Symptoms:** Server fails to start due to "address already in use"
+<Symptoms>
+Server fails to start due to "address already in use"
+</Symptoms>
 
 **Solutions:**
 - TCP: By default, TCP uses an OS-assigned free port, so port conflicts should be rare. If you explicitly set `DYN_TCP_RPC_PORT` to a specific port and get conflicts, either change the port or remove the setting to use automatic port assignment.

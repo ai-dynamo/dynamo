@@ -38,14 +38,15 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Ubuntu**           | 24.04       | ARM64            | Supported    |
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
-> [!Note]
-> Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04).
->
-> Compatibility with other Linux distributions is expected but has not been officially verified yet.
+<Note>
+Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04).
 
-> [!Caution]
-> KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
+Compatibility with other Linux distributions is expected but has not been officially verified yet.
+</Note>
 
+<Warning>
+KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
+</Warning>
 ## Software Compatibility
 
 ### Runtime Dependency
@@ -67,13 +68,13 @@ The following table shows the dependency versions included with each Dynamo rele
 | vLLM           | 0.13.0         | 0.12.0     | 0.11.0     | 0.11.0           | 0.11.0     |
 | NIXL           | 0.8.0          | 0.8.0      | 0.8.0      | 0.8.0            | 0.8.0      |
 
-> [!Note]
-> **main (ToT)** reflects the current development branch.
+<Note>
+**main (ToT)** reflects the current development branch.
+</Note>
 
-
-> [!Important]
-> Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.
-
+<Important>
+Specific versions of TensorRT-LLM supported by Dynamo are subject to change. Currently TensorRT-LLM does not support Python 3.11 so installation of the ai-dynamo[trtllm] will fail.
+</Important>
 ### CUDA Support by Framework
 | **Dynamo Version**   | **SGLang**                        | **TensorRT-LLM**        | **vLLM**                          |
 | :------------------- | :-------------------------------- | :-----------------------| :-------------------------------- |
@@ -90,9 +91,9 @@ The following table shows the dependency versions included with each Dynamo rele
 | :------------------------ | :---------- | :--------------- | :--------- |
 | **Amazon Linux**          | 2023        | x86_64           | Supported¹ |
 
-> [!Caution]
-> There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
-
+<Warning>
+There is a known issue with the TensorRT-LLM framework when running the AL2023 container locally with `docker run --network host ...` due to a [bug](https://github.com/mpi4py/mpi4py/discussions/491#discussioncomment-12660609) in mpi4py. To avoid this issue, replace the `--network host` flag with more precise networking configuration by mapping only the necessary ports (e.g., 4222 for nats, 2379/2380 for etcd, 8000 for frontend).
+</Warning>
 ## Build Support
 
 **Dynamo** currently provides build support in the following ways:

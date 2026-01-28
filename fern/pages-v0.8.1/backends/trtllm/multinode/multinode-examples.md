@@ -4,7 +4,9 @@
 title: "Example: Multi-node TRTLLM Workers with Dynamo on Slurm"
 ---
 
-> **Note:** The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+<Note>
+The scripts referenced in this example (such as `srun_aggregated.sh` and `srun_disaggregated.sh`) can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+</Note>
 
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),
 the set of nodes need to be launched together in the same MPI world, such as
@@ -148,9 +150,10 @@ Assuming you have at least 8 nodes allocated (4 for prefill, 4 for decode)
 following the setup above, follow these steps below to launch a **disaggregated**
 deployment across 8 nodes:
 
-> [!Tip]
-> Make sure you have a fresh environment and don't still have the aggregated
-> example above still deployed on the same set of nodes.
+<Tip>
+Make sure you have a fresh environment and don't still have the aggregated
+example above still deployed on the same set of nodes.
+</Tip>
 
 ```bash
 # Defaults set in srun_disaggregated.sh, but can customize here.
@@ -175,9 +178,10 @@ deployment across 8 nodes:
 ./srun_disaggregated.sh
 ```
 
-> [!Tip]
-> To launch multiple replicas of the configured prefill/decode workers, you can set
-> NUM_PREFILL_WORKERS and NUM_DECODE_WORKERS respectively (default: 1).
+<Tip>
+To launch multiple replicas of the configured prefill/decode workers, you can set
+NUM_PREFILL_WORKERS and NUM_DECODE_WORKERS respectively (default: 1).
+</Tip>
 
 ## Understanding the Output
 

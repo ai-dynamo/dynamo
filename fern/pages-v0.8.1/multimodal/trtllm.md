@@ -10,7 +10,9 @@ You can provide multimodal inputs in the following ways:
 - By sending image URLs
 - By providing paths to pre-computed embedding files
 
-> **Note:** You should provide **either image URLs or embedding file paths** in a single request.
+<Note>
+You should provide **either image URLs or embedding file paths** in a single request.
+</Note>
 
 ## Support Matrix
 
@@ -179,7 +181,9 @@ cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/epd_disagg.sh
 ```
 
-> **Note:** This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific embedding file ready.
+<Note>
+This script is designed for 8-node H200 with `Llama-4-Scout-17B-16E-Instruct` model and assumes you have a model-specific embedding file ready.
+</Note>
 
 ### Configuration
 
@@ -246,7 +250,9 @@ sequenceDiagram
 
 This section demonstrates how to deploy large multimodal models that require a multi-node setup using Slurm.
 
-> **Note:** The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+<Note>
+The scripts referenced in this section can be found in [`examples/basics/multinode/trtllm/`](https://github.com/ai-dynamo/dynamo/tree/main/examples/basics/multinode/trtllm/).
+</Note>
 
 ### Environment Setup
 
@@ -310,7 +316,9 @@ pkill srun
 | E/P/D (pre-computed embeddings) | `epd_disagg.sh` | Yes | Encoder → Prefill (embeddings via NIXL) |
 | E/P/D (WIP) | N/A | No | Encoder → Prefill (handles via params), Prefill → Decode (KV cache) |
 
-> **Note:** NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
+<Note>
+NIXL for KV cache transfer is currently beta and only supported on AMD64 (x86_64) architecture.
+</Note>
 
 ## ModelInput Types and Registration
 

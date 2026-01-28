@@ -42,7 +42,9 @@ SGLang Multimodal <sglang.md>
 - **E/P/D** - All stages separate
 - **EP/D** - Combined encode+prefill, separate decode
 
-**Status:** ✅ Supported | 🚧 WIP | 🧪 Experimental | ❌ Not supported
+<Status>
+✅ Supported | 🚧 WIP | 🧪 Experimental | ❌ Not supported
+</Status>
 
 ### Input Format Support
 
@@ -186,7 +188,9 @@ Response
 | Encode+Prefill Worker | Combined encoding and prefill |
 | Decode Worker | Decode only, token generation |
 
-> **Note:** TRT-LLM's EP/D mode skips the Python Processor - the Rust frontend handles tokenization and routes directly to the Prefill worker.
+<Note>
+TRT-LLM's EP/D mode skips the Python Processor - the Rust frontend handles tokenization and routes directly to the Prefill worker.
+</Note>
 > For multimodal requests, the Python prefill worker still re-tokenizes/builds inputs; Rust token_ids are ignored.
 
 **When to use:** Models without pre-computed embedding support (Llama 4), or TRT-LLM disaggregated deployment.
