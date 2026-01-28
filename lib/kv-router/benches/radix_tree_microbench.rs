@@ -11,15 +11,15 @@
 //! Size is defined as total (worker, block) pairs in the tree.
 //! Depth is the number of blocks per sequence (depth = (isl + osl) / block_size).
 //!
-//! Run with: cargo run --package dynamo-llm --bin radix_tree_microbench --features kv-router-stress -- --help
+//! Run with: cargo bench --package dynamo-kv-router --bench radix_tree_microbench --features bench -- --help
 
 use clap::{Parser, ValueEnum};
-use dynamo_llm::kv_router::{
+use dynamo_kv_router::{
+    compute_block_hash_for_seq,
     indexer::{RadixTree, RouterEvent},
     protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, WorkerId,
-        compute_block_hash_for_seq,
     },
 };
 use rand::rngs::StdRng;

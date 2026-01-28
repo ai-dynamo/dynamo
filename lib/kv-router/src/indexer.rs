@@ -32,28 +32,42 @@
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
 use async_trait::async_trait;
+#[cfg(feature = "metrics")]
+pub use dynamo_runtime::protocols::maybe_error::MaybeError;
+#[cfg(feature = "metrics")]
 use dynamo_runtime::{
     component::Component,
     metrics::{MetricsHierarchy, prometheus_names::kvrouter},
-    protocols::maybe_error::MaybeError,
 };
 use prometheus::{IntCounterVec, Opts};
+
+/// Trait for types that may represent an error response.
+/// Used for RPC-style responses that can indicate success or failure.
+#[cfg(not(feature = "metrics"))]
+pub trait MaybeError {
+    /// Construct an instance from an error.
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self;
+    /// Convert to an error instance if this represents an error.
+    fn err(&self) -> Option<anyhow::Error>;
+}
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "metrics")]
+use std::sync::OnceLock;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     iter,
     rc::Rc,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::kv_router::approx::{BlockEntry, PruneConfig, PruneManager};
-use crate::kv_router::protocols::*;
-use crate::tokens::SequenceHash;
+use crate::approx::{BlockEntry, PruneConfig, PruneManager};
+use crate::protocols::*;
+use dynamo_tokens::SequenceHash;
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -622,9 +636,14 @@ pub const METRIC_EVENT_STORED: &str = "stored";
 pub const METRIC_EVENT_REMOVED: &str = "removed";
 pub const METRIC_EVENT_CLEARED: &str = "cleared";
 
+/// Metric name for KV cache events applied counter.
+const KV_CACHE_EVENTS_APPLIED_NAME: &str = "dynamo_kvrouter_kv_cache_events_applied";
+
+#[cfg(feature = "metrics")]
 static KV_INDEXER_METRICS: OnceLock<Arc<KvIndexerMetrics>> = OnceLock::new();
 
 impl KvIndexerMetrics {
+    #[cfg(feature = "metrics")]
     fn new(kv_cache_events_applied: IntCounterVec) -> Self {
         Self {
             kv_cache_events_applied,
@@ -633,6 +652,7 @@ impl KvIndexerMetrics {
 
     /// Creates a new KvIndexerMetrics from a Component, memoizing the result in
     /// KV_INDEXER_METRICS to avoid duplicate registration issues.
+    #[cfg(feature = "metrics")]
     pub fn from_component(component: &Component) -> Arc<Self> {
         KV_INDEXER_METRICS.get_or_init(|| {
             match component.metrics().create_intcountervec(
@@ -656,7 +676,7 @@ impl KvIndexerMetrics {
         Self {
             kv_cache_events_applied: IntCounterVec::new(
                 Opts::new(
-                    kvrouter::KV_CACHE_EVENTS_APPLIED,
+                    KV_CACHE_EVENTS_APPLIED_NAME,
                     "Total number of KV cache events applied to index",
                 ),
                 &["event_type", "status"],
@@ -2038,14 +2058,14 @@ impl Drop for KvIndexerSharded {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
+    use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use rstest::rstest;
     use rstest_reuse::{self, *};
     use tokio::time;
     use tokio_util::sync::CancellationToken;
 
     fn setup() {
-        dynamo_runtime::logging::init();
+        // Logging init removed to avoid dynamo-runtime dependency
     }
 
     fn make_blocks(hashes: Vec<u64>) -> Vec<KvCacheStoredBlockData> {
