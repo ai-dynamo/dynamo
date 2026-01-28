@@ -67,11 +67,18 @@ The `vllm-2p1d.yaml` file provides a multi-DGD deployment with real vLLM workers
 
 ### Deployment
 
-The YAML uses `${K8S_NAMESPACE}` as a placeholder. Use `envsubst` to substitute your actual namespace:
+The YAML uses environment variable placeholders:
+- `${K8S_NAMESPACE}` - Your Kubernetes namespace
+- `${VLLM_IMAGE}` - Dynamo vLLM runtime container image
+
+Use `envsubst` to substitute these before applying:
 
 ```bash
-# Set your Kubernetes namespace and deploy
+# Set your Kubernetes namespace and image
 export K8S_NAMESPACE=<your-k8s-namespace>
+export VLLM_IMAGE=<dynamo-vllm-image>
+
+# Deploy all DGDs
 envsubst < vllm-2p1d.yaml | kubectl apply -n ${K8S_NAMESPACE} -f -
 ```
 
@@ -92,6 +99,7 @@ kubectl logs -n ${K8S_NAMESPACE} -l nvidia.com/dynamo-component=Frontend
 
 ```bash
 export K8S_NAMESPACE=<your-k8s-namespace>
+export VLLM_IMAGE=<dynamo-vllm-image>
 envsubst < vllm-2p1d.yaml | kubectl delete -n ${K8S_NAMESPACE} -f -
 ```
 

@@ -81,7 +81,7 @@ spec:
           - python
           - -m
           - dynamo.frontend
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
     GlobalRouter:
@@ -104,7 +104,7 @@ spec:
           - python
           - -m
           - dynamo.global_router
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
           volumeMounts:
           - mountPath: /workspace/config
@@ -148,7 +148,7 @@ spec:
           - python
           - -m
           - dynamo.router
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
     VllmPrefillWorker:
@@ -172,7 +172,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
       resources:
@@ -213,7 +213,7 @@ spec:
           - python
           - -m
           - dynamo.router
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
     VllmPrefillWorker:
@@ -237,7 +237,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
       resources:
@@ -279,7 +279,7 @@ spec:
           - python
           - -m
           - dynamo.router
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
     VllmDecodeWorker:
@@ -302,7 +302,7 @@ spec:
           - python3
           - -m
           - dynamo.vllm
-          image: nvcr.io/nvidian/dynamo-dev/vllm-runtim:hzhou-0128-01
+          image: ${VLLM_IMAGE}
           workingDir: /workspace
       replicas: 1
       resources:
