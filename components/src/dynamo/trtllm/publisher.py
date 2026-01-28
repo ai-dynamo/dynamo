@@ -39,10 +39,13 @@ logging.basicConfig(level=logging.DEBUG)
 
 # Use non-blocking RPC calls; control overhead with backoff sleeps.
 _STATS_TIMEOUT_SEC = 0.01
-_KV_EVENTS_TIMEOUT_SEC = 0.01
+_KV_EVENTS_TIMEOUT_SEC = 0.0
 _PUBLISH_MIN_SLEEP_SEC = 0.01
 _PUBLISH_MAX_SLEEP_SEC = 0.1
 _PUBLISH_BACKOFF_FACTOR = 2.0
+_KV_EVENTS_MIN_SLEEP_SEC = 0.005
+_KV_EVENTS_MAX_SLEEP_SEC = 0.02
+_KV_EVENTS_BACKOFF_FACTOR = 1.5
 
 
 def _to_signed_i64(value: int | None) -> int | None:
@@ -460,9 +463,9 @@ class Publisher:
                 timeout=_KV_EVENTS_TIMEOUT_SEC
             ),
             self._handle_kv_event,
-            _PUBLISH_MIN_SLEEP_SEC,
-            _PUBLISH_MAX_SLEEP_SEC,
-            _PUBLISH_BACKOFF_FACTOR,
+            _KV_EVENTS_MIN_SLEEP_SEC,
+            _KV_EVENTS_MAX_SLEEP_SEC,
+            _KV_EVENTS_BACKOFF_FACTOR,
         )
         return True
 
