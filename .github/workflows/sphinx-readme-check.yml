@@ -52,7 +52,7 @@ jobs:
         run: |
           echo "Building Sphinx documentation with strict warning checks..."
           echo "Any warnings or errors will cause this job to fail."
-          
+
           # Build the docs using the Dockerfile which runs Sphinx with -W flag
           # The -W flag in docs/Makefile treats warnings as errors
           docker build -t docs-builder \
@@ -62,7 +62,7 @@ jobs:
             echo "Please fix the documentation errors/warnings before merging."
             exit 1
           }
-          
+
           echo "✅ Sphinx build completed successfully with no warnings or errors!"
 
       - name: Copy documentation out of container for verification
