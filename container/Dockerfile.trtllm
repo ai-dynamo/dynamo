@@ -712,7 +712,10 @@ RUN if [ ${ARCH_ALT} = "x86_64" ]; then \
         openssh-client \
         openssh-server \
         # System utilities and dependencies
-        curl && \
+        curl \
+        # libfabric dependencies
+        hwloc \
+        && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* && \
     # Create libnccl.so symlink pointing to libnccl.so.2. TensorRT-LLM requires explicit libnccl.so
@@ -741,6 +744,7 @@ COPY --chmod=775 --chown=dynamo:0 --from=framework ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 # Copy NIXL source from framework image
 # Copy dynamo wheels for gitlab artifacts (read-only, no group-write needed)
 COPY --chown=dynamo: --from=wheel_builder /usr/local/ucx /usr/local/ucx
+COPY --chown=dynamo: --from=wheel_builder /usr/local/libfabric /usr/local/libfabric
 COPY --chown=dynamo: --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --chown=dynamo: --from=wheel_builder /opt/nvidia/nvda_nixl/lib64/. ${NIXL_LIB_DIR}/
 COPY --chown=dynamo: --from=wheel_builder /opt/dynamo/dist/nixl/ /opt/dynamo/wheelhouse/nixl/
@@ -761,6 +765,7 @@ $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
+/usr/local/libfabric/lib:\
 /opt/hpcx/ompi/lib:\
 /usr/lib/${ARCH_ALT}-linux-gnu/nvshmem/13/:\
 $TENSORRT_LIB_DIR:\
