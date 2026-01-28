@@ -684,8 +684,12 @@ check_wheel_file() {
 get_trtllm_version_from_pip_wheel() {
     local wheel_spec="$1"
     if [[ "$wheel_spec" =~ == ]]; then
-        echo "$wheel_spec" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p'
-        return 0
+        local version
+        version=$(echo "$wheel_spec" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+        if _is_semver_ref "$version"; then
+            echo "${version#v}"
+            return 0
+        fi
     fi
     echo ""
     return 0
@@ -707,14 +711,20 @@ get_trtllm_wheel_image_for_version() {
     return 0
 }
 
+_is_semver_ref() {
+    local ref="$1"
+    local semver_regex='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+|[A-Za-z][0-9A-Za-z.-]+)?$'
+    [[ "$ref" =~ $semver_regex ]]
+}
+
 get_github_trtllm_ref() {
     local commit="$1"
-    if [[ "$commit" =~ ^v ]]; then
-        echo "$commit"
-        return 0
-    fi
-    if [[ "$commit" =~ ^[0-9] ]]; then
-        echo "v${commit}"
+    if _is_semver_ref "$commit"; then
+        if [[ "$commit" =~ ^v ]]; then
+            echo "$commit"
+        else
+            echo "v${commit}"
+        fi
         return 0
     fi
     echo "$commit"
@@ -927,7 +937,11 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ -z "$TRTLLM_COMMIT" ]]; then
         # Attempt to default since the commit will work with a hash or a tag/branch
         if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
-            TRTLLM_COMMIT=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+            TRTLLM_COMMIT=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+            if [[ -z "$TRTLLM_COMMIT" ]]; then
+                echo -e "[ERROR] Could not parse a semver version from TENSORRTLLM_PIP_WHEEL: ${TENSORRTLLM_PIP_WHEEL}"
+                exit 1
+            fi
             echo "Attempting to default TRTLLM_COMMIT to \"$TRTLLM_COMMIT\" for installation of TensorRT."
         else
             echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set."
