@@ -35,7 +35,7 @@
 {% elif ( target == "runtime" or target == "dev" or target == "local-dev" ) and framework != "dynamo" %}
     {% include "templates/" ~ framework ~ "_framework.Dockerfile" %}
     {% include "templates/" ~ framework ~ "_runtime.Dockerfile" %}
-{% else % }
+{% else %}
 # --- No framework stages included
 {% endif %}
 
@@ -52,6 +52,6 @@
     {% if target == "local-dev" %}
         {% include "templates/local_dev.Dockerfile" %}
     {% endif %}
-{% else % }
+{% else %}
 # --- No development stages included
 {% endif %}
