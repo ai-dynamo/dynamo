@@ -18,7 +18,7 @@
 from blake3 import blake3
 
 
-class MultiModalHasher:
+class MultimodalHasher:
     """Hashes multimodal content (images, videos, etc.) based on raw bytes.
 
     Fast and deterministic - no decoding overhead. Uses BLAKE3 for cryptographic
@@ -39,7 +39,7 @@ class MultiModalHasher:
             Hex digest string (64 characters for BLAKE3)
 
         Example:
-            >>> hasher = MultiModalHasher()
+            >>> hasher = MultimodalHasher()
             >>> hash_result = hasher.hash_bytes(b"hello world")
             >>> isinstance(hash_result, str)
             True
