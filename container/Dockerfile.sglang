@@ -544,9 +544,8 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
 # Install SGLang - from source if SGLANG_REF is set, otherwise from pip
 RUN if [ -n "${SGLANG_REF}" ]; then \
         echo "Installing SGLang from source: ${SGLANG_REPO} @ ${SGLANG_REF}" && \
-        git clone ${SGLANG_REPO} /tmp/sglang && \
+        git clone --branch ${SGLANG_REF} --depth 1 ${SGLANG_REPO} /tmp/sglang && \
         cd /tmp/sglang && \
-        git checkout ${SGLANG_REF} && \
         pip install --no-cache-dir --break-system-packages -e "python[all]" && \
         rm -rf /tmp/sglang/.git; \
     else \
