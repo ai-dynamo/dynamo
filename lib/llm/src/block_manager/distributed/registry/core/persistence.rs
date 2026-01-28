@@ -537,7 +537,9 @@ where
     ///
     /// - `Ok(None)` if no persisted state exists (empty snapshot and no WAL entries)
     /// - `Ok(Some((snapshot, wal_entries)))` with the snapshot and entries to replay
-    pub async fn recover(&self) -> Result<Option<(RegistrySnapshot<K, V, M>, Vec<WalEntry<K, V, M>>)>> {
+    pub async fn recover(
+        &self,
+    ) -> Result<Option<(RegistrySnapshot<K, V, M>, Vec<WalEntry<K, V, M>>)>> {
         // Load latest snapshot
         let snapshot = self.snapshot.load_latest().await?.unwrap_or_default();
 
