@@ -343,7 +343,7 @@ class GMSClientMemoryManager:
         self._require_rw()
 
         if torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+            torch.cuda.synchronize()
 
         # After publishing, prevent further writes locally.
         for va, m in list(self._mappings.items()):
@@ -396,7 +396,7 @@ class GMSClientMemoryManager:
             raise RuntimeError("unmap() requires RO mode")
 
         if torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+            torch.cuda.synchronize()
 
         # Preserve allocation IDs for remapping on remap
         self._preserved_allocation_ids = list(self._allocation_id_to_va.keys())
@@ -404,6 +404,12 @@ class GMSClientMemoryManager:
         # Unmap physical memory but keep VA reservations
         self._unmap_preserving_va()
         self._va_preserved = True
+
+        # Ensure all CUDA VMM unmap operations complete before releasing the lock.
+        # This prevents race conditions where remap() may be called before
+        # physical memory is fully released.
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
         self._client_rpc.close()
         self._client = None
@@ -490,7 +496,7 @@ class GMSClientMemoryManager:
 
         # Ensure kernels are done before tearing down mappings.
         if torch.cuda.is_available():
-            torch.cuda.synchronize(self.device)
+            torch.cuda.synchronize()
 
         # Release all mappings including preserved VA reservations
         self._unmap_all()
