@@ -33,6 +33,14 @@ spec:
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
+        - description: Model identifier
+          jsonPath: .spec.identity.model
+          name: Model
+          type: string
+        - description: Backend framework
+          jsonPath: .spec.identity.backendFramework
+          name: Backend
+          type: string
         - description: Current phase of the checkpoint
           jsonPath: .status.phase
           name: Phase

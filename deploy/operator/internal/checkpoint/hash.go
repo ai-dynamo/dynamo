@@ -44,7 +44,12 @@ type normalizedIdentity struct {
 // 1. Normalizing all fields
 // 2. Serializing to JSON (with sorted keys)
 // 3. Computing SHA256 hash
-// 4. Returning first 12 characters of hex encoding
+// 4. Returning first 16 characters of hex encoding (64 bits)
+//
+// 16 hex characters (64 bits) provides excellent collision resistance:
+// - 1% collision probability at ~500 million configs
+// - 50% collision probability at ~4 billion configs
+// This is a perfect balance between readability and safety.
 func ComputeIdentityHash(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) (string, error) {
 	normalized := normalizeIdentity(identity)
 
@@ -58,8 +63,9 @@ func ComputeIdentityHash(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) (s
 	// Compute SHA256 hash
 	hash := sha256.Sum256(data)
 
-	// Return first 12 characters of hex encoding
-	return hex.EncodeToString(hash[:])[:12], nil
+	// Return first 16 characters of hex encoding (64 bits)
+	// Provides excellent collision resistance while remaining readable
+	return hex.EncodeToString(hash[:])[:16], nil
 }
 
 func normalizeIdentity(identity nvidiacomv1alpha1.DynamoCheckpointIdentity) normalizedIdentity {

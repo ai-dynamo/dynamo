@@ -1166,11 +1166,15 @@ func (r *DynamoGraphDeploymentReconciler) createCheckpointCR(
 		return nil, fmt.Errorf("failed to compute identity hash: %w", err)
 	}
 
-	// Generate checkpoint name: {dgd-name}-{service}-{hash-prefix}
-	ckptName := fmt.Sprintf("%s-%s-%s", dynamoDeployment.Name, strings.ToLower(serviceName), hash[:8])
+	// Generate checkpoint name: use hash directly (16 chars, 64 bits)
+	// This allows natural deduplication - same identity = same checkpoint name
+	// 16 characters provides excellent collision resistance (1% at 500M configs)
+	ckptName := hash
 
 	// Use SyncResource to create/update the DynamoCheckpoint CR
-	_, ckpt, err := commoncontroller.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoCheckpoint, bool, error) {
+	// Pass nil as parentResource to create an independent checkpoint (no owner reference)
+	// This ensures the checkpoint persists even if the DGD is deleted
+	_, ckpt, err := commoncontroller.SyncResource(ctx, r, nil, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoCheckpoint, bool, error) {
 		// Build the checkpoint identity from service identity
 		checkpointIdentity := nvidiacomv1alpha1.DynamoCheckpointIdentity{
 			Model:                identity.Model,

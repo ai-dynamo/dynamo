@@ -18,16 +18,16 @@ func TestComputeIdentityHash(t *testing.T) {
 		shouldMatch   bool
 	}{
 		{
-			name: "basic identity with known hash",
+			name: "basic identity produces deterministic hash",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
 				Model:            "meta-llama/Llama-2-7b-hf",
 				BackendFramework: "vllm",
 			},
 			expectError:  false,
-			expectedHash: "96429b272576", // Known hash for this specific identity
+			expectedHash: "96429b2725761a09", // Known hash for this specific identity
 		},
 		{
-			name: "identity with all fields",
+			name: "identity with all fields produces deterministic hash",
 			identity: nvidiacomv1alpha1.DynamoCheckpointIdentity{
 				Model:                "meta-llama/Llama-2-13b-hf",
 				BackendFramework:     "sglang",
@@ -41,7 +41,7 @@ func TestComputeIdentityHash(t *testing.T) {
 				},
 			},
 			expectError:  false,
-			expectedHash: "0c5c7799bf09", // Known hash for this specific identity
+			expectedHash: "0c5c7799bf09378f", // Known hash for this specific identity
 		},
 		{
 			name: "same identity produces same hash",
@@ -166,9 +166,9 @@ func TestComputeIdentityHash(t *testing.T) {
 
 			require.NoError(t, err1)
 			assert.NotEmpty(t, hash1, "hash should not be empty")
-			assert.Len(t, hash1, 12, "hash should be 12 characters")
+			assert.Len(t, hash1, 16, "hash should be 16 characters (64 bits)")
 			// Verify it's hex
-			assert.Regexp(t, "^[0-9a-f]{12}$", hash1, "hash should be 12 hex characters")
+			assert.Regexp(t, "^[0-9a-f]{16}$", hash1, "hash should be 16 hex characters")
 
 			// If we have an expected hash, check it
 			if tt.expectedHash != "" {
