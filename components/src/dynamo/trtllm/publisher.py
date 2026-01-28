@@ -406,7 +406,7 @@ class Publisher:
                 async for item in fetch_fn():
                     had_data = True
                     handler_fn(item)
-            except (asyncio.TimeoutError, TimeoutError):
+            except (asyncio.TimeoutError, TimeoutError, asyncio.QueueEmpty):
                 pass
             except Exception as e:
                 logging.warning(f"Publisher polling loop error: {e}", exc_info=True)
@@ -470,7 +470,7 @@ class Publisher:
         return True
 
     def _handle_kv_event(self, event):
-        logging.debug(f"KV cache event received: {event}")
+        logging.info(f"KV cache event received: {event}")
         # drop the events that is not emitted from the global attention layer.
         if self.should_drop_event(event):
             return
