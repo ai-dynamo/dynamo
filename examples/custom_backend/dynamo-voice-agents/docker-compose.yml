@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Docker Compose for Streaming ASR Voice Agents
+#
+# Usage:
+#   # Start services
+#   docker compose up -d
+#
+#   # View logs
+#   docker compose logs -f
+#
+#   # Stop services
+#   docker compose down
+
+services:
+  asr-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: nvcr.io/nvidia/nemo
+        BASE_IMAGE_TAG: "25.04"
+    image: dynamo-voice-agents:latest
+    container_name: dynamo-asr
+    
+    # GPU configuration - uses NVIDIA Container Toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Specify GPU device IDs (e.g., "0", "0,1", or "all")
+              device_ids: ["${NVIDIA_VISIBLE_DEVICES:-0}"]
+              capabilities: [gpu]
+    
+    environment:
+      # CUDA device index within the container (usually 0 when passing single GPU)
+      - ASR_CUDA_DEVICE=${ASR_CUDA_DEVICE:-0}
+      # Model to use
+      - ASR_MODEL_NAME=${ASR_MODEL_NAME:-nvidia/parakeet-rnnt-1.1b}
+      # Logging level
+      - WORKER_LOG_LEVEL=${WORKER_LOG_LEVEL:-INFO}
+      # Dynamo runtime configuration
+      - DYN_STORE_KV=${DYN_STORE_KV:-file}
+      - DYN_REQUEST_PLANE=${DYN_REQUEST_PLANE:-tcp}
+      - DYN_LOG=${DYN_LOG:-INFO}
+      # OpenTelemetry tracing (optional)
+      - OTEL_EXPORT_ENABLED=${OTEL_EXPORT_ENABLED:-false}
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://jaeger:4317}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-streaming-asr}
+      # HuggingFace cache for model downloads
+      - HF_HOME=/app/cache/huggingface
+      - TRANSFORMERS_CACHE=/app/cache/huggingface
+    
+    volumes:
+      # Persist model cache to avoid re-downloading
+      - asr-model-cache:/app/cache
+      # Mount audio files for testing (optional)
+      - ${AUDIO_DATA_DIR:-./data}:/app/data:ro
+      # Persist Dynamo runtime state
+      - asr-state:/app/state
+    
+    # Shared memory size (required for PyTorch DataLoader with multiple workers)
+    shm_size: "2gb"
+    
+    # Keep container running
+    restart: unless-stopped
+    
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  # Optional: Jaeger for tracing visualization
+  jaeger:
+    image: jaegertracing/all-in-one:1.54
+    container_name: jaeger
+    profiles:
+      - tracing
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+volumes:
+  asr-model-cache:
+    name: dynamo-asr-model-cache
+  asr-state:
+    name: dynamo-asr-state

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Requirements for the streaming ASR voice agents example
+
+# Dynamo runtime
+ai-dynamo-runtime>=0.8.0
+
+# Audio processing
+torchaudio>=2.0.0
+
+# Async runtime
+uvloop>=0.19.0
+
+# Data validation
+pydantic>=2.0.0
+
+# NeMo ASR (installed in base image, but listed for reference)
+# nemo_toolkit[asr]
+
+# OpenTelemetry tracing (optional)
+opentelemetry-api>=1.20.0
+opentelemetry-sdk>=1.20.0
+opentelemetry-exporter-otlp-proto-grpc>=1.20.0
