@@ -352,6 +352,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             },
                             extra_args: None,
                             completion_usage: None,
+                            output_type: None,
                         };
 
                         // Prefill: after first token, mark room complete (unblocks decode)

@@ -10,6 +10,17 @@ use dynamo_async_openai::types::CompletionUsage;
 use dynamo_async_openai::types::StopReason;
 use dynamo_runtime::protocols::maybe_error::MaybeError;
 
+/// Output type for multi-modal responses
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputType {
+    #[default]
+    Text,
+    Image,
+    Audio,
+    Video,
+}
+
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
 
@@ -117,6 +128,11 @@ pub struct LLMEngineOutput {
     // Token usage information
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_usage: Option<CompletionUsage>,
+
+    /// Output type for multi-modal responses (text, image, audio, video)
+    /// When set to non-text types, Rust skips detokenization and passes through the response
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_type: Option<OutputType>,
 }
 
 impl LLMEngineOutput {
@@ -134,6 +150,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            output_type: None,
         }
     }
 
@@ -151,6 +168,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            output_type: None,
         }
     }
 
@@ -168,6 +186,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            output_type: None,
         }
     }
 
@@ -185,6 +204,7 @@ impl LLMEngineOutput {
             disaggregated_params: None,
             extra_args: None,
             completion_usage: None,
+            output_type: None,
         }
     }
 }

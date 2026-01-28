@@ -72,6 +72,9 @@ class Config:
     multimodal_encode_prefill_worker: bool = False
     mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
 
+    # Omni worker for multi-modal generation (text-to-image, text-to-audio)
+    omni_worker: bool = False
+
     # vLLM-native encoder worker (ECConnector mode)
     vllm_native_encoder_worker: bool = False
     ec_connector_backend: Optional[str] = "ECExampleConnector"
@@ -246,6 +249,11 @@ def parse_args() -> Config:
         help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
     )
     parser.add_argument(
+        "--omni-worker",
+        action="store_true",
+        help="Run as Omni worker for multi-modal generation (text-to-image, text-to-audio, etc.) using vLLM-Omni",
+    )
+    parser.add_argument(
         "--store-kv",
         type=str,
         choices=["etcd", "file", "mem"],
@@ -338,14 +346,15 @@ def parse_args() -> Config:
         + int(bool(args.multimodal_decode_worker))
         + int(bool(args.multimodal_encode_prefill_worker))
         + int(bool(args.vllm_native_encoder_worker))
+        + int(bool(args.omni_worker))
     )
     if mm_flags > 1:
         raise ValueError(
             "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
-            "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
+            "--multimodal-decode-worker, --multimodal-encode-prefill-worker, --vllm-native-encoder-worker, or --omni-worker"
         )
 
-    if mm_flags == 1 and not args.enable_multimodal:
+    if mm_flags == 1 and not args.enable_multimodal and not args.omni_worker:
         raise ValueError("Use --enable-multimodal to enable multimodal processing")
 
     # Validate vLLM-native encoder worker config
@@ -379,6 +388,10 @@ def parse_args() -> Config:
         # Multimodal prefill worker stays as "backend" to maintain encoder connection
         config.component = "backend"
         config.endpoint = "generate"
+    elif args.omni_worker:
+        # Omni worker for multi-modal generation (text-to-image, etc.)
+        config.component = "backend"
+        config.endpoint = "generate"
     elif args.is_prefill_worker:
         config.component = "prefill"
         config.endpoint = "generate"
@@ -407,6 +420,7 @@ def parse_args() -> Config:
     config.ec_storage_path = args.ec_storage_path
     config.ec_extra_config = args.ec_extra_config
     config.ec_consumer_mode = args.ec_consumer_mode
+    config.omni_worker = args.omni_worker
     config.store_kv = args.store_kv
     config.request_plane = args.request_plane
     config.event_plane = args.event_plane
