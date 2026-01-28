@@ -1361,6 +1361,7 @@ func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResour
 			Protocol:   corev1.ProtocolTCP,
 		}
 	default:
+		// Worker and other components use the system port for metrics/health
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,
