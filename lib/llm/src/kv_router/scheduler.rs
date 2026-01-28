@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::discovery::RuntimeConfigsWithNotify;
+use crate::discovery::RuntimeConfigs;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
@@ -99,7 +99,7 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
+        workers_with_configs: Arc<RuntimeConfigs>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
         router_id: u64,
@@ -127,9 +127,11 @@ impl KvScheduler {
         );
 
         // Spawn background task to sync slots with DashMap when notified of changes.
-        // ModelManager's watcher updates the DashMap and notifies; we wait on notify here.
+        // ModelManager's watcher updates the DashMap and notifies; we wait on watch receiver here.
         let slots_monitor = slots.clone();
-        let workers_monitor = workers_with_configs.clone();
+        let subscriber = workers_with_configs.subscribe();
+        let configs_monitor = subscriber.configs;
+        let mut change_rx = subscriber.change_rx;
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
@@ -142,13 +144,12 @@ impl KvScheduler {
                         tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
-                    _ = workers_monitor.notify.notified() => {}
+                    _ = change_rx.changed() => {}
                 }
 
                 // Get current workers from DashMap
                 let current_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
-                    workers_monitor
-                        .configs
+                    configs_monitor
                         .iter()
                         .map(|r| (*r.key(), r.value().clone()))
                         .collect();

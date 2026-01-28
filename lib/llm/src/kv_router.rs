@@ -39,7 +39,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
-    discovery::RuntimeConfigsWithNotify,
+    discovery::RuntimeConfigs,
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent},
@@ -329,7 +329,7 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
+        workers_with_configs: Arc<RuntimeConfigs>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -377,9 +377,12 @@ impl KvRouter {
 
         // Initialize worker query client using namespace abstraction
         // (created before background task so we can use it for startup recovery)
-        // Uses workers_with_configs which is guaranteed to be populated by ModelManager
-        let worker_query_client =
-            worker_query::WorkerQueryClient::new(component.clone(), workers_with_configs.clone());
+        // Uses a subscriber from workers_with_configs
+        let worker_query_client = worker_query::WorkerQueryClient::new(
+            component.clone(),
+            workers_with_configs.configs.clone(),
+            workers_with_configs.subscribe().change_rx,
+        );
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
@@ -388,13 +391,14 @@ impl KvRouter {
         {
             // Wait for at least one worker with a known runtime config (not None)
             // This ensures we have actual config data to make routing decisions
+            let mut config_rx = workers_with_configs.subscribe().change_rx;
             while !workers_with_configs
                 .configs
                 .iter()
                 .any(|r| r.value().is_some())
             {
                 tracing::info!("KV router waiting for at least one worker with runtime config...");
-                workers_with_configs.notify.notified().await;
+                let _ = config_rx.changed().await;
             }
 
             let count = workers_with_configs
@@ -435,7 +439,8 @@ impl KvRouter {
                     cancellation_token.clone(),
                     worker_query::WorkerQueryClient::new(
                         component.clone(),
-                        workers_with_configs.clone(),
+                        workers_with_configs.configs.clone(),
+                        workers_with_configs.subscribe().change_rx,
                     ),
                     transport_kind,
                 )

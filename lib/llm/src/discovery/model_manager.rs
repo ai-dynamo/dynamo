@@ -8,7 +8,7 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{oneshot, watch};
 
 use crate::discovery::KvWorkerMonitor;
 
@@ -81,14 +81,55 @@ pub struct ModelManager {
 
     /// Runtime configs per endpoint using DashMap for lock-free access.
     /// Outer DashMap: keyed by EndpointId
-    /// Inner RuntimeConfigsWithNotify: shared with KvScheduler
-    runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigsWithNotify>>,
+    /// Inner RuntimeConfigs: shared with KvScheduler
+    runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
 }
 
-/// Runtime configs for an endpoint with a notify for change notifications.
-pub struct RuntimeConfigsWithNotify {
-    pub configs: DashMap<WorkerId, Option<ModelRuntimeConfig>>,
-    pub notify: Notify,
+/// Runtime configs for an endpoint with watch-based change notifications.
+/// Call `subscribe()` to get a subscriber with its own watch receiver.
+pub struct RuntimeConfigs {
+    pub configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
+    change_tx: watch::Sender<u64>,
+}
+
+impl RuntimeConfigs {
+    fn new() -> Self {
+        let (change_tx, _) = watch::channel(0u64);
+        Self {
+            configs: Arc::new(DashMap::new()),
+            change_tx,
+        }
+    }
+
+    /// Create a subscriber that can wait for config changes.
+    /// Each subscriber has its own watch receiver, so notifications are not lost.
+    pub fn subscribe(&self) -> RuntimeConfigsSubscriber {
+        RuntimeConfigsSubscriber {
+            configs: self.configs.clone(),
+            change_rx: self.change_tx.subscribe(),
+        }
+    }
+
+    /// Notify all subscribers of a change (internal use only).
+    fn notify_change(&self) {
+        // Increment counter to notify subscribers
+        self.change_tx.send_modify(|v| *v = v.wrapping_add(1));
+    }
+}
+
+/// A subscriber to runtime config changes.
+/// Each subscriber has its own watch receiver, ensuring no notifications are lost.
+pub struct RuntimeConfigsSubscriber {
+    pub configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
+    pub change_rx: watch::Receiver<u64>,
+}
+
+impl RuntimeConfigsSubscriber {
+    /// Wait for a config change notification.
+    /// Returns immediately if a change happened since the last call.
+    pub async fn wait_for_change(&mut self) -> Result<(), watch::error::RecvError> {
+        self.change_rx.changed().await
+    }
 }
 
 impl Default for ModelManager {
@@ -622,11 +663,11 @@ impl ModelManager {
 
     /// Get or create a runtime config watcher for an endpoint.
     /// Spawns a background task to watch DiscoveryQuery::EndpointModels.
-    /// Returns a shared RuntimeConfigsWithNotify that KvScheduler can use directly.
+    /// Returns a shared RuntimeConfigs that KvScheduler can use directly.
     pub async fn get_or_create_runtime_config_watcher(
         &self,
         endpoint: &Endpoint,
-    ) -> anyhow::Result<Arc<RuntimeConfigsWithNotify>> {
+    ) -> anyhow::Result<Arc<RuntimeConfigs>> {
         let endpoint_id = endpoint.id();
 
         // Fast path: return existing if present
@@ -635,10 +676,7 @@ impl ModelManager {
         }
 
         // Atomic get-or-insert to avoid TOCTOU race
-        let inner = Arc::new(RuntimeConfigsWithNotify {
-            configs: DashMap::new(),
-            notify: Notify::new(),
-        });
+        let inner = Arc::new(RuntimeConfigs::new());
         let (result, is_new) = match self.runtime_configs.entry(endpoint_id) {
             Entry::Occupied(e) => (e.get().clone(), false),
             Entry::Vacant(e) => {
@@ -673,7 +711,7 @@ impl ModelManager {
     async fn spawn_runtime_config_watcher(
         &self,
         endpoint: &Endpoint,
-        inner: Arc<RuntimeConfigsWithNotify>,
+        inner: Arc<RuntimeConfigs>,
     ) -> anyhow::Result<()> {
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
@@ -764,7 +802,7 @@ impl ModelManager {
 
                 // Notify when a config with Some value is added OR a worker is removed
                 if config_added || worker_removed {
-                    inner.notify.notify_waiters();
+                    inner.notify_change();
                 }
 
                 tracing::trace!(
