@@ -68,9 +68,9 @@ dynamo-operator:
       # Container image configuration for the operator manager
       image:
         # -- Official NVIDIA Dynamo operator image repository
-        repository: "nvcr.io/nvidian/dynamo-dev/schwinns-dynamo-operator"
+        repository: "nvcr.io/nvidian/dynamo-dev/dynamo-operator"
         # -- Image tag (leave empty to use chart default)
-        tag: "07df00b-loc-fix"
+        tag: "schwinns-latest"
         # -- Image pull policy - when to pull the image
         pullPolicy: Always
 

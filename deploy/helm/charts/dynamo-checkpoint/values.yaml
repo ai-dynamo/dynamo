@@ -37,12 +37,12 @@ storage:
   # Host path for signal files (inter-pod communication)
   signalHostPath: /var/lib/dynamo-checkpoint/signals
 
-# DaemonSet configuration for CRIU checkpoint agent
+# DaemonSet configuration for chrek (checkpoint/restore) agent
 daemonset:
   # Container image
   image:
-    repository: nvcr.io/nvidian/dynamo-dev/schwinns-criu
-    tag: criu-agent-cf34e68
+    repository: nvcr.io/nvidian/dynamo-dev/chrek-agent
+    tag: latest
     pullPolicy: Always
   
   # Image pull secrets
