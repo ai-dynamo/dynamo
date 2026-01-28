@@ -75,7 +75,7 @@ class VllmProcessor:
             output_kind=RequestOutputKind.DELTA,
             max_tokens=max_tokens,
         )
-        for (k, v) in request.items():
+        for k, v in request.items():
             if hasattr(sampling_params, k):
                 setattr(sampling_params, k, v)
 
