@@ -6,6 +6,8 @@
 use std::fmt::Debug;
 use std::hash::Hash;
 
+use super::storage::PositionalStorageKey;
+
 /// Trait for registry keys.
 pub trait RegistryKey: Copy + Hash + Eq + Debug + Send + Sync + 'static {
     fn to_bytes(&self) -> Vec<u8>;
@@ -38,17 +40,17 @@ impl RegistryKey for Key128 {
     }
 }
 
-/// Key combining bucket identifier and sequence hash.
+/// Key combining worker identifier and sequence hash.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CompositeKey {
-    pub bucket_id: u64,
+    pub worker_id: u64,
     pub sequence_hash: u64,
 }
 
 impl RegistryKey for CompositeKey {
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(16);
-        buf.extend_from_slice(&self.bucket_id.to_le_bytes());
+        buf.extend_from_slice(&self.worker_id.to_le_bytes());
         buf.extend_from_slice(&self.sequence_hash.to_le_bytes());
         buf
     }
@@ -58,16 +60,16 @@ impl RegistryKey for CompositeKey {
             return None;
         }
         Some(Self {
-            bucket_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            worker_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
             sequence_hash: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
         })
     }
 }
 
-/// Key with bucket, sequence hash, and position in sequence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Key with worker id, sequence hash, and position in sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PositionalKey {
-    pub bucket_id: u64,
+    pub worker_id: u64,
     pub sequence_hash: u64,
     pub position: u32,
 }
@@ -75,7 +77,7 @@ pub struct PositionalKey {
 impl RegistryKey for PositionalKey {
     fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(20);
-        buf.extend_from_slice(&self.bucket_id.to_le_bytes());
+        buf.extend_from_slice(&self.worker_id.to_le_bytes());
         buf.extend_from_slice(&self.sequence_hash.to_le_bytes());
         buf.extend_from_slice(&self.position.to_le_bytes());
         buf
@@ -86,10 +88,16 @@ impl RegistryKey for PositionalKey {
             return None;
         }
         Some(Self {
-            bucket_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
+            worker_id: u64::from_le_bytes(bytes[0..8].try_into().ok()?),
             sequence_hash: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
             position: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
         })
+    }
+}
+
+impl PositionalStorageKey for PositionalKey {
+    fn position(&self) -> u64 {
+        self.position as u64
     }
 }
 
@@ -114,7 +122,7 @@ mod tests {
     #[test]
     fn test_composite_key_roundtrip() {
         let key = CompositeKey {
-            bucket_id: 123,
+            worker_id: 123,
             sequence_hash: 456,
         };
         let bytes = key.to_bytes();
@@ -124,7 +132,7 @@ mod tests {
     #[test]
     fn test_positional_key_roundtrip() {
         let key = PositionalKey {
-            bucket_id: 123,
+            worker_id: 123,
             sequence_hash: 456,
             position: 789,
         };

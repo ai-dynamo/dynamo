@@ -6,12 +6,14 @@
 pub mod builder;
 pub mod codec;
 pub mod error;
+pub mod events;
 pub mod eviction;
 pub mod hub;
 pub mod hub_transport;
 pub mod key;
 pub mod lease;
 pub mod metadata;
+pub mod persistence;
 pub mod registry;
 pub mod storage;
 pub mod transport;
@@ -34,8 +36,8 @@ pub use error::{RegistryError, RegistryResult};
 pub use lease::{LeaseInfo, LeaseManager};
 
 // Storage & Eviction
-pub use eviction::{Eviction, NoEviction, TailEviction};
-pub use storage::{HashMapStorage, Storage};
+pub use eviction::{Eviction, NoEviction, PositionalEviction, TailEviction};
+pub use storage::{HashMapStorage, PositionalStorageKey, RadixStorage, Storage};
 
 // Key, Value, Metadata
 pub use key::{CompositeKey, Key128, PositionalKey, RegistryKey};
@@ -50,8 +52,8 @@ pub use zmq_transport::{ZmqTransport, ZmqTransportConfig};
 // Hub (Server)
 pub use hub::{HubStats, RegistryHub};
 pub use hub_transport::{
-    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport, ZmqHubConfig,
-    ZmqHubTransport,
+    ClientId, HubMessage, HubTransport, InProcessClientHandle, InProcessHubTransport,
+    ZmqHubTransport, ZmqHubTransportConfig,
 };
 
 // Builder
@@ -59,3 +61,15 @@ pub use builder::{ClientBuilder, HubBuilder, client, hub};
 
 // ZMQ Hub
 pub use zmq_hub::{ZmqHub, ZmqHubConfig as ZmqHubServerConfig};
+
+// Persistence
+pub use persistence::{
+    AccessStats, HybridPersistence, LocalDiskBackend, PersistedEntry, PersistenceBackend,
+    PersistenceConfig, RegistrySnapshot, SnapshotPersistence, WalEntry, WalPersistence,
+};
+
+// Event Bus
+pub use events::{
+    EventBus, EventBusConfig, EventHandler, EventReceiver, EventTopic, EvictionReason,
+    InProcessEventBus, RegistryEvent, StorageTier, StorageType,
+};

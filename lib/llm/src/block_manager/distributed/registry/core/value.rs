@@ -23,11 +23,8 @@ impl RegistryValue for u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum StorageBackend {
-    S3 = 0,
-    Gcs = 1,
-    Azure = 2,
-    Local = 3,
-    Rdma = 4,
+    Object = 0,
+    Disk = 1,
 }
 
 impl TryFrom<u8> for StorageBackend {
@@ -35,11 +32,8 @@ impl TryFrom<u8> for StorageBackend {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => Ok(Self::S3),
-            1 => Ok(Self::Gcs),
-            2 => Ok(Self::Azure),
-            3 => Ok(Self::Local),
-            4 => Ok(Self::Rdma),
+            0 => Ok(Self::Object),
+            1 => Ok(Self::Disk),
             _ => Err(()),
         }
     }
@@ -96,7 +90,7 @@ mod tests {
     #[test]
     fn test_storage_location_roundtrip() {
         let loc = StorageLocation {
-            backend: StorageBackend::S3,
+            backend: StorageBackend::Object,
             path: "bucket/key/object.bin".to_string(),
             size_bytes: 1024 * 1024,
         };

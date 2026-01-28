@@ -45,6 +45,20 @@ where
     async fn can_offload(&self, keys: &[K]) -> Result<OffloadResult<K>>;
     async fn match_prefix(&self, keys: &[K]) -> Result<Vec<(K, V, M)>>;
     async fn flush(&self) -> Result<()>;
+
+    /// Remove/invalidate entries from the registry by key.
+    /// Returns the number of entries that were removed.
+    /// This is used to clean up stale entries (e.g., when object storage returns NoSuchKey).
+    async fn remove(&self, keys: &[K]) -> Result<usize>;
+
+    /// Notify the registry that entries were accessed (cache hit).
+    ///
+    /// Used for LRU/LFU eviction policies to track access recency/frequency.
+    /// Returns the number of keys that were touched (acknowledged).
+    ///
+    /// This is typically called after a successful onboard from G4 storage,
+    /// or when blocks are accessed from G2 (host) cache.
+    async fn touch(&self, keys: &[K]) -> Result<usize>;
 }
 
 /// Pending batch state.
@@ -173,10 +187,10 @@ where
                             !pending.is_empty() && pending.is_timed_out(timeout)
                         };
 
-                        if should_flush {
-                            if let Err(e) = client.flush().await {
-                                tracing::warn!(error = %e, "Batch flush failed");
-                            }
+                        if should_flush
+                            && let Err(e) = client.flush().await
+                        {
+                            tracing::warn!(error = %e, "Batch flush failed");
                         }
                     }
                 }
@@ -225,6 +239,14 @@ where
 
         match decoded {
             ResponseType::CanOffload(statuses) => {
+                // Validate that statuses length matches keys length to avoid silently dropping keys
+                if statuses.len() != keys.len() {
+                    return Err(anyhow::anyhow!(
+                        "CanOffload response length mismatch: got {} statuses but expected {} (keys.len())",
+                        statuses.len(),
+                        keys.len()
+                    ));
+                }
                 let mut result = OffloadResult::default();
                 for (key, status) in keys.iter().zip(statuses.iter()) {
                     match status {
@@ -273,6 +295,48 @@ where
         let mut buf = Vec::new();
         self.codec.encode_register(&entries, &mut buf)?;
         self.transport.publish(&buf).await
+    }
+
+    async fn remove(&self, keys: &[K]) -> Result<usize> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let mut buf = Vec::new();
+        self.codec
+            .encode_query(&QueryType::Remove(keys.to_vec()), &mut buf)?;
+
+        let response = self.transport.request(&buf).await?;
+        let decoded = self
+            .codec
+            .decode_response(&response)
+            .ok_or_else(|| anyhow::anyhow!("invalid response"))?;
+
+        match decoded {
+            ResponseType::Remove(count) => Ok(count),
+            _ => Err(anyhow::anyhow!("unexpected response type for remove")),
+        }
+    }
+
+    async fn touch(&self, keys: &[K]) -> Result<usize> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+
+        let mut buf = Vec::new();
+        self.codec
+            .encode_query(&QueryType::Touch(keys.to_vec()), &mut buf)?;
+
+        let response = self.transport.request(&buf).await?;
+        let decoded = self
+            .codec
+            .decode_response(&response)
+            .ok_or_else(|| anyhow::anyhow!("invalid response"))?;
+
+        match decoded {
+            ResponseType::Touch(count) => Ok(count),
+            _ => Err(anyhow::anyhow!("unexpected response type for touch")),
+        }
     }
 }
 
@@ -413,7 +477,7 @@ mod tests {
         // Count publishes in background
         let flush_counter = flush_count_clone;
         tokio::spawn(async move {
-            while let Some(_) = rx.recv().await {
+            while (rx.recv().await).is_some() {
                 flush_counter.fetch_add(1, Ordering::SeqCst);
             }
         });
@@ -447,7 +511,7 @@ mod tests {
         // Count publishes in background
         let flush_counter = flush_count_clone;
         tokio::spawn(async move {
-            while let Some(_) = rx.recv().await {
+            while (rx.recv().await).is_some() {
                 flush_counter.fetch_add(1, Ordering::SeqCst);
             }
         });

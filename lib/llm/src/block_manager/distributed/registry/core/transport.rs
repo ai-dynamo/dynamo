@@ -17,9 +17,12 @@ pub trait RegistryTransport: Send + Sync {
     fn name(&self) -> &'static str;
 }
 
+/// Handler function type for in-process transport.
+type RequestHandler = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
 /// In-process transport for testing.
 pub struct InProcessTransport {
-    handler: Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>,
+    handler: RequestHandler,
     publish_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
@@ -71,10 +74,13 @@ impl RegistryTransport for InProcessTransport {
     }
 }
 
+/// Handler option type for in-process hub.
+type HubHandler = Option<Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>>;
+
 /// In-process hub for testing.
 #[derive(Clone)]
 pub struct InProcessHub {
-    request_handler: Arc<Mutex<Option<Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>>>>,
+    request_handler: Arc<Mutex<HubHandler>>,
 }
 
 impl InProcessHub {

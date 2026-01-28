@@ -21,6 +21,13 @@ pub enum MessageType {
     Match = 3,
     CanOffloadResponse = 4,
     MatchResponse = 5,
+    Remove = 6,
+    RemoveResponse = 7,
+    /// Touch/access notification for LRU/LFU tracking
+    Touch = 8,
+    TouchResponse = 9,
+    /// Error response for decode/processing failures
+    ErrorResponse = 10,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -33,6 +40,11 @@ impl TryFrom<u8> for MessageType {
             3 => Ok(Self::Match),
             4 => Ok(Self::CanOffloadResponse),
             5 => Ok(Self::MatchResponse),
+            6 => Ok(Self::Remove),
+            7 => Ok(Self::RemoveResponse),
+            8 => Ok(Self::Touch),
+            9 => Ok(Self::TouchResponse),
+            10 => Ok(Self::ErrorResponse),
             _ => Err(()),
         }
     }
@@ -63,12 +75,25 @@ impl TryFrom<u8> for OffloadStatus {
 pub enum QueryType<K> {
     CanOffload(Vec<K>),
     Match(Vec<K>),
+    /// Remove/invalidate entries by key.
+    Remove(Vec<K>),
+    /// Touch/access notification for LRU/LFU tracking.
+    /// Fire-and-forget: notifies the registry that keys were accessed (cache hit).
+    Touch(Vec<K>),
 }
 
 #[derive(Debug, Clone)]
 pub enum ResponseType<K, V, M> {
     CanOffload(Vec<OffloadStatus>),
     Match(Vec<(K, V, M)>),
+    /// Number of entries removed.
+    Remove(usize),
+    /// Number of entries touched (acknowledged).
+    Touch(usize),
+    /// Error response for decode/processing failures.
+    /// Contains an error message that clients can use to distinguish
+    /// errors from legitimate empty results.
+    Error(String),
 }
 
 pub trait RegistryCodec<K, V, M>: Send + Sync
@@ -267,7 +292,10 @@ where
     fn encode_query(&self, query: &QueryType<K>, buf: &mut Vec<u8>) -> RegistryResult<()> {
         buf.push(PROTOCOL_VERSION);
         match query {
-            QueryType::CanOffload(keys) | QueryType::Match(keys) => {
+            QueryType::CanOffload(keys)
+            | QueryType::Match(keys)
+            | QueryType::Remove(keys)
+            | QueryType::Touch(keys) => {
                 if keys.len() > u32::MAX as usize {
                     return Err(RegistryError::EncodeError {
                         context: "key count exceeds u32::MAX",
@@ -276,6 +304,8 @@ where
                 let msg_type = match query {
                     QueryType::CanOffload(_) => MessageType::CanOffload,
                     QueryType::Match(_) => MessageType::Match,
+                    QueryType::Remove(_) => MessageType::Remove,
+                    QueryType::Touch(_) => MessageType::Touch,
                 };
                 buf.push(msg_type as u8);
                 buf.extend_from_slice(&(keys.len() as u32).to_le_bytes());
@@ -323,6 +353,8 @@ where
         match msg_type {
             MessageType::CanOffload => Some(QueryType::CanOffload(keys)),
             MessageType::Match => Some(QueryType::Match(keys)),
+            MessageType::Remove => Some(QueryType::Remove(keys)),
+            MessageType::Touch => Some(QueryType::Touch(keys)),
             _ => None,
         }
     }
@@ -381,6 +413,25 @@ where
                     buf.extend_from_slice(&mb);
                 }
             }
+            ResponseType::Remove(count) => {
+                buf.push(MessageType::RemoveResponse as u8);
+                buf.extend_from_slice(&(*count as u64).to_le_bytes());
+            }
+            ResponseType::Touch(count) => {
+                buf.push(MessageType::TouchResponse as u8);
+                buf.extend_from_slice(&(*count as u64).to_le_bytes());
+            }
+            ResponseType::Error(msg) => {
+                buf.push(MessageType::ErrorResponse as u8);
+                let msg_bytes = msg.as_bytes();
+                if msg_bytes.len() > u16::MAX as usize {
+                    return Err(RegistryError::EncodeError {
+                        context: "error message exceeds u16::MAX bytes",
+                    });
+                }
+                buf.extend_from_slice(&(msg_bytes.len() as u16).to_le_bytes());
+                buf.extend_from_slice(msg_bytes);
+            }
         }
         Ok(())
     }
@@ -390,10 +441,49 @@ where
         let offset = Self::header_offset(data);
         let data = &data[offset..];
 
-        if data.len() < 5 {
+        if data.is_empty() {
             return None;
         }
         let msg_type = MessageType::try_from(data[0]).ok()?;
+
+        // Handle RemoveResponse, TouchResponse, and ErrorResponse separately
+        // as they use different formats than the u32-count responses
+        match msg_type {
+            MessageType::RemoveResponse => {
+                // format: [msg_type (1 byte)][u64 count (8 bytes)]
+                if data.len() < 1 + 8 {
+                    return None;
+                }
+                let removed = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
+                return Some(ResponseType::Remove(removed));
+            }
+            MessageType::TouchResponse => {
+                // format: [msg_type (1 byte)][u64 count (8 bytes)]
+                if data.len() < 1 + 8 {
+                    return None;
+                }
+                let touched = u64::from_le_bytes(data[1..9].try_into().ok()?) as usize;
+                return Some(ResponseType::Touch(touched));
+            }
+            MessageType::ErrorResponse => {
+                // format: [msg_type (1 byte)][u16 length (2 bytes)][utf8 message]
+                if data.len() < 1 + 2 {
+                    return None;
+                }
+                let msg_len = u16::from_le_bytes(data[1..3].try_into().ok()?) as usize;
+                if data.len() < 1 + 2 + msg_len {
+                    return None;
+                }
+                let msg = String::from_utf8(data[3..3 + msg_len].to_vec()).ok()?;
+                return Some(ResponseType::Error(msg));
+            }
+            _ => {}
+        }
+
+        // For other response types, parse u32 count
+        if data.len() < 5 {
+            return None;
+        }
         let count = u32::from_le_bytes(data[1..5].try_into().ok()?) as usize;
 
         match msg_type {

@@ -107,12 +107,12 @@ where
         let mut leases = self.leases.write();
 
         // Check if there's an existing lease
-        if let Some(existing) = leases.get(&key) {
-            if !existing.is_expired() && existing.client_id != client_id {
-                // Another client holds an active lease
-                return None;
-            }
-            // Lease expired or same client - we can take it
+        if let Some(existing) = leases.get(&key)
+            && !existing.is_expired()
+            && existing.client_id != client_id
+        {
+            // Another client holds an active lease
+            return None;
         }
 
         let info = LeaseInfo {

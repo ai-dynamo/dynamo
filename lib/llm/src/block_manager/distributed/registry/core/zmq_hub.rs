@@ -124,19 +124,50 @@ where
         });
 
         // Wait for either to finish or cancellation
+        let mut query_handle = query_handle;
+        let mut pull_handle = pull_handle;
         tokio::select! {
-            result = query_handle => {
-                if let Err(e) = result {
-                    error!(error = %e, "Query handler panicked");
+            result = &mut query_handle => {
+                // Query handler finished first, cancel the other and await it
+                cancel.cancel();
+                match result {
+                    Err(e) => error!(error = %e, "Query handler panicked"),
+                    Ok(Err(e)) => error!(error = %e, "Query handler failed"),
+                    Ok(Ok(())) => {}
+                }
+                match pull_handle.await {
+                    Err(e) => error!(error = %e, "Pull handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
+                    Ok(Ok(())) => {}
                 }
             }
-            result = pull_handle => {
-                if let Err(e) = result {
-                    error!(error = %e, "Pull handler panicked");
+            result = &mut pull_handle => {
+                // Pull handler finished first, cancel the other and await it
+                cancel.cancel();
+                match result {
+                    Err(e) => error!(error = %e, "Pull handler panicked"),
+                    Ok(Err(e)) => error!(error = %e, "Pull handler failed"),
+                    Ok(Ok(())) => {}
+                }
+                match query_handle.await {
+                    Err(e) => error!(error = %e, "Query handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Query handler failed during shutdown"),
+                    Ok(Ok(())) => {}
                 }
             }
             _ = cancel.cancelled() => {
                 info!("Hub received shutdown signal");
+                // Await both handlers to ensure clean shutdown
+                match query_handle.await {
+                    Err(e) => error!(error = %e, "Query handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Query handler failed during shutdown"),
+                    Ok(Ok(())) => {}
+                }
+                match pull_handle.await {
+                    Err(e) => error!(error = %e, "Pull handler panicked during shutdown"),
+                    Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
+                    Ok(Ok(())) => {}
+                }
             }
         }
 
@@ -202,6 +233,13 @@ where
                             let identity = frames[0].to_vec();
                             let data = frames[frames.len() - 1].to_vec();
 
+                            debug!(
+                                identity_len = identity.len(),
+                                data_len = data.len(),
+                                frames = frames.len(),
+                                "Query request received"
+                            );
+
                             let response = Self::handle_query(&storage, &codec, &data);
 
                             if tx.send((identity, response)).await.is_err() {
@@ -249,6 +287,13 @@ where
                 result = puller.next() => {
                     match result {
                         Some(Ok(msg)) => {
+                            let frame_count = msg.len();
+                            let total_bytes: usize = msg.iter().map(|f| f.len()).sum();
+                            debug!(
+                                frames = frame_count,
+                                total_bytes = total_bytes,
+                                "Registration request received"
+                            );
                             for frame in msg.iter() {
                                 Self::handle_registration(&storage, &codec, frame.as_ref());
                             }
@@ -274,6 +319,14 @@ where
 
         let Some(query) = codec.decode_query(data) else {
             warn!("Failed to decode query");
+            // Return an explicit error response so clients can distinguish
+            // decode errors from legitimate empty results
+            if let Err(e) = codec.encode_response(
+                &ResponseType::Error("Failed to decode query".to_string()),
+                &mut response,
+            ) {
+                warn!("Failed to encode error response: {}", e);
+            }
             return response;
         };
 
@@ -290,13 +343,20 @@ where
                     })
                     .collect();
 
+                let granted_count = statuses
+                    .iter()
+                    .filter(|s| **s == OffloadStatus::Granted)
+                    .count();
+                let already_stored_count = statuses.len() - granted_count;
+
                 debug!(
-                    keys = keys.len(),
-                    granted = statuses
-                        .iter()
-                        .filter(|s| **s == OffloadStatus::Granted)
-                        .count(),
-                    "can_offload query"
+                    query_type = "CanOffload",
+                    keys = ?keys,
+                    keys_count = keys.len(),
+                    granted = granted_count,
+                    already_stored = already_stored_count,
+                    storage_size = storage.len(),
+                    "Query processed"
                 );
 
                 if let Err(e) =
@@ -312,12 +372,58 @@ where
                     .collect();
 
                 debug!(
+                    query_type = "Match",
+                    keys = ?keys,
                     requested = keys.len(),
                     matched = entries.len(),
-                    "match query"
+                    matched_keys = ?entries.iter().map(|(k, _, _)| k).collect::<Vec<_>>(),
+                    miss = keys.len() - entries.len(),
+                    storage_size = storage.len(),
+                    "Query processed"
                 );
 
                 if let Err(e) = codec.encode_response(&ResponseType::Match(entries), &mut response)
+                {
+                    warn!("Failed to encode response: {}", e);
+                }
+            }
+            QueryType::Remove(keys) => {
+                let mut removed_count = 0usize;
+                for key in &keys {
+                    if storage.remove(key).is_some() {
+                        removed_count += 1;
+                    }
+                }
+
+                debug!(
+                    query_type = "Remove",
+                    keys = ?keys,
+                    requested = keys.len(),
+                    removed = removed_count,
+                    storage_size = storage.len(),
+                    "Query processed"
+                );
+
+                if let Err(e) =
+                    codec.encode_response(&ResponseType::Remove(removed_count), &mut response)
+                {
+                    warn!("Failed to encode response: {}", e);
+                }
+            }
+            QueryType::Touch(keys) => {
+                // Touch is a no-op for now - just acknowledge
+                // Future: could update access timestamps for LRU eviction
+                let touched_count = keys.len();
+                debug!(
+                    query_type = "Touch",
+                    keys = ?keys,
+                    keys_count = touched_count,
+                    storage_size = storage.len(),
+                    "Query processed (no-op)"
+                );
+
+                if let Err(e) =
+                    codec.encode_response(&ResponseType::Touch(touched_count), &mut response)
                 {
                     warn!("Failed to encode response: {}", e);
                 }
@@ -330,16 +436,36 @@ where
     /// Handle a registration message.
     fn handle_registration(storage: &S, codec: &C, data: &[u8]) {
         let Some(entries) = codec.decode_register(data) else {
-            warn!("Failed to decode registration");
+            warn!(data_len = data.len(), "Failed to decode registration");
             return;
         };
 
         let count = entries.len();
+        let prev_total = storage.len();
+
+        // Log each entry being registered
+        for (key, value, metadata) in &entries {
+            debug!(
+                key = ?key,
+                value = ?value,
+                metadata = ?metadata,
+                "Registering entry"
+            );
+        }
+
         for (key, value, _metadata) in entries {
             storage.insert(key, value);
         }
+        let new_total = storage.len();
 
-        debug!(count, total = storage.len(), "registration processed");
+        debug!(
+            entries_count = count,
+            prev_total = prev_total,
+            new_total = new_total,
+            added = new_total - prev_total,
+            data_bytes = data.len(),
+            "Registration batch processed"
+        );
     }
 }
 

@@ -228,6 +228,54 @@ where
                     warn!("Failed to encode response: {}", e);
                 }
             }
+            QueryType::Remove(keys) => {
+                let mut removed_count = 0usize;
+                for key in &keys {
+                    if self.storage.remove(key).is_some() {
+                        removed_count += 1;
+                    }
+                }
+
+                debug!(
+                    requested = keys.len(),
+                    removed = removed_count,
+                    "Processed remove query"
+                );
+
+                if let Err(e) = self
+                    .codec
+                    .encode_response(&ResponseType::Remove(removed_count), &mut response_buf)
+                {
+                    warn!("Failed to encode response: {}", e);
+                }
+            }
+            QueryType::Touch(keys) => {
+                // Touch is used for LRU/LFU tracking - record access for each key
+                // that exists in storage. The storage/eviction policy handles the
+                // actual access tracking.
+                let mut touched_count = 0usize;
+                for key in &keys {
+                    if self.storage.contains(key) {
+                        // Note: The actual access tracking happens in the eviction policy.
+                        // For now, we just count how many keys exist.
+                        // TODO: Call storage.touch(key) when eviction policies support it
+                        touched_count += 1;
+                    }
+                }
+
+                debug!(
+                    requested = keys.len(),
+                    touched = touched_count,
+                    "Processed touch query (access notification)"
+                );
+
+                if let Err(e) = self
+                    .codec
+                    .encode_response(&ResponseType::Touch(touched_count), &mut response_buf)
+                {
+                    warn!("Failed to encode response: {}", e);
+                }
+            }
         }
 
         response_buf
@@ -284,6 +332,7 @@ where
 }
 
 /// Create a simple hub with HashMap storage and binary codec.
+#[allow(clippy::type_complexity)]
 pub fn simple_hub<K, V, M>()
 -> RegistryHub<K, V, M, super::storage::HashMapStorage<K, V>, super::codec::BinaryCodec<K, V, M>>
 where

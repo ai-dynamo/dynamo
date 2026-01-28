@@ -8,7 +8,7 @@ use std::time::Duration;
 /// Hub configuration for the registry server.
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// let config = RegistryHubConfig {
 ///     capacity: 1_000_000,
 ///     query_addr: "tcp://*:5555".to_string(),
@@ -99,7 +99,7 @@ impl RegistryHubConfig {
 /// Client configuration for registry workers.
 ///
 /// # Example
-/// ```ignore
+/// ```text
 /// let config = RegistryClientConfig {
 ///     hub_query_addr: "tcp://leader:5555".to_string(),
 ///     hub_register_addr: "tcp://leader:5556".to_string(),
@@ -286,6 +286,23 @@ impl RegistryClientConfig {
         self.world_size = Some(world_size);
         self.namespace = default_namespace(self.rank, self.world_size);
         self
+    }
+
+    /// Create ZMQ transport from this config.
+    ///
+    /// Returns `None` if connection fails.
+    pub fn create_transport(&self) -> Option<super::ZmqTransport> {
+        let transport_config =
+            super::ZmqTransportConfig::new(&self.hub_query_addr, &self.hub_register_addr)
+                .with_timeout(self.request_timeout);
+
+        match super::ZmqTransport::connect(transport_config) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::error!("Failed to connect to distributed registry hub: {}", e);
+                None
+            }
+        }
     }
 }
 

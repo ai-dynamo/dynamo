@@ -25,9 +25,7 @@ use super::value::RegistryValue;
 ///
 /// # Example
 ///
-/// ```ignore
-/// use registry::core::{ClientBuilder, BinaryCodec, NoMetadata};
-///
+/// ```text
 /// let client = ClientBuilder::new(transport, BinaryCodec::new())
 ///     .batch_size(50)
 ///     .batch_timeout(Duration::from_millis(20))
@@ -97,9 +95,7 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
-/// use registry::core::{HubBuilder, BinaryCodec, HashMapStorage, NoMetadata, HubConfig};
-///
+/// ```text
 /// let hub = HubBuilder::new(storage, BinaryCodec::new())
 ///     .lease_ttl(Duration::from_secs(60))
 ///     .build();
@@ -179,7 +175,7 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// let client = client(transport)
 ///     .batch_size(50)
 ///     .build();
@@ -198,7 +194,7 @@ where
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// let hub = hub(storage)
 ///     .lease_ttl(Duration::from_secs(60))
 ///     .build();
