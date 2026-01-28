@@ -60,9 +60,6 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
     metrics: Arc<Metrics>,
-    /// Tracks models currently being registered to prevent duplicate concurrent
-    /// config downloads. When multiple workers register the same model simultaneously,
-    /// only one will proceed with download while others wait/skip.
     registering_models: DashSet<String>,
 }
 
