@@ -320,7 +320,8 @@ impl Scheduler {
                     &args.perf_model,
                     args.block_size,
                     args.speedup_ratio,
-                    iteration_start + Duration::from_secs_f64(prefill_time.as_secs_f64() / args.speedup_ratio),
+                    iteration_start
+                        + Duration::from_secs_f64(prefill_time.as_secs_f64() / args.speedup_ratio),
                 )
                 .await;
 
