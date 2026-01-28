@@ -106,6 +106,7 @@ impl LLMMetricAnnotation {
 struct ReasoningState {
     stream: Pin<Box<dyn Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>> + Send>>,
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    finished: bool,
 }
 
 pub struct OpenAIPreprocessor {
@@ -859,9 +860,15 @@ impl OpenAIPreprocessor {
         let state = ReasoningState {
             stream: Box::pin(stream),
             reasoning_parser: Some(reasoning_parser),
+            finished: false,
         };
 
         stream::unfold(state, |mut state| async move {
+            // If already finished, return None immediately to prevent polling exhausted stream
+            if state.finished {
+                return None;
+            }
+
             if let Some(response) = state.stream.next().await {
                 // Process the response through reasoning parser if available
                 let processed_response = if let Some(ref mut parser) = state.reasoning_parser {
@@ -886,6 +893,9 @@ impl OpenAIPreprocessor {
 
                 Some((processed_response, state))
             } else {
+                // Stream has ended - must set finished to true to prevent unfold from polling
+                // again. The stream is exhausted and will panic if polled after None.
+                state.finished = true;
                 None
             }
         })
