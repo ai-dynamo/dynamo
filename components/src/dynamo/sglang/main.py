@@ -71,12 +71,22 @@ async def worker():
     dump_config(config.dynamo_args.dump_config_to, config)
 
     loop = asyncio.get_running_loop()
-    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
+
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.dynamo_args.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.dynamo_args.request_plane == "nats" or (
+        config.dynamo_args.event_plane == "nats" and config.dynamo_args.use_kv_events
+    )
+
     runtime = DistributedRuntime(
         loop,
         config.dynamo_args.store_kv,
         config.dynamo_args.request_plane,
-        config.dynamo_args.use_kv_events,
+        enable_nats,
     )
 
     def signal_handler():
