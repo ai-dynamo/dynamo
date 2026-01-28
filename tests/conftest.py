@@ -375,18 +375,24 @@ class NatsServer(ManagedProcess):
 
 
 class SharedManagedProcess:
-    """Base class for ManagedProcess with file-based reference counting for multi-process sharing."""
+    """Base class for ManagedProcess with file-based reference counting for multi-process sharing.
+
+    Supports dynamic port allocation: when start_port is provided, the first worker
+    allocates a dynamic port and stores it in the ref file. Subsequent workers read
+    the allocated port from the ref file.
+    """
 
     def __init__(
         self,
         request,
         tmp_path_factory,
         resource_name: str,
-        port: int,
+        start_port: int,
         timeout: int = 300,
     ):
         self.request = request
-        self.port = port
+        self.start_port = start_port
+        self.port: Optional[int] = None  # Set when entering context
         self.timeout = timeout
         self.resource_name = resource_name
         self._server: Optional[ManagedProcess] = None
@@ -395,73 +401,82 @@ class SharedManagedProcess:
         root_tmp = Path(tempfile.gettempdir()) / "pytest_ref_counting"
         root_tmp.mkdir(parents=True, exist_ok=True)
 
-        self.ref_file = root_tmp / f"pytest_{resource_name}_{port}_ref_count"
+        # Use resource_name only (not port) since port is dynamic
+        self.ref_file = root_tmp / f"pytest_{resource_name}_shared_ref"
         self.lock_file = str(self.ref_file) + ".lock"
 
-    def _create_server(self) -> ManagedProcess:
+    def _create_server(self, port: int) -> ManagedProcess:
         """Create the underlying server instance. Must be implemented by subclasses."""
         raise NotImplementedError
 
-    def _read_ref_count(self) -> int:
-        """Read current reference count."""
+    def _read_ref_data(self) -> dict:
+        """Read ref data (count and port) from file."""
         if self.ref_file.exists():
             try:
-                return int(self.ref_file.read_text().strip())
+                import json
+
+                data = json.loads(self.ref_file.read_text().strip())
+                if isinstance(data, dict):
+                    return data
+                # Handle legacy format (just an int)
+                return {"ref_count": int(data), "port": None}
             except (ValueError, IOError):
-                return 0
-        return 0
+                return {"ref_count": 0, "port": None}
+        return {"ref_count": 0, "port": None}
 
-    def _write_ref_count(self, count: int):
-        """Write reference count atomically."""
-        self.ref_file.write_text(str(count))
+    def _write_ref_data(self, ref_count: int, port: Optional[int]):
+        """Write ref data atomically."""
+        import json
 
-    def _increment_ref_count(self) -> int:
-        """Increment reference count and return new count."""
-        count = self._read_ref_count()
-        count += 1
-        self._write_ref_count(count)
-        return count
-
-    def _decrement_ref_count(self) -> int:
-        """Decrement reference count and return new count."""
-        count = self._read_ref_count()
-        count = max(0, count - 1)
-        self._write_ref_count(count)
-        return count
+        self.ref_file.write_text(json.dumps({"ref_count": ref_count, "port": port}))
 
     def __enter__(self):
         with FileLock(self.lock_file):
-            ref_count = self._increment_ref_count()
+            data = self._read_ref_data()
+            ref_count = data["ref_count"] + 1
+
             if ref_count == 1:
-                # First reference - start the process
-                self._server = self._create_server()
+                # First reference - allocate port and start the process
+                self.port = allocate_port(self.start_port)
+                self._write_ref_data(ref_count, self.port)
+                self._server = self._create_server(self.port)
                 self._server.__enter__()
                 self._owns_process = True
-                logging.info(f"[{self.resource_name}] Started process (ref_count=1)")
+                logging.info(
+                    f"[{self.resource_name}] Started process on port {self.port} (ref_count=1)"
+                )
             else:
-                # Process already running, just track reference
+                # Process already running - read port from ref file
+                self.port = data["port"]
+                self._write_ref_data(ref_count, self.port)
                 self._owns_process = False
                 logging.info(
-                    f"[{self.resource_name}] Reusing existing process (ref_count={ref_count})"
+                    f"[{self.resource_name}] Reusing existing process on port {self.port} (ref_count={ref_count})"
                 )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         with FileLock(self.lock_file):
-            ref_count = self._decrement_ref_count()
-            if ref_count == 0 and self._owns_process:
-                # Last reference - stop the process
-                if self._server:
-                    self._server.__exit__(exc_type, exc_val, exc_tb)
-                logging.info(f"[{self.resource_name}] Stopped process (ref_count=0)")
-            elif ref_count == 0:
-                # Last reference but we don't own it - shouldn't happen, but clean up ref file
+            data = self._read_ref_data()
+            ref_count = max(0, data["ref_count"] - 1)
+            port = data["port"]
+
+            if ref_count == 0:
+                if self._owns_process:
+                    # Last reference and we own it - stop the process
+                    if self._server:
+                        self._server.__exit__(exc_type, exc_val, exc_tb)
+                    # Deallocate the port
+                    if port is not None:
+                        deallocate_port(port)
+                    logging.info(
+                        f"[{self.resource_name}] Stopped process on port {port} (ref_count=0)"
+                    )
+                # Clean up ref file
                 if self.ref_file.exists():
                     self.ref_file.unlink()
-                logging.warning(
-                    f"[{self.resource_name}] Ref count reached 0 but we don't own process"
-                )
             else:
+                self._write_ref_data(ref_count, port)
                 logging.info(
                     f"[{self.resource_name}] Released reference (ref_count={ref_count})"
                 )
@@ -470,14 +485,14 @@ class SharedManagedProcess:
 class SharedEtcdServer(SharedManagedProcess):
     """EtcdServer with file-based reference counting for multi-process sharing."""
 
-    def __init__(self, request, tmp_path_factory, port=2379, timeout=300):
-        super().__init__(request, tmp_path_factory, "etcd", port, timeout)
+    def __init__(self, request, tmp_path_factory, start_port=2380, timeout=300):
+        super().__init__(request, tmp_path_factory, "etcd", start_port, timeout)
         # Create a log directory for session-scoped servers
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
 
-    def _create_server(self) -> ManagedProcess:
+    def _create_server(self, port: int) -> ManagedProcess:
         """Create EtcdServer instance."""
-        server = EtcdServer(self.request, port=self.port, timeout=self.timeout)
+        server = EtcdServer(self.request, port=port, timeout=self.timeout)
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
@@ -486,14 +501,14 @@ class SharedEtcdServer(SharedManagedProcess):
 class SharedNatsServer(SharedManagedProcess):
     """NatsServer with file-based reference counting for multi-process sharing."""
 
-    def __init__(self, request, tmp_path_factory, port=4222, timeout=300):
-        super().__init__(request, tmp_path_factory, "nats", port, timeout)
+    def __init__(self, request, tmp_path_factory, start_port=4223, timeout=300):
+        super().__init__(request, tmp_path_factory, "nats", start_port, timeout)
         # Create a log directory for session-scoped servers
         self._log_dir = tempfile.mkdtemp(prefix=f"pytest_{self.resource_name}_logs_")
 
-    def _create_server(self) -> ManagedProcess:
+    def _create_server(self, port: int) -> ManagedProcess:
         """Create NatsServer instance."""
-        server = NatsServer(self.request, port=self.port, timeout=self.timeout)
+        server = NatsServer(self.request, port=port, timeout=self.timeout)
         # Override log_dir since request.node.name is empty in session scope
         server.log_dir = self._log_dir
         return server
@@ -601,19 +616,25 @@ def runtime_services_session(request, tmp_path_factory):
 
     Uses file-based reference counting to coordinate between pytest-xdist worker processes.
     Only the first worker starts services, and only the last worker tears them down.
+    Dynamically allocates ports to avoid conflicts.
 
-    WARNING: may not be parallel/xdist safe.
-    - This fixture shares one NATS + one etcd across many tests (and across xdist workers).
-    - It is only safe if tests fully isolate state (e.g. unique namespaces) and do not
-      assume exclusive access to global streams/keys/ports.
-    - Prefer `runtime_services_dynamic_ports` for true per-test isolation in parallel runs.
+    This fixture is xdist-safe when tests use unique namespaces (e.g. random suffixes)
+    and do not assume exclusive access to global streams/keys.
 
-    TODO: once nothing uses `runtime_services_session`, make the per-test dynamic ports
-    behavior the default for router/frontend integration tests.
+    For tests that need to restart NATS (e.g. indexer sync), use `runtime_services_dynamic_ports`
+    which provides per-test isolated instances.
     """
     with SharedNatsServer(request, tmp_path_factory) as nats:
         with SharedEtcdServer(request, tmp_path_factory) as etcd:
+            # Set environment variables for Rust/Python runtime to use
+            os.environ["NATS_SERVER"] = f"nats://localhost:{nats.port}"
+            os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd.port}"
+
             yield nats, etcd
+
+            # Clean up environment variables
+            os.environ.pop("NATS_SERVER", None)
+            os.environ.pop("ETCD_ENDPOINTS", None)
 
 
 @pytest.fixture
