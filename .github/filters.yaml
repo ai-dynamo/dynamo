@@ -102,6 +102,7 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/global_router/**'
 
 vllm:
   - 'container/Dockerfile.vllm'

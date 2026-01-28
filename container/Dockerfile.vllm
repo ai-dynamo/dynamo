@@ -75,7 +75,7 @@ ARG RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 ARG CUDA_VERSION="12.9"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.14.0"
+ARG VLLM_REF="v0.14.1"
 # FlashInfer Ref used to install flashinfer-cubin and flashinfer-jit-cache
 ARG FLASHINF_REF="v0.5.3"
 
@@ -846,6 +846,10 @@ USER dynamo
 
 ARG DYNAMO_COMMIT_SHA
 ENV DYNAMO_COMMIT_SHA=$DYNAMO_COMMIT_SHA
+
+# In vLLM 0.12 the default sampler changed on the forward pass.
+# We need to enable this to enable the cuda kernels.
+ENV VLLM_USE_FLASHINFER_SAMPLER=1
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

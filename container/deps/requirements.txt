@@ -54,7 +54,7 @@ tensorboardX==2.6.2.2
 # Transformers version constraint for container builds
 # - vLLM 0.11.0: >=4.55.2, vLLM 0.11.2: >=4.56.0,<5
 # - TensorRT-LLM 1.2.0rc6.post2: ==4.57.1
-# - SGLang 0.5.7: ==4.57.1
+# - SGLang 0.5.8: ==4.57.1
 # Using >=4.56.0 to satisfy all frameworks
 transformers>=4.56.0
 types-aiofiles==25.1.0.20251011
