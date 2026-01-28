@@ -144,7 +144,12 @@ impl KvScheduler {
                         tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
-                    _ = change_rx.changed() => {}
+                    result = change_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                            break;
+                        }
+                    }
                 }
 
                 // Get current workers from DashMap
