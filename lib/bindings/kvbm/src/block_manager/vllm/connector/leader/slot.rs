@@ -14,6 +14,7 @@ use dynamo_llm::{
     tokens::TokenBlock,
 };
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::cache_stats::CacheStatsTracker;
@@ -133,6 +134,11 @@ pub trait Slot: std::fmt::Debug {
 
     /// Take all pending operations for the slot.
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>>;
+
+    /// Returns true if this slot ever had operations (onboarding or offloading).
+    /// Used by request_finished() to determine if vLLM should wait for the worker's
+    /// finished_sending signal.
+    fn had_operations(&self) -> bool;
 
     /// Record the number of tokens that were cached on the device.
     fn record_cached_device_tokens(&mut self, num_tokens: usize);
@@ -294,6 +300,25 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
     }
 }
 
+impl<R: RequestKey> ConnectorSlotManager<R> {
+    /// Ensure a slot exists on the worker's scheduler before transfers start.
+    /// This sends a CreateSlot message through the transfer engine, which will
+    /// be forwarded to the worker's scheduler.
+    ///
+    /// This fixes the race condition where transfers complete before the worker
+    /// slot is created, which previously caused is_complete() to return true
+    /// for missing slots.
+    pub fn ensure_scheduler_slot(&self, request_id: &R) -> Result<(), SlotError> {
+        tracing::debug!(
+            request_id = %request_id,
+            "ensuring scheduler slot exists before transfers start"
+        );
+        self.xfer_tx
+            .send(LocalTransferRequest::CreateSlot(request_id.to_string()))
+            .map_err(|_| SlotError::InvalidOperation("transfer engine closed".to_string()))
+    }
+}
+
 impl<R: RequestKey> Drop for ConnectorSlotManager<R> {
     fn drop(&mut self) {
         if let Some(task) = self._transfer_engine_handle.take() {
@@ -346,6 +371,13 @@ pub struct VllmConnectorSlot {
 
     pending_operations: Option<Vec<WorkerTransferRequest>>,
 
+    /// Tracks whether this slot ever had operations (onboarding or offloading).
+    /// This is set to true when operations are added and never reset.
+    /// Used by request_finished() to determine if vLLM should wait for the worker's
+    /// finished_sending signal. If true, return true to make vLLM wait.
+    /// If false (no operations ever), return false so vLLM can free immediately.
+    had_operations: bool,
+
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
 
@@ -397,6 +429,7 @@ impl VllmConnectorSlot {
             staging_from_host: None,
             staging_from_disk: None,
             pending_operations: None,
+            had_operations: false,
             tokens_cached_from_device: 0,
             tokens_cached_from_host: 0,
             tokens_cached_from_disk: 0,
@@ -706,6 +739,10 @@ impl Slot for VllmConnectorSlot {
 
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>> {
         self.pending_operations.take()
+    }
+
+    fn had_operations(&self) -> bool {
+        self.had_operations
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
@@ -1071,6 +1108,10 @@ impl VllmConnectorSlot {
     }
 
     fn append_pending_operation(&mut self, operation: WorkerTransferRequest) {
+        // Mark that this slot has had operations - used by request_finished() to determine
+        // if vLLM should wait for the worker's finished_sending signal
+        self.had_operations = true;
+
         if let Some(pending_operations) = self.pending_operations.as_mut() {
             pending_operations.push(operation);
         } else {
@@ -1082,6 +1123,10 @@ impl VllmConnectorSlot {
 enum LocalTransferRequest {
     Offload(LocalOffloadRequest),
     Onboard(LocalOnboardRequest),
+    /// Create a slot for the given request_id before transfers start.
+    /// This enables synchronous slot creation to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    CreateSlot(String),
 }
 
 struct LocalOffloadRequest {
@@ -1136,6 +1181,9 @@ struct LocalTransferEngine {
     block_manager: VllmBlockManager,
     leader: Arc<KvbmLeader>,
     xfer_rx: mpsc::UnboundedReceiver<LocalTransferRequest>,
+    /// Tracks spawned CreateSlot tasks so they can be cancelled during shutdown.
+    /// This prevents CUDA_ERROR_DEINITIALIZED errors when tasks outlive the CUDA context.
+    create_slot_tasks: JoinSet<()>,
 }
 
 impl LocalTransferEngine {
@@ -1148,6 +1196,7 @@ impl LocalTransferEngine {
             block_manager,
             leader,
             xfer_rx,
+            create_slot_tasks: JoinSet::new(),
         }
     }
 
@@ -1277,6 +1326,22 @@ impl LocalTransferEngine {
                                         tracing::error!("LocalTransferEngine: error sending onboard request: {:?}", e);
                                     }
                                 }
+                                LocalTransferRequest::CreateSlot(request_id) => {
+                                    // Send a slot creation request to the worker's scheduler.
+                                    // This creates the slot BEFORE transfers start, fixing the
+                                    // race condition where transfers complete before the slot exists.
+                                    // Use JoinSet to track these tasks so they can be cancelled during
+                                    // shutdown, preventing CUDA_ERROR_DEINITIALIZED errors.
+                                    let leader_clone = self.leader.clone();
+                                    self.create_slot_tasks.spawn(async move {
+                                        if let Err(e) = process_create_slot_request(request_id.clone(), &leader_clone).await {
+                                            tracing::error!(
+                                                request_id = %request_id,
+                                                "LocalTransferEngine: error creating slot: {:?}", e
+                                            );
+                                        }
+                                    });
+                                }
                             }
                         }
                         None => {
@@ -1289,6 +1354,23 @@ impl LocalTransferEngine {
         }
 
         tracing::debug!("LocalTransferEngine: shutting down");
+
+        // Abort all pending create slot tasks to prevent CUDA_ERROR_DEINITIALIZED errors.
+        // These tasks may be in-flight and accessing CUDA resources, so we must cancel them
+        // before the CUDA context is destroyed during Python/vLLM shutdown.
+        let pending_count = self.create_slot_tasks.len();
+        if pending_count > 0 {
+            tracing::debug!(
+                "LocalTransferEngine: aborting {} pending create slot tasks",
+                pending_count
+            );
+            self.create_slot_tasks.abort_all();
+            // Wait for all tasks to complete (they will return JoinError due to abort)
+            while self.create_slot_tasks.join_next().await.is_some() {
+                // Tasks are being cancelled, ignore results
+            }
+            tracing::debug!("LocalTransferEngine: all create slot tasks aborted");
+        }
 
         // drop all tx channels
         drop(onboard_tx);
@@ -1533,6 +1615,64 @@ async fn process_onboard_request(
     Ok(())
 }
 
+/// Process a slot creation request by sending it to the worker's scheduler.
+/// This creates the slot BEFORE transfers start, fixing the race condition
+/// where transfers complete before the worker slot exists.
+async fn process_create_slot_request(
+    request_id: String,
+    leader: &Arc<KvbmLeader>,
+) -> anyhow::Result<()> {
+    tracing::debug!(
+        request_id = %request_id,
+        "Processing slot creation request"
+    );
+
+    // Send a transfer request with no blocks and RequestType::CreateSlot.
+    // The worker will interpret this as a slot creation request.
+    let block_xfer_req = BlockTransferRequest {
+        from_pool: BlockTransferPool::Device,
+        to_pool: BlockTransferPool::Device,
+        blocks: vec![],
+        connector_req: Some(LeaderTransferRequest {
+            request_id: request_id.clone(),
+            uuid: uuid::Uuid::nil(), // Use nil UUID for slot creation (no operation tracking)
+            requirement: None,
+            request_type: RequestType::CreateSlot,
+        }),
+    };
+
+    // Fire and forget - we don't need to wait for the slot creation to complete.
+    // The important thing is that the message is sent before any transfers start.
+    match leader.transfer_blocks_request(block_xfer_req).await {
+        Ok(notify_receiver) => {
+            // Wait for acknowledgment to ensure the slot is created
+            match notify_receiver.await {
+                Ok(_) => {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        "Slot creation request completed successfully"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        request_id = %request_id,
+                        "Slot creation notification failed - slot may not be created"
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!(
+                request_id = %request_id,
+                "Failed to send slot creation request: {:?}", e
+            );
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+
 // todo move to core lib
 pub trait AnyBlocks: Send {
     fn len(&self) -> usize;
@@ -1588,5 +1728,184 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutab
 
     fn block_ids(&self) -> Vec<BlockId> {
         self.block_ids()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dynamo_llm::block_manager::connector::protocol::WorkerTransferRequest;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    /// Helper to create a minimal test slot without requiring VllmBlockManager.
+    /// This directly constructs the slot fields for unit testing the had_operations flag.
+    fn create_test_slot() -> VllmConnectorSlot {
+        let (xfer_tx, _xfer_rx) = mpsc::unbounded_channel();
+        let cache_stats = Arc::new(CacheStatsTracker::new(Some("test".to_string())));
+
+        // Create a minimal slot by directly setting fields
+        // Note: We need tokens to be non-empty as required by the assert in new()
+        let tokens: Tokens = vec![1u32, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16].into();
+        let block_size = 16usize;
+        let salt_hash = SaltHash::default();
+        let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
+
+        VllmConnectorSlot {
+            request_id: "test-request-id".to_string(),
+            sequence,
+            // We don't have a real block_manager for testing, but we can test the flag behavior
+            // by directly manipulating the slot state. The block_manager field is only used
+            // in methods that interact with storage, not for the had_operations flag.
+            block_manager: unsafe { std::mem::zeroed() }, // Only for testing had_operations flag
+            block_size,
+            xfer_tx,
+            state: SlotState::Initialized,
+            iteration_first_scheduled: None,
+            current_position: 0,
+            evaluated_blocks: 0,
+            device_blocks: Vec::new(),
+            staging_from_host: None,
+            staging_from_disk: None,
+            pending_operations: None,
+            had_operations: false,
+            tokens_cached_from_device: 0,
+            tokens_cached_from_host: 0,
+            tokens_cached_from_disk: 0,
+            performed_cache_lookup: false,
+            total_blocks_queried: 0,
+            cache_stats,
+        }
+    }
+
+    #[test]
+    fn test_had_operations_initially_false() {
+        // Create a new slot and verify had_operations starts as false
+        let slot = create_test_slot();
+
+        // Verify had_operations starts as false
+        assert!(
+            !slot.had_operations(),
+            "had_operations should be false on slot creation"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_set_when_operations_appended() {
+        // Create a slot and directly test append_pending_operation behavior
+        let mut slot = create_test_slot();
+
+        // Verify starts false
+        assert!(!slot.had_operations());
+
+        // Create a dummy worker transfer request and append it
+        let worker_req = WorkerTransferRequest {
+            request_id: "test-request-id".to_string(),
+            uuid: uuid::Uuid::new_v4(),
+            transfer_type: TransferType::Store,
+            request_type: RequestType::Scheduled,
+        };
+
+        // Append the operation - this should set had_operations to true
+        slot.append_pending_operation(worker_req);
+
+        // Verify had_operations is now true
+        assert!(
+            slot.had_operations(),
+            "had_operations should be true after append_pending_operation"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_false_when_no_operations_added() {
+        // Create a slot, perform state changes but don't add operations
+        let mut slot = create_test_slot();
+
+        // Verify starts false
+        assert!(!slot.had_operations());
+
+        // Transition through various states that don't involve operations
+        slot.state = SlotState::Prefilling;
+        assert!(!slot.had_operations());
+
+        slot.state = SlotState::Decoding;
+        assert!(!slot.had_operations());
+
+        slot.state = SlotState::Finishing;
+        assert!(!slot.had_operations());
+
+        slot.state = SlotState::Finished;
+        assert!(
+            !slot.had_operations(),
+            "had_operations should remain false when no operations were ever added"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_persists_through_state_changes() {
+        // Create slot, add operation, verify flag persists through state changes
+        let mut slot = create_test_slot();
+
+        // Add an operation to set had_operations = true
+        let worker_req = WorkerTransferRequest {
+            request_id: "test-request-id".to_string(),
+            uuid: uuid::Uuid::new_v4(),
+            transfer_type: TransferType::Load,
+            request_type: RequestType::Immediate,
+        };
+        slot.append_pending_operation(worker_req);
+        assert!(slot.had_operations());
+
+        // Transition through states - flag should persist
+        slot.state = SlotState::Prefilling;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Prefilling"
+        );
+
+        slot.state = SlotState::Decoding;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Decoding"
+        );
+
+        slot.state = SlotState::Finishing;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Finishing"
+        );
+
+        slot.state = SlotState::Finished;
+        assert!(
+            slot.had_operations(),
+            "had_operations should persist through Finished"
+        );
+    }
+
+    #[test]
+    fn test_had_operations_not_reset_on_take_pending_operations() {
+        // Verify that taking pending operations doesn't reset had_operations
+        let mut slot = create_test_slot();
+
+        // Add an operation
+        let worker_req = WorkerTransferRequest {
+            request_id: "test-request-id".to_string(),
+            uuid: uuid::Uuid::new_v4(),
+            transfer_type: TransferType::Store,
+            request_type: RequestType::Scheduled,
+        };
+        slot.append_pending_operation(worker_req);
+        assert!(slot.had_operations());
+
+        // Take the pending operations (this is what the connector does)
+        let ops = slot.take_pending_operations();
+        assert!(ops.is_some());
+        assert_eq!(ops.unwrap().len(), 1);
+
+        // Verify had_operations is STILL true after take
+        assert!(
+            slot.had_operations(),
+            "had_operations should remain true even after take_pending_operations"
+        );
     }
 }
