@@ -1537,4 +1537,96 @@ dynamo_component_errors_total 5"#;
 
         println!("✓ All refactored filter functions work correctly!");
     }
+
+    #[tokio::test]
+    async fn test_same_metric_name_different_endpoints() {
+        // Test that the same metric name can exist in different endpoints without collision.
+        // This validates the multi-registry approach: each endpoint has its own registry,
+        // and metrics are merged at scrape time with distinct labels.
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns_test").unwrap();
+        let component = namespace.component("comp_test").unwrap();
+
+        // Create two endpoints with the same metric name
+        let ep1 = component.endpoint("ep1");
+        let ep2 = component.endpoint("ep2");
+
+        let counter1 = ep1
+            .metrics()
+            .create_counter("requests_total", "Total requests", &[])
+            .unwrap();
+        counter1.inc_by(100.0);
+
+        let counter2 = ep2
+            .metrics()
+            .create_counter("requests_total", "Total requests", &[])
+            .unwrap();
+        counter2.inc_by(200.0);
+
+        // Get merged Prometheus output from component level
+        let output = component.metrics().prometheus_expfmt().unwrap();
+
+        let expected_output = r#"# HELP dynamo_component_requests_total Total requests
+# TYPE dynamo_component_requests_total counter
+dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep1",dynamo_namespace="ns_test"} 100
+dynamo_component_requests_total{dynamo_component="comp_test",dynamo_endpoint="ep2",dynamo_namespace="ns_test"} 200"#;
+
+        assert_eq!(
+            output.trim_end_matches('\n'),
+            expected_output.trim_end_matches('\n'),
+            "\n=== MULTI-REGISTRY COMPARISON FAILED ===\n\
+             Actual:\n{}\n\
+             Expected:\n{}\n\
+             ==============================",
+            output,
+            expected_output
+        );
+
+        println!("✓ Multi-registry prevents Prometheus collisions!");
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_series_warning() {
+        // Test that duplicate series (same metric name + same labels) are detected and deduplicated.
+        // This should log a warning and keep only one of the duplicate series.
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns_dup").unwrap();
+        let component = namespace.component("comp_dup").unwrap();
+
+        // Create two endpoints with counters that will have identical labels when scraped
+        let ep1 = component.endpoint("ep_same");
+        let ep2 = component.endpoint("ep_same"); // Same endpoint name = duplicate labels
+
+        let counter1 = ep1
+            .metrics()
+            .create_counter("dup_metric", "Duplicate metric test", &[])
+            .unwrap();
+        counter1.inc_by(50.0);
+
+        let counter2 = ep2
+            .metrics()
+            .create_counter("dup_metric", "Duplicate metric test", &[])
+            .unwrap();
+        counter2.inc_by(75.0);
+
+        // Get merged output - duplicates should be deduplicated
+        let output = component.metrics().prometheus_expfmt().unwrap();
+
+        let expected_output = r#"# HELP dynamo_component_dup_metric Duplicate metric test
+# TYPE dynamo_component_dup_metric counter
+dynamo_component_dup_metric{dynamo_component="comp_dup",dynamo_endpoint="ep_same",dynamo_namespace="ns_dup"} 50"#;
+
+        assert_eq!(
+            output.trim_end_matches('\n'),
+            expected_output.trim_end_matches('\n'),
+            "\n=== DEDUPLICATION COMPARISON FAILED ===\n\
+             Actual:\n{}\n\
+             Expected:\n{}\n\
+             ==============================",
+            output,
+            expected_output
+        );
+
+        println!("✓ Duplicate series detection and deduplication works!");
+    }
 }
