@@ -73,10 +73,23 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 
 	// EPP-specific environment variables
 	// Note: Platform-specific env vars (NATS_SERVER, ETCD_ENDPOINTS) are added by the controller
+	// Note: DYNAMO_* env vars are for the dynamo_kv_scorer plugin (different from DYN_* runtime vars)
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  "DYNAMO_KV_BLOCK_SIZE",
 			Value: "16",
+		},
+		{
+			// DYNAMO_NAMESPACE is used by the dynamo_kv_scorer plugin to find model cards
+			// It must match the namespace where backend workers register their ModelDeploymentCard
+			Name:  "DYNAMO_NAMESPACE",
+			Value: context.DynamoNamespace,
+		},
+		{
+			// DYNAMO_COMPONENT is used by the dynamo_kv_scorer plugin
+			// Backend workers typically register under "backend" component
+			Name:  "DYNAMO_COMPONENT",
+			Value: "backend",
 		},
 		{
 			Name:  "USE_STREAMING",
@@ -111,6 +124,13 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	_, volumeMount := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
 	container.VolumeMounts = append(container.VolumeMounts, volumeMount)
 
+	// Mount HuggingFace cache directory for model config downloads
+	hfCacheMount := corev1.VolumeMount{
+		Name:      "hf-cache",
+		MountPath: "/home/nonroot/.cache",
+	}
+	container.VolumeMounts = append(container.VolumeMounts, hfCacheMount)
+
 	return container, nil
 }
 
@@ -126,6 +146,15 @@ func (e *EPPDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, 
 	// Add EPP config volume
 	volume, _ := epp.GetConfigMapVolumeMount(context.ParentGraphDeploymentName, context.EPPConfig)
 	podSpec.Volumes = append(podSpec.Volumes, volume)
+
+	// Add emptyDir volume for HuggingFace cache (needed for downloading model config files)
+	hfCacheVolume := corev1.Volume{
+		Name: "hf-cache",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}
+	podSpec.Volumes = append(podSpec.Volumes, hfCacheVolume)
 
 	return podSpec, nil
 }
