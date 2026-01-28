@@ -324,7 +324,7 @@ class DisaggMockerProcess:
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_kv_router(
-    request, runtime_services_session, predownload_tokenizers, request_plane
+    request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
     """
     Test KV router with multiple mocker engine instances.
@@ -332,7 +332,7 @@ def test_mocker_kv_router(
     Tests both NATS and TCP request planes.
     """
 
-    # runtime_services_session provides shared etcd and nats instances (persistent across tests)
+    # runtime_services starts etcd and optionally nats based on request_plane
     logger.info(f"Starting mocker KV router test with request_plane={request_plane}")
 
     # Create mocker args dictionary
@@ -375,7 +375,7 @@ def test_mocker_kv_router(
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up
 def test_mocker_two_kv_router(
     request,
-    runtime_services_session,
+    runtime_services_dynamic_ports,
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
@@ -386,7 +386,7 @@ def test_mocker_two_kv_router(
     Tests with both etcd and file storage backends.
     """
 
-    # runtime_services_session provides shared etcd and nats instances (persistent across tests)
+    # runtime_services starts etcd and nats
     logger.info(
         f"Starting mocker two KV router test with {store_backend} storage backend"
     )
@@ -430,7 +430,7 @@ def test_mocker_two_kv_router(
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
-    request, runtime_services_session, predownload_tokenizers
+    request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
     logger.info("Starting mocker KV router overload test for 503 status")
@@ -469,7 +469,7 @@ def test_mocker_kv_router_overload_503(
 @pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_kv_push_router_bindings(
-    request, runtime_services_session, predownload_tokenizers, request_plane
+    request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
     """Test KvPushRouter Python bindings with mocker engines."""
     logger.info("Starting KvPushRouter bindings test")
@@ -590,7 +590,7 @@ def test_indexers_sync(
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
 def test_query_instance_id_returns_worker_and_tokens(
-    request, runtime_services_session, predownload_tokenizers
+    request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
     """Test query_instance_id annotation with mocker engines."""
     logger.info("Starting KV router query_instance_id annotation test")
@@ -636,7 +636,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 )
 def test_router_decisions(
     request,
-    runtime_services_session,
+    runtime_services_dynamic_ports,
     predownload_tokenizers,
     use_nats_core,
     use_kv_events,
@@ -650,7 +650,7 @@ def test_router_decisions(
     - Approximate mode (--no-kv-events): No KV events, router predicts cache state
       based on routing decisions with TTL-based expiration and pruning
     """
-    # runtime_services_session provides shared NATS and etcd (persistent across tests)
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     if not use_kv_events:
         mode = "Approximate (no-kv-events)"
     elif use_nats_core:
@@ -713,7 +713,7 @@ def test_router_decisions(
 @pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
 def test_router_decisions_disagg(
     request,
-    runtime_services_session,
+    runtime_services_dynamic_ports,
     predownload_tokenizers,
     registration_order,
     enable_disagg_bootstrap,
@@ -727,7 +727,7 @@ def test_router_decisions_disagg(
     - registration_order: prefill_first vs decode_first
     - enable_disagg_bootstrap: without vs with bootstrap rendezvous
     """
-    # runtime_services_session provides shared NATS and etcd (persistent across tests)
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting disaggregated router prefix reuse test "
         f"(registration_order={registration_order}, bootstrap={enable_disagg_bootstrap})"
@@ -829,7 +829,7 @@ def test_router_decisions_disagg(
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
 def test_busy_threshold_endpoint(
-    request, runtime_services_session, predownload_tokenizers, request_plane
+    request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -840,7 +840,7 @@ def test_busy_threshold_endpoint(
 
     For now, this test only verifies the endpoint is accessible and returns valid responses.
     """
-    # runtime_services_session provides shared NATS and etcd (persistent across tests)
+    # runtime_services_dynamic_ports handles NATS and etcd startup
     logger.info(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )
