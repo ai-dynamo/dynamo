@@ -191,11 +191,20 @@ cd deploy/helm/charts
 helm install dynamo-crds ./crds/ --namespace default
 
 # Install platform with custom operator image
+
+# Add  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+# if the docker registry secret is needed.
+# If so create it first.
+# kubectl create secret docker-registry docker-imagepullsecret \
+#   --docker-server=$DOCKER_SERVER \
+#   --docker-username=$DOCKER_USERNAME \
+#   --docker-password=$DOCKER_PASSWORD \
+#   --namespace=$NAMESPACE
+
 helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --create-namespace \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
-  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
   --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
   --set etcd.enabled=false
 ```
