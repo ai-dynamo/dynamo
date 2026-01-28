@@ -439,6 +439,7 @@ def test_mocker_two_kv_router(
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             store_backend=store_backend,
+            skip_consumer_verification=use_nats_core,  # Skip JetStream checks in NATS Core mode
         )
 
     finally:

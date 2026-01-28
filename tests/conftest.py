@@ -317,7 +317,7 @@ class NatsServer(ManagedProcess):
             "-p",
             str(port),
         ]
-        if not disable_jetstream:
+        if not disable_jetstream and data_dir:
             command.extend(["-js", "--store_dir", data_dir])
         super().__init__(
             command=command,
@@ -353,7 +353,17 @@ class NatsServer(ManagedProcess):
             except Exception:
                 return False
 
-        return asyncio.run(check())
+        # Handle both sync and async contexts
+        try:
+            asyncio.get_running_loop()  # Check if we're in async context
+            # Already in async context - run in a thread to avoid blocking
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(asyncio.run, check()).result(timeout=timeout)
+        except RuntimeError:
+            # No running loop - safe to use asyncio.run()
+            return asyncio.run(check())
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Release allocated port when server exits."""
@@ -370,9 +380,10 @@ class NatsServer(ManagedProcess):
         """Stop the NATS server for restart. Does not release port or clean up fully."""
         _logger.info(f"Stopping NATS server on port {self.port}")
         self._terminate_process_group()
-        if self.proc:
+        proc = self.proc  # type: ignore[has-type]
+        if proc is not None:
             try:
-                self.proc.wait(timeout=10)
+                proc.wait(timeout=10)
             except Exception as e:
                 _logger.warning(f"Error waiting for NATS process to stop: {e}")
             self.proc = None
@@ -382,8 +393,9 @@ class NatsServer(ManagedProcess):
         _logger.info(f"Starting NATS server on port {self.port} with fresh state")
         # Clean up old data directory and create fresh one (only if JetStream enabled)
         if not self._disable_jetstream:
-            if self.data_dir:
-                shutil.rmtree(self.data_dir, ignore_errors=True)
+            old_data_dir = self.data_dir  # type: ignore[has-type]
+            if old_data_dir is not None:
+                shutil.rmtree(old_data_dir, ignore_errors=True)
             self.data_dir = tempfile.mkdtemp(prefix="nats_")
 
         # Rebuild command
@@ -393,7 +405,7 @@ class NatsServer(ManagedProcess):
             "-p",
             str(self.port),
         ]
-        if not self._disable_jetstream:
+        if not self._disable_jetstream and self.data_dir:
             self.command.extend(["-js", "--store_dir", self.data_dir])
 
         self._start_process()

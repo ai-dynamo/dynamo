@@ -525,10 +525,10 @@ async def send_request_via_python_kv_router(
             stream = await kv_python_router.generate(
                 token_ids=token_ids,
                 model=model_name,
-                stop_conditions=stop_conditions,
-                sampling_options=sampling_options,
-                output_options=output_options,
-                router_config_override=router_config_override,
+                stop_conditions=stop_conditions,  # type: ignore[arg-type]
+                sampling_options=sampling_options,  # type: ignore[arg-type]
+                output_options=output_options,  # type: ignore[arg-type]
+                router_config_override=router_config_override,  # type: ignore[arg-type]
                 worker_id=worker_id,
                 dp_rank=dp_rank,
             )
@@ -693,6 +693,7 @@ def _test_router_two_routers(
     test_payload: dict,
     num_requests: int,
     store_backend: str = "etcd",
+    skip_consumer_verification: bool = False,
 ):
     """Test two KV routers with alternating requests and consumer lifecycle verification.
 
@@ -701,8 +702,8 @@ def _test_router_two_routers(
     This test:
     1. Starts two KV routers on different ports
     2. Sends requests alternating between the two routers
-    3. Verifies that both routers create durable consumers
-    4. Verifies consumers are cleaned up when routers exit
+    3. Verifies that both routers create durable consumers (unless skipped)
+    4. Verifies consumers are cleaned up when routers exit (unless skipped)
 
     Args:
         engine_workers: Backend workers (mocker/vllm) already initialized with __enter__()
@@ -712,6 +713,7 @@ def _test_router_two_routers(
         test_payload: Test payload to send to /v1/chat/completions
         num_requests: Number of concurrent requests to send
         store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+        skip_consumer_verification: Skip JetStream consumer verification (for NATS Core mode).
 
     Raises:
         AssertionError: If consumer lifecycle verification fails
@@ -846,8 +848,14 @@ def _test_router_two_routers(
             finally:
                 await nc.close()
 
-        # Run consumer lifecycle verification
-        asyncio.run(verify_consumer_lifecycle())
+        # Run consumer lifecycle verification (skip for NATS Core mode)
+        if skip_consumer_verification:
+            logger.info("Skipping JetStream consumer verification (NATS Core mode)")
+            # Clean up routers manually since we're not doing consumer verification
+            for kv_router in kv_routers:
+                kv_router.__exit__(None, None, None)
+        else:
+            asyncio.run(verify_consumer_lifecycle())
 
         # Clear the kv_routers list since we've already cleaned them up
         kv_routers = []
