@@ -33,7 +33,7 @@ use dynamo_runtime::engine::AsyncEngineContext;
 use futures::{Stream, StreamExt};
 use std::sync::Arc;
 
-use crate::http::service::metrics::{InflightGuard, Metrics};
+use crate::http::service::metrics::{ErrorType, InflightGuard, Metrics};
 
 #[derive(Clone, Copy)]
 pub enum ConnectionStatus {
@@ -181,7 +181,11 @@ pub fn monitor_for_disconnects(
                             yield event;
                         }
                         Some(Err(err)) => {
+                            // Mark error as internal since it's a streaming error
+                            inflight_guard.mark_error(ErrorType::Internal);
                             yield Event::default().event("error").comment(err.to_string());
+                            // Break to prevent any subsequent mark_ok() from overwriting the error
+                            break;
                         }
                         None => {
                             // Stream ended normally
@@ -197,6 +201,8 @@ pub fn monitor_for_disconnects(
                 }
                 _ = context.stopped() => {
                     tracing::trace!("Context stopped; breaking stream");
+                    // Mark as cancelled when context is stopped (client disconnect or timeout)
+                    inflight_guard.mark_error(ErrorType::Cancelled);
                     break;
                 }
             }
