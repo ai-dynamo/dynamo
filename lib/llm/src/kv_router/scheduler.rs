@@ -21,7 +21,7 @@ use super::indexer::OverlapScores;
 use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
-use crate::tokens::SequenceHash;
+use dynamo_tokens::SequenceHash;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {

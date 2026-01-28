@@ -8,6 +8,7 @@ members = [
     "lib/runtime",
     "lib/config",
     "lib/tokens",
+    "lib/kv-router",
     "lib/memory",
     "lib/async-openai",
     "lib/parsers",
@@ -47,6 +48,7 @@ dynamo-runtime = { path = "lib/runtime", version = "0.9.0" }
 dynamo-llm = { path = "lib/llm", version = "0.9.0" }
 dynamo-config = { path = "lib/config", version = "0.9.0" }
 dynamo-tokens = { path = "lib/tokens", version = "0.9.0" }
+dynamo-kv-router = { path = "lib/kv-router", version = "0.9.0", features = ["metrics"] }
 dynamo-async-openai = { path = "lib/async-openai", version = "0.9.0", features = [
     "byot",
     "rustls",

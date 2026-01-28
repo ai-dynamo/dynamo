@@ -23,10 +23,12 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-pub mod approx;
-pub mod indexer;
+// Re-export from dynamo-kv-router crate
+pub use dynamo_kv_router::approx;
+pub use dynamo_kv_router::indexer;
+pub use dynamo_kv_router::protocols;
+
 pub mod prefill_router;
-pub mod protocols;
 pub mod publisher;
 pub mod recorder;
 pub mod scheduler;

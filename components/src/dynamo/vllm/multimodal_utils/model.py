@@ -14,13 +14,20 @@
 # limitations under the License.
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import torch
 from transformers import AutoModel
+from vllm import LLM
+from vllm.utils.system_utils import update_environment_variables
 
 logger = logging.getLogger(__name__)
+
+# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
+# should be removed once there is proper way to extract vLLM encoder.
+VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
 class SupportedModels:
@@ -129,10 +136,27 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
-    model = AutoModel.from_pretrained(
+    if VLLM_ENCODER and is_qwen_vl_model(model_id):
+        # Disable to get ViT from the same process
+        update_environment_variables(
+            {
+                "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
+            }
+        )
+        # [gluo NOTE] this actually loads the full model,
+        # which require more GPU memory than needed.
+        vllm_model = LLM(
+            model=model_id,
+            enforce_eager=True,
+            gpu_memory_utilization=0.4,
+            max_model_len=10,
+        )
+        return (
+            vllm_model.llm_engine.engine_core.engine_core.model_executor.driver_worker.worker.model_runner.model.visual
+        )
+    return AutoModel.from_pretrained(
         model_id, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True
     )
-    return model
 
 
 def construct_mm_data(
