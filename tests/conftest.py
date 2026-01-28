@@ -574,21 +574,34 @@ def runtime_services_dynamic_ports(request, store_kv, request_plane):
     if store_kv == "etcd":
         with NatsServer(request, port=0) as nats_process:
             with EtcdServer(request, port=0) as etcd_process:
-                # Set environment variables for Rust/Python runtime to use. Note that xdist (parallel execution)
-                # will launch isolated tests in a new process, so no need to worry about environment pollution.
+                # Save original env vars (may be set by session-scoped fixture)
+                orig_nats = os.environ.get("NATS_SERVER")
+                orig_etcd = os.environ.get("ETCD_ENDPOINTS")
+
+                # Set environment variables for this test's dynamic ports
                 os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
                 os.environ["ETCD_ENDPOINTS"] = f"http://localhost:{etcd_process.port}"
 
                 yield nats_process, etcd_process
 
-                # No test should rely on these variables after the test, but clean up just in case.
-                os.environ.pop("NATS_SERVER", None)
-                os.environ.pop("ETCD_ENDPOINTS", None)
+                # Restore original env vars (or remove if they weren't set)
+                if orig_nats is not None:
+                    os.environ["NATS_SERVER"] = orig_nats
+                else:
+                    os.environ.pop("NATS_SERVER", None)
+                if orig_etcd is not None:
+                    os.environ["ETCD_ENDPOINTS"] = orig_etcd
+                else:
+                    os.environ.pop("ETCD_ENDPOINTS", None)
     elif request_plane == "nats":
         with NatsServer(request, port=0) as nats_process:
+            orig_nats = os.environ.get("NATS_SERVER")
             os.environ["NATS_SERVER"] = f"nats://localhost:{nats_process.port}"
             yield nats_process, None
-            os.environ.pop("NATS_SERVER", None)
+            if orig_nats is not None:
+                os.environ["NATS_SERVER"] = orig_nats
+            else:
+                os.environ.pop("NATS_SERVER", None)
     else:
         yield None, None
 
