@@ -544,7 +544,10 @@ impl VllmConnectorSlot {
                             num_hashes = hashes.len(),
                             "removing stale hashes from registry"
                         );
-                        handle.remove_hashes_with_positions_blocking(hashes, self.g4_context.worker_id);
+                        handle.remove_hashes_with_positions_blocking(
+                            hashes,
+                            self.g4_context.worker_id,
+                        );
                     }
                 }
                 G4Action::MarkBlocksFailed { block_ids } => {
@@ -2052,7 +2055,7 @@ where
         sequence_hashes,
     };
     let notify_receiver = leader.transfer_blocks_request(block_xfer_req).await?;
-    
+
     tracing::debug!(
         request_id = request_id,
         operation_id = %operation_id,

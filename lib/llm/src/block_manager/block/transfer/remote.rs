@@ -4,12 +4,12 @@
 //! Remote storage transfer abstractions for remote transfers.
 //!
 //! This module provides the core types for remote storage transfers:
-//! - [`RemoteKey`] - Abstract key for remote storage (object or disk)
+//! - [`RemoteKey`] - Abstract key for remote storage (object, file, or key-value)
 //! - [`RemoteBlockDescriptor`] - Descriptor for a block in remote storage
 //! - [`RemoteTransferPipeline`] - Transfer pipeline configuration
 //! - [`RemoteTransferHandle`] - Handle for async transfer operations
 //!
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
@@ -22,7 +22,9 @@ use crate::block_manager::distributed::registry::RegistryValue;
 /// Kind of remote storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteStorageKind {
+    /// S3-compatible object storage (NIXL OBJ backend)
     Object,
+    // Future: File, KeyValue variants can be added here
 }
 
 /// A key that identifies a block in remote storage.
@@ -33,8 +35,9 @@ pub enum RemoteStorageKind {
 /// The key must be serializable for registry storage and network transmission.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RemoteKey {
-    /// Object storage
+    /// Object storage: bucket + key
     Object(ObjectKey),
+    // Future: File, KeyValue variants can be added here
 }
 
 /// Key for object storage - bucket + object identifier.
@@ -77,12 +80,17 @@ impl RemoteKey {
         }
     }
 
-    /// Get the "raw" key portion (for NIXL device_id).
-    /// Returns hash of the key for use in NIXL descriptors.
+    /// Get the NIXL device_id for this key.
+    ///
+    /// For keys created from sequence hashes (the common case), returns the
+    /// sequence hash directly. For other keys, returns 0 (caller should handle).
     pub fn nixl_device_id(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut hasher);
-        hasher.finish()
+        match self {
+            RemoteKey::Object(obj) => {
+                // Keys are typically sequence hashes formatted as hex - use directly
+                obj.as_hash().unwrap_or(0)
+            }
+        }
     }
 
     /// Create object key.
@@ -90,7 +98,7 @@ impl RemoteKey {
         RemoteKey::Object(ObjectKey::new(bucket, key))
     }
 
-    /// Get the sequence hash if this is an object key created from a hash.
+    /// Get the sequence hash if this key was created from a hash.
     pub fn sequence_hash(&self) -> Option<u64> {
         match self {
             RemoteKey::Object(obj) => obj.as_hash(),
@@ -114,6 +122,22 @@ impl RemoteKey {
     /// Create object key from sequence hash (common pattern).
     pub fn object_from_hash(bucket: impl Into<String>, hash: u64) -> Self {
         RemoteKey::Object(ObjectKey::from_hash(bucket, hash))
+    }
+}
+
+// Display for better logging
+impl fmt::Display for RemoteKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RemoteKey::Object(k) => write!(f, "obj://{}/{}", k.bucket, k.key),
+        }
+    }
+}
+
+// Ergonomic From impl
+impl From<ObjectKey> for RemoteKey {
+    fn from(key: ObjectKey) -> Self {
+        RemoteKey::Object(key)
     }
 }
 
@@ -409,11 +433,10 @@ impl RemoteTransferPipeline {
         }
 
         let direction = self.direction();
-        let kind = descriptors[0].kind();
 
+        // Kind is derived from descriptors inside execute_remote_transfer
         super::nixl::execute_remote_transfer(
             direction,
-            kind,
             descriptors,
             local_blocks,
             ctx,
@@ -424,7 +447,6 @@ impl RemoteTransferPipeline {
 }
 
 /// Strategy for remote transfers.
-///
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RemoteTransferStrategy {
     NixlObjectRead,
@@ -436,9 +458,11 @@ impl RemoteTransferStrategy {
     pub fn is_read(&self) -> bool {
         matches!(self, Self::NixlObjectRead)
     }
+
     pub fn is_write(&self) -> bool {
         matches!(self, Self::NixlObjectWrite)
     }
+
     pub fn is_object(&self) -> bool {
         matches!(self, Self::NixlObjectRead | Self::NixlObjectWrite)
     }
@@ -507,6 +531,33 @@ mod tests {
     fn test_remote_key_kind() {
         let obj_key = RemoteKey::object("bucket", "key");
         assert_eq!(obj_key.kind(), RemoteStorageKind::Object);
+    }
+
+    #[test]
+    fn test_remote_key_display() {
+        let obj_key = RemoteKey::object("bucket", "key");
+        assert_eq!(format!("{}", obj_key), "obj://bucket/key");
+    }
+
+    #[test]
+    fn test_remote_key_from_impl() {
+        let obj: RemoteKey = ObjectKey::new("bucket", "key").into();
+        assert_eq!(obj.kind(), RemoteStorageKind::Object);
+    }
+
+    #[test]
+    fn test_nixl_device_id() {
+        // Keys from sequence hashes should return the hash directly
+        let key1 = RemoteKey::object_from_hash("bucket", 0x1234567890abcdef);
+        assert_eq!(key1.nixl_device_id(), 0x1234567890abcdef);
+
+        // Same hash, different bucket - still same device_id (it's the sequence hash)
+        let key2 = RemoteKey::object_from_hash("other-bucket", 0x1234567890abcdef);
+        assert_eq!(key2.nixl_device_id(), 0x1234567890abcdef);
+
+        // Non-hash keys return 0
+        let key3 = RemoteKey::object("bucket", "not-a-hash");
+        assert_eq!(key3.nixl_device_id(), 0);
     }
 
     #[test]

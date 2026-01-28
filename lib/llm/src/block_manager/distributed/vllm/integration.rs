@@ -667,4 +667,18 @@ mod tests {
         // Registry disabled
         assert!(!should_trigger_h2o(true, false, 0, 8));
     }
+
+    #[test]
+    fn test_create_descriptors_object() {
+        use crate::block_manager::block::transfer::remote::RemoteStorageKind;
+
+        let hashes: Vec<SequenceHash> = vec![0x1234, 0x5678];
+        let config = RemoteStorageConfig::object("my-bucket");
+        let descriptors = create_descriptors(&hashes, &config, 4096);
+
+        assert_eq!(descriptors.len(), 2);
+        assert_eq!(descriptors[0].kind(), RemoteStorageKind::Object);
+        assert_eq!(descriptors[0].sequence_hash(), Some(0x1234));
+        assert_eq!(descriptors[1].sequence_hash(), Some(0x5678));
+    }
 }

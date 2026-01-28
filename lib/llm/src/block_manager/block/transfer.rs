@@ -66,6 +66,9 @@ pub enum TransferError {
     #[error("Transfer was cancelled")]
     Cancelled,
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }

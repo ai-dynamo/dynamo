@@ -316,6 +316,7 @@ pub enum RemoteStorageConfig {
         endpoint: Option<String>,
         region: Option<String>,
     },
+    // Future: File, KeyValue variants can be added here
 }
 
 impl RemoteStorageConfig {

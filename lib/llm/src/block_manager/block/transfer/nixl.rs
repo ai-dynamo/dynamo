@@ -3,9 +3,9 @@
 
 use super::*;
 
-use super::remote::{RemoteBlockDescriptor, RemoteKey, RemoteStorageKind, RemoteTransferDirection};
+use super::remote::{RemoteBlockDescriptor, RemoteTransferDirection};
 use crate::block_manager::config::RemoteTransferContext;
-use crate::block_manager::storage::ObjectStorage;
+use crate::block_manager::storage::RemoteStorage;
 use anyhow::Result;
 use nixl_sys::{
     Agent as NixlAgent, MemType, MemoryRegion, NixlDescriptor, XferDescList, XferOp, XferRequest,
@@ -195,7 +195,6 @@ where
 /// # Arguments
 ///
 /// * `direction` - Whether this is an onboard (read) or offload (write)
-/// * `kind` - Type of remote storage (Object)
 /// * `descriptors` - Remote block descriptors with keys and sizes
 /// * `local_blocks` - Local host blocks (source for offload, destination for onboard)
 /// * `ctx` - Remote transfer context
@@ -206,7 +205,6 @@ where
 /// `Ok(())` on success, or `TransferError` on failure/cancellation.
 pub async fn execute_remote_transfer<LB>(
     direction: RemoteTransferDirection,
-    kind: RemoteStorageKind,
     descriptors: &[RemoteBlockDescriptor],
     local_blocks: &[LB],
     ctx: &RemoteTransferContext,
@@ -245,31 +243,26 @@ where
     let block_size = first_block.block_data().block_view()?.size();
 
     tracing::debug!(
-        "Remote transfer: {} blocks, direction={:?}, kind={:?}, block_size={}",
+        "Remote transfer: {} blocks, direction={:?}, block_size={}",
         num_blocks,
         direction,
-        kind,
         block_size
     );
 
-    match kind {
-        RemoteStorageKind::Object => {
-            execute_object_transfer(
-                agent,
-                direction,
-                descriptors,
-                local_blocks,
-                block_size,
-                ctx,
-                cancel_token,
-            )
-            .await
-        }
-    }
+    execute_storage_transfer(
+        agent,
+        direction,
+        descriptors,
+        local_blocks,
+        block_size,
+        ctx,
+        cancel_token,
+    )
+    .await
 }
 
 /// Execute object storage transfer.
-async fn execute_object_transfer<LB>(
+async fn execute_storage_transfer<LB>(
     agent: &NixlAgent,
     direction: RemoteTransferDirection,
     descriptors: &[RemoteBlockDescriptor],
@@ -282,45 +275,28 @@ where
     LB: ReadableBlock + WritableBlock + Local,
     <LB as StorageTypeProvider>::StorageType: NixlDescriptor,
 {
-    // Only capture start time when debug logging is enabled (avoid syscall overhead)
+    // Only capture start time when debug logging is enabled
     let start_time =
         tracing::enabled!(target: "kvbm-g4", tracing::Level::DEBUG).then(std::time::Instant::now);
     let num_blocks = descriptors.len();
-    let _default_bucket = ctx.default_bucket().unwrap_or("default");
 
-    // Declare registration handles and obj_storages in parent scope so they remain alive
+    // Declare registration handles and remote_storages in parent scope so they remain alive
     // until the transfer completes. NIXL transfers may still be in progress after the
     // scope block ends, so these must outlive the await points below.
     let mut _registration_handles = Vec::with_capacity(num_blocks);
-    let mut _obj_storages = Vec::with_capacity(num_blocks);
+    let mut _remote_storages = Vec::with_capacity(num_blocks);
 
     // Use a scope block to ensure all non-Send types are dropped before await
     let (xfer_req, still_pending) = {
-        // TODO: Add support for string-based object keys via metadata in nixl-sys Rust bindings.
-        // For now, we pass the sequence hash (u64) directly as device_id.
-
         for desc in descriptors.iter() {
-            let bucket = match desc.key() {
-                RemoteKey::Object(obj_key) => obj_key.bucket.as_str(),
-            };
+            // Create RemoteStorage from the descriptor's key
+            let remote_storage = RemoteStorage::from_remote_key(desc.key(), block_size);
 
-            // Use sequence hash directly as device_id - NIXL uses this as the object key
-            let object_key = desc.sequence_hash().ok_or_else(|| {
-                TransferError::ExecutionError(format!(
-                    "Descriptor missing sequence_hash: {:?}",
-                    desc.key()
-                ))
+            let handle = agent.register_memory(&remote_storage, None).map_err(|e| {
+                TransferError::ExecutionError(format!("Failed to register remote storage: {:?}", e))
             })?;
 
-            let obj_storage = ObjectStorage::new(bucket, object_key, block_size).map_err(|e| {
-                TransferError::ExecutionError(format!("Failed to create ObjectStorage: {:?}", e))
-            })?;
-
-            let handle = agent.register_memory(&obj_storage, None).map_err(|e| {
-                TransferError::ExecutionError(format!("Failed to register object storage: {:?}", e))
-            })?;
-
-            _obj_storages.push(obj_storage);
+            _remote_storages.push(remote_storage);
             _registration_handles.push(handle);
         }
 
@@ -328,16 +304,18 @@ where
         let mut src_dl = XferDescList::new(MemType::Dram).map_err(|e| {
             TransferError::ExecutionError(format!("Failed to create src_dl: {:?}", e))
         })?;
+
+        // TODO: this should be determined by the storage type
         let mut dst_dl = XferDescList::new(MemType::Object).map_err(|e| {
             TransferError::ExecutionError(format!("Failed to create dst_dl: {:?}", e))
         })?;
 
-        for (block, desc) in local_blocks.iter().zip(descriptors.iter()) {
+        for (block, storage) in local_blocks.iter().zip(_remote_storages.iter()) {
             let block_view = block.block_data().block_view()?;
             let addr = unsafe { block_view.as_ptr() as usize };
 
             src_dl.add_desc(addr, block_size, 0);
-            dst_dl.add_desc(0, block_size, desc.sequence_hash().unwrap());
+            dst_dl.add_desc(0, block_size, storage.device_id());
         }
 
         // Determine the transfer operation
@@ -497,7 +475,6 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Object,
             &descriptors,
             &local_blocks,
             &remote_ctx,
@@ -534,7 +511,6 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Object,
             &descriptors,
             &blocks,
             &remote_ctx,
@@ -574,7 +550,6 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Object,
             &descriptors,
             &blocks,
             &remote_ctx,
@@ -631,7 +606,6 @@ mod tests {
         // Offload (write to object storage via OBJ)
         let result = execute_remote_transfer(
             RemoteTransferDirection::Offload,
-            RemoteStorageKind::Object,
             &descriptors,
             &blocks,
             &remote_ctx,
@@ -677,7 +651,6 @@ mod tests {
 
         let result = execute_remote_transfer(
             RemoteTransferDirection::Onboard,
-            RemoteStorageKind::Object,
             &descriptors,
             &onboard_blocks,
             &remote_ctx,
