@@ -373,9 +373,9 @@ impl EventBusConfig {
             }),
             other => Err(EventBusConfigError {
                 backend: other.to_string(),
-                message: format!(
+                message:
                     "Unknown backend. Supported: 'in_process'. Reserved: 'zmq', 'nats', 'redis'"
-                ),
+                        .to_string(),
             }),
         }
     }
@@ -470,9 +470,9 @@ mod tests {
             backend: "zmq".to_string(),
             ..Default::default()
         };
-        let result = config.build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let Err(err) = config.build() else {
+            panic!("ZMQ should return error");
+        };
         assert_eq!(err.backend, "zmq");
         assert!(err.message.contains("not yet implemented"));
 
@@ -481,27 +481,29 @@ mod tests {
             backend: "nats".to_string(),
             ..Default::default()
         };
-        let result = config.build();
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().backend, "nats");
+        let Err(err) = config.build() else {
+            panic!("NATS should return error");
+        };
+        assert_eq!(err.backend, "nats");
 
         // Redis - reserved but not implemented
         let config = EventBusConfig {
             backend: "redis".to_string(),
             ..Default::default()
         };
-        let result = config.build();
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().backend, "redis");
+        let Err(err) = config.build() else {
+            panic!("Redis should return error");
+        };
+        assert_eq!(err.backend, "redis");
 
         // Unknown backend
         let config = EventBusConfig {
             backend: "unknown_backend".to_string(),
             ..Default::default()
         };
-        let result = config.build();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        let Err(err) = config.build() else {
+            panic!("Unknown backend should return error");
+        };
         assert_eq!(err.backend, "unknown_backend");
         assert!(err.message.contains("Unknown backend"));
     }

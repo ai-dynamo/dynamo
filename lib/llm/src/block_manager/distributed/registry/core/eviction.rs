@@ -220,15 +220,15 @@ where
 
             while let Some((descendant, new_depth)) = queue.pop_front() {
                 // Clear parent pointer for direct children only
-                if new_depth == 0 {
-                    if let Some(desc_parent) = parents.get_mut(&descendant) {
-                        *desc_parent = None;
-                    }
+                if new_depth == 0
+                    && let Some(desc_parent) = parents.get_mut(&descendant)
+                {
+                    *desc_parent = None;
                 }
 
                 // Update depth
                 if let Some(old_depth) = depths.get_mut(&descendant) {
-                    *old_depth = new_depth;
+                    *old_depth = new_depth as u32;
                 }
 
                 // Remove old eviction entry and re-insert with updated priority
@@ -658,17 +658,23 @@ mod tests {
         );
 
         // After evicting 4, node 3 becomes a leaf at depth 0
-        // Evict again - should evict node 3 (leaf at depth 0)
+        // Both node 1 and node 3 are now at depth 0.
+        // With FIFO ordering at same depth, node 1 (added to leaves first when node 2
+        // was removed) is evicted before node 3 (added when node 4 was evicted).
+        let evicted = evictable.evict(1);
+        assert_eq!(
+            evicted,
+            vec![1],
+            "Should evict node 1 (leaf at depth 0, older insertion_id)"
+        );
+
+        // Finally evict node 3
         let evicted = evictable.evict(1);
         assert_eq!(
             evicted,
             vec![3],
-            "Should evict node 3 (now a leaf at depth 0)"
+            "Should evict node 3 (last remaining leaf)"
         );
-
-        // Finally evict node 1
-        let evicted = evictable.evict(1);
-        assert_eq!(evicted, vec![1], "Should evict node 1 (leaf at depth 0)");
     }
 
     // PositionalEviction tests

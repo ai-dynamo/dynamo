@@ -126,51 +126,42 @@ where
         // Wait for either to finish or cancellation
         let mut query_handle = query_handle;
         let mut pull_handle = pull_handle;
+        let mut error_result: Option<anyhow::Error> = None;
 
         tokio::select! {
             result = &mut query_handle => {
                 // Query handler finished first, cancel the other and await it
                 cancel.cancel();
-                let handler_error = match result {
-                    Err(e) => {
-                        error!(error = %e, "Query handler panicked");
-                        Some(anyhow::anyhow!("Query handler panicked: {}", e))
-                    }
-                    Ok(Err(e)) => {
-                        error!(error = %e, "Query handler failed");
-                        Some(e)
-                    }
-                    Ok(Ok(())) => None,
-                };
+                if let Err(e) = &result {
+                    error!(error = %e, "Query handler panicked");
+                    error_result = Some(anyhow::anyhow!("Query handler panicked: {}", e));
+                } else if let Ok(Err(e)) = result {
+                    error!(error = %e, "Query handler failed");
+                    error_result = Some(e);
+                }
+                // Await sibling handler for clean shutdown
                 match pull_handle.await {
                     Err(e) => error!(error = %e, "Pull handler panicked during shutdown"),
                     Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
                     Ok(Ok(())) => {}
                 }
-                info!(entries = self.storage.len(), "ZMQ hub stopped");
-                return handler_error.map_or(Ok(()), Err);
             }
             result = &mut pull_handle => {
                 // Pull handler finished first, cancel the other and await it
                 cancel.cancel();
-                let handler_error = match result {
-                    Err(e) => {
-                        error!(error = %e, "Pull handler panicked");
-                        Some(anyhow::anyhow!("Pull handler panicked: {}", e))
-                    }
-                    Ok(Err(e)) => {
-                        error!(error = %e, "Pull handler failed");
-                        Some(e)
-                    }
-                    Ok(Ok(())) => None,
-                };
+                if let Err(e) = &result {
+                    error!(error = %e, "Pull handler panicked");
+                    error_result = Some(anyhow::anyhow!("Pull handler panicked: {}", e));
+                } else if let Ok(Err(e)) = result {
+                    error!(error = %e, "Pull handler failed");
+                    error_result = Some(e);
+                }
+                // Await sibling handler for clean shutdown
                 match query_handle.await {
                     Err(e) => error!(error = %e, "Query handler panicked during shutdown"),
                     Ok(Err(e)) => error!(error = %e, "Query handler failed during shutdown"),
                     Ok(Ok(())) => {}
                 }
-                info!(entries = self.storage.len(), "ZMQ hub stopped");
-                return handler_error.map_or(Ok(()), Err);
             }
             _ = cancel.cancelled() => {
                 info!("Hub received shutdown signal");
@@ -185,10 +176,16 @@ where
                     Ok(Err(e)) => error!(error = %e, "Pull handler failed during shutdown"),
                     Ok(Ok(())) => {}
                 }
-                info!(entries = self.storage.len(), "ZMQ hub stopped");
-                return Ok(());
             }
         }
+
+        info!(entries = self.storage.len(), "ZMQ hub stopped");
+
+        if let Some(e) = error_result {
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     /// Run the query handler (ROUTER socket).
