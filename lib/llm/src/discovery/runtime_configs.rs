@@ -176,6 +176,7 @@ impl RuntimeConfigsSubscriber {
     /// Wait until at least one worker has a Some config.
     /// Returns the list of worker IDs that have configs.
     /// This is race-safe: checks the DashMap first, only waits if empty.
+    /// Returns empty vec if the sender is dropped (shutdown).
     pub async fn wait_for_some(&mut self) -> Vec<WorkerId> {
         loop {
             let ready: Vec<WorkerId> = self
@@ -189,8 +190,11 @@ impl RuntimeConfigsSubscriber {
                 return ready;
             }
 
-            // Wait for next change; ignore RecvError (sender dropped = shutdown)
-            let _ = self.change_rx.changed().await;
+            // If sender dropped (shutdown), return empty rather than loop forever
+            if self.change_rx.changed().await.is_err() {
+                tracing::warn!("RuntimeConfigsSubscriber: sender dropped during wait_for_some");
+                return vec![];
+            }
         }
     }
 }
