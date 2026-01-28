@@ -95,9 +95,10 @@ class ASRInferenceHandler:
                 RNNTDecodingConfig,
             )
 
-            # Setup device
+            # Setup device - use CUDA_VISIBLE_DEVICES or ASR_CUDA_DEVICE env var
             if torch.cuda.is_available():
-                self.device = torch.device("cuda:7")
+                cuda_device = os.environ.get("ASR_CUDA_DEVICE", "0")
+                self.device = torch.device(f"cuda:{cuda_device}")
                 can_use_bfloat16 = torch.cuda.is_bf16_supported()
                 self.compute_dtype = (
                     torch.bfloat16 if can_use_bfloat16 else torch.float32
