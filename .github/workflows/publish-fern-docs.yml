@@ -57,4 +57,4 @@ jobs:
         env:
           FERN_TOKEN: ${{ secrets.FERN_TOKEN }}
         working-directory: ./fern
-        run: fern generate --docs --preview
+        run: fern generate --docs
