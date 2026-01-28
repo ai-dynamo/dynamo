@@ -79,7 +79,7 @@ jobs:
     needs: changed-files
     if: needs.changed-files.outputs.operator == 'true'
     name: Operator
-    runs-on: prod-builder-v2
+    runs-on: prod-default-v2
     env:
       ECR_HOSTNAME: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com
     outputs:
