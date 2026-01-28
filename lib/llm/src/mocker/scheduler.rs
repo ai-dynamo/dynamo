@@ -37,7 +37,7 @@ use crate::mocker::protocols::{
 };
 use crate::mocker::running_mean::RunningMean;
 use crate::mocker::sequence::ActiveSequence;
-use crate::tokens::blocks::UniqueBlock;
+use dynamo_tokens::blocks::UniqueBlock;
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
 use tokio::time::Duration;

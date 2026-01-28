@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::tokens::{SequenceHash, Token};
+use dynamo_tokens::{SequenceHash, Token};
 use serde::{Deserialize, Serialize};
 use xxhash_rust::xxh3;
 
