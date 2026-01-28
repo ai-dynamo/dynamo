@@ -1,34 +1,57 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use pythonize::{depythonize, pythonize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
+use std::sync::mpsc;
 use tokio_stream::StreamExt;
 
 use super::*;
 use crate::Component;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
-use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
-use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
-use llm_rs::kv_router::protocols::KvStats as RsKvStats;
-use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
-use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
+use llm_rs::kv_router::protocols::compute_block_hash_for_seq;
 use rs::pipeline::{AsyncEngine, SingleIn};
 use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks};
+use llm_rs::kv_router::publisher::{KvEventSourceConfig, create_stored_blocks, start_zmq_listener};
+use llm_rs::protocols::common::timing::RequestTracker;
 use llm_rs::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
+use serde_json::json;
 
 #[pyfunction]
-pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
+#[pyo3(signature = (tokens, kv_block_size, block_mm_infos=None))]
+pub fn compute_block_hash_for_seq_py(
+    _py: Python,
+    tokens: Vec<u32>,
+    kv_block_size: usize,
+    block_mm_infos: Option<Bound<PyAny>>,
+) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
-        return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "kv_block_size cannot be 0",
+        ));
     }
 
-    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32);
+    // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
+    let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+        .as_ref()
+        .map(|infos_py| {
+            depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to convert block_mm_infos: {}",
+                    e
+                ))
+            })
+        })
+        .transpose()?;
+
+    let hashes =
+        compute_block_hash_for_seq(&tokens, kv_block_size as u32, mm_infos_rust.as_deref());
+
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
 
@@ -48,34 +71,15 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component, metrics_labels = None))]
-    #[allow(unused_variables)]
+    #[pyo3(signature = (component))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        metrics_labels: Option<Vec<(String, String)>>, // TODO: fully remove this
     ) -> PyResult<Bound<'p, PyAny>> {
-        // Emit deprecation warning if metrics_labels is provided
-        if metrics_labels.is_some() {
-            let warnings = py.import("warnings")?;
-            warnings.call_method1(
-                "warn",
-                (
-                    "The 'metrics_labels' parameter is deprecated and no longer used. It will be removed in a future version.",
-                    py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
-                ),
-            )?;
-        }
-
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Register Prometheus metrics first
-            rs_publisher
-                .register_prometheus_metrics(&rs_component)
-                .map_err(to_pyerr)?;
-
             rs_publisher
                 .create_endpoint(rs_component)
                 .await
@@ -84,11 +88,15 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (metrics))]
-    fn publish(&self, _py: Python, metrics: &ForwardPassMetrics) -> PyResult<()> {
-        // Create and publish the complete metrics
+    /// Publish worker metrics for load monitoring.
+    ///
+    /// # Arguments
+    /// * `dp_rank` - Data parallel rank of the worker (None defaults to 0)
+    /// * `active_decode_blocks` - Number of active KV cache blocks
+    #[pyo3(signature = (dp_rank, active_decode_blocks))]
+    fn publish(&self, dp_rank: Option<u32>, active_decode_blocks: u64) -> PyResult<()> {
         self.inner
-            .publish(metrics.0.clone().into())
+            .publish(dp_rank, active_decode_blocks)
             .map_err(to_pyerr)
     }
 }
@@ -104,6 +112,9 @@ pub struct ZmqKvEventPublisherConfig {
     pub zmq_endpoint: String,
     #[pyo3(get, set)]
     pub zmq_topic: String,
+    #[pyo3(get, set)]
+    pub enable_local_indexer: bool, // whether the underlying KvEventPublisher publishes to
+                                    // both global and worker-local KvIndexers
 }
 
 #[pymethods]
@@ -113,19 +124,22 @@ impl ZmqKvEventPublisherConfig {
         worker_id,
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
-        zmq_topic = "".to_string()
+        zmq_topic = "".to_string(),
+        enable_local_indexer = false
     ))]
     pub fn new(
         worker_id: WorkerId,
         kv_block_size: usize,
         zmq_endpoint: String,
         zmq_topic: String,
+        enable_local_indexer: bool,
     ) -> Self {
         Self {
             worker_id,
             kv_block_size,
             zmq_endpoint,
             zmq_topic,
+            enable_local_indexer,
         }
     }
 }
@@ -139,14 +153,14 @@ pub(crate) struct ZmqKvEventPublisher {
 impl ZmqKvEventPublisher {
     #[new]
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
             component.inner,
-            config.worker_id,
             config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
             }),
+            config.enable_local_indexer,
         )
         .map_err(to_pyerr)?;
         Ok(Self { inner })
@@ -178,7 +192,7 @@ impl ZmqKvEventListener {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
             let shutdown_token = tokio_util::sync::CancellationToken::new();
 
-            tokio::spawn(llm_rs::kv_router::publisher::start_zmq_listener(
+            tokio::spawn(start_zmq_listener(
                 zmq_endpoint,
                 zmq_topic,
                 tx,
@@ -237,22 +251,27 @@ pub(crate) struct KvEventPublisher {
 #[pymethods]
 impl KvEventPublisher {
     #[new]
-    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0))]
+    #[pyo3(signature = (component, worker_id, kv_block_size, dp_rank=0, enable_local_indexer=false))]
     fn new(
         component: Component,
         worker_id: WorkerId,
         kv_block_size: usize,
         dp_rank: DpRank,
+        enable_local_indexer: bool,
     ) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
         }
 
-        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
+        // Note: worker_id parameter matches the Python stub (_core.pyi) signature but is not used.
+        // The actual worker_id is inferred from component's connection_id in the Rust implementation.
+        let _ = worker_id;
+
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new_with_local_indexer(
             component.inner,
-            worker_id,
             kv_block_size as u32,
             None,
+            enable_local_indexer,
         )
         .map_err(to_pyerr)?;
 
@@ -265,49 +284,76 @@ impl KvEventPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None))]
+    #[pyo3(signature = (event_id, token_ids, num_block_tokens, block_hashes, lora_id, parent_hash=None, block_mm_infos=None))]
     fn publish_stored(
         &mut self,
-        _py: Python,
+        py: Python,
         event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
         block_hashes: Vec<i64>,
         lora_id: u64,
         parent_hash: Option<i64>,
+        block_mm_infos: Option<Bound<PyAny>>,
     ) -> PyResult<()> {
-        let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
-                blocks: create_stored_blocks(
-                    self.kv_block_size as u32,
-                    &token_ids,
-                    &num_block_tokens,
-                    &block_hashes_u64,
-                    lora_id,
-                    &self.warning_count,
-                ),
-            }),
-            dp_rank: self.dp_rank,
-        };
+        let kv_block_size = self.kv_block_size as u32;
+        let dp_rank = self.dp_rank;
+        let warning_count = self.warning_count.clone();
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        // Convert Python block_mm_infos to Rust Vec<Option<BlockExtraInfo>>
+        let mm_infos_rust: Option<Vec<Option<BlockExtraInfo>>> = block_mm_infos
+            .as_ref()
+            .map(|infos_py| {
+                depythonize::<Vec<Option<BlockExtraInfo>>>(infos_py).map_err(|e| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Failed to convert block_mm_infos: {}",
+                        e
+                    ))
+                })
+            })
+            .transpose()?;
+
+        py.allow_threads(|| {
+            let block_hashes_u64: Vec<u64> = block_hashes.iter().map(|&h| h as u64).collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                    blocks: create_stored_blocks(
+                        kv_block_size,
+                        &token_ids,
+                        &num_block_tokens,
+                        &block_hashes_u64,
+                        lora_id,
+                        &warning_count,
+                        mm_infos_rust.as_deref(),
+                    ),
+                }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 
-    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
-        let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
-            .into_iter()
-            .map(ExternalSequenceBlockHash::from)
-            .collect();
-        let event = KvCacheEvent {
-            event_id,
-            data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
-            dp_rank: self.dp_rank,
-        };
+    fn publish_removed(&self, py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
+        let dp_rank = self.dp_rank;
+        let inner = self.inner.clone();
 
-        self.inner.publish(event).map_err(to_pyerr)
+        py.allow_threads(|| {
+            let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
+                .into_iter()
+                .map(ExternalSequenceBlockHash::from)
+                .collect();
+            let event = KvCacheEvent {
+                event_id,
+                data: KvCacheEventData::Removed(KvCacheRemoveData { block_hashes }),
+                dp_rank,
+            };
+
+            inner.publish(event).map_err(to_pyerr)
+        })
     }
 }
 
@@ -320,7 +366,7 @@ pub(crate) struct OverlapScores {
 #[pymethods]
 impl OverlapScores {
     #[getter]
-    fn scores(&self) -> HashMap<(i64, u32), u32> {
+    fn scores(&self) -> HashMap<(u64, u32), u32> {
         // Return scores with full WorkerWithDpRank granularity as (worker_id, dp_rank) tuples
         self.inner
             .scores
@@ -335,10 +381,36 @@ impl OverlapScores {
     }
 }
 
-// NOTE: the user needs to guarantee that this stays single threaded in Python land
-#[pyclass(unsendable)]
+#[derive(Debug)]
+enum RadixTreeRequest {
+    FindMatches {
+        local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash>,
+        early_exit: bool,
+        response_tx: mpsc::SyncSender<llm_rs::kv_router::indexer::OverlapScores>,
+    },
+    ApplyEvent {
+        worker_id: WorkerId,
+        kv_cache_event_bytes: Vec<u8>,
+        response_tx: mpsc::SyncSender<PyResult<()>>,
+    },
+    RemoveWorker {
+        worker_id: WorkerId,
+        response_tx: mpsc::SyncSender<()>,
+    },
+    ClearAllBlocks {
+        worker_id: WorkerId,
+        response_tx: mpsc::SyncSender<()>,
+    },
+    DumpTreeAsEvents {
+        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::indexer::RouterEvent>>,
+    },
+    Shutdown,
+}
+
+// NOTE: RadixTree is now thread-safe with pure sync patterns
+#[pyclass]
 pub(crate) struct RadixTree {
-    inner: llm_rs::kv_router::indexer::RadixTree,
+    request_tx: mpsc::Sender<RadixTreeRequest>,
 }
 
 #[pymethods]
@@ -347,55 +419,249 @@ impl RadixTree {
     #[pyo3(signature = (expiration_duration_secs=None))]
     fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
         let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
-        let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
-        Ok(Self { inner })
+
+        let (request_tx, request_rx) = mpsc::channel::<RadixTreeRequest>();
+
+        // Spawn dedicated thread with simplified sync processing
+        std::thread::spawn(move || {
+            let mut radix_tree =
+                llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+
+            loop {
+                match request_rx.recv() {
+                    Ok(RadixTreeRequest::Shutdown) => {
+                        tracing::debug!("RadixTree thread received shutdown request");
+                        break;
+                    }
+                    Ok(request) => {
+                        Self::handle_request(&mut radix_tree, request);
+                    }
+                    Err(mpsc::RecvError) => {
+                        tracing::debug!("RadixTree request channel disconnected");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self { request_tx })
     }
 
     #[pyo3(signature = (sequence, early_exit=false))]
     fn find_matches(
         &self,
-        _py: Python,
+        py: Python,
         sequence: Vec<u64>,
         early_exit: bool,
     ) -> PyResult<OverlapScores> {
-        let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
-            .into_iter()
-            .map(llm_rs::kv_router::protocols::LocalBlockHash)
-            .collect();
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let rs_overlap_scores = self.inner.find_matches(local_block_hashes, early_exit);
-        Ok(OverlapScores {
-            inner: rs_overlap_scores,
-        })
+        let local_block_hashes = py.allow_threads(|| {
+            sequence
+                .into_iter()
+                .map(llm_rs::kv_router::protocols::LocalBlockHash)
+                .collect()
+        });
+
+        let request = RadixTreeRequest::FindMatches {
+            local_block_hashes,
+            early_exit,
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        let result = py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+            })
+        })?;
+
+        Ok(OverlapScores { inner: result })
     }
 
     fn apply_event(
-        &mut self,
-        _py: Python,
+        &self,
+        py: Python,
         worker_id: WorkerId,
         kv_cache_event_bytes: &[u8],
     ) -> PyResult<()> {
-        let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
-            serde_json::from_slice(kv_cache_event_bytes).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Failed to deserialize KvCacheEvent: {}",
-                    e
-                ))
-            })?;
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
 
-        let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
-        let _ = self.inner.apply_event(router_event);
-        Ok(())
+        let request = RadixTreeRequest::ApplyEvent {
+            worker_id,
+            kv_cache_event_bytes: kv_cache_event_bytes.to_vec(),
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        let result = py.allow_threads(move || response_rx.recv());
+
+        result.map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+        })?
     }
 
-    fn remove_worker(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
-        self.inner.remove_worker(worker_id);
-        Ok(())
+    fn remove_worker(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        let request = RadixTreeRequest::RemoveWorker {
+            worker_id,
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+            })
+        })
     }
 
-    fn clear_all_blocks(&mut self, _py: Python, worker_id: WorkerId) -> PyResult<()> {
-        self.inner.clear_all_blocks(worker_id);
-        Ok(())
+    fn clear_all_blocks(&self, py: Python, worker_id: WorkerId) -> PyResult<()> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        let request = RadixTreeRequest::ClearAllBlocks {
+            worker_id,
+            response_tx,
+        };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "RadixTree background task has shut down",
+            )
+        })?;
+
+        // Release GIL while waiting for response
+        py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("RadixTree request was cancelled")
+            })
+        })
+    }
+
+    fn dump_tree_as_events(&self, py: Python) -> PyResult<Vec<String>> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+        let request = RadixTreeRequest::DumpTreeAsEvents { response_tx };
+
+        self.request_tx.send(request).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Failed to send dump tree request")
+        })?;
+
+        // Release GIL while waiting for response from dedicated thread
+        let events = py.allow_threads(move || {
+            response_rx.recv().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "Failed to receive dump tree response",
+                )
+            })
+        })?;
+
+        // Serialize RouterEvent structs to JSON strings with GIL released
+        py.allow_threads(move || {
+            events
+                .into_iter()
+                .map(|event| {
+                    serde_json::to_string(&event).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Failed to serialize event to JSON: {}",
+                            e
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<String>, PyErr>>()
+        })
+    }
+}
+
+impl RadixTree {
+    fn handle_request(
+        radix_tree: &mut llm_rs::kv_router::indexer::RadixTree,
+        request: RadixTreeRequest,
+    ) {
+        match request {
+            RadixTreeRequest::FindMatches {
+                local_block_hashes,
+                early_exit,
+                response_tx,
+            } => {
+                let result = radix_tree.find_matches(local_block_hashes, early_exit);
+                let _ = response_tx.send(result);
+            }
+            RadixTreeRequest::ApplyEvent {
+                worker_id,
+                kv_cache_event_bytes,
+                response_tx,
+            } => {
+                let result = match serde_json::from_slice::<
+                    llm_rs::kv_router::protocols::KvCacheEvent,
+                >(&kv_cache_event_bytes)
+                {
+                    Ok(kv_cache_event) => {
+                        let router_event =
+                            llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+                        match radix_tree.apply_event(router_event) {
+                            Ok(_) => Ok(()),
+                            Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                format!("Failed to apply event: {}", e),
+                            )),
+                        }
+                    }
+                    Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Failed to deserialize KvCacheEvent: {}",
+                        e
+                    ))),
+                };
+                let _ = response_tx.send(result);
+            }
+            RadixTreeRequest::RemoveWorker {
+                worker_id,
+                response_tx,
+            } => {
+                radix_tree.remove_worker(worker_id);
+                let _ = response_tx.send(());
+            }
+            RadixTreeRequest::ClearAllBlocks {
+                worker_id,
+                response_tx,
+            } => {
+                radix_tree.clear_all_blocks(worker_id);
+                let _ = response_tx.send(());
+            }
+            RadixTreeRequest::DumpTreeAsEvents { response_tx } => {
+                let events = radix_tree.dump_tree_as_events();
+                let _ = response_tx.send(events);
+            }
+            RadixTreeRequest::Shutdown => {
+                // This is handled in the main loop
+            }
+        }
+    }
+}
+
+// Cleanup when RadixTree is dropped
+impl Drop for RadixTree {
+    fn drop(&mut self) {
+        // Only need graceful shutdown via RadixTreeRequest::Shutdown
+        let _ = self.request_tx.send(RadixTreeRequest::Shutdown);
     }
 }
 
@@ -487,28 +753,57 @@ impl KvIndexer {
     }
 }
 
-/// Bindings for the approximate KV indexer. We need to exactly match the regular KV Indexer
-/// interface, so that the router can switch between the two.
+/// Bindings for the approximate KV indexer. This is a wrapper around KvIndexer
+/// that uses TTL-based expiration and pruning instead of receiving KV events from workers.
 #[pyclass]
 pub(crate) struct ApproxKvIndexer {
-    inner: Arc<llm_rs::kv_router::approx::ApproxKvIndexer>,
+    inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
 }
 
 #[pymethods]
 impl ApproxKvIndexer {
     #[new]
-    fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
-        let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
-        let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
-            component.inner.drt().runtime().child_token(),
-            kv_block_size as u32,
-            ttl,
-        ));
-        Ok(Self { inner })
+    #[pyo3(signature = (component, kv_block_size, router_ttl_secs=120.0, router_max_tree_size=1048576, router_prune_target_ratio=0.8))]
+    fn new(
+        component: Component,
+        kv_block_size: usize,
+        router_ttl_secs: f64,
+        router_max_tree_size: usize,
+        router_prune_target_ratio: f64,
+    ) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let cancellation_token = component.inner.drt().runtime().child_token();
+            let kv_indexer_metrics =
+                llm_rs::kv_router::indexer::KvIndexerMetrics::from_component(&component.inner);
+
+            // Build PruneConfig with the provided parameters
+            let prune_config = llm_rs::kv_router::approx::PruneConfig {
+                ttl: std::time::Duration::from_secs_f64(router_ttl_secs),
+                max_tree_size: router_max_tree_size,
+                prune_target_ratio: router_prune_target_ratio,
+            };
+
+            // Create KvIndexer with pruning enabled, but DO NOT subscribe to events
+            let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
+                llm_rs::kv_router::indexer::KvIndexer::new_with_frequency(
+                    cancellation_token.clone(),
+                    None, // expiration_duration - not used with prune_config
+                    kv_block_size as u32,
+                    kv_indexer_metrics,
+                    Some(prune_config),
+                )
+                .into();
+
+            // Note: We deliberately do NOT call start_kv_router_background here
+            // because ApproxKvIndexer doesn't use KV events from workers
+
+            Ok(Self { inner })
+        })
     }
 
-    fn block_size(&self) -> u32 {
-        self.inner.block_size()
+    fn block_size(&self) -> usize {
+        self.inner.block_size() as usize
     }
 
     fn find_matches_for_request<'p>(
@@ -537,10 +832,12 @@ impl ApproxKvIndexer {
         dp_rank: DpRank,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
+        let block_size = self.inner.block_size();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let worker = llm_rs::kv_router::protocols::WorkerWithDpRank::new(worker_id, dp_rank);
+            let mut tokens_with_hashes = TokensWithHashes::new(tokens, block_size);
             indexer
-                .process_routing_decision_for_request(tokens.as_slice(), worker)
+                .process_routing_decision_for_request(&mut tokens_with_hashes, worker)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -667,98 +964,6 @@ impl KvRecorder {
     }
 }
 
-#[pyclass]
-#[repr(transparent)]
-pub struct ForwardPassMetrics(pub RsForwardPassMetrics);
-
-#[pyclass]
-#[repr(transparent)]
-pub struct WorkerStats(pub RsWorkerStats);
-
-#[pyclass]
-#[repr(transparent)]
-pub struct KvStats(pub RsKvStats);
-
-#[pyclass]
-#[repr(transparent)]
-pub struct SpecDecodeStats(pub RsSpecDecodeStats);
-
-#[pymethods]
-impl ForwardPassMetrics {
-    #[new]
-    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
-    fn new(
-        worker_stats: &WorkerStats,
-        kv_stats: &KvStats,
-        spec_decode_stats: Option<&SpecDecodeStats>,
-    ) -> Self {
-        Self(RsForwardPassMetrics {
-            worker_stats: worker_stats.0.clone(),
-            kv_stats: kv_stats.0.clone(),
-            spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
-        })
-    }
-}
-
-#[pymethods]
-impl WorkerStats {
-    #[new]
-    #[pyo3(signature = (request_active_slots, request_total_slots, num_requests_waiting, data_parallel_rank=None))]
-    fn new(
-        request_active_slots: u64,
-        request_total_slots: u64,
-        num_requests_waiting: u64,
-        data_parallel_rank: Option<DpRank>,
-    ) -> Self {
-        Self(RsWorkerStats {
-            data_parallel_rank,
-            request_active_slots,
-            request_total_slots,
-            num_requests_waiting,
-        })
-    }
-}
-
-#[pymethods]
-impl KvStats {
-    #[new]
-    #[pyo3(signature = (kv_active_blocks, kv_total_blocks, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate))]
-    fn new(
-        kv_active_blocks: u64,
-        kv_total_blocks: u64,
-        gpu_cache_usage_perc: f32,
-        gpu_prefix_cache_hit_rate: f32,
-    ) -> Self {
-        Self(RsKvStats {
-            kv_active_blocks,
-            kv_total_blocks,
-            gpu_cache_usage_perc,
-            gpu_prefix_cache_hit_rate,
-        })
-    }
-}
-
-#[pymethods]
-impl SpecDecodeStats {
-    #[new]
-    #[pyo3(signature = (num_spec_tokens, num_drafts, num_draft_tokens, num_accepted_tokens, num_accepted_tokens_per_pos))]
-    fn new(
-        num_spec_tokens: Option<u32>,
-        num_drafts: Option<u32>,
-        num_draft_tokens: Option<u32>,
-        num_accepted_tokens: Option<u32>,
-        num_accepted_tokens_per_pos: Option<Vec<u32>>,
-    ) -> Self {
-        Self(RsSpecDecodeStats {
-            num_spec_tokens,
-            num_drafts,
-            num_draft_tokens,
-            num_accepted_tokens,
-            num_accepted_tokens_per_pos,
-        })
-    }
-}
-
 /// Helper function to create a KV router from an endpoint using the ModelManager
 /// to ensure proper etcd registration
 async fn create_kv_router_from_endpoint(
@@ -766,25 +971,10 @@ async fn create_kv_router_from_endpoint(
     block_size: usize,
     kv_router_config: Option<llm_rs::kv_router::KvRouterConfig>,
 ) -> Result<Arc<llm_rs::kv_router::KvRouter>, PyErr> {
-    // Get component from endpoint
-    let component = endpoint.inner.component();
-
-    // Verify we're not in static mode
-    if component.drt().primary_lease().is_none() {
-        return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-            "Failed to get primary lease: Cannot KV route static workers",
-        ));
-    }
-
-    // Create ModelManager and use it to create KvRouter (ensures etcd registration)
+    // Create ModelManager and use it to create KvRouter (ensures registration)
     let model_manager = Arc::new(llm_rs::discovery::ModelManager::new());
     let kv_router = model_manager
-        .kv_chooser_for(
-            "dummy_name", // does not matter, never cached
-            component,
-            block_size as u32,
-            kv_router_config,
-        )
+        .kv_chooser_for(&endpoint.inner, block_size as u32, kv_router_config)
         .await
         .map_err(to_pyerr)?;
 
@@ -796,6 +986,31 @@ pub(crate) struct KvPushRouter {
     inner: Arc<llm_rs::kv_router::KvPushRouter>,
 }
 
+/// Inject worker_id info from tracker into response's disaggregated_params.
+/// This is needed for Python bindings to expose worker routing info since
+/// the raw LLMEngineOutput doesn't go through DeltaGenerator (which adds nvext).
+fn inject_worker_id_from_tracker(
+    data: &mut llm_rs::protocols::common::llm_backend::LLMEngineOutput,
+    tracker: &RequestTracker,
+) {
+    let Some(worker_info) = tracker.get_worker_info() else {
+        return;
+    };
+
+    let worker_id_json =
+        serde_json::to_value(&worker_info).expect("WorkerIdInfo serialization should not fail");
+
+    if let Some(obj) = data
+        .disaggregated_params
+        .as_mut()
+        .and_then(|p| p.as_object_mut())
+    {
+        obj.insert("worker_id".to_string(), worker_id_json);
+    } else {
+        data.disaggregated_params = Some(json!({"worker_id": worker_id_json}));
+    }
+}
+
 // TODO: can this reuse the stream conversion method in Client bindings?
 impl KvPushRouter {
     /// Helper method to process a request and create a Python async generator
@@ -803,6 +1018,7 @@ impl KvPushRouter {
         py: Python<'p>,
         inner: Arc<llm_rs::kv_router::KvPushRouter>,
         request: llm_rs::protocols::common::preprocessor::PreprocessedRequest,
+        tracker: Option<Arc<RequestTracker>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let single_in = SingleIn::new(request);
@@ -812,7 +1028,17 @@ impl KvPushRouter {
             // Spawn a task to process the stream
             tokio::spawn(async move {
                 let mut stream = stream;
-                while let Some(response) = stream.next().await {
+                let mut first_item = true;
+
+                while let Some(mut response) = stream.next().await {
+                    // Inject worker_id into first response if tracker is available
+                    if first_item {
+                        first_item = false;
+                        if let (Some(tracker), Some(data)) = (&tracker, &mut response.data) {
+                            inject_worker_id_from_tracker(data, tracker);
+                        }
+                    }
+
                     // Convert LLMEngineOutput to PyObject
                     let py_response = Python::with_gil(|py| {
                         pythonize(py, &response.data)
@@ -900,47 +1126,39 @@ impl KvPushRouter {
         extra_args: Option<PyObject>,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the options with defaults
-        let (stop_conditions, sampling_options, output_options, router_config_override, extra_args) =
-            Python::with_gil(|py| {
-                let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    StopConditions::default()
-                };
+        let stop_conditions: StopConditions = if let Some(obj) = stop_conditions {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            StopConditions::default()
+        };
 
-                let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    SamplingOptions::default()
-                };
+        let sampling_options: SamplingOptions = if let Some(obj) = sampling_options {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            SamplingOptions::default()
+        };
 
-                let output_options: OutputOptions = if let Some(obj) = output_options {
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?
-                } else {
-                    OutputOptions::default()
-                };
+        let output_options: OutputOptions = if let Some(obj) = output_options {
+            depythonize(obj.bind(py)).map_err(to_pyerr)?
+        } else {
+            OutputOptions::default()
+        };
 
-                let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
-                    if let Some(obj) = router_config_override {
-                        Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-                    } else {
-                        None
-                    };
+        let router_config_override: Option<llm_rs::kv_router::RouterConfigOverride> =
+            if let Some(obj) = router_config_override {
+                Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+            } else {
+                None
+            };
 
-                let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
-                    Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
-                } else {
-                    None
-                };
+        let extra_args: Option<serde_json::Value> = if let Some(obj) = extra_args {
+            Some(depythonize(obj.bind(py)).map_err(to_pyerr)?)
+        } else {
+            None
+        };
 
-                Ok::<_, PyErr>((
-                    stop_conditions,
-                    sampling_options,
-                    output_options,
-                    router_config_override,
-                    extra_args,
-                ))
-            })?;
+        // Create tracker to capture worker routing info from KvRouter
+        let tracker = Arc::new(RequestTracker::new());
 
         // Build the PreprocessedRequest
         let mut request_builder =
@@ -952,18 +1170,23 @@ impl KvPushRouter {
             .sampling_options(sampling_options)
             .output_options(output_options)
             .router_config_override(router_config_override)
-            .dp_rank(dp_rank)
-            .extra_args(extra_args);
+            .extra_args(extra_args)
+            .tracker(Some(tracker.clone()));
 
-        // Set backend_instance_id if worker_id is provided
-        if let Some(worker_id) = worker_id {
-            request_builder.backend_instance_id(Some(worker_id));
+        // Set routing hints if worker_id or dp_rank is provided
+        if worker_id.is_some() || dp_rank.is_some() {
+            let routing = llm_rs::protocols::common::preprocessor::RoutingHints {
+                backend_instance_id: worker_id,
+                dp_rank,
+                ..Default::default()
+            };
+            request_builder.routing(Some(routing));
         }
 
         let request = request_builder.build().map_err(to_pyerr)?;
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request)
+        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
     fn generate_from_request<'p>(
@@ -972,11 +1195,21 @@ impl KvPushRouter {
         request: PyObject,
     ) -> PyResult<Bound<'p, PyAny>> {
         // Depythonize the request directly into PreprocessedRequest
-        let request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
-            Python::with_gil(|py| depythonize(request.bind(py)).map_err(to_pyerr))?;
+        let mut request: llm_rs::protocols::common::preprocessor::PreprocessedRequest =
+            depythonize(request.bind(py)).map_err(to_pyerr)?;
+
+        // Create tracker if not already set, to capture worker routing info
+        let tracker = match request.tracker {
+            Some(ref t) => t.clone(),
+            None => {
+                let t = Arc::new(RequestTracker::new());
+                request.tracker = Some(t.clone());
+                t
+            }
+        };
 
         // Use the helper method to process the request
-        Self::process_request_to_stream(py, self.inner.clone(), request)
+        Self::process_request_to_stream(py, self.inner.clone(), request, Some(tracker))
     }
 
     #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
@@ -988,11 +1221,9 @@ impl KvPushRouter {
         request_id: Option<String>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let router_config_override = if let Some(obj) = router_config_override {
-            Python::with_gil(|py| {
-                let override_config: llm_rs::kv_router::RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Ok::<_, PyErr>(Some(override_config))
-            })?
+            let override_config: llm_rs::kv_router::RouterConfigOverride =
+                depythonize(obj.bind(py)).map_err(to_pyerr)?;
+            Some(override_config)
         } else {
             None
         };
@@ -1012,54 +1243,6 @@ impl KvPushRouter {
                 .map_err(to_pyerr)?;
 
             Ok((best_worker.worker_id, best_worker.dp_rank, overlap_blocks))
-        })
-    }
-
-    /// Deprecated: Use `best_worker()` instead which returns (worker_id, dp_rank, overlap_blocks)
-    #[pyo3(signature = (token_ids, router_config_override=None, request_id=None))]
-    fn best_worker_id<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        router_config_override: Option<PyObject>,
-        request_id: Option<String>,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        // Issue deprecation warning
-        let warnings = py.import("warnings")?;
-        warnings.call_method1(
-            "warn",
-            (
-                "best_worker_id() is deprecated. Use best_worker() instead which returns (worker_id, dp_rank, overlap_blocks)",
-                py.get_type::<pyo3::exceptions::PyDeprecationWarning>(),
-            ),
-        )?;
-
-        let router_config_override = if let Some(obj) = router_config_override {
-            Python::with_gil(|py| {
-                let override_config: llm_rs::kv_router::RouterConfigOverride =
-                    depythonize(obj.bind(py)).map_err(to_pyerr)?;
-                Ok::<_, PyErr>(Some(override_config))
-            })?
-        } else {
-            None
-        };
-
-        let chooser = self.inner.chooser.clone();
-        let update_states = request_id.is_some();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (best_worker, overlap_blocks) = chooser
-                .find_best_match(
-                    request_id.as_deref(),
-                    &token_ids,
-                    router_config_override.as_ref(),
-                    update_states,
-                )
-                .await
-                .map_err(to_pyerr)?;
-
-            // Return only worker_id and overlap_blocks for backward compatibility
-            Ok((best_worker.worker_id, overlap_blocks))
         })
     }
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! # KV Cache Block Registration
@@ -230,6 +230,16 @@ pub struct RegistrationHandle {
 }
 
 impl RegistrationHandle {
+    /// Returns the block size (number of tokens in the block)
+    pub fn block_size(&self) -> usize {
+        self.token_block.block_size()
+    }
+
+    /// Returns a reference to the tokens in this block
+    pub fn tokens(&self) -> &crate::tokens::Tokens {
+        self.token_block.tokens()
+    }
+
     fn from_token_block(
         token_block: &TokenBlock,
         release_manager: Arc<dyn EventReleaseManager>,

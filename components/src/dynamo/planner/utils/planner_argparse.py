@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,12 +34,12 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--namespace",
         default=SLAPlannerDefaults.namespace,
-        help="Namespace",
+        help="Dynamo namespace",
     )
     parser.add_argument(
         "--backend",
         default=SLAPlannerDefaults.backend,
-        choices=["vllm", "sglang", "trtllm"],
+        choices=["vllm", "sglang", "trtllm", "mocker"],
         help="Backend type",
     )
     parser.add_argument(
@@ -101,19 +101,61 @@ def create_sla_planner_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--load-predictor",
         default=SLAPlannerDefaults.load_predictor,
-        help="Load predictor type",
+        help="Load predictor type (constant, arima, kalman, prophet)",
     )
     parser.add_argument(
-        "--load-prediction-window-size",
-        type=int,
-        default=SLAPlannerDefaults.load_prediction_window_size,
-        help="Load prediction window size",
+        "--load-predictor-log1p",
+        action="store_true",
+        default=SLAPlannerDefaults.load_predictor_log1p,
+        help="Model log1p(y) instead of y in the selected load predictor (ARIMA/Kalman/Prophet)",
     )
     parser.add_argument(
-        "--prometheus-port",
+        "--prophet-window-size",
         type=int,
-        default=SLAPlannerDefaults.prometheus_port,
-        help="Prometheus port",
+        default=SLAPlannerDefaults.prophet_window_size,
+        help="Prophet history window size",
+    )
+    parser.add_argument(
+        "--load-predictor-warmup-trace",
+        type=str,
+        default=None,
+        help="Optional path to a mooncake-style JSONL trace file used to warm up load predictors before observing live traffic",
+    )
+    parser.add_argument(
+        "--kalman-q-level",
+        type=float,
+        default=SLAPlannerDefaults.kalman_q_level,
+        help="Kalman process noise for level (higher = more responsive)",
+    )
+    parser.add_argument(
+        "--kalman-q-trend",
+        type=float,
+        default=SLAPlannerDefaults.kalman_q_trend,
+        help="Kalman process noise for trend (higher = faster trend changes)",
+    )
+    parser.add_argument(
+        "--kalman-r",
+        type=float,
+        default=SLAPlannerDefaults.kalman_r,
+        help="Kalman measurement noise (lower = remember less / react more to new measurements)",
+    )
+    parser.add_argument(
+        "--kalman-min-points",
+        type=int,
+        default=SLAPlannerDefaults.kalman_min_points,
+        help="Minimum number of points before Kalman predictor returns forecasts",
+    )
+    parser.add_argument(
+        "--metric-pulling-prometheus-endpoint",
+        type=str,
+        default=SLAPlannerDefaults.metric_pulling_prometheus_endpoint,
+        help="Prometheus endpoint URL for pulling dynamo deployment metrics",
+    )
+    parser.add_argument(
+        "--metric-reporting-prometheus-port",
+        type=int,
+        default=SLAPlannerDefaults.metric_reporting_prometheus_port,
+        help="Port for exposing planner's own metrics to Prometheus",
     )
     parser.add_argument(
         "--no-correction",

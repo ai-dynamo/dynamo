@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
@@ -28,7 +28,6 @@ async def worker(runtime: DistributedRuntime):
     endpoint_name = "generate"
 
     component = runtime.namespace(namespace_name).component(component_name)
-    await component.create_service()
 
     logger.info(f"Created service {namespace_name}/{component_name}")
 

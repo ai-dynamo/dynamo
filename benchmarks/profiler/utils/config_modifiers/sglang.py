@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
 import re
-from typing import Literal
+
+import yaml
 
 from benchmarks.profiler.utils.config import (
     Config,
@@ -14,11 +15,14 @@ from benchmarks.profiler.utils.config import (
     remove_valued_arguments,
     set_argument_value,
     setup_worker_service_resources,
+    update_image,
     validate_and_get_worker_args,
 )
+from benchmarks.profiler.utils.config_modifiers.protocol import BaseConfigModifier
 from benchmarks.profiler.utils.defaults import (
     DEFAULT_MODEL_NAME,
     DYNAMO_RUN_DEFAULT_PORT,
+    EngineType,
 )
 from dynamo.planner.defaults import SubComponentType
 
@@ -33,12 +37,27 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-class SGLangConfigModifier:
+DEFAULT_SGLANG_CONFIG_PATH = "examples/backends/sglang/deploy/disagg.yaml"
+
+
+class SGLangConfigModifier(BaseConfigModifier):
+    BACKEND = "sglang"
+
+    @classmethod
+    def load_default_config(cls) -> dict:
+        with open(DEFAULT_SGLANG_CONFIG_PATH, "r") as f:
+            return yaml.safe_load(f)
+
+    @classmethod
+    def update_image(cls, config, image: str) -> dict:
+        """Update container image for all DGD services (frontend, planner, workers)."""
+        return update_image(config, image)
+
     @classmethod
     def convert_config(
         cls,
         config: dict,
-        target: Literal["prefill", "decode"],
+        target: EngineType,
         is_moe_model: bool = False,
     ) -> dict:
         cfg = Config.model_validate(config)
@@ -50,7 +69,7 @@ class SGLangConfigModifier:
         if "Planner" in cfg.spec.services:
             del cfg.spec.services["Planner"]
 
-        if target == "prefill":
+        if target == EngineType.PREFILL:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "sglang", SubComponentType.PREFILL
@@ -87,7 +106,7 @@ class SGLangConfigModifier:
 
             worker_service.extraPodSpec.mainContainer.args = args
 
-        elif target == "decode":
+        elif target == EngineType.DECODE:
             # Get service names by inferring from subComponentType first
             prefill_service_name = get_service_name_by_type(
                 cfg, "sglang", SubComponentType.PREFILL
@@ -161,6 +180,18 @@ class SGLangConfigModifier:
 
         # Set --tp argument
         args = set_argument_value(args, "--tp", str(tp_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
+
+        # Remove --ep if present
+        args = remove_valued_arguments(args, "--ep")
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
+
+        # remove --dp if present
+        args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
@@ -186,12 +217,18 @@ class SGLangConfigModifier:
 
         # 1. Set --tp=tep_size, if not present add it
         args = set_argument_value(args, "--tp", str(tep_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
 
-        # 2. Set --ep-size=tep_size, if not present add it
-        args = set_argument_value(args, "--ep-size", str(tep_size))
+        # 2. Set --ep=tep_size, if not present add it
+        args = set_argument_value(args, "--ep", str(tep_size))
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
 
         # 3. Remove --dp if present
         args = remove_valued_arguments(args, "--dp")
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         # 4. Remove --enable-dp-attention if present
         if "--enable-dp-attention" in args:
@@ -221,16 +258,22 @@ class SGLangConfigModifier:
 
         # 1. Set --tp=dep_size
         args = set_argument_value(args, "--tp", str(dep_size))
+        args = remove_valued_arguments(args, "--tp-size")
+        args = remove_valued_arguments(args, "--tensor-parallel-size")
 
         # 2. Set --dp=dep_size (data parallelism across experts)
         args = set_argument_value(args, "--dp", str(dep_size))
+        args = remove_valued_arguments(args, "--dp-size")
+        args = remove_valued_arguments(args, "--data-parallel-size")
 
         # 3. Enable --enable-dp-attention
         if "--enable-dp-attention" not in args:
             args = append_argument(args, "--enable-dp-attention")
 
-        # 4. Set --ep-size=dep_size (expert parallelism size)
-        args = set_argument_value(args, "--ep-size", str(dep_size))
+        # 4. Set --ep=dep_size (expert parallelism size)
+        args = set_argument_value(args, "--ep", str(dep_size))
+        args = remove_valued_arguments(args, "--ep-size")
+        args = remove_valued_arguments(args, "--expert-parallel-size")
 
         worker_service.extraPodSpec.mainContainer.args = args
         return cfg.model_dump()
@@ -248,6 +291,12 @@ class SGLangConfigModifier:
             return DEFAULT_MODEL_NAME
 
         args = break_arguments(args)
+        # Check for --model-path first (primary argument for SGLang)
+        for i, arg in enumerate(args):
+            if arg == "--model-path" and i + 1 < len(args):
+                return args[i + 1]
+
+        # Fall back to --served-model-name if --model-path not found
         for i, arg in enumerate(args):
             if arg == "--served-model-name" and i + 1 < len(args):
                 return args[i + 1]
@@ -303,3 +352,34 @@ class SGLangConfigModifier:
         except Exception as e:
             logger.warning(f"Failed to parse KV cache size from log file. Error: {e}")
         return 0
+
+    @classmethod
+    def set_prefill_config(
+        cls,
+        config: dict,
+        max_batch_size: int,
+        max_num_tokens: int,
+        component_type: SubComponentType = SubComponentType.DECODE,
+    ) -> dict:
+        """
+        Configure prefill-related limits for aggregated prefill runs.
+        - Batch size is applied as server concurrency.
+        - Max tokens is applied as a total token cap to avoid chunked prefill.
+        """
+        cfg = Config.model_validate(config)
+        worker_service = get_worker_service_from_config(
+            cfg, backend="sglang", sub_component_type=component_type
+        )
+        args = validate_and_get_worker_args(worker_service, backend="sglang")
+        args = break_arguments(args)
+
+        # Set max concurrency to control effective batch size
+        args = set_argument_value(args, "--max-running-requests", str(max_batch_size))
+
+        # Cap total tokens processed in a batch to avoid chunked prefill
+        args = set_argument_value(args, "--chunked-prefill-size", str(max_num_tokens))
+
+        args = append_argument(args, "--enable-dp-lm-head")
+
+        worker_service.extraPodSpec.mainContainer.args = args
+        return cfg.model_dump()

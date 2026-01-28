@@ -1,40 +1,30 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 
 import logging
 import os
+import socket
 from typing import Any, Dict, Optional
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.utils import FlexibleArgumentParser
+
+try:
+    from vllm.utils import FlexibleArgumentParser
+except ImportError:
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import add_config_dump_args, register_encoder
-from dynamo.runtime import DistributedRuntime
 
-from . import __version__
-from .ports import (
-    DEFAULT_DYNAMO_PORT_MAX,
-    DEFAULT_DYNAMO_PORT_MIN,
-    DynamoPortRange,
-    PortAllocationRequest,
-    PortMetadata,
-    allocate_and_reserve_port,
-    allocate_and_reserve_port_block,
-    get_host_ip,
-)
+from . import __version__, envs
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-
 VALID_CONNECTORS = {"nixl", "lmcache", "kvbm", "null", "none"}
-
-# Global LMCache configuration - initialize once on module import
-ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
 
 
 class Config:
@@ -45,10 +35,12 @@ class Config:
     component: str
     endpoint: str
     is_prefill_worker: bool
+    is_decode_worker: bool
     migration_limit: int = 0
-    kv_port: Optional[int] = None
-    port_range: DynamoPortRange
     custom_jinja_template: Optional[str] = None
+    store_kv: str
+    request_plane: str
+    enable_local_indexer: bool = False
 
     # mirror vLLM
     model: str
@@ -64,16 +56,62 @@ class Config:
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
 
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
+
+    # multimodal options
+    multimodal_processor: bool = False
+    # Embedding Cache Processor is different from the regular processor
+    # TODO: Have a single processor for all cases and adopting rust based processor
+    ec_processor: bool = False
+    multimodal_encode_worker: bool = False
+    multimodal_worker: bool = False
+    multimodal_decode_worker: bool = False
+    enable_multimodal: bool = False
+    multimodal_encode_prefill_worker: bool = False
+    mm_prompt_template: str = "USER: <image>\n<prompt> ASSISTANT:"
+
+    # vLLM-native encoder worker (ECConnector mode)
+    vllm_native_encoder_worker: bool = False
+    ec_connector_backend: Optional[str] = "ECExampleConnector"
+    ec_storage_path: Optional[str] = None
+    ec_extra_config: Optional[str] = None
+    ec_consumer_mode: bool = False
+
     # dump config to file
     dump_config_to: Optional[str] = None
+
+    # Use vLLM's tokenizer for pre/post processing
+    use_vllm_tokenizer: bool = False
+
+    # Whether to enable NATS for KV events (derived from kv_events_config in overwrite_args)
+    use_kv_events: bool = False
+
+    def has_connector(self, connector_name: str) -> bool:
+        """
+        Check if a specific connector is enabled.
+
+        Args:
+            connector_name: Name of the connector to check (e.g., "kvbm", "nixl")
+
+        Returns:
+            True if the connector is in the connector list, False otherwise
+        """
+        return self.connector_list is not None and connector_name in self.connector_list
 
 
 @register_encoder(Config)
 def _preprocess_for_encode_config(config: Config) -> Dict[str, Any]:
+    """Convert Config object to dictionary for encoding."""
     return config.__dict__
 
 
 def parse_args() -> Config:
+    """Parse command-line arguments for the vLLM backend.
+
+    Returns:
+        Config: Parsed configuration object.
+    """
     parser = FlexibleArgumentParser(
         description="vLLM server integrated with Dynamo LLM."
     )
@@ -86,22 +124,15 @@ def parse_args() -> Config:
         help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
     )
     parser.add_argument(
+        "--is-decode-worker",
+        action="store_true",
+        help="Mark this as a decode worker which does not publish KV events.",
+    )
+    parser.add_argument(
         "--migration-limit",
         type=int,
         default=0,
         help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
-    )
-    parser.add_argument(
-        "--dynamo-port-min",
-        type=int,
-        default=DEFAULT_DYNAMO_PORT_MIN,
-        help=f"Minimum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MIN}). Must be in registered ports range (1024-49151).",
-    )
-    parser.add_argument(
-        "--dynamo-port-max",
-        type=int,
-        default=DEFAULT_DYNAMO_PORT_MAX,
-        help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MAX}). Must be in registered ports range (1024-49151).",
     )
     parser.add_argument(
         "--connector",
@@ -131,11 +162,145 @@ def parse_args() -> Config:
         default=None,
         help="Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository.",
     )
+    parser.add_argument(
+        "--dyn-endpoint-types",
+        type=str,
+        default="chat,completions",
+        help="Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    )
+    parser.add_argument(
+        "--multimodal-processor",
+        action="store_true",
+        help="Run as multimodal processor component for handling multimodal requests",
+    )
+    parser.add_argument(
+        "--ec-processor",
+        action="store_true",
+        help="Run as ECConnector processor (routes multimodal requests to encoder then PD workers)",
+    )
+    parser.add_argument(
+        "--multimodal-encode-worker",
+        action="store_true",
+        help="Run as multimodal encode worker component for processing images/videos",
+    )
+    parser.add_argument(
+        "--multimodal-worker",
+        action="store_true",
+        help="Run as multimodal worker component for LLM inference with multimodal data",
+    )
+    parser.add_argument(
+        "--multimodal-decode-worker",
+        action="store_true",
+        help="Run as multimodal decode worker in disaggregated mode",
+    )
+    parser.add_argument(
+        "--multimodal-encode-prefill-worker",
+        action="store_true",
+        help="Run as unified encode+prefill+decode worker for models requiring integrated image encoding (e.g., Llama 4)",
+    )
+    parser.add_argument(
+        "--enable-multimodal",
+        action="store_true",
+        help="Enable multimodal processing. If not set, none of the multimodal components can be used.",
+    )
+    parser.add_argument(
+        "--mm-prompt-template",
+        type=str,
+        default="USER: <image>\n<prompt> ASSISTANT:",
+        help=(
+            "Different multi-modal models expect the prompt to contain different special media prompts. "
+            "The processor will use this argument to construct the final prompt. "
+            "User prompt will replace '<prompt>' in the provided template. "
+            "For example, if the user prompt is 'please describe the image' and the prompt template is "
+            "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
+            "'USER: <image> please describe the image ASSISTANT:'."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-native-encoder-worker",
+        action="store_true",
+        help="Run as vLLM-native encoder worker using ECConnector for encoder disaggregation (requires shared storage). The following flags only work when this flag is enabled: --ec-connector-backend, --ec-storage-path, --ec-extra-config, --ec-consumer-mode.",
+    )
+    parser.add_argument(
+        "--ec-connector-backend",
+        type=str,
+        default="ECExampleConnector",
+        help="ECConnector implementation class for encoder disaggregation. Default: ECExampleConnector (disk-based)",
+    )
+    parser.add_argument(
+        "--ec-storage-path",
+        type=str,
+        default=None,
+        help="Storage path for ECConnector (required for ECExampleConnector, optional for other backends)",
+    )
+    parser.add_argument(
+        "--ec-extra-config",
+        type=str,
+        default=None,
+        help="Additional ECConnector configuration as JSON string",
+    )
+    parser.add_argument(
+        "--ec-consumer-mode",
+        action="store_true",
+        help="Configure as ECConnector consumer for receiving encoder embeddings (for PD workers)",
+    )
+    parser.add_argument(
+        "--store-kv",
+        type=str,
+        choices=["etcd", "file", "mem"],
+        default=os.environ.get("DYN_STORE_KV", "etcd"),
+        help="Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    )
+    parser.add_argument(
+        "--request-plane",
+        type=str,
+        choices=["nats", "http", "tcp"],
+        default=os.environ.get("DYN_REQUEST_PLANE", "tcp"),
+        help="Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    )
+    parser.add_argument(
+        "--enable-local-indexer",
+        type=str,
+        choices=["true", "false"],
+        default=os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        help="Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    )
+    parser.add_argument(
+        "--use-vllm-tokenizer",
+        action="store_true",
+        default=False,
+        help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
+    args.enable_local_indexer = str(args.enable_local_indexer).lower() == "true"
     engine_args = AsyncEngineArgs.from_cli_args(args)
+
+    if hasattr(engine_args, "stream_interval") and engine_args.stream_interval != 1:
+        logger.warning(
+            "--stream-interval is currently not respected in Dynamo. "
+            "Dynamo uses its own post-processing implementation on the frontend, "
+            "bypassing vLLM's OutputProcessor buffering. "
+        )
+    # Workaround for vLLM GIL contention bug with NIXL connector when using UniProcExecutor.
+    # With TP=1, vLLM defaults to UniProcExecutor which runs scheduler and worker in the same
+    # process. This causes a hot loop in _process_engine_step that doesn't release the GIL,
+    # blocking NIXL's add_remote_agent from completing. Using "mp" backend forces separate
+    # processes, avoiding the GIL contention.
+    # Note: Only apply for NIXL - other connectors (kvbm, lmcache) work fine with UniProcExecutor
+    # and forcing mp can expose race conditions in vLLM's scheduler.
+    # See: https://github.com/vllm-project/vllm/issues/29369
+    connector_list = [c.lower() for c in args.connector] if args.connector else []
+    uses_nixl = "nixl" in connector_list
+    tp_size = getattr(engine_args, "tensor_parallel_size", None) or 1
+    if uses_nixl and tp_size == 1 and engine_args.distributed_executor_backend is None:
+        logger.info(
+            "Setting --distributed-executor-backend=mp for TP=1 to avoid "
+            "UniProcExecutor GIL contention with NIXL connector"
+        )
+        engine_args.distributed_executor_backend = "mp"
 
     if engine_args.enable_prefix_caching is None:
         logger.debug(
@@ -155,17 +320,90 @@ def parse_args() -> Config:
         config.served_model_name = None
 
     config.namespace = os.environ.get("DYN_NAMESPACE", "dynamo")
-    config.component = "prefill" if args.is_prefill_worker else "backend"
-    config.endpoint = "generate"
+
+    # Check multimodal role exclusivity
+    mm_flags = (
+        int(bool(args.multimodal_processor))
+        + int(bool(args.ec_processor))
+        + int(bool(args.multimodal_encode_worker))
+        + int(bool(args.multimodal_worker))
+        + int(bool(args.multimodal_decode_worker))
+        + int(bool(args.multimodal_encode_prefill_worker))
+        + int(bool(args.vllm_native_encoder_worker))
+    )
+    if mm_flags > 1:
+        raise ValueError(
+            "Use only one of --multimodal-processor, --ec-processor, --multimodal-encode-worker, --multimodal-worker, "
+            "--multimodal-decode-worker, --multimodal-encode-prefill-worker, or --vllm-native-encoder-worker"
+        )
+
+    if mm_flags == 1 and not args.enable_multimodal:
+        raise ValueError("Use --enable-multimodal to enable multimodal processing")
+
+    # Validate vLLM-native encoder worker config
+    if args.vllm_native_encoder_worker:
+        if (
+            args.ec_connector_backend == "ECExampleConnector"
+            and not args.ec_storage_path
+        ):
+            raise ValueError(
+                "--ec-storage-path is required when using ECExampleConnector backend. "
+                "Specify a shared storage path for encoder cache."
+            )
+
+    # Set component and endpoint based on worker type
+    if args.multimodal_processor or args.ec_processor:
+        config.component = "processor"
+        config.endpoint = "generate"
+    elif (
+        args.vllm_native_encoder_worker
+        or args.multimodal_encode_worker
+        or args.multimodal_encode_prefill_worker
+    ):
+        config.component = "encoder"
+        config.endpoint = "generate"
+    elif args.multimodal_decode_worker:
+        # Uses "decoder" component name because prefill worker connects to "decoder"
+        # (prefill uses "backend" to receive from encoder)
+        config.component = "decoder"
+        config.endpoint = "generate"
+    elif args.multimodal_worker and args.is_prefill_worker:
+        # Multimodal prefill worker stays as "backend" to maintain encoder connection
+        config.component = "backend"
+        config.endpoint = "generate"
+    elif args.is_prefill_worker:
+        config.component = "prefill"
+        config.endpoint = "generate"
+    else:
+        config.component = "backend"
+        config.endpoint = "generate"
+
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
+    config.is_decode_worker = args.is_decode_worker
     config.migration_limit = args.migration_limit
-    config.port_range = DynamoPortRange(
-        min=args.dynamo_port_min, max=args.dynamo_port_max
-    )
     config.tool_call_parser = args.dyn_tool_call_parser
     config.reasoning_parser = args.dyn_reasoning_parser
     config.custom_jinja_template = args.custom_jinja_template
+    config.dyn_endpoint_types = args.dyn_endpoint_types
+    config.multimodal_processor = args.multimodal_processor
+    config.ec_processor = args.ec_processor
+    config.multimodal_encode_worker = args.multimodal_encode_worker
+    config.multimodal_worker = args.multimodal_worker
+    config.multimodal_decode_worker = args.multimodal_decode_worker
+    config.multimodal_encode_prefill_worker = args.multimodal_encode_prefill_worker
+    config.enable_multimodal = args.enable_multimodal
+    config.mm_prompt_template = args.mm_prompt_template
+    config.vllm_native_encoder_worker = args.vllm_native_encoder_worker
+    config.ec_connector_backend = args.ec_connector_backend
+    config.ec_storage_path = args.ec_storage_path
+    config.ec_extra_config = args.ec_extra_config
+    config.ec_consumer_mode = args.ec_consumer_mode
+    config.store_kv = args.store_kv
+    config.request_plane = args.request_plane
+    config.enable_local_indexer = args.enable_local_indexer
+    config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    # use_kv_events is set later in overwrite_args() based on kv_events_config
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:
@@ -180,35 +418,34 @@ def parse_args() -> Config:
                 f"Please ensure the file exists and the path is correct."
             )
 
-    # Check for conflicting flags
+    normalized = [c.lower() for c in args.connector]
+
+    invalid = [c for c in normalized if c not in VALID_CONNECTORS]
+    if invalid:
+        raise ValueError(
+            f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+        )
+
+    # Check for custom kv_transfer_config
     has_kv_transfer_config = (
         hasattr(engine_args, "kv_transfer_config")
         and engine_args.kv_transfer_config is not None
     )
-    has_connector_flag = args.connector is not None
 
-    if has_kv_transfer_config and has_connector_flag:
-        raise ValueError(
-            "Cannot specify both --kv-transfer-config and --connector flags"
-        )
-
-    if has_connector_flag:
-        normalized = [c.lower() for c in args.connector]
-
-        invalid = [c for c in normalized if c not in VALID_CONNECTORS]
-        if invalid:
+    if not normalized or "none" in normalized or "null" in normalized:
+        if len(normalized) > 1:
             raise ValueError(
-                f"Invalid connector(s): {', '.join(invalid)}. Valid options are: {', '.join(sorted(VALID_CONNECTORS))}"
+                "'none' and 'null' cannot be combined with other connectors"
+            )
+        config.connector_list = []
+    else:
+        # Check for conflicting flags
+        if has_kv_transfer_config:
+            raise ValueError(
+                "Cannot specify both --kv-transfer-config and --connector flags"
             )
 
-        if "none" in normalized or "null" in normalized:
-            if len(normalized) > 1:
-                raise ValueError(
-                    "'none' and 'null' cannot be combined with other connectors"
-                )
-            config.connector_list = []
-        else:
-            config.connector_list = normalized
+        config.connector_list = normalized
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -221,92 +458,42 @@ def parse_args() -> Config:
     return config
 
 
-async def configure_ports(runtime: DistributedRuntime, config: Config):
-    """Configure including port allocation and vLLM overrides."""
-
-    dp_rank = config.engine_args.data_parallel_rank or 0
-    worker_id = f"vllm-{config.component}-dp{dp_rank}"
-
-    # Allocate KV events port
-    if config.engine_args.enable_prefix_caching:
-        kv_metadata = PortMetadata(worker_id=worker_id, reason="zmq_kv_event_port")
-        kv_port = await allocate_and_reserve_port(
-            runtime=runtime,
-            namespace=config.namespace,
-            metadata=kv_metadata,
-            port_range=config.port_range,
-        )
-        config.kv_port = kv_port
-        logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
-
-        # Check if NIXL is needed based on connector list
-    needs_nixl = config.connector_list and "nixl" in config.connector_list
-
-    if needs_nixl:
-        # Allocate side channel ports
-        # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L372
-        # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
-        # For dp_rank, we need to reserve tp_size consecutive ports
-        tp_size = config.engine_args.tensor_parallel_size or 1
-
-        # The first port for this dp_rank will be at: base_port + (dp_rank * tp_size)
-        # We need to allocate tp_size consecutive ports starting from there
-        nixl_metadata = PortMetadata(
-            worker_id=worker_id, reason="nixl_side_channel_port"
-        )
-        nixl_request = PortAllocationRequest(
-            metadata=nixl_metadata,
-            port_range=config.port_range,
-            block_size=tp_size,
-        )
-        allocated_ports = await allocate_and_reserve_port_block(
-            runtime, config.namespace, nixl_request
-        )
-        first_port_for_dp_rank = allocated_ports[0]
-
-        # Calculate the base port that NIXL expects
-        # base_port = first_port_for_dp_rank - (dp_rank * tp_size)
-        nixl_offset = dp_rank * tp_size
-        base_side_channel_port = first_port_for_dp_rank - nixl_offset
-
-        if base_side_channel_port < 0:
-            raise ValueError(
-                f"NIXL base port calculation resulted in negative port: "
-                f"first_allocated_port={first_port_for_dp_rank}, offset={nixl_offset}, "
-                f"base_port={base_side_channel_port}. Current range: {config.port_range.min}-{config.port_range.max}. "
-                f"Consider using a higher port range."
-            )
-
-        logger.info(
-            f"Allocated NIXL side channel ports: base={base_side_channel_port}, "
-            f"allocated_ports={allocated_ports} (worker_id={worker_id}, dp_rank={dp_rank}, tp_size={tp_size})"
-        )
-        set_side_channel_host_and_port(base_side_channel_port)
-
-
 def create_kv_events_config(config: Config) -> Optional[KVEventsConfig]:
     """Create KVEventsConfig for prefix caching if needed."""
+    if config.is_decode_worker:
+        logger.info(
+            f"Decode worker detected (is_decode_worker={config.is_decode_worker}): "
+            f"kv_events_config disabled (decode workers don't publish KV events)"
+        )
+        return None
+
     # If prefix caching is not enabled, no events config needed
     if not config.engine_args.enable_prefix_caching:
+        logger.info("No kv_events_config required: prefix caching is disabled")
         return None
 
     # If user provided their own config, use that
-    if getattr(config.engine_args, "kv_events_config"):
-        logger.info("Using user-provided kv_events_config")
-        return None
+    if c := getattr(config.engine_args, "kv_events_config"):
+        # Warn user that enable_kv_cache_events probably should be True (user may have omitted it from JSON)
+        if not c.enable_kv_cache_events:
+            logger.warning(
+                "User provided --kv_events_config which set enable_kv_cache_events to False (default). "
+                "To publish events, explicitly set enable_kv_cache_events to True."
+            )
+        logger.info(f"Using user-provided kv_events_config {c}")
+        return c
 
     # Create default events config for prefix caching
-    logger.info("Creating Dynamo default kv_events_config for prefix caching")
-    if config.kv_port is None:
-        raise ValueError(
-            "config.kv_port is not set; call configure_ports(...) before overwrite_args "
-            "or provide --kv-event-config to supply an explicit endpoint."
-        )
+    port = envs.DYN_VLLM_KV_EVENT_PORT
+    logger.info(
+        f"Using env-var DYN_VLLM_KV_EVENT_PORT={port} to create kv_events_config"
+    )
     dp_rank = config.engine_args.data_parallel_rank or 0
+
     return KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
-        endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+        endpoint=f"tcp://*:{port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
     )
 
 
@@ -341,7 +528,7 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         elif connector == "kvbm":
             connector_cfg = {
                 "kv_connector": "DynamoConnector",
-                "kv_connector_module_path": "dynamo.llm.vllm_integration.connector",
+                "kv_connector_module_path": "kvbm.vllm_integration.connector",
                 "kv_role": "kv_both",
             }
         multi_connectors.append(connector_cfg)
@@ -356,20 +543,30 @@ def create_kv_transfer_config(config: Config) -> Optional[KVTransferConfig]:
         kv_connector="PdConnector",
         kv_role="kv_both",
         kv_connector_extra_config={"connectors": multi_connectors},
-        kv_connector_module_path="dynamo.llm.vllm_integration.connector",
+        kv_connector_module_path="kvbm.vllm_integration.connector",
     )
 
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
+
+    if config.has_connector("nixl") or (
+        # Check if the user provided their own kv_transfer_config
+        config.engine_args.kv_transfer_config is not None
+        # and the connector is NixlConnector
+        and config.engine_args.kv_transfer_config.kv_connector == "NixlConnector"
+    ):
+        ensure_side_channel_host()
+
     defaults = {
-        "task": "generate",
+        # vLLM 0.13+ renamed 'task' to 'runner'
+        "runner": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
         # `sampling_params.update_from_tokenizer(...)`, so we can no longer
         # skip tokenizer initialisation.  Setting this to **False** avoids
         # a NoneType error when the processor accesses the tokenizer.
         "skip_tokenizer_init": False,
-        "disable_log_requests": True,
+        "enable_log_requests": False,
         "disable_log_stats": False,
     }
 
@@ -377,9 +574,14 @@ def overwrite_args(config):
     if kv_transfer_config:
         defaults["kv_transfer_config"] = kv_transfer_config
 
-    kv_events_config = create_kv_events_config(config)
-    if kv_events_config:
-        defaults["kv_events_config"] = kv_events_config
+    kv_cfg = create_kv_events_config(config)
+    defaults["kv_events_config"] = kv_cfg
+    # Derive use_kv_events from whether kv_events_config is set AND enable_kv_cache_events is True
+    config.use_kv_events = kv_cfg is not None and kv_cfg.enable_kv_cache_events
+    logger.info(
+        f"Using kv_events_config for publishing vLLM kv events over zmq: {kv_cfg} "
+        f"(use_kv_events={config.use_kv_events})"
+    )
 
     logger.debug("Setting Dynamo defaults for vLLM")
     for key, value in defaults.items():
@@ -387,14 +589,50 @@ def overwrite_args(config):
             setattr(config.engine_args, key, value)
             logger.debug(f" engine_args.{key} = {value}")
         else:
-            raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
+            logger.debug(
+                f" Skipping engine_args.{key} (not available in this vLLM version)"
+            )
 
 
-def set_side_channel_host_and_port(side_channel_port: int):
-    """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
-    This sets the port number for the side channel.
-    """
+def get_host_ip() -> str:
+    """Get the IP address of the host for side-channel coordination."""
+    try:
+        host_name = socket.gethostname()
+    except socket.error as exc:
+        logger.warning("Failed to get hostname: %s, falling back to 127.0.0.1", exc)
+        return "127.0.0.1"
+
+    try:
+        host_ip = socket.gethostbyname(host_name)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
+            test_socket.bind((host_ip, 0))
+        return host_ip
+    except socket.gaierror as exc:
+        logger.warning(
+            "Hostname %s cannot be resolved: %s, falling back to 127.0.0.1",
+            host_name,
+            exc,
+        )
+        return "127.0.0.1"
+    except socket.error as exc:
+        logger.warning(
+            "Hostname %s is not usable for binding: %s, falling back to 127.0.0.1",
+            host_name,
+            exc,
+        )
+        return "127.0.0.1"
+
+
+def ensure_side_channel_host():
+    """Ensure the NIXL side-channel host is available without overriding user settings."""
+
+    existing_host = os.getenv("VLLM_NIXL_SIDE_CHANNEL_HOST")
+    if existing_host:
+        logger.debug(
+            "Preserving existing VLLM_NIXL_SIDE_CHANNEL_HOST=%s", existing_host
+        )
+        return
+
     host_ip = get_host_ip()
     os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(side_channel_port)
-    logger.debug(f"Set NIXL side channel to {host_ip}:{side_channel_port}")
+    logger.debug("Set VLLM_NIXL_SIDE_CHANNEL_HOST to %s", host_ip)

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,8 +17,8 @@
 # This is a YAML-formatted file.
 # Declare variables to be passed into your templates.
 
-# This is the Dynamo namespace where the dynamo model is deployed
-dynamoNamespace: "vllm-agg"
+# Name of the DynamoGraphDeployment (DGD) that backs this gateway integration
+dynamoGraphDeploymentName: "vllm-agg"
 
 # This is the port on which the model is exposed
 model:
@@ -27,8 +27,6 @@ model:
   identifier: "Qwen/Qwen3-0.6B"
   # This is the short name of the model that will be used to generate the resource names
   shortName: "qwen"
-  # Criticality level for the inference model
-  criticality: "Critical"
 
 # InferencePool configuration
 inferencePool:
@@ -41,6 +39,9 @@ httpRoute:
   enabled: true
   # Gateway parent reference configuration
   gatewayName: "inference-gateway"
+  # Namespace where the Gateway resource is deployed
+  # Leave empty ("") to use the release namespace, or set explicitly (e.g., "default")
+  gatewayNamespace: ""
   # Path matching configuration
   path:
     prefix: "/"
@@ -51,8 +52,8 @@ httpRoute:
 extension:
   # EPP image for the GAIE extension (Dynamo EPP image by default)
   image: "" # leave empty to use defaults below
-  standardImage: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v0.4.0
-  dynamoImage: nvcr.io/nvstaging/ai-dynamo/gaie-epp-dynamo:v0.6.0-1
+  standardImage: us-central1-docker.pkg.dev/k8s-artifacts-prod/images/gateway-api-inference-extension/epp:v1.2.1
+  dynamoImage: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:new-build-1
 
 # generic knobs you may want in both modes
 imagePullSecrets:
@@ -72,9 +73,10 @@ epp:
   # Dynamo-specific settings (only used when useDynamo: true)
   configFile: "/etc/epp/epp-config-dynamo.yaml"
   dynamo:
-    namespace: "vllm-agg" # Required when useDynamo: true.
-    component: "backend"
     kvBlockSize: "16"
+    # Use ETCD for discovery instead of Kubernetes (default: false)
+    # Set to true via --set epp.dynamo.useEtcd=true to enable ETCD discovery
+    useEtcd: false
 
 # Platform configuration (for Dynamo mode)
 platformReleaseName: dynamo-platform

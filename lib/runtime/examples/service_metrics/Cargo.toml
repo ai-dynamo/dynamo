@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
@@ -14,6 +14,7 @@ repository.workspace = true
 dynamo-runtime = { workspace = true }
 
 # third-party
+anyhow = { workspace = true }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }

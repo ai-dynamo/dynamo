@@ -1,5 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
+"""
+Test Execution Times (Last Run: 2025-12-09):
+- test_request_cancellation_vllm_aggregated: ~55s (gpu_1)
+- test_request_cancellation_vllm_decode_cancel: ~53s (gpu_2)
+- test_request_cancellation_vllm_prefill_cancel: ~53s (gpu_2)
+- Total: 161.65s (0:02:41)
+"""
 
 import logging
 import os
@@ -14,17 +22,36 @@ from tests.fault_tolerance.cancellation.utils import (
     send_cancellable_request,
 )
 from tests.utils.constants import FAULT_TOLERANCE_MODEL_NAME
-from tests.utils.engine_process import FRONTEND_PORT
 from tests.utils.managed_process import ManagedProcess
 from tests.utils.payloads import check_health_generate, check_models_api
+from tests.utils.port_utils import allocate_port, deallocate_port
 
 logger = logging.getLogger(__name__)
+
+pytestmark = [
+    pytest.mark.vllm,
+    pytest.mark.gpu_1,
+    pytest.mark.e2e,
+    pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME),
+    pytest.mark.post_merge,  # post_merge to pinpoint failure commit
+    pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True),
+]
 
 
 class DynamoWorkerProcess(ManagedProcess):
     """Process manager for Dynamo worker with vLLM backend"""
 
-    def __init__(self, request, is_prefill: bool = False):
+    def __init__(
+        self,
+        request,
+        frontend_port: int,
+        is_prefill: bool = False,
+    ):
+        # Allocate system port for this worker
+        system_port = allocate_port(9100)
+        self.system_port = system_port
+        self.frontend_port = frontend_port
+
         command = [
             "python3",
             "-m",
@@ -35,30 +62,48 @@ class DynamoWorkerProcess(ManagedProcess):
             "--gpu-memory-utilization",
             "0.45",
             "--max-model-len",
-            "8192",
+            "16384",
             "--migration-limit",
             "3",
         ]
 
-        health_check_urls = [
-            (f"http://localhost:{FRONTEND_PORT}/v1/models", check_models_api),
-            (f"http://localhost:{FRONTEND_PORT}/health", check_health_generate),
-        ]
-
-        # Set port based on worker type
-        port = "8082" if is_prefill else "8081"
-
-        # Add prefill worker flag if needed
+        # Configure health check based on worker type
         if is_prefill:
+            # Prefill workers check their own status endpoint
             command.append("--is-prefill-worker")
-            health_check_urls = [(f"http://localhost:{port}/health", self.is_ready)]
+            health_check_urls = [
+                (f"http://localhost:{system_port}/health", self.is_ready)
+            ]
+        else:
+            # Decode workers should also check their own status endpoint first,
+            # then verify the frontend sees the model
+            health_check_urls = [
+                (f"http://localhost:{system_port}/health", self.is_ready),
+                (f"http://localhost:{frontend_port}/v1/models", check_models_api),
+                (f"http://localhost:{frontend_port}/health", check_health_generate),
+            ]
 
-        # Set debug logging environment
+        # Set environment variables
         env = os.environ.copy()
+        env["DYN_REQUEST_PLANE"] = request.getfixturevalue("request_plane")
+
         env["DYN_LOG"] = "debug"
-        env["DYN_SYSTEM_ENABLED"] = "true"
+        # Disable canary health check - these tests expect full control over requests
+        # sent to the workers where canary health check intermittently sends dummy
+        # requests to workers interfering with the test process which may cause
+        # intermittent failures
+        env["DYN_HEALTH_CHECK_ENABLED"] = "false"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
-        env["DYN_SYSTEM_PORT"] = port
+        env["DYN_SYSTEM_PORT"] = str(system_port)
+        env["DYN_HTTP_PORT"] = str(frontend_port)
+
+        # Set KV event port and NIXL side channel port only for prefill worker
+        # to avoid conflicts with decode worker
+        if is_prefill:
+            env["DYN_VLLM_KV_EVENT_PORT"] = "20082"  # TODO: use dynamic port allocation
+            env[
+                "VLLM_NIXL_SIDE_CHANNEL_PORT"
+            ] = "5601"  # TODO: use dynamic port allocation
 
         # Set log directory based on worker type
         worker_type = "prefill_worker" if is_prefill else "worker"
@@ -95,6 +140,16 @@ class DynamoWorkerProcess(ManagedProcess):
         """Get the PID of the worker process"""
         return self.proc.pid if self.proc else None
 
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Release allocated port when worker exits."""
+        try:
+            # system_port is always allocated in __init__
+            deallocate_port(self.system_port)
+        except Exception as e:
+            logging.warning(f"Failed to release vLLM worker port: {e}")
+
+        return super().__exit__(exc_type, exc_val, exc_tb)
+
     def is_ready(self, response) -> bool:
         """Check the health of the worker process"""
         try:
@@ -111,12 +166,9 @@ class DynamoWorkerProcess(ManagedProcess):
         return False
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(110)  # 3x average
 def test_request_cancellation_vllm_aggregated(
-    request, runtime_services, predownload_models
+    request, runtime_services_dynamic_ports, predownload_models
 ):
     """
     End-to-end test for request cancellation functionality in aggregated mode.
@@ -127,14 +179,19 @@ def test_request_cancellation_vllm_aggregated(
     1. Completion request
     2. Chat completion request (non-streaming)
     3. Chat completion request (streaming)
+
+    Timing (Last Run: 2025-12-09): ~55s total
+    - Engine initialization: ~15s
+    - Testing 3 scenarios: ~38s (~12s each)
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start a single worker
-        with DynamoWorkerProcess(request) as worker:
+        # Step 2: Start a single worker (allocates its own system_port)
+        with DynamoWorkerProcess(request, frontend.frontend_port) as worker:
             logger.info(f"Worker PID: {worker.get_pid()}")
 
             # Step 3: Test request cancellation with polling approach
@@ -153,12 +210,14 @@ def test_request_cancellation_vllm_aggregated(
                 logger.info(f"Testing {description.lower()}...")
 
                 # Send the request (non-blocking)
-                cancellable_req = send_cancellable_request(request_type)
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port, request_type
+                )
 
-                # Poll for "New Request ID" pattern
+                # Poll for "Decode Request ID" pattern (vLLM v2 pattern)
                 request_id, worker_log_offset = poll_for_pattern(
                     process=worker,
-                    pattern="New Request ID: ",
+                    pattern="Decode Request ID: ",
                     log_offset=worker_log_offset,
                     match_type="contains",
                 )
@@ -188,12 +247,9 @@ def test_request_cancellation_vllm_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
+@pytest.mark.timeout(150)  # 3x average
 def test_request_cancellation_vllm_decode_cancel(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
     End-to-end test for request cancellation during decode phase.
@@ -201,18 +257,27 @@ def test_request_cancellation_vllm_decode_cancel(
     This test verifies that when a request is cancelled by the client during the decode phase,
     the system properly handles the cancellation and cleans up resources
     on the decode worker side in a disaggregated setup.
+
+    Timing (Last Run: 2025-12-09): ~53s total (requires 2 GPUs)
+    - Engine initialization: ~23s (decode + prefill workers)
+    - Testing stream cancellation during decode: ~28s
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start the prefill worker
-        with DynamoWorkerProcess(request, is_prefill=True) as prefill_worker:
+        # Step 2: Start the prefill worker (allocates its own system_port)
+        with DynamoWorkerProcess(
+            request, frontend.frontend_port, is_prefill=True
+        ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
-            # Step 3: Start the decode worker
-            with DynamoWorkerProcess(request, is_prefill=False) as decode_worker:
+            # Step 3: Start the decode worker (allocates its own system_port)
+            with DynamoWorkerProcess(
+                request, frontend.frontend_port, is_prefill=False
+            ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
                 # Step 4: Test request cancellation for streaming scenario
@@ -221,19 +286,21 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
                 # Send streaming request (non-blocking)
-                cancellable_req = send_cancellable_request("chat_completion_stream")
+                cancellable_req = send_cancellable_request(
+                    frontend.frontend_port, "chat_completion_stream"
+                )
 
-                # Poll for "New Request ID" pattern in decode worker
+                # Poll for "Decode Request ID" pattern in decode worker (vLLM v2 pattern)
                 request_id, decode_log_offset = poll_for_pattern(
                     process=decode_worker,
-                    pattern="New Request ID: ",
+                    pattern="Decode Request ID: ",
                     match_type="contains",
                 )
 
-                # Verify same request ID reached prefill worker (as "New Prefill Request ID")
+                # Verify same request ID reached prefill worker (as "Prefill Request ID")
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"New Prefill Request ID: {request_id}",
+                    pattern=f"Prefill Request ID: {request_id}",
                 )
 
                 # Read 5 streaming responses (decode phase)
@@ -261,72 +328,68 @@ def test_request_cancellation_vllm_decode_cancel(
                 )
 
 
-@pytest.mark.vllm
-@pytest.mark.gpu_1
-@pytest.mark.e2e
-@pytest.mark.model(FAULT_TOLERANCE_MODEL_NAME)
-def test_request_cancellation_vllm_remote_prefill_cancel(
-    request, runtime_services, predownload_models, set_ucx_tls_no_mm
+@pytest.mark.timeout(150)  # 3x average
+def test_request_cancellation_vllm_prefill_cancel(
+    request, runtime_services_dynamic_ports, set_ucx_tls_no_mm, predownload_models
 ):
     """
-    End-to-end test for request cancellation during remote prefill phase.
+    End-to-end test for request cancellation during prefill phase.
 
-    This test verifies that when a request is cancelled by the client during the remote prefill phase,
+    This test verifies that when a request is cancelled by the client during the prefill phase,
     the system properly handles the cancellation and cleans up resources
     on both the decode and prefill workers in a disaggregated setup.
+
+    Timing (Last Run: 2025-12-09): ~53s total (requires 2 GPUs)
+    - Engine initialization: ~23s (decode + prefill workers)
+    - Testing cancellation during prefill: ~28s
+    - Teardown: ~2s
     """
 
-    # Step 1: Start the frontend
+    # Step 1: Start the frontend (allocates its own frontend_port)
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
 
-        # Step 2: Start the prefill worker
-        with DynamoWorkerProcess(request, is_prefill=True) as prefill_worker:
+        # Step 2: Start the prefill worker (allocates its own system_port)
+        with DynamoWorkerProcess(
+            request, frontend.frontend_port, is_prefill=True
+        ) as prefill_worker:
             logger.info(f"Prefill Worker PID: {prefill_worker.get_pid()}")
 
-            # Step 3: Start the decode worker
-            with DynamoWorkerProcess(request, is_prefill=False) as decode_worker:
+            # Step 3: Start the decode worker (allocates its own system_port)
+            with DynamoWorkerProcess(
+                request, frontend.frontend_port, is_prefill=False
+            ) as decode_worker:
                 logger.info(f"Decode Worker PID: {decode_worker.get_pid()}")
 
-                # Step 4: Test request cancellation during remote prefill phase
+                # Step 4: Test request cancellation during prefill phase
+                # Note: With the new architecture, prefill routing happens in the frontend,
+                # so the request goes directly to the prefill worker first
                 logger.info(
-                    "Testing completion request cancellation during remote prefill phase..."
+                    "Testing completion request cancellation during prefill phase..."
                 )
 
                 # Send request with long prompt (non-blocking)
                 cancellable_req = send_cancellable_request(
-                    "completion", use_long_prompt=True
+                    frontend.frontend_port, "completion", use_long_prompt=True
                 )
 
-                # Poll for "New Request ID" pattern in decode worker
-                request_id, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern="New Request ID: ",
-                    match_type="contains",
-                )
-
-                # Poll for same request ID in prefill worker (as "New Prefill Request ID")
-                _, prefill_log_offset = poll_for_pattern(
+                # Poll for "Prefill Request ID" pattern in prefill worker (vLLM v2 pattern)
+                # With new architecture, prefill is routed by frontend's internal router
+                request_id, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
-                    pattern=f"New Prefill Request ID: {request_id}",
+                    pattern="Prefill Request ID: ",
+                    match_type="contains",
                 )
 
                 # Cancel during prefill phase
                 cancellable_req.cancel()
-                logger.info(f"Cancelled request ID: {request_id} during remote prefill")
+                logger.info(f"Cancelled request ID: {request_id} during prefill")
 
-                # Poll for "Aborted Prefill Request ID" in prefill worker first (where cancellation happens)
+                # Poll for "Aborted Prefill Request ID" in prefill worker (where cancellation happens)
                 _, prefill_log_offset = poll_for_pattern(
                     process=prefill_worker,
                     pattern=f"Aborted Prefill Request ID: {request_id}",
                     log_offset=prefill_log_offset,
-                )
-
-                # Then poll for "Aborted Remote Prefill Request ID" in decode worker
-                _, decode_log_offset = poll_for_pattern(
-                    process=decode_worker,
-                    pattern=f"Aborted Remote Prefill Request ID: {request_id}",
-                    log_offset=decode_log_offset,
                 )
 
                 # Verify frontend log has kill message
@@ -335,6 +398,23 @@ def test_request_cancellation_vllm_remote_prefill_cancel(
                     pattern="issued control message Kill to sender",
                 )
 
+                # Verify decode worker never received the request
+                pattern = "Request ID: "
+                try:
+                    _, decode_log_offset = poll_for_pattern(
+                        process=decode_worker,
+                        pattern=pattern,
+                        max_wait_ms=10,
+                        match_type="contains",
+                    )
+                    pytest.fail(
+                        "Decode worker received request cancelled during prefill phase"
+                    )
+                except AssertionError as e:
+                    assert str(e).startswith(
+                        f"Failed to find '{pattern}' pattern after 2 iterations "
+                    ), f"Unexpected error: {e}"
+
                 logger.info(
-                    "Completion request cancellation during remote prefill phase detected successfully"
+                    "Completion request cancellation during prefill phase detected successfully"
                 )

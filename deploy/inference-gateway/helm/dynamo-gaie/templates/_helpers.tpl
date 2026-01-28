@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -63,6 +63,21 @@ Selector labels
 {{- define "dynamo-gaie.selectorLabels" -}}
 app.kubernetes.io/name: {{ include "dynamo-gaie.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{/*
+Resolve the fully qualified Dynamo namespace as "<release namespace>-<dynamoGraphDeploymentName>"
+*/}}
+{{- define "dynamo-gaie.dynamoNamespace" -}}
+{{- $dgdName := (.Values.dynamoGraphDeploymentName | default "") | trim -}}
+{{- if not $dgdName }}
+{{- fail "set dynamoGraphDeploymentName to derive the Dynamo namespace" }}
+{{- end }}
+{{- $releaseNamespace := (.Release.Namespace | default "") | trim -}}
+{{- if not $releaseNamespace }}
+{{- fail "Release.Namespace must be set to derive the Dynamo namespace" }}
+{{- end }}
+{{- printf "%s-%s" $releaseNamespace $dgdName }}
 {{- end }}
 
 {{/*

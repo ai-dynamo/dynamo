@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +23,13 @@ from dynamo.planner.utils.prometheus import (
     FrontendMetricContainer,
     PrometheusAPIClient,
 )
+
+pytestmark = [
+    pytest.mark.gpu_0,
+    pytest.mark.pre_merge,
+    pytest.mark.unit,
+    pytest.mark.planner,
+]
 
 
 @pytest.fixture
@@ -133,7 +140,7 @@ def test_get_average_metric_none_result():
         mock_query.return_value = None
 
         result = client._get_average_metric(
-            metric_name="test_metric",
+            full_metric_name="test_metric",
             interval="60s",
             operation_name="test operation",
             model_name="test_model",
@@ -150,7 +157,7 @@ def test_get_average_metric_empty_result():
         mock_query.return_value = []
 
         result = client._get_average_metric(
-            metric_name="test_metric",
+            full_metric_name="test_metric",
             interval="60s",
             operation_name="test operation",
             model_name="test_model",
@@ -168,7 +175,7 @@ def test_get_average_metric_no_matching_containers(mock_prometheus_result):
         mock_query.return_value = [mock_prometheus_result[0]]
 
         result = client._get_average_metric(
-            metric_name="test_metric",
+            full_metric_name="test_metric",
             interval="60s",
             operation_name="test operation",
             model_name="target_model",
@@ -186,7 +193,7 @@ def test_get_average_metric_one_matching_container(mock_prometheus_result):
         mock_query.return_value = mock_prometheus_result[:2]
 
         result = client._get_average_metric(
-            metric_name="test_metric",
+            full_metric_name="test_metric",
             interval="60s",
             operation_name="test operation",
             model_name="target_model",
@@ -220,7 +227,7 @@ def test_get_average_metric_with_validation_error():
         mock_query.return_value = mock_result
 
         result = client._get_average_metric(
-            metric_name="test_metric",
+            full_metric_name="test_metric",
             interval="60s",
             operation_name="test operation",
             model_name="target_model",
@@ -238,7 +245,7 @@ def test_get_average_metric_multiple_matching_containers(mock_prometheus_result)
         mock_query.return_value = mock_prometheus_result[1:]
 
         result = client._get_average_metric(
-            metric_name="test_metric",
+            full_metric_name="test_metric",
             interval="60s",
             operation_name="test operation",
             model_name="target_model",

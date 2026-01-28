@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -47,38 +47,39 @@ impl WorkHandlerMetrics {
         metrics_labels: Option<&[(&str, &str)]>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let metrics_labels = metrics_labels.unwrap_or(&[]);
-        let request_counter = endpoint.create_intcounter(
+        let metrics = endpoint.metrics();
+        let request_counter = metrics.create_intcounter(
             work_handler::REQUESTS_TOTAL,
             "Total number of requests processed by work handler",
             metrics_labels,
         )?;
 
-        let request_duration = endpoint.create_histogram(
+        let request_duration = metrics.create_histogram(
             work_handler::REQUEST_DURATION_SECONDS,
             "Time spent processing requests by work handler",
             metrics_labels,
             None,
         )?;
 
-        let inflight_requests = endpoint.create_intgauge(
+        let inflight_requests = metrics.create_intgauge(
             work_handler::INFLIGHT_REQUESTS,
             "Number of requests currently being processed by work handler",
             metrics_labels,
         )?;
 
-        let request_bytes = endpoint.create_intcounter(
+        let request_bytes = metrics.create_intcounter(
             work_handler::REQUEST_BYTES_TOTAL,
             "Total number of bytes received in requests by work handler",
             metrics_labels,
         )?;
 
-        let response_bytes = endpoint.create_intcounter(
+        let response_bytes = metrics.create_intcounter(
             work_handler::RESPONSE_BYTES_TOTAL,
             "Total number of bytes sent in responses by work handler",
             metrics_labels,
         )?;
 
-        let error_counter = endpoint.create_intcountervec(
+        let error_counter = metrics.create_intcountervec(
             work_handler::ERRORS_TOTAL,
             "Total number of errors in work handler processing",
             &[work_handler::ERROR_TYPE_LABEL],
@@ -281,9 +282,24 @@ where
                 m.response_bytes.inc_by(resp_bytes.len() as u64);
             }
             if (publisher.send(resp_bytes.into()).await).is_err() {
-                tracing::error!("Failed to publish response for stream {}", context.id());
-                context.stop_generating();
                 send_complete_final = false;
+                if context.is_stopped() {
+                    // Say there are 2 threads accessing `context`, the sequence can be either:
+                    // 1. context.stop_generating (other) -> publisher.send failure (this)
+                    //    -> context.is_stopped (this)
+                    // 2. publisher.send failure (this) -> context.stop_generating (other)
+                    //    -> context.is_stopped (this)
+                    // Case 1 can happen when client closed the connection after receiving the
+                    // complete response from frontend. Hence, send failure can be expected in this
+                    // case.
+                    tracing::warn!("Failed to publish response for stream {}", context.id());
+                } else {
+                    // Otherwise, this is an error.
+                    tracing::error!("Failed to publish response for stream {}", context.id());
+                    context.stop_generating();
+                }
+                // Account errors in all cases, including cancellation. Therefore this metric can be
+                // inflated.
                 if let Some(m) = self.metrics() {
                     m.error_counter
                         .with_label_values(&[work_handler::error_types::PUBLISH_RESPONSE])

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -31,13 +31,13 @@ where
                 src_desc.as_ptr() as usize,
                 src_desc.size(),
                 src_desc.device_id(),
-            )?;
+            );
 
             dst_dl.add_desc(
                 dst_desc.as_ptr() as usize,
                 dst_desc.size(),
                 dst_desc.device_id(),
-            )?;
+            );
         }
 
         Ok(())
@@ -58,13 +58,13 @@ where
                         src_desc.as_ptr() as usize,
                         src_desc.size(),
                         src_desc.device_id(),
-                    )?;
+                    );
 
                     dst_dl.add_desc(
                         dst_desc.as_ptr() as usize,
                         dst_desc.size(),
                         dst_desc.device_id(),
-                    )?;
+                    );
                 }
             }
         }

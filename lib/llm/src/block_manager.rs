@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Block Manager for LLM KV Cache
@@ -14,11 +14,14 @@ pub mod block;
 pub mod connector;
 pub mod distributed;
 pub mod events;
+pub mod kv_consolidator;
 pub mod layout;
 pub mod metrics_kvbm;
+pub mod numa_allocator;
 pub mod offload;
 pub mod pool;
 pub mod storage;
+pub mod v2;
 
 // dynamo rt integration
 pub mod controller;
@@ -323,18 +326,6 @@ mod tests {
         ReferenceBlockManager::new(create_reference_block_manager_config())
             .await
             .unwrap()
-    }
-
-    pub async fn create_reference_block_manager_with_counts(
-        device: usize,
-        host: usize,
-        disk: usize,
-    ) -> ReferenceBlockManager {
-        ReferenceBlockManager::new(create_reference_block_manager_config_with_counts(
-            device, host, disk,
-        ))
-        .await
-        .unwrap()
     }
 
     #[tokio::test]

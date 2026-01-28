@@ -1,2 +1,5 @@
 # Ignore all file:// protocol URLs (examples, local references, etc.)
 ^file://
+
+# Ignore URLs in test data files
+.*tests/data.*

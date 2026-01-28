@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -197,6 +197,7 @@ impl BlockTransferHandler {
 
         let notify = match (request.from_pool(), request.to_pool()) {
             (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
+            (Device, Disk) => self.begin_transfer(&self.device, &self.disk, request).await,
             (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
             (Host, Disk) => self.begin_transfer(&self.host, &self.disk, request).await,
             (Disk, Device) => self.begin_transfer(&self.disk, &self.device, request).await,

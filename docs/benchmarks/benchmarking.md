@@ -1,4 +1,4 @@
-<!-- # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+<!-- # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -97,10 +97,10 @@ Client-side benchmarking runs on your local machine and connects to Kubernetes d
 Follow these steps to benchmark Dynamo deployments using client-side benchmarking:
 
 ### Step 1: Establish Kubernetes Cluster and Install Dynamo
-Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Cloud platform. First follow the [installation guide](/docs/kubernetes/installation_guide.md) to install Dynamo Cloud, then use [deploy/utils/README](../../deploy/utils/README.md) to set up benchmarking resources.
+Set up your Kubernetes cluster with NVIDIA GPUs and install the Dynamo Kubernetes Platform. First follow the [installation guide](/docs/kubernetes/installation_guide.md) to install Dynamo Kubernetes Platform, then use [deploy/utils/README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md) to set up benchmarking resources.
 
 ### Step 2: Deploy DynamoGraphDeployments
-Deploy your DynamoGraphDeployments separately using the [deployment documentation](../../components/backends/). Each deployment should have a frontend service exposed.
+Deploy your DynamoGraphDeployments separately using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Each deployment should have a frontend service exposed.
 
 ### Step 3: Port-Forward and Benchmark Deployment A
 ```bash
@@ -325,18 +325,18 @@ The server-side benchmarking solution:
 
 ## Prerequisites
 
-1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Cloud/Platform docs](/docs/kubernetes/README.md))
-2. **Storage and service account** PersistentVolumeClaim and service account configured with appropriate permissions (see [deploy/utils README](../../deploy/utils/README.md))
+1. **Kubernetes cluster** with NVIDIA GPUs and Dynamo namespace setup (see [Dynamo Kubernetes Platform docs](/docs/kubernetes/README.md))
+2. **Storage** PersistentVolumeClaim configured with appropriate permissions (see [deploy/utils README](https://github.com/ai-dynamo/dynamo/blob/main/deploy/utils/README.md))
 3. **Docker image** containing the Dynamo benchmarking tools
 
 ## Quick Start
 
 ### Step 1: Deploy Your DynamoGraphDeployment
-Deploy your DynamoGraphDeployment using the [deployment documentation](../../components/backends/). Ensure it has a frontend service exposed.
+Deploy your DynamoGraphDeployment using the [deployment documentation](https://github.com/ai-dynamo/dynamo/blob/main/examples/backends). Ensure it has a frontend service exposed.
 
 ### Step 2: Deploy and Run Benchmark Job
 
-**Note**: The server-side benchmarking job requires a Docker image containing the Dynamo benchmarking tools. Before the 0.5.1 release, you must build your own Docker image using the [container build instructions](../../container/README.md), push it to your container registry, then update the `image` field in `benchmarks/incluster/benchmark_job.yaml` to use your built image tag.
+**Note**: The server-side benchmarking job requires a Docker image containing the Dynamo benchmarking tools. Before the 0.5.1 release, you must build your own Docker image using the [container build instructions](https://github.com/ai-dynamo/dynamo/blob/main/container/README.md), push it to your container registry, then update the `image` field in `benchmarks/incluster/benchmark_job.yaml` to use your built image tag.
 
 ```bash
 export NAMESPACE=benchmarking
@@ -364,12 +364,15 @@ kubectl apply -f benchmarks/incluster/benchmark_job.yaml -n $NAMESPACE
 
 ### Step 3: Retrieve Results
 ```bash
-# Download results from PVC (recommended)
-python3 -m deploy.utils.download_pvc_results \
-  --namespace $NAMESPACE \
-  --output-dir ./benchmarks/results/<benchmark-name> \
-  --folder /data/results/<benchmark-name> \
-  --no-config
+# Create access pod (skip this step if access pod is already running)
+kubectl apply -f deploy/utils/manifests/pvc-access-pod.yaml -n $NAMESPACE
+kubectl wait --for=condition=Ready pod/pvc-access-pod -n $NAMESPACE --timeout=60s
+
+# Download the results
+kubectl cp $NAMESPACE/pvc-access-pod:/data/results/<benchmark-name> ./benchmarks/results/<benchmark-name>
+
+# Cleanup
+kubectl delete pod pvc-access-pod -n $NAMESPACE
 ```
 
 ### Step 4: Generate Plots
@@ -489,7 +492,6 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 ### Common Issues
 
 1. **Service not found**: Ensure your DynamoGraphDeployment frontend service is running
-2. **Service account permissions**: Verify `dynamo-sa` has necessary RBAC permissions
 3. **PVC access**: Check that `dynamo-pvc` is properly configured and accessible
 4. **Image pull issues**: Ensure the Docker image is accessible from the cluster
 5. **Resource constraints**: Adjust resource limits if the job is being evicted
@@ -499,9 +501,6 @@ kubectl describe pod <pod-name> -n $NAMESPACE
 ```bash
 # Check PVC status
 kubectl get pvc dynamo-pvc -n $NAMESPACE
-
-# Verify service account
-kubectl get sa dynamo-sa -n $NAMESPACE
 
 # Check service endpoints
 kubectl get svc -n $NAMESPACE
@@ -525,3 +524,18 @@ The built-in Python workflow connects to endpoints, benchmarks with aiperf, and 
 3. **Direct module usage**: Use individual Python modules (`benchmarks.utils.benchmark`, `benchmarks.utils.plot`) for granular control over each step of the benchmarking process.
 
 The Python benchmarking module provides a complete end-to-end benchmarking experience with full control over the workflow.
+
+---
+
+## Testing with Mocker Backend
+
+For development and testing purposes, Dynamo provides a [mocker backend](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) that simulates LLM inference without requiring actual GPU resources. This is useful for:
+
+- **Testing deployments** without expensive GPU infrastructure
+- **Developing and debugging** router, planner, or frontend logic
+- **CI/CD pipelines** that need to validate infrastructure without model execution
+- **Benchmarking framework validation** to ensure your setup works before using real backends
+
+The mocker backend mimics the API and behavior of real backends (vLLM, SGLang, TensorRT-LLM) but generates mock responses instead of running actual inference.
+
+See the [mocker directory](https://github.com/ai-dynamo/dynamo/blob/main/components/src/dynamo/mocker) for usage examples and configuration options.

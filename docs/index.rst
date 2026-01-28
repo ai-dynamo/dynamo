@@ -1,5 +1,5 @@
 ..
-    SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
     SPDX-License-Identifier: Apache-2.0
 
     Licensed under the Apache License, Version 2.0 (the "License");
@@ -43,40 +43,49 @@ Quickstart
    Quickstart <self>
    Installation <_sections/installation>
    Support Matrix <reference/support-matrix.md>
-   Architecture <_sections/architecture>
+   Feature Matrix <reference/feature-matrix.md>
+   Release Artifacts <reference/release-artifacts.md>
    Examples <_sections/examples>
 
 .. toctree::
    :hidden:
    :caption: Kubernetes Deployment
 
-   Quickstart (K8s) <../kubernetes/README.md>
-   Detailed Installation Guide <../kubernetes/installation_guide.md>
-   Creating Deployments <../kubernetes/create_deployment.md>
-   API Reference <../kubernetes/api_reference.md>
-   Dynamo Operator <../kubernetes/dynamo_operator.md>
-   Metrics <../kubernetes/metrics.md>
-   Logging <../kubernetes/logging.md>
-   Multinode <../kubernetes/multinode-deployment.md>
-   Minikube Setup <../kubernetes/minikube.md>
+   Deployment Guide <_sections/k8s_deployment>
+   Observability (K8s) <_sections/k8s_observability>
+   Multinode <_sections/k8s_multinode>
+
+.. toctree::
+   :hidden:
+   :caption: User Guides
+
+   Tool Calling <agents/tool-calling.md>
+   Multimodality Support <multimodal/index.md>
+   Finding Best Initial Configs <performance/aiconfigurator.md>
+   Benchmarking <benchmarks/benchmarking.md>
+   Tuning Disaggregated Performance <performance/tuning.md>
+   Writing Python Workers in Dynamo <development/backend-guide.md>
+   Observability (Local) <_sections/observability>
+   Fault Tolerance <_sections/fault_tolerance>
+   Glossary <reference/glossary.md>
 
 .. toctree::
    :hidden:
    :caption: Components
 
    Backends <_sections/backends>
+   Frontends <_sections/frontends>
    Router <router/README>
    Planner <planner/planner_intro>
    KVBM <kvbm/kvbm_intro>
 
 .. toctree::
    :hidden:
-   :caption: Developer Guide
+   :caption: Design Docs
 
-   Benchmarking Guide <benchmarks/benchmarking.md>
-   SLA Planner (Autoscaling) Quickstart <planner/sla_planner_quickstart>
-   Logging <observability/logging.md>
-   Health Checks <observability/health-checks.md>
-   Tuning Disaggregated Serving Performance <performance/tuning.md>
-   Writing Python Workers in Dynamo <development/backend-guide.md>
-   Glossary <reference/glossary.md>
+   Overall Architecture <design_docs/architecture.md>
+   Architecture Flow <design_docs/dynamo_flow.md>
+   Disaggregated Serving <design_docs/disagg_serving.md>
+   Distributed Runtime <design_docs/distributed_runtime.md>
+   Request Plane <design_docs/request_plane.md>
+   Event Plane <design_docs/event_plane.md>

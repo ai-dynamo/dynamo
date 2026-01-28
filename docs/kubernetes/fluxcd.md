@@ -1,10 +1,10 @@
 # GitOps Deployment with FluxCD
 
-This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](/docs/backends/vllm/README.md) to demonstrate the workflow.
+This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](../backends/vllm/README.md) to demonstrate the workflow.
 
 ## Prerequisites
 
-- A Kubernetes cluster with [Dynamo Cloud](/docs/kubernetes/installation_guide.md) installed
+- A Kubernetes cluster with [Dynamo Kubernetes Platform](./installation_guide.md) installed
 - [FluxCD](https://fluxcd.io/flux/installation/) installed in your cluster
 - A Git repository to store your deployment configurations
 
@@ -16,9 +16,9 @@ The GitOps workflow for Dynamo deployments consists of three main steps:
 2. Create and commit a DynamoGraphDeployment custom resource for initial deployment
 3. Update the graph by building a new version and updating the CR for subsequent updates
 
-## Step 1: Build and Push Dynamo Cloud Operator
+## Step 1: Build and Push Dynamo Operator
 
-First, follow to [See Install Dynamo Cloud](/docs/kubernetes/installation_guide.md).
+First, follow to [See Install Dynamo Kubernetes Platform](./installation_guide.md).
 
 ## Step 2: Create Initial Deployment
 
@@ -69,7 +69,7 @@ You can monitor the deployment status using:
 
 ```bash
 
-export NAMESPACE=<namespace-with-the-dynamo-cloud-operator>
+export NAMESPACE=<namespace-with-the-dynamo-operator>
 
 # Check the DynamoGraphDeployment status
 kubectl get dynamographdeployment llm-agg -n $NAMESPACE

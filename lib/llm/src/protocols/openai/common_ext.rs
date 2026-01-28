@@ -1,12 +1,13 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use validator::Validate;
 
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
-#[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
+#[derive(ToSchema, Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
 pub struct CommonExt {
     /// If true, the model will ignore the end of string token and generate to max_tokens.
     /// This field can also be specified in nvext, but the root-level value takes precedence.
@@ -72,6 +73,14 @@ pub struct CommonExt {
     #[builder(default, setter(strip_option))]
     #[allow(unused)] // Not used
     pub guided_whitespace_pattern: Option<String>,
+
+    /// Whether to skip special tokens in the decoded output.
+    /// When true, special tokens (like EOS, BOS, PAD) are removed from the output text.
+    /// When false, special tokens are included in the output text.
+    /// Defaults to false if not specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub skip_special_tokens: Option<bool>,
 }
 
 impl CommonExt {
@@ -86,7 +95,7 @@ pub trait CommonExtProvider {
     fn common_ext(&self) -> Option<&CommonExt>;
 
     /// Guided Decoding Options
-    fn get_guided_json(&self) -> Option<&serde_json::Value>;
+    fn get_guided_json(&self) -> Option<serde_json::Value>;
     fn get_guided_regex(&self) -> Option<String>;
     fn get_guided_grammar(&self) -> Option<String>;
     fn get_guided_choice(&self) -> Option<Vec<String>>;
@@ -99,6 +108,9 @@ pub trait CommonExtProvider {
     fn get_min_p(&self) -> Option<f32>;
     fn get_repetition_penalty(&self) -> Option<f32>;
     fn get_include_stop_str_in_output(&self) -> Option<bool>;
+
+    /// Output Options
+    fn get_skip_special_tokens(&self) -> Option<bool>;
 }
 
 #[cfg(test)]
@@ -120,6 +132,7 @@ mod tests {
         assert_eq!(common_ext.guided_choice, None);
         assert_eq!(common_ext.guided_decoding_backend, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
+        assert_eq!(common_ext.skip_special_tokens, None);
     }
 
     #[test]
@@ -135,6 +148,7 @@ mod tests {
             .guided_grammar("grammar".to_string())
             .guided_choice(vec!["choice1".to_string(), "choice2".to_string()])
             .guided_decoding_backend("backend".to_string())
+            .skip_special_tokens(false)
             .build()
             .unwrap();
 
@@ -157,6 +171,7 @@ mod tests {
             common_ext.guided_decoding_backend,
             Some("backend".to_string())
         );
+        assert_eq!(common_ext.skip_special_tokens, Some(false));
     }
 
     #[test]
@@ -190,6 +205,7 @@ mod tests {
             guided_choice: None,
             guided_decoding_backend: None,
             guided_whitespace_pattern: None,
+            skip_special_tokens: None,
         };
         assert!(common_ext.validate().is_ok());
     }
@@ -218,5 +234,53 @@ mod tests {
         assert_eq!(common_ext.repetition_penalty, None);
         assert_eq!(common_ext.include_stop_str_in_output, None);
         assert!(common_ext.validate().is_ok());
+    }
+
+    #[test]
+    fn test_skip_special_tokens_field() {
+        // Test that skip_special_tokens can be set and retrieved
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(true)
+            .build()
+            .unwrap();
+
+        assert_eq!(common_ext.skip_special_tokens, Some(true));
+
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(false)
+            .build()
+            .unwrap();
+
+        assert_eq!(common_ext.skip_special_tokens, Some(false));
+    }
+
+    #[test]
+    fn test_skip_special_tokens_serialization() {
+        // Test that skip_special_tokens can be serialized and deserialized
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(true)
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&common_ext).unwrap();
+        let deserialized: CommonExt = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.skip_special_tokens, Some(true));
+
+        // Test with false value
+        let common_ext = CommonExt::builder()
+            .skip_special_tokens(false)
+            .build()
+            .unwrap();
+
+        let json = serde_json::to_string(&common_ext).unwrap();
+        let deserialized: CommonExt = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.skip_special_tokens, Some(false));
+
+        // Test that None is not serialized (skip_serializing_if = "Option::is_none")
+        let common_ext = CommonExt::builder().build().unwrap();
+        let json = serde_json::to_string(&common_ext).unwrap();
+        assert!(!json.contains("skip_special_tokens"));
     }
 }

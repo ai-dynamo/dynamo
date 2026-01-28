@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Error;
@@ -93,7 +93,7 @@ impl
         let stream = stream! {
             tokio::time::sleep(std::time::Duration::from_millis(max_tokens)).await;
             for i in 0..10 {
-                let output = generator.create_choice(i,Some(format!("choice {i}")), None, None);
+                let output = generator.create_choice(i, Some(format!("choice {i}")), None, None, None);
 
                 yield Annotated::from_data(output);
             }
@@ -276,6 +276,9 @@ async fn test_http_service() {
     let token = CancellationToken::new();
     let cancel_token = token.clone();
     let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+    // Wait for the service to be ready before proceeding
+    wait_for_service_ready(port).await;
 
     let registry = Registry::new();
 
@@ -770,6 +773,8 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -810,6 +815,8 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client.chat_stream(request).await;
@@ -851,6 +858,8 @@ async fn test_nv_custom_client() {
         common: Default::default(),
         nvext: None,
         chat_template_args: None,
+        media_io_kwargs: None,
+        unsupported_fields: Default::default(),
     };
 
     let result = nv_custom_client

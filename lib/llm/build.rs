@@ -1,8 +1,12 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
 use std::path::PathBuf;
+
+// Environment variable names (build.rs can't import from runtime crate)
+const DYNAMO_FATBIN_PATH: &str = "DYNAMO_FATBIN_PATH";
+const OUT_DIR: &str = "OUT_DIR";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Declare our custom cfg flag to avoid unexpected_cfgs warnings
@@ -14,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get FATBIN path and copy it to OUT_DIR for embedding
     if let Some(fatbin_path) = find_fatbin_file() {
         // Copy FATBIN to OUT_DIR so we can include it with a predictable path
-        let out_dir = env::var("OUT_DIR").unwrap();
+        let out_dir = env::var(OUT_DIR).unwrap();
         let dest_path = PathBuf::from(out_dir).join("vectorized_copy.fatbin");
 
         if let Err(e) = std::fs::copy(&fatbin_path, &dest_path) {
@@ -44,13 +48,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn build_protos() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::compile_protos("src/grpc/protos/kserve.proto")?;
+    tonic_build::configure()
+        .type_attribute(".", "#[derive(serde::Serialize,serde::Deserialize)]")
+        .compile_protos(&["src/grpc/protos/kserve.proto"], &["src/grpc/protos"])?;
     Ok(())
 }
 
 fn find_fatbin_file() -> Option<PathBuf> {
     // 1. Check if user specified custom path via environment variable
-    if let Ok(custom_path) = env::var("DYNAMO_FATBIN_PATH") {
+    if let Ok(custom_path) = env::var(DYNAMO_FATBIN_PATH) {
         let fatbin_file = PathBuf::from(custom_path);
         if fatbin_file.exists() {
             println!(

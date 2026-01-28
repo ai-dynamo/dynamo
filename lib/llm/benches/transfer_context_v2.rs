@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 #[cfg(feature = "testing-cuda")]
@@ -7,7 +7,7 @@ mod benchmarks {
 
     use criterion::{BenchmarkId, Criterion, criterion_group};
     use cudarc::driver::{CudaContext, CudaStream};
-    use nixl_sys;
+
     use tokio::runtime::Runtime;
     use tokio_util::task::TaskTracker;
 

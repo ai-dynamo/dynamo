@@ -1,8 +1,9 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
 
+use anyhow::{Error, Result, anyhow as error};
 use pyo3::prelude::*;
 
 use crate::{CancellationToken, engine::*, to_pyerr};
@@ -10,7 +11,6 @@ use crate::{CancellationToken, engine::*, to_pyerr};
 pub use dynamo_llm::endpoint_type::EndpointType;
 pub use dynamo_llm::http::service::{error as http_error, service_v2};
 pub use dynamo_runtime::{
-    Error, Result, error,
     pipeline::{AsyncEngine, Data, ManyOut, SingleIn, async_trait},
     protocols::annotated::Annotated,
 };
@@ -138,6 +138,12 @@ impl HttpAsyncEngine {
     }
 }
 
+#[derive(FromPyObject)]
+struct HttpError {
+    code: u16,
+    message: String,
+}
+
 #[async_trait]
 impl<Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for HttpAsyncEngine
 where
@@ -153,23 +159,15 @@ where
             Err(e) => {
                 if let Some(py_err) = e.downcast_ref::<PyErr>() {
                     Python::with_gil(|py| {
-                        let err_val = py_err.clone_ref(py).into_value(py);
-                        let bound_err = err_val.bind(py);
-
-                        // check: Py03 exceptions cannot be cross-compiled, so we duck-type by name
-                        // and fields.
-                        if let Ok(type_name) = bound_err.get_type().name()
-                            && type_name.to_string().contains("HttpError")
-                            && let (Ok(code), Ok(message)) =
-                                (bound_err.getattr("code"), bound_err.getattr("message"))
-                            && let (Ok(code), Ok(message)) =
-                                (code.extract::<u16>(), message.extract::<String>())
-                        {
+                        // With the Stable ABI, we can't subclass Python's built-in exceptions in PyO3, so instead we
+                        // implement the exception in Python and assume that it's an HttpError if the code and message
+                        // are present.
+                        if let Ok(HttpError { code, message }) = py_err.value(py).extract() {
                             // SSE panics if there are carriage returns or newlines
                             let message = message.replace(['\r', '\n'], "");
                             return Err(http_error::HttpError { code, message })?;
                         }
-                        Err(error!("Python Error: {}", py_err.to_string()))
+                        Err(error!("Python Error: {}", py_err))
                     })
                 } else {
                     Err(e)

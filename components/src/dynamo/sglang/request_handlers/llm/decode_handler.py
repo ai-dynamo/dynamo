@@ -1,16 +1,15 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
 import logging
 import time
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, AsyncGenerator, Dict
 
 import sglang as sgl
 
-from dynamo._core import Client, Component, Context
+from dynamo._core import Component, Context
 from dynamo.sglang.args import Config, DisaggregationMode
-from dynamo.sglang.protocol import DisaggPreprocessedRequest
 from dynamo.sglang.publisher import DynamoSglangPublisher
 from dynamo.sglang.request_handlers.handler_base import BaseWorkerHandler
 
@@ -24,8 +23,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         engine: sgl.Engine,
         config: Config,
         publisher: DynamoSglangPublisher,
-        prefill_client: Optional[Client] = None,
-        prefill_router_client: Optional[Client] = None,
+        generate_endpoint=None,
     ) -> None:
         """Initialize decode worker handler.
 
@@ -34,29 +32,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             engine: The SGLang engine instance.
             config: SGLang and Dynamo configuration.
             publisher: Metrics publisher for the worker.
-            prefill_client: Optional client for prefill worker in disaggregated mode.
-            prefill_router_client: Optional client for prefill router in disaggregated mode.
-
-        Raises:
-            ValueError: If prefill_client is not provided in decode serving mode.
+            generate_endpoint: The endpoint handle for discovery registration.
         """
         super().__init__(
             component,
             engine,
             config,
             publisher,
-            prefill_client,
+            generate_endpoint,
         )
         if self.serving_mode == DisaggregationMode.DECODE:
-            if self.prefill_client is None:
-                raise ValueError(
-                    "prefill_client must be provided when serving_mode is decode"
-                )
-            self.prefill_client = prefill_client
-            logging.info("Decode worker handler initialized")
-
-        self.prefill_router_client = prefill_router_client
-        logging.info("Worker handler initialized")
+            logging.info(
+                "Decode worker handler initialized (disaggregated decode mode)"
+            )
+        else:
+            logging.info("Decode worker handler initialized (aggregated mode)")
 
     def cleanup(self) -> None:
         """Shutdown the engine and cleanup resources."""
@@ -112,47 +102,29 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             RuntimeError: If no bootstrap info received from prefill worker.
         """
         logging.debug(f"New Request ID: {context.id()}")
+        trace_id = context.trace_id
         sampling_params = self._build_sampling_params(request)
         input_param = self._get_input_param(request)
 
         if self.serving_mode == DisaggregationMode.DECODE:
-            # request the bootstrap info from the target prefill worker
-            if (
-                self.prefill_router_client is not None
-                and self.prefill_router_client.instance_ids()
-            ):
-                token_ids = request["token_ids"]
-                stream = await self.prefill_router_client.generate(token_ids)
-                result = await anext(stream)
-                (
-                    worker_id,
-                    overlap,
-                ) = result.data()  # Returns tuple (worker_id, overlap_amount)
-                logging.info(f"Best prefill worker ID: {worker_id}, overlap: {overlap}")
-
-                prefill_stream = await self.prefill_client.direct(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    worker_id,
-                )
-            else:
-                prefill_stream = await self.prefill_client.generate(
-                    DisaggPreprocessedRequest(
-                        request=request,
-                        sampling_params=sampling_params,
-                    ).model_dump(),
-                    context=context,
-                )
-
-            bootstrap_info = None
-            async for info in prefill_stream:
-                bootstrap_info = info.data()
-                break
+            # Check if bootstrap_info is pre-computed in the request (from frontend)
+            bootstrap_info = request.get("bootstrap_info")
 
             if not bootstrap_info:
-                raise RuntimeError("No bootstrap info received from prefill worker")
+                raise RuntimeError(
+                    "bootstrap_info is required for disaggregated decode but was not provided"
+                )
+
+            logging.debug(
+                f"Using bootstrap_info: "
+                f"host={bootstrap_info['bootstrap_host']}, "
+                f"port={bootstrap_info['bootstrap_port']}, "
+                f"room={bootstrap_info['bootstrap_room']}"
+            )
+
+            trace_header = (
+                self._get_trace_header(context) if self.enable_trace else None
+            )
 
             decode = await self.engine.async_generate(
                 **input_param,
@@ -161,6 +133,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 bootstrap_host=bootstrap_info["bootstrap_host"],
                 bootstrap_port=bootstrap_info["bootstrap_port"],
                 bootstrap_room=bootstrap_info["bootstrap_room"],
+                external_trace_header=trace_header,
+                rid=trace_id,
             )
 
             if self.skip_tokenizer_init:
@@ -170,10 +144,30 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 async for out in self._process_text_stream(decode, context):
                     yield out
         else:
+            # Extract image URLs for multimodal requests. SGLang's mm_data_processor
+            # handles loading/preprocessing, and the scheduler does vision encoding.
+            image_data = None
+            image_items = request.get("multi_modal_data", {}).get("image_url")
+            if image_items:
+                image_data = []
+                for item in image_items:
+                    if isinstance(item, str):
+                        image_data.append(item)
+                    elif isinstance(item, dict) and "Url" in item:
+                        image_data.append(item["Url"])
+                image_data = image_data or None
+
+            trace_header = (
+                self._get_trace_header(context) if self.enable_trace else None
+            )
+
             agg = await self.engine.async_generate(
                 **input_param,
+                image_data=image_data,
                 sampling_params=sampling_params,
                 stream=True,
+                external_trace_header=trace_header,
+                rid=trace_id,
             )
             if self.skip_tokenizer_init:
                 async for out in self._process_token_stream(agg, context):
@@ -189,6 +183,9 @@ class DecodeWorkerHandler(BaseWorkerHandler):
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Process token-based stream output.
 
+        With stream_output=True (enforced by Dynamo), SGLang sends disjoint segments
+        containing only new tokens since the last output. We pass these through directly.
+
         Args:
             stream_source: Async generator from engine.async_generate.
             context: Context object for cancellation handling.
@@ -196,8 +193,6 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         Yields:
             Dict with token_ids and optional finish_reason.
         """
-        num_output_tokens_so_far = 0
-
         # Use Future pattern for request ID - will be set when first response arrives
         request_id_future = asyncio.Future()
         async with self._cancellation_monitor(request_id_future, context):
@@ -219,6 +214,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                 if finish_reason:
                     out["finish_reason"] = finish_reason["type"]
 
+                # With stream_output=True, output_ids contains only new tokens (disjoint)
                 output_ids = res.get("output_ids", [])
                 # If request is not finished yet, but there are no outputs, return an error.
                 if not output_ids and not finish_reason:
@@ -226,9 +222,21 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                         yield {"finish_reason": "error", "token_ids": []}
                     break
 
-                next_total_toks = len(output_ids)
-                out["token_ids"] = output_ids[num_output_tokens_so_far:]
-                num_output_tokens_so_far = next_total_toks
+                # Pass through disjoint token segments directly
+                out["token_ids"] = output_ids
+                if finish_reason:
+                    input_tokens = res["meta_info"]["prompt_tokens"]
+                    completion_tokens = res["meta_info"]["completion_tokens"]
+                    cached_tokens = res["meta_info"]["cached_tokens"]
+                    prefill_prompt_tokens_details = None
+                    if cached_tokens is not None and cached_tokens > 0:
+                        prefill_prompt_tokens_details = {"cached_tokens": cached_tokens}
+                    out["completion_usage"] = {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": input_tokens + completion_tokens,
+                        "prompt_tokens_details": prefill_prompt_tokens_details,
+                    }
                 if not context.is_stopped():
                     yield out
 

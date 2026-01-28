@@ -1,5 +1,5 @@
 ..
-    SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
     SPDX-License-Identifier: Apache-2.0
 
     Licensed under the Apache License, Version 2.0 (the "License");
@@ -78,5 +78,5 @@ Key features include:
 
    Overview <self>
    SLA Planner Quick Start <sla_planner_quickstart>
-   Pre-Deployment Profiling <../benchmarks/pre_deployment_profiling.md>
+   SLA-Driven Profiling <../benchmarks/sla_driven_profiling.md>
    SLA-based Planner <sla_planner.md>

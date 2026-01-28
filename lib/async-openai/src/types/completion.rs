@@ -1,11 +1,11 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Based on https://github.com/64bit/async-openai/ by Himanshu Neema
 // Original Copyright (c) 2022 Himanshu Neema
 // Licensed under MIT License (see ATTRIBUTIONS-Rust.md)
 //
-// Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+// Modifications Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
 // Licensed under Apache 2.0
 
 use std::{collections::HashMap, pin::Pin};
@@ -13,12 +13,84 @@ use std::{collections::HashMap, pin::Pin};
 use derive_builder::Builder;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::error::OpenAIError;
 
 use super::{ChatCompletionStreamOptions, Choice, CompletionUsage, Prompt, Stop};
 
-#[derive(Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
+/// Custom deserializer for the echo parameter that only accepts booleans.
+/// Rejects integers and strings with clear error messages.
+fn deserialize_echo_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Outer visitor: handles Option semantics (Some/None/null)
+    struct StrictBoolVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StrictBoolVisitor {
+        type Value = Option<bool>;
+
+        // Required by Visitor trait
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("echo parameter to be a boolean (true or false) or null")
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserializer.deserialize_any(BoolOnlyVisitor)
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(None)
+        }
+    }
+
+    // Inner visitor: validates type is boolean, rejects integers and strings
+    struct BoolOnlyVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for BoolOnlyVisitor {
+        type Value = Option<bool>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("echo parameter to be a boolean (true or false) or null")
+        }
+
+        fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(Some(value))
+        }
+
+        // Explicitly reject strings (including "null", "true", "false")
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Err(E::invalid_type(
+                serde::de::Unexpected::Str(value),
+                &"echo parameter to be a boolean (true or false) or null",
+            ))
+        }
+    }
+
+    deserializer.deserialize_option(StrictBoolVisitor)
+}
+
+#[derive(ToSchema, Clone, Serialize, Deserialize, Default, Debug, Builder, PartialEq)]
 #[builder(name = "CreateCompletionRequestArgs")]
 #[builder(pattern = "mutable")]
 #[builder(setter(into, strip_option), default)]
@@ -32,6 +104,13 @@ pub struct CreateCompletionRequest {
     ///
     /// Note that <|endoftext|> is the document separator that the model sees during training, so if a prompt is not specified the model will generate as if from the beginning of a new document.
     pub prompt: Prompt,
+
+    /// Base64-encoded PyTorch tensor containing pre-computed embeddings.
+    /// At least one of prompt or prompt_embeds is required.
+    /// If both are provided, prompt_embeds takes precedence.
+    /// Maximum size: 10MB decoded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_embeds: Option<String>,
 
     /// The suffix that comes after a completion of inserted text.
     ///
@@ -80,6 +159,7 @@ pub struct CreateCompletionRequest {
 
     /// Echo back the prompt in addition to the completion
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_echo_bool")]
     pub echo: Option<bool>,
 
     ///  Up to 4 sequences where the API will stop generating further tokens. The returned text will not contain the stop sequence.
@@ -125,7 +205,7 @@ pub struct CreateCompletionRequest {
     pub seed: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Serialize)]
+#[derive(ToSchema, Debug, Deserialize, Clone, PartialEq, Serialize)]
 pub struct CreateCompletionResponse {
     /// A unique identifier for the completion.
     pub id: String,
@@ -144,8 +224,39 @@ pub struct CreateCompletionResponse {
     /// The object type, which is always "text_completion"
     pub object: String,
     pub usage: Option<CompletionUsage>,
+
+    /// NVIDIA extension field for response metadata (worker IDs, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvext: Option<serde_json::Value>,
 }
 
 /// Parsed server side events stream until an \[DONE\] is received from server.
 pub type CompletionResponseStream =
     Pin<Box<dyn Stream<Item = Result<CreateCompletionResponse, OpenAIError>> + Send>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn echo_rejects_integer() {
+        let json = r#"{"model": "test_model", "prompt": "test", "echo": 1}"#;
+        let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid type"));
+        assert!(err_msg.contains("integer"));
+        assert!(err_msg.contains("echo parameter"));
+    }
+
+    #[test]
+    fn echo_rejects_string() {
+        let json = r#"{"model": "test_model", "prompt": "test", "echo": "null"}"#;
+        let result: Result<CreateCompletionRequest, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid type"));
+        assert!(err_msg.contains("string"));
+        assert!(err_msg.contains("echo parameter"));
+    }
+}

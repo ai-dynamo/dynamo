@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,44 +21,52 @@ limitations under the License.
 
 In disaggregated serving architectures, KV cache must be transferred between prefill and decode workers. TensorRT-LLM supports two methods for this transfer:
 
-## Default Method: UCX
-By default, TensorRT-LLM uses UCX (Unified Communication X) for KV cache transfer between prefill and decode workers. UCX provides high-performance communication optimized for GPU-to-GPU transfers.
-
-## Beta Method: NIXL
-TensorRT-LLM also supports using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
-
-**Note:** NIXL support in TensorRT-LLM is currently beta and may have some sharp edges.
-
 ## Using NIXL for KV Cache Transfer
 
-**Note:** NIXL backend for TensorRT-LLM is currently only supported on AMD64 (x86_64) architecture. If you're running on ARM64, you'll need to use the default UCX method for KV cache transfer.
+Start the disaggregated service: See [Disaggregated Serving](./README.md#disaggregated) to learn how to start the deployment.
 
-To enable NIXL for KV cache transfer in disaggregated serving:
+## Default Method: NIXL
+By default, TensorRT-LLM uses **NIXL** (NVIDIA Inference Xfer Library) with UCX (Unified Communication X) as backend for KV cache transfer between prefill and decode workers. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
 
-1. **Build the container with NIXL support:**
-   The TensorRT-LLM wheel must be built from source with NIXL support. The `./container/build.sh` script caches previously built TensorRT-LLM wheels to reduce build time. If you have previously built a TensorRT-LLM wheel without NIXL support, you must delete the cached wheel to force a rebuild with NIXL support.
+### Specify Backends for NIXL
 
-   **Remove cached TensorRT-LLM wheel (only if previously built without NIXL support):**
-   ```bash
-   rm -rf /tmp/trtllm_wheel
-   ```
+NIXL supports multiple communication backends that can be configured via environment variables. By default, UCX is used if no backends are explicitly specified.
 
-   **Build the container with NIXL support:**
-   ```bash
-   ./container/build.sh --framework trtllm \
-     --use-default-experimental-tensorrtllm-commit \
-     --trtllm-use-nixl-kvcache-experimental
-   ```
+**Environment Variable Format:**
+```bash
+DYN_KVBM_NIXL_BACKEND_<BACKEND>=<value>
+```
 
-   **Note:** Both `--use-default-experimental-tensorrtllm-commit` and `--trtllm-use-nixl-kvcache-experimental` flags are required to enable NIXL support.
+**Supported Backends:**
+- `UCX` - Unified Communication X (default)
+- `GDS` - GPU Direct Storage
 
-2. **Run the containerized environment:**
-   See [run container](./README.md#run-container) section to learn how to start the container image built in previous step.
+**Examples:**
+```bash
+# Enable UCX backend (default behavior)
+export DYN_KVBM_NIXL_BACKEND_UCX=true
 
-3. **Start the disaggregated service:**
-   See [disaggregated serving](./README.md#disaggregated-serving) to see how to start the deployment.
+# Enable GDS backend
+export DYN_KVBM_NIXL_BACKEND_GDS=true
 
-4. **Send the request:**
-   See [client](./README.md#client) section to learn how to send the request to deployment.
+# Enable multiple backends
+export DYN_KVBM_NIXL_BACKEND_UCX=true
+export DYN_KVBM_NIXL_BACKEND_GDS=true
 
-**Important:** Ensure that ETCD and NATS services are running before starting the service.
+# Explicitly disable a backend
+export DYN_KVBM_NIXL_BACKEND_GDS=false
+```
+
+**Valid Values:**
+- `true`, `1`, `on`, `yes` - Enable the backend
+- `false`, `0`, `off`, `no` - Disable the backend
+
+> [!Note]
+> If no `DYN_KVBM_NIXL_BACKEND_*` environment variables are set, UCX is used as the default backend.
+
+## Alternative Method: UCX
+
+TensorRT-LLM can also leverage **UCX** (Unified Communication X) directly for KV cache transfer between prefill and decode workers. To enable UCX as the KV cache transfer backend, set `cache_transceiver_config.backend: UCX` in your engine configuration YAML file.
+
+> [!Note]
+> The environment variable `TRTLLM_USE_UCX_KV_CACHE=1` with `cache_transceiver_config.backend: DEFAULT` does not enable UCX. You must explicitly set `backend: UCX` in the configuration.

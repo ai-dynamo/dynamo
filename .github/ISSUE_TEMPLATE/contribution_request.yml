@@ -1,0 +1,59 @@
+name: Contribution Request
+description: Propose a change you want to implement
+title: '[CONTRIBUTION]: '
+labels: ["contribution-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for your interest in contributing to Dynamo! Please fill out this form so we can review your proposal.
+
+  - type: dropdown
+    id: change-type
+    attributes:
+      label: Type of Change
+      options:
+        - Bug fix
+        - New feature
+        - Refactoring
+        - Performance improvement
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What problem are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How do you plan to solve this?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: pr-size
+    attributes:
+      label: Estimated PR Size
+      options:
+        - XS (1-10 lines)
+        - S (11-50 lines)
+        - M (51-200 lines)
+        - L (201-500 lines)
+        - XL (501-1000 lines)
+        - XXL (1000+ lines)
+    validations:
+      required: true
+
+  - type: textarea
+    id: files-affected
+    attributes:
+      label: Files/Components Affected
+      description: Which files or components will you modify?
+    validations:
+      required: true

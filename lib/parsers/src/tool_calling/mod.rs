@@ -1,7 +1,10 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use serde_json::Value;
+
 pub mod config;
+pub mod dsml;
 pub mod harmony;
 pub mod json;
 pub mod parsers;
@@ -10,10 +13,19 @@ pub mod response;
 #[cfg(test)]
 pub mod tests;
 pub mod tools;
+pub mod xml;
+
+/// Represents a tool definition with function schema.
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub parameters: Option<Value>,
+}
 
 // Re-export main types and functions for convenience
-pub use config::{JsonParserConfig, ToolCallConfig, ToolCallParserType};
-pub use harmony::{parse_tool_calls_harmony, parse_tool_calls_harmony_complete};
+pub use config::{JsonParserConfig, ParserConfig, ToolCallConfig, XmlParserConfig};
+pub use dsml::try_tool_call_parse_dsml;
+pub use harmony::parse_tool_calls_harmony_complete;
 pub use json::try_tool_call_parse_json;
 pub use parsers::{
     detect_and_parse_tool_call, detect_tool_call_start, find_tool_call_end_position,
@@ -22,3 +34,4 @@ pub use parsers::{
 pub use pythonic::try_tool_call_parse_pythonic;
 pub use response::{CalledFunction, ToolCallResponse, ToolCallType};
 pub use tools::{try_tool_call_parse_aggregate, try_tool_call_parse_stream};
+pub use xml::try_tool_call_parse_xml;

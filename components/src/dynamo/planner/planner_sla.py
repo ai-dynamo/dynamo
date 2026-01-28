@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,14 +33,13 @@ class RequestType(BaseModel):
     text: str
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def init_planner(runtime: DistributedRuntime, args):
     await asyncio.sleep(INIT_PLANNER_START_DELAY)
 
     await start_sla_planner(runtime, args)
 
     component = runtime.namespace(args.namespace).component("Planner")
-    await component.create_service()
 
     async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""

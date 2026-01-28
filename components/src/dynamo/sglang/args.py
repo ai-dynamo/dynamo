@@ -1,18 +1,22 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
 import argparse
 import contextlib
+import json
 import logging
 import os
 import socket
 import sys
+import tempfile
 from argparse import Namespace
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
+import yaml
 from sglang.srt.server_args import ServerArgs
+from sglang.srt.server_args_config_parser import ConfigArgumentMerger
 
 from dynamo._core import get_reasoning_parser_names, get_tool_parser_names
 from dynamo.common.config_dump import register_encoder
@@ -57,11 +61,17 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Path to a custom Jinja template file to override the model's default chat template. This template will take precedence over any template found in the model repository. This template will be applied by Dynamo's preprocessor and cannot be used with --use-sglang-tokenizer.",
     },
+    "endpoint-types": {
+        "flags": ["--dyn-endpoint-types"],
+        "type": str,
+        "default": "chat,completions",
+        "help": "Comma-separated list of endpoint types to enable. Options: 'chat', 'completions'. Default: 'chat,completions'. Use 'completions' for models without chat templates.",
+    },
     "use-sglang-tokenizer": {
         "flags": ["--use-sglang-tokenizer"],
         "action": "store_true",
         "default": False,
-        "help": "Use SGLang's tokenizer. This will skip tokenization of the input and output and only v1/chat/completions will be available when using the dynamo frontend. Cannot be used with --custom-jinja-template.",
+        "help": "Use SGLang's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend. Cannot be used with --custom-jinja-template.",
     },
     "multimodal-processor": {
         "flags": ["--multimodal-processor"],
@@ -93,6 +103,27 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Dump debug config to the specified file path. If not specified, the config will be dumped to stdout at INFO level.",
     },
+    "store-kv": {
+        "flags": ["--store-kv"],
+        "type": str,
+        "choices": ["etcd", "file", "mem"],
+        "default": os.environ.get("DYN_STORE_KV", "etcd"),
+        "help": "Which key-value backend to use: etcd, mem, file. Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details. File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.",
+    },
+    "request-plane": {
+        "flags": ["--request-plane"],
+        "type": str,
+        "choices": ["nats", "http", "tcp"],
+        "default": os.environ.get("DYN_REQUEST_PLANE", "tcp"),
+        "help": "Determines how requests are distributed from routers to workers. 'tcp' is fastest [nats|http|tcp]",
+    },
+    "enable-local-indexer": {
+        "flags": ["--enable-local-indexer"],
+        "type": str,
+        "choices": ["true", "false"],
+        "default": os.environ.get("DYN_LOCAL_INDEXER", "false"),
+        "help": "Enable worker-local KV indexer for tracking this worker's own KV cache state (can also be toggled with env var DYN_LOCAL_INDEXER).",
+    },
 }
 
 
@@ -102,11 +133,16 @@ class DynamoArgs:
     component: str
     endpoint: str
     migration_limit: int
+    store_kv: str
+    request_plane: str
 
     # tool and reasoning parser options
     tool_call_parser: Optional[str] = None
     reasoning_parser: Optional[str] = None
     custom_jinja_template: Optional[str] = None
+
+    # endpoint types to enable
+    dyn_endpoint_types: str = "chat,completions"
 
     # preprocessing options
     use_sglang_tokenizer: bool = False
@@ -118,8 +154,16 @@ class DynamoArgs:
 
     # embedding options
     embedding_worker: bool = False
+
+    # diffusion language model options (derived from server_args.dllm_algorithm)
+    diffusion_worker: bool = False
+
     # config dump options
     dump_config_to: Optional[str] = None
+    # local indexer option
+    enable_local_indexer: bool = False
+    # Whether to enable NATS for KV events (derived from server_args.kv_events_config)
+    use_kv_events: bool = False
 
 
 class DisaggregationMode(Enum):
@@ -152,6 +196,7 @@ class Config:
 def _preprocess_for_encode_config(
     config: Config,
 ) -> Dict[str, Any]:  # pyright: ignore[reportUnusedFunction]
+    """Convert Config object to dictionary for encoding."""
     return {
         "server_args": config.server_args,
         "dynamo_args": config.dynamo_args,
@@ -204,6 +249,70 @@ def _set_parser(
         return dynamo_str
 
 
+def _extract_config_section(
+    args: List[str], config_path: str, config_key: str
+) -> tuple[List[str], str]:
+    """
+    Extract a section from nested YAML and create temp flat file.
+
+    Args:
+        args: CLI arguments list
+        config_path: Path to the YAML config file
+        config_key: Key to extract from nested YAML
+
+    Returns:
+        tuple: (modified args with temp file path, temp file path for cleanup)
+
+    Raises:
+        ValueError: If config file not found, key missing, or invalid format
+    """
+    logging.info(f"Extracting config section '{config_key}' from {config_path}")
+
+    path = Path(config_path)
+    if not path.exists():
+        raise ValueError(f"Config file not found: {config_path}")
+
+    with open(config_path, "r") as f:
+        config_data = yaml.safe_load(f)
+
+    if not isinstance(config_data, dict):
+        raise ValueError(
+            f"Config file must contain a dictionary, got {type(config_data).__name__}"
+        )
+
+    available_keys = list(config_data.keys())
+    logging.info(f"Available config keys in {config_path}: {available_keys}")
+
+    if config_key not in config_data:
+        raise ValueError(
+            f"Config key '{config_key}' not found in {config_path}. "
+            f"Available keys: {available_keys}"
+        )
+
+    section_data = config_data[config_key]
+
+    if not isinstance(section_data, dict):
+        raise ValueError(
+            f"Config section '{config_key}' must be a dictionary, got {type(section_data).__name__}"
+        )
+
+    temp_fd, temp_path = tempfile.mkstemp(suffix=".yaml", prefix="dynamo_config_")
+
+    try:
+        with os.fdopen(temp_fd, "w") as f:
+            yaml.dump(section_data, f)
+        logging.info(f"Successfully wrote config section '{config_key}' to temp file")
+    except Exception:
+        os.unlink(temp_path)
+        raise
+
+    config_index = args.index("--config")
+    args = list(args)
+    args[config_index + 1] = temp_path
+
+    return args, temp_path
+
+
 async def parse_args(args: list[str]) -> Config:
     """Parse CLI arguments and return combined configuration.
     Download the model if necessary.
@@ -238,11 +347,67 @@ async def parse_args(args: list[str]) -> Config:
 
         parser.add_argument(*info["flags"], **kwargs)
 
+    # Config key argument (for nested configs)
+    parser.add_argument(
+        "--config-key",
+        type=str,
+        default=None,
+        help="Key to select from nested config file (e.g., 'prefill', 'decode')",
+    )
+
     # SGLang args
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
 
+    # Handle config file if present
+    temp_config_file = None  # Track temp file for cleanup
+    if "--config" in args:
+        # Check if --config-key is also present
+        if "--config-key" in args:
+            key_index = args.index("--config-key")
+            config_key = args[key_index + 1]
+            config_index = args.index("--config")
+            config_path = args[config_index + 1]
+
+            # Extract nested section to temp file
+            args, temp_config_file = _extract_config_section(
+                args, config_path, config_key
+            )
+
+            # Remove --config-key from args (not recognized by SGLang)
+            args = args[:key_index] + args[key_index + 2 :]
+
+        # Merge config file arguments with CLI arguments.
+        # ConfigArgumentMerger API changed after SGLang v0.5.7:
+        # - New API (post-v0.5.7): accepts parser= for proper store_true detection
+        # - Old API (v0.5.7 and earlier): only accepts boolean_actions=
+        # We use inspect.signature to detect the API rather than version checking
+        # since unreleased builds may have the new API while still reporting v0.5.7.
+        # Related upstream issue: https://github.com/sgl-project/sglang/issues/16256
+        # Upstream fix PR: https://github.com/sgl-project/sglang/pull/16638
+        import inspect
+
+        sig = inspect.signature(ConfigArgumentMerger.__init__)
+        if "parser" in sig.parameters:
+            config_merger = ConfigArgumentMerger(parser=parser)
+        else:
+            # Legacy path: extract store_true actions manually
+            boolean_actions = [
+                action.dest
+                for action in parser._actions
+                if isinstance(action, argparse._StoreTrueAction)
+            ]
+            config_merger = ConfigArgumentMerger(boolean_actions=boolean_actions)
+        args = config_merger.merge_config_with_args(args)
+
     parsed_args = parser.parse_args(args)
+
+    # Clean up temp file if created
+    if temp_config_file and os.path.exists(temp_config_file):
+        try:
+            os.unlink(temp_config_file)
+        except Exception:
+            logging.warning(f"Failed to clean up temp config file: {temp_config_file}")
 
     # Auto-set bootstrap port if not provided
     if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args):
@@ -324,32 +489,30 @@ async def parse_args(args: list[str]) -> Config:
                 f"Custom Jinja template file not found: {expanded_template_path}"
             )
 
-    dynamo_args = DynamoArgs(
-        namespace=parsed_namespace,
-        component=parsed_component_name,
-        endpoint=parsed_endpoint_name,
-        migration_limit=parsed_args.migration_limit,
-        tool_call_parser=tool_call_parser,
-        reasoning_parser=reasoning_parser,
-        custom_jinja_template=expanded_template_path,
-        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
-        multimodal_processor=parsed_args.multimodal_processor,
-        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
-        multimodal_worker=parsed_args.multimodal_worker,
-        embedding_worker=parsed_args.embedding_worker,
-        dump_config_to=parsed_args.dump_config_to,
-    )
-    logging.debug(f"Dynamo args: {dynamo_args}")
-
-    # TODO: sglang downloads the model in `from_cli_args`, so we need to do it here.
-    # That's unfortunate because `parse_args` isn't the right place for this. Fix.
     model_path = parsed_args.model_path
+    # Name the model
     if not parsed_args.served_model_name:
         parsed_args.served_model_name = model_path
+    # Download the model if necessary using modelexpress.
+    # We don't set `parsed_args.model_path` to the local path fetch_llm returns
+    # because sglang will send this to its pipeline-parallel workers, which may
+    # not have the local path.
+    # sglang will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
     if not os.path.exists(model_path):
-        parsed_args.model_path = await fetch_llm(model_path)
+        await fetch_llm(model_path)
 
+    # TODO: sglang downloads the model in `from_cli_args`, which means we had to
+    # fetch_llm (download the model) here, in `parse_args`. `parse_args` should not
+    # contain code to download a model, it should only parse the args.
     server_args = ServerArgs.from_cli_args(parsed_args)
+
+    # Dynamo's streaming handlers expect disjoint output_ids from SGLang (only new
+    # tokens since last output), not cumulative tokens. When stream_output=True,
+    # SGLang sends disjoint segments which Dynamo passes through directly.
+    # Force stream_output=True for optimal streaming performance.
+    server_args.stream_output = True
 
     if parsed_args.use_sglang_tokenizer:
         logging.info(
@@ -361,6 +524,47 @@ async def parse_args(args: list[str]) -> Config:
             "Using dynamo's built in tokenizer. Setting skip_tokenizer_init to True"
         )
         server_args.skip_tokenizer_init = True
+
+    # Derive use_kv_events from server_args.kv_events_config
+    # Check that kv_events_config exists AND publisher is not "null" ("zmq" or any future publishers)
+    use_kv_events = False
+    if server_args.kv_events_config:
+        try:
+            kv_cfg = json.loads(server_args.kv_events_config)
+            use_kv_events = kv_cfg.get("publisher", "null") != "null"
+        except json.JSONDecodeError:
+            logging.warning(
+                f"Failed to parse kv_events_config: {server_args.kv_events_config}"
+            )
+    logging.info(
+        f"Derived use_kv_events={use_kv_events} from kv_events_config={server_args.kv_events_config}"
+    )
+
+    # Auto-detect diffusion worker mode if dllm_algorithm
+    diffusion_worker = server_args.dllm_algorithm is not None
+
+    dynamo_args = DynamoArgs(
+        namespace=parsed_namespace,
+        component=parsed_component_name,
+        endpoint=parsed_endpoint_name,
+        migration_limit=parsed_args.migration_limit,
+        store_kv=parsed_args.store_kv,
+        request_plane=parsed_args.request_plane,
+        tool_call_parser=tool_call_parser,
+        reasoning_parser=reasoning_parser,
+        custom_jinja_template=expanded_template_path,
+        dyn_endpoint_types=parsed_args.dyn_endpoint_types,
+        use_sglang_tokenizer=parsed_args.use_sglang_tokenizer,
+        multimodal_processor=parsed_args.multimodal_processor,
+        multimodal_encode_worker=parsed_args.multimodal_encode_worker,
+        multimodal_worker=parsed_args.multimodal_worker,
+        embedding_worker=parsed_args.embedding_worker,
+        diffusion_worker=diffusion_worker,
+        dump_config_to=parsed_args.dump_config_to,
+        enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
+        use_kv_events=use_kv_events,
+    )
+    logging.debug(f"Dynamo args: {dynamo_args}")
 
     return Config(server_args, dynamo_args)
 

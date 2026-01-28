@@ -17,7 +17,7 @@
 
 **Dynamo** - NVIDIA's high-performance distributed inference framework for Large Language Models (LLMs) and generative AI models, designed for multinode environments with disaggregated serving and cache-aware routing.
 
-**Dynamo Cloud** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
+**Dynamo Kubernetes Platform** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
 
 ## E
 **Endpoint** - A specific network-accessible API within a Dynamo component, such as `generate` or `load_metrics`.
@@ -78,7 +78,7 @@
 **Time-To-First-Token (TTFT)** - The latency from receiving a request to generating the first output token.
 
 ## V
-**vLLM** - High-throughput LLM serving engine with Ray distributed support and PagedAttention.
+**vLLM** - High-throughput LLM serving engine with distributed tensor/pipeline parallelism and PagedAttention.
 
 ## W
 **Wide Expert Parallelism (WideEP)** - Mixture-of-Experts deployment strategy that spreads experts across many GPUs (e.g., 64-way EP) so each GPU hosts only a few experts.

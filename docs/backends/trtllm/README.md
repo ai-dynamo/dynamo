@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -38,7 +38,6 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Quick Start](#quick-start)
 - [Single Node Examples](#single-node-examples)
 - [Advanced Examples](#advanced-examples)
-- [Disaggregation Strategy](#disaggregation-strategy)
 - [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
 - [Client](#client)
 - [Benchmarking](#benchmarking)
@@ -52,9 +51,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**Disaggregated Serving**](../../../docs/design_docs/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/design_docs/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../../docs/router/kv_cache_routing.md) | ✅ |  |
 | [**SLA-Based Planner**](../../../docs/planner/sla_planner.md) | ✅ |  |
 | [**Load Based Planner**](../../../docs/planner/load_planner.md) | 🚧 | Planned |
 | [**KVBM**](../../../docs/kvbm/kvbm_architecture.md) | ✅ | |
@@ -71,13 +70,18 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
-### Start NATS and ETCD in the background
+### Start Infrastructure Services (Local Development Only)
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+For local/bare-metal development, start etcd and optionally NATS using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
+> [!NOTE]
+> - **etcd** is optional but is the default local discovery backend. You can also use `--kv_store file` to use file system based discovery.
+> - **NATS** is optional - only needed if using KV routing with events (default). You can disable it with `--no-kv-events` flag for prediction-based routing
+> - **On Kubernetes**, neither is required when using the Dynamo operator, which explicitly sets `DYN_DISCOVERY_BACKEND=kubernetes` to enable native K8s service discovery (DynamoWorkerMetadata CRD)
 
 ### Build container
 
@@ -94,7 +98,7 @@ apt-get update && apt-get -y install git git-lfs
 # Build the container with the default experimental TensorRT-LLM commit
 # WARNING: This is for experimental feature testing only.
 # The container should not be used in a production environment.
-./container/build.sh --framework trtllm --use-default-experimental-tensorrtllm-commit
+./container/build.sh --framework trtllm --tensorrtllm-git-url https://github.com/NVIDIA/TensorRT-LLM.git --tensorrtllm-commit main
 ```
 
 ### Run container
@@ -108,61 +112,42 @@ apt-get update && apt-get -y install git git-lfs
 > [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
-This figure shows an overview of the major components to deploy:
-
-```
-+------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| processor |----->|      Worker1     |------------>|    Worker2    |
-|      |<-----|           |<-----|                  |<------------|               |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
-```
-
-**Note:** The diagram above shows all possible components in a deployment. Depending on the chosen disaggregation strategy, you can configure whether Worker1 handles prefill and Worker2 handles decode, or vice versa. For more information on how to select and configure these strategies, see the [Disaggregation Strategy](#disaggregation-strategy) section below.
+For detailed information about the architecture and how KV-aware routing works, see the [KV Cache Routing documentation](../../router/kv_cache_routing.md).
 
 ### Aggregated
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/agg.sh
 ```
 
 ### Aggregated with KV Routing
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/agg_router.sh
 ```
 
 ### Disaggregated
 
-> [!IMPORTANT]
-> Disaggregated serving supports two strategies for request flow: `"prefill_first"` and `"decode_first"`. By default, the script below uses the `"decode_first"` strategy, which can reduce response latency by minimizing extra hops in the return path. You can switch strategies by setting the `DISAGGREGATION_STRATEGY` environment variable.
-
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/disagg.sh
 ```
 
 ### Disaggregated with KV Routing
 
 > [!IMPORTANT]
-> Disaggregated serving with KV routing uses a "prefill first" workflow by default. Currently, Dynamo supports KV routing to only one endpoint per model. In disaggregated workflow, it is generally more effective to route requests to the prefill worker. If you wish to use a "decode first" workflow instead, you can simply set the `DISAGGREGATION_STRATEGY` environment variable accordingly.
+> In disaggregated workflow, requests are routed to the prefill worker to maximize KV cache reuse.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 ./launch/disagg_router.sh
 ```
 
 ### Aggregated with Multi-Token Prediction (MTP) and DeepSeek R1
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 
-export AGG_ENGINE_ARGS=./engine_configs/deepseek_r1/mtp/mtp_agg.yaml
+export AGG_ENGINE_ARGS=./engine_configs/deepseek-r1/agg/mtp/mtp_agg.yaml
 export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 # nvidia/DeepSeek-R1-FP4 is a large model
 export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
@@ -186,7 +171,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../components/backends/trtllm/deploy/README.md).
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../examples/backends/trtllm/deploy/README.md).
 
 ### Client
 
@@ -199,20 +184,6 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 To benchmark your deployment with AIPerf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
 
-
-## Disaggregation Strategy
-
-The disaggregation strategy controls how requests are distributed between the prefill and decode workers in a disaggregated deployment.
-
-By default, Dynamo uses a `decode first` strategy: incoming requests are initially routed to the decode worker, which then forwards them to the prefill worker in round-robin fashion. The prefill worker processes the request and returns results to the decode worker for any remaining decode operations.
-
-When using KV routing, however, Dynamo switches to a `prefill first` strategy. In this mode, requests are routed directly to the prefill worker, which can help maximize KV cache reuse and improve overall efficiency for certain workloads. Choosing the appropriate strategy can have a significant impact on performance, depending on your use case.
-
-The disaggregation strategy can be set using the `DISAGGREGATION_STRATEGY` environment variable. You can set the strategy before launching your deployment, for example:
-```bash
-DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
-```
-
 ## KV Cache Transfer in Disaggregated Serving
 
 Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-transfer.md).
@@ -220,13 +191,30 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+You can enable [request migration](../../../docs/fault_tolerance/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
 ```bash
+# For decode and aggregated workers
 python3 -m dynamo.trtllm ... --migration-limit=3
 ```
 
-This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
+> [!IMPORTANT]
+> **Prefill workers do not support request migration** and must use `--migration-limit=0` (the default). Prefill workers only process prompts and return KV cache state - they don't maintain long-running generation requests that would benefit from migration.
+
+See the [Request Migration Architecture](../../../docs/fault_tolerance/request_migration.md) documentation for details on how this works.
+
+## Request Cancellation
+
+When a user cancels a request (e.g., by disconnecting from the frontend), the request is automatically cancelled across all workers, freeing compute resources for other requests.
+
+### Cancellation Support Matrix
+
+| | Prefill | Decode |
+|-|---------|--------|
+| **Aggregated** | ✅ | ✅ |
+| **Disaggregated** | ✅ | ✅ |
+
+For more details, see the [Request Cancellation Architecture](../../fault_tolerance/request_cancellation.md) documentation.
 
 ## Client
 
@@ -241,7 +229,7 @@ To benchmark your deployment with AIPerf, see this utility script, configuring t
 
 ## Multimodal support
 
-Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [Multimodal Support Guide](./multimodal_support.md).
+Dynamo with the TensorRT-LLM backend supports multimodal models, enabling you to process both text and images (or pre-computed embeddings) in a single request. For detailed setup instructions, example requests, and best practices, see the [TensorRT-LLM Multimodal Guide](../../multimodal/trtllm.md).
 
 ## Logits Processing
 
@@ -256,7 +244,7 @@ Logits processors let you modify the next-token logits at every decoding step (e
 You can enable a test-only processor that forces the model to respond with "Hello world!". This is useful to verify the wiring without modifying your model or engine code.
 
 ```bash
-cd $DYNAMO_HOME/components/backends/trtllm
+cd $DYNAMO_HOME/examples/backends/trtllm
 export DYNAMO_ENABLE_TEST_LOGITS_PROCESSOR=1
 ./launch/agg.sh
 ```
@@ -302,7 +290,7 @@ sampling_params.logits_processor = create_trtllm_adapters(processors)
 
 ## Performance Sweep
 
-For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../components/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
+For detailed instructions on running comprehensive performance sweeps across both aggregated and disaggregated serving configurations, see the [TensorRT-LLM Benchmark Scripts for DeepSeek R1 model](../../../examples/backends/trtllm/performance_sweeps/README.md). This guide covers recommended benchmarking setups, usage of provided scripts, and best practices for evaluating system performance.
 
 ## Dynamo KV Block Manager Integration
 

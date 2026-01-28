@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 apiVersion: nvidia.com/v1alpha1
@@ -11,7 +11,6 @@ spec:
       value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:8000"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
   services:
     Frontend:
-      dynamoNamespace: vllm-disagg-planner
       componentType: main
       replicas: 1
       livenessProbe:
@@ -42,14 +41,13 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000 --kv-cache-block-size 128 --router-mode kv --kv-overlap-score-weight 0.0 --router-temperature 0.0 --no-kv-events"
     Planner:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: planner
       replicas: 1
@@ -94,7 +92,6 @@ spec:
               --prometheus-port=9085
               --no-correction
     VllmDecodeWorker:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: decode
@@ -123,8 +120,6 @@ spec:
           memory: "100Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
         - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
           value: "[\"generate\"]"
         - name: DYN_SYSTEM_PORT
@@ -139,7 +134,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 60
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - python3
           args:
@@ -151,7 +146,6 @@ spec:
             - --block-size
             - "128"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
       subComponentType: prefill
@@ -180,8 +174,6 @@ spec:
           memory: "100Gi"
           gpu: "1"
       envs:
-        - name: DYN_SYSTEM_ENABLED
-          value: "true"
         - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
           value: "[\"generate\"]"
         - name: DYN_SYSTEM_PORT
@@ -196,7 +188,7 @@ spec:
             periodSeconds: 10
             failureThreshold: 60
           image: my-registry/vllm-runtime:my-tag
-          workingDir: /workspace/components/backends/vllm
+          workingDir: /workspace/examples/backends/vllm
           command:
             - python3
           args:

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -17,12 +17,12 @@ Usage (both patterns supported):
     # Pattern 1: Import module
     from dynamo import prometheus_names
     print(prometheus_names.frontend_service.REQUESTS_TOTAL)  # "requests_total"
-    print(prometheus_names.kvstats.ACTIVE_BLOCKS)  # "kvstats_active_blocks"
+    print(prometheus_names.work_handler.ERRORS_TOTAL)  # "errors_total"
 
     # Pattern 2: Import specific classes
-    from dynamo.prometheus_names import frontend_service, kvstats
+    from dynamo.prometheus_names import frontend_service, work_handler
     print(frontend_service.REQUESTS_TOTAL)  # "requests_total"
-    print(kvstats.ACTIVE_BLOCKS)  # "kvstats_active_blocks"
+    print(work_handler.ERRORS_TOTAL)  # "errors_total"
 """
 
 from __future__ import annotations
@@ -55,6 +55,10 @@ class frontend_service:
     INPUT_SEQUENCE_TOKENS = "input_sequence_tokens"
     # Output sequence length in tokens
     OUTPUT_SEQUENCE_TOKENS = "output_sequence_tokens"
+    # Number of cached tokens (prefix cache hits) per request
+    CACHED_TOKENS = "cached_tokens"
+    # Total number of output tokens generated (counter that updates in real-time)
+    OUTPUT_TOKENS_TOTAL = "output_tokens_total"
     # Time to first token in seconds
     TIME_TO_FIRST_TOKEN_SECONDS = "time_to_first_token_seconds"
     # Inter-token latency in seconds
@@ -74,35 +78,50 @@ class frontend_service:
     MODEL_KV_CACHE_BLOCK_SIZE = "model_kv_cache_block_size"
     # Request migration limit for a worker serving the model (MDC)
     MODEL_MIGRATION_LIMIT = "model_migration_limit"
+    # Total number of request migrations due to worker unavailability
+    MODEL_MIGRATION_TOTAL = "model_migration_total"
+    # Label name for the type of migration
+    MIGRATION_TYPE_LABEL = "migration_type"
 
 
-class kvbm_connector:
-    """KVBM connector"""
+class kvbm:
+    """KVBM"""
 
-    # KVBM connector leader
-    KVBM_CONNECTOR_LEADER = "kvbm_connector_leader"
-    # KVBM connector worker
-    KVBM_CONNECTOR_WORKER = "kvbm_connector_worker"
+    # The number of offload blocks from device to host
+    OFFLOAD_BLOCKS_D2H = "offload_blocks_d2h"
+    # The number of offload blocks from host to disk
+    OFFLOAD_BLOCKS_H2D = "offload_blocks_h2d"
+    # The number of offload blocks from device to disk (bypassing host memory)
+    OFFLOAD_BLOCKS_D2D = "offload_blocks_d2d"
+    # The number of onboard blocks from host to device
+    ONBOARD_BLOCKS_H2D = "onboard_blocks_h2d"
+    # The number of onboard blocks from disk to device
+    ONBOARD_BLOCKS_D2D = "onboard_blocks_d2d"
+    # The number of matched tokens
+    MATCHED_TOKENS = "matched_tokens"
+    # Host cache hit rate (0.0-1.0) from the sliding window
+    HOST_CACHE_HIT_RATE = "host_cache_hit_rate"
+    # Disk cache hit rate (0.0-1.0) from the sliding window
+    DISK_CACHE_HIT_RATE = "disk_cache_hit_rate"
+    # Object storage cache hit rate (0.0-1.0) from the sliding window
+    OBJECT_CACHE_HIT_RATE = "object_cache_hit_rate"
+    # Number of blocks offloaded from device to object storage
+    OFFLOAD_BLOCKS_D2O = "offload_blocks_d2o"
+    # Number of blocks onboarded from object storage to device
+    ONBOARD_BLOCKS_O2D = "onboard_blocks_o2d"
+    # Bytes transferred to object storage (offload)
+    OFFLOAD_BYTES_OBJECT = "offload_bytes_object"
+    # Bytes transferred from object storage (onboard)
+    ONBOARD_BYTES_OBJECT = "onboard_bytes_object"
+    # Number of failed object storage read operations (blocks)
+    OBJECT_READ_FAILURES = "object_read_failures"
+    # Number of failed object storage write operations (blocks)
+    OBJECT_WRITE_FAILURES = "object_write_failures"
 
 
 class kvrouter:
     # Number of KV cache events applied to the index (including status)
     KV_CACHE_EVENTS_APPLIED = "kv_cache_events_applied"
-
-
-class kvstats:
-    """KvStats metrics from LLM workers"""
-
-    # Prefix for all KvStats metrics
-    PREFIX = ""
-    # Number of active KV cache blocks currently in use
-    ACTIVE_BLOCKS = "kvstats_active_blocks"
-    # Total number of KV cache blocks available
-    TOTAL_BLOCKS = "kvstats_total_blocks"
-    # GPU cache usage as a percentage (0.0-1.0)
-    GPU_CACHE_USAGE_PERCENT = "kvstats_gpu_cache_usage_percent"
-    # GPU prefix cache hit rate as a percentage (0.0-1.0)
-    GPU_PREFIX_CACHE_HIT_RATE = "kvstats_gpu_prefix_cache_hit_rate"
 
 
 class labels:
@@ -123,45 +142,6 @@ class name_prefix:
     COMPONENT = "dynamo_component"
     # Prefix for frontend service metrics
     FRONTEND = "dynamo_frontend"
-
-
-class nats_client:
-    """NATS client metrics. DistributedRuntime contains a NATS client shared by all children)"""
-
-    # Prefix for all NATS client metrics
-    PREFIX = ""
-    # Total number of bytes received by NATS client
-    IN_TOTAL_BYTES = "nats_client_in_total_bytes"
-    # Total number of bytes sent by NATS client
-    OUT_OVERHEAD_BYTES = "nats_client_out_overhead_bytes"
-    # Total number of messages received by NATS client
-    IN_MESSAGES = "nats_client_in_messages"
-    # Total number of messages sent by NATS client
-    OUT_MESSAGES = "nats_client_out_messages"
-    # Current number of active connections for NATS client
-    # Note: Gauge metric measuring current connections, not cumulative total
-    CURRENT_CONNECTIONS = "nats_client_current_connections"
-    # Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)
-    CONNECTION_STATE = "nats_client_connection_state"
-
-
-class nats_service:
-    """NATS service metrics, from the $SRV.STATS.<service_name> requests on NATS server"""
-
-    # Prefix for all NATS service metrics
-    PREFIX = ""
-    # Average processing time in milliseconds (maps to: average_processing_time in ms)
-    PROCESSING_MS_AVG = "nats_service_processing_ms_avg"
-    # Total errors across all endpoints (maps to: num_errors)
-    ERRORS_TOTAL = "nats_service_errors_total"
-    # Total requests across all endpoints (maps to: num_requests)
-    REQUESTS_TOTAL = "nats_service_requests_total"
-    # Total processing time in milliseconds (maps to: processing_time in ms)
-    PROCESSING_MS_TOTAL = "nats_service_processing_ms_total"
-    # Number of active services (derived from ServiceSet.services)
-    ACTIVE_SERVICES = "nats_service_active_services"
-    # Number of active endpoints (derived from ServiceInfo.endpoints)
-    ACTIVE_ENDPOINTS = "nats_service_active_endpoints"
 
 
 class task_tracker:

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
@@ -27,7 +27,7 @@ async-stream = { workspace = true }
 async-trait = { workspace = true }
 either = { workspace = true }
 indexmap = { version = "2.9.0", features = ["serde"] }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0", rev = "a13220255" }
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0", rev = "2bcf0e9e3" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

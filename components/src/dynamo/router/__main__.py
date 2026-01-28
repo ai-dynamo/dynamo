@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -90,6 +90,12 @@ class StandaloneRouterHandler:
 
         # Wrap incoming request into PreprocessedRequest format for KvPushRouter
         # The request should already have most fields, but we ensure it has the structure
+        # Build routing hints from request (supports both nested routing object and legacy dp_rank)
+        routing = request.get("routing")
+        dp_rank = request.get("dp_rank")
+        if routing is None and dp_rank is not None:
+            routing = {"dp_rank": dp_rank}
+
         preprocessed_request = {
             "model": request.get("model", "unknown"),
             "token_ids": request["token_ids"],
@@ -98,9 +104,11 @@ class StandaloneRouterHandler:
             "output_options": request.get("output_options", {}),
             "eos_token_ids": request.get("eos_token_ids", []),
             "annotations": request.get("annotations", []),
-            "disaggregated_params": request.get("disaggregated_params"),
-            "dp_rank": request.get("dp_rank"),
-            "extra_args": request.get("extra_args", {}),
+            "routing": routing,
+            "router_config_override": request.get("router_config_override"),
+            "prefill_result": request.get("prefill_result"),
+            "bootstrap_info": request.get("bootstrap_info"),
+            "extra_args": request.get("extra_args"),
         }
 
         # Route and process through KvPushRouter
@@ -117,9 +125,11 @@ class StandaloneRouterHandler:
                 "log_probs": worker_output.get("log_probs"),
                 "top_logprobs": worker_output.get("top_logprobs"),
                 "finish_reason": worker_output.get("finish_reason"),
+                "stop_reason": worker_output.get("stop_reason"),
                 "index": worker_output.get("index"),
                 "disaggregated_params": worker_output.get("disaggregated_params"),
                 "extra_args": worker_output.get("extra_args"),
+                "completion_usage": worker_output.get("completion_usage"),
             }
             yield llm_engine_output
 
@@ -135,11 +145,11 @@ class StandaloneRouterHandler:
             logger.error("KvPushRouter not initialized - cannot get best worker")
             raise RuntimeError("Router not initialized")
 
-        result = await self.kv_push_router.best_worker_id(
+        (worker_id, _dp_rank, _overlap_blocks) = await self.kv_push_router.best_worker(
             token_ids, router_config_override
         )
 
-        yield result
+        yield worker_id
 
 
 def parse_args():
@@ -184,7 +194,7 @@ def parse_args():
         action="store_false",
         dest="use_kv_events",
         default=True,
-        help="KV Router: Disable KV events. When set, uses ApproxKvRouter for predicting block creation/deletion based only on incoming requests. By default, KV events are enabled.",
+        help="KV Router: Disable KV events. When set, the router predicts cache state based on routing decisions with TTL-based expiration and pruning, rather than receiving events from workers. By default, KV events are enabled.",
     )
 
     parser.add_argument(
@@ -217,10 +227,39 @@ def parse_args():
         help="KV Router: Disable tracking of active blocks (blocks being used for ongoing generation). By default, active blocks are tracked for load balancing (default: True)",
     )
 
+    parser.add_argument(
+        "--track-output-blocks",
+        action="store_true",
+        dest="router_track_output_blocks",
+        default=False,
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens (default: False)",
+    )
+
+    parser.add_argument(
+        "--router-ttl-secs",
+        type=float,
+        default=120.0,
+        help="KV Router: TTL for blocks in seconds. Only used when --no-kv-events is set. Controls how long cached blocks are considered valid without explicit events (default: 120.0)",
+    )
+
+    parser.add_argument(
+        "--router-max-tree-size",
+        type=int,
+        default=2**20,
+        help="KV Router: Maximum tree size before pruning. Only used when --no-kv-events is set. When the indexer tree exceeds this size, pruning is triggered (default: 1048576, which is 2^20)",
+    )
+
+    parser.add_argument(
+        "--router-prune-target-ratio",
+        type=float,
+        default=0.8,
+        help="KV Router: Target size ratio after pruning (0.0-1.0). Only used when --no-kv-events is set. Determines how aggressively to prune the tree (default: 0.8)",
+    )
+
     return parser.parse_args()
 
 
-@dynamo_worker(static=False)
+@dynamo_worker()
 async def worker(runtime: DistributedRuntime):
     """Main worker function for the standalone router service."""
 
@@ -243,7 +282,11 @@ async def worker(runtime: DistributedRuntime):
         f"use_kv_events={args.use_kv_events}, "
         f"router_replica_sync={args.router_replica_sync}, "
         f"router_reset_states={args.router_reset_states}, "
-        f"router_track_active_blocks={args.router_track_active_blocks}"
+        f"router_track_active_blocks={args.router_track_active_blocks}, "
+        f"router_track_output_blocks={args.router_track_output_blocks}, "
+        f"router_ttl_secs={args.router_ttl_secs}, "
+        f"router_max_tree_size={args.router_max_tree_size}, "
+        f"router_prune_target_ratio={args.router_prune_target_ratio}"
     )
 
     # Create KvRouter configuration
@@ -255,11 +298,14 @@ async def worker(runtime: DistributedRuntime):
         router_snapshot_threshold=args.router_snapshot_threshold,
         router_reset_states=args.router_reset_states,
         router_track_active_blocks=args.router_track_active_blocks,
+        router_track_output_blocks=args.router_track_output_blocks,
+        router_ttl_secs=args.router_ttl_secs,
+        router_max_tree_size=args.router_max_tree_size,
+        router_prune_target_ratio=args.router_prune_target_ratio,
     )
 
     # Create service component - use "router" as component name
     component = runtime.namespace(namespace).component("router")
-    await component.create_service()
 
     # Create handler
     handler = StandaloneRouterHandler(

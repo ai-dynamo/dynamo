@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 # ASSUMPTION: dynamo and its dependencies are properly installed
@@ -40,7 +40,6 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL&
 sleep 20
 
 # run prefill worker on GPU 1 with LMCache
-ENABLE_LMCACHE=1 \
 LMCACHE_CHUNK_SIZE=256 \
 LMCACHE_LOCAL_CPU=True \
 LMCACHE_MAX_LOCAL_CPU_SIZE=20 \

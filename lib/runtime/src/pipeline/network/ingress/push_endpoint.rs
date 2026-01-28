@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,8 +11,8 @@ use crate::protocols::LeaseId;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -39,7 +39,7 @@ impl PushEndpoint {
         namespace: String,
         component_name: String,
         endpoint_name: String,
-        instance_id: i64,
+        instance_id: u64,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let mut endpoint = endpoint;
@@ -52,7 +52,6 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
 
         loop {
@@ -132,21 +131,30 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .unwrap()
             .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
-            tracing::info!(
-                "Waiting for {} inflight requests to complete",
-                inflight.load(Ordering::SeqCst)
-            );
-            while inflight.load(Ordering::SeqCst) > 0 {
-                notify.notified().await;
+            let inflight_count = inflight.load(Ordering::SeqCst);
+            if inflight_count > 0 {
+                tracing::info!(
+                    endpoint_name = endpoint_name_local.as_str(),
+                    inflight_count = inflight_count,
+                    "Waiting for inflight NATS requests to complete"
+                );
+                while inflight.load(Ordering::SeqCst) > 0 {
+                    notify.notified().await;
+                }
+                tracing::info!(
+                    endpoint_name = endpoint_name_local.as_str(),
+                    "All inflight NATS requests completed"
+                );
             }
-            tracing::info!("All inflight requests completed");
         } else {
-            tracing::info!("Skipping graceful shutdown, not waiting for inflight requests");
+            tracing::info!(
+                endpoint_name = endpoint_name_local.as_str(),
+                "Skipping graceful shutdown, not waiting for inflight requests"
+            );
         }
 
         Ok(())

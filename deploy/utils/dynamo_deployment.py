@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -247,6 +247,26 @@ class DynamoDeploymentClient:
         # Ensure name and namespace are set correctly
         self.deployment_spec["metadata"]["name"] = self.deployment_name
         self.deployment_spec["metadata"]["namespace"] = self.namespace
+
+        # Add ownerReference if env vars are set (for temporary DGDs during profiling)
+        # This makes the DGD auto-delete when the DGDR is deleted
+        dgdr_name = os.environ.get("DGDR_NAME")
+        dgdr_namespace = os.environ.get("DGDR_NAMESPACE")
+        dgdr_uid = os.environ.get("DGDR_UID")
+
+        if dgdr_name and dgdr_namespace and dgdr_uid:
+            if self.namespace == dgdr_namespace:
+                self.deployment_spec["metadata"]["ownerReferences"] = [
+                    {
+                        "apiVersion": "nvidia.com/v1alpha1",
+                        "kind": "DynamoGraphDeploymentRequest",
+                        "name": dgdr_name,
+                        "uid": dgdr_uid,
+                        "controller": False,
+                        "blockOwnerDeletion": True,
+                    }
+                ]
+                print(f"Added ownerReference to DGDR {dgdr_name} for auto-cleanup")
 
         try:
             await self.custom_api.create_namespaced_custom_object(
@@ -573,6 +593,6 @@ async def main():
 
 
 # run with:
-# uv run benchmarks/profiler/utils/dynamo_deployment.py -n mo-dyn-cloud -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
+# uv run benchmarks/profiler/utils/dynamo_deployment.py -n mo-dyn -f ./examples/vllm/deploy/agg.yaml -l ./client_logs
 if __name__ == "__main__":
     asyncio.run(main())
