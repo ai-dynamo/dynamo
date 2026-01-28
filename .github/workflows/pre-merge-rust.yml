@@ -28,6 +28,7 @@ on:
     - '**.rs'
     - 'Cargo.toml'
     - 'Cargo.lock'
+    - 'deny.toml'
 
 # Cancel any previous check runs for the same pull request to avoid redundant workflows.
 concurrency:
@@ -75,7 +76,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
-        cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+        cargo-deny --all-features check licenses bans --config ${{ github.workspace }}/deny.toml
     # Have an explicit step to build tests first to separate time spent on build vs execution.
     - name: Compile Tests
       working-directory: ${{ matrix.dir }}
