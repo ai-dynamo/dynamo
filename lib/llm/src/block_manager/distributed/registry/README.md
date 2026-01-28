@@ -46,12 +46,12 @@ To prevent race conditions where two workers try to store the same block simulta
 Leases expire after a configurable timeout (default: 30s) if the worker fails to complete the upload.
 
 ```rust
-use registry::core::{hub, HashMapStorage, NoMetadata};
+use registry::core::{hub, HashMapStorage};
 use std::time::Duration;
 
 // Configure lease TTL using the builder
 let storage = HashMapStorage::<u64, u64>::new();
-let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
+let registry_hub = hub::<u64, u64, _>(storage)
     .lease_ttl(Duration::from_secs(60))
     .build();
 
@@ -69,16 +69,16 @@ The registry uses a **pluggable architecture** with trait-based abstractions:
 ```text
 +-----------------------------------------------------------+
 |                        Client                              |
-|  +---------+  +---------+  +---------+  +------------+    |
-|  |   Key   |  |  Value  |  |Metadata |  |   Codec    |    |
-|  |  (u64)  |  |  (u64)  |  |  (None) |  |  (Binary)  |    |
-|  +----+----+  +----+----+  +----+----+  +-----+------+    |
-|       +--------------+-----------+-----------+            |
-|                      |                                    |
-|               +------v------+                             |
-|               |  Transport  |                             |
-|               |  (ZMQ/etc)  |                             |
-|               +-------------+                             |
+|  +---------+  +---------+  +------------+                 |
+|  |   Key   |  |  Value  |  |   Codec    |                 |
+|  |  (u64)  |  |  (u64)  |  |  (Binary)  |                 |
+|  +----+----+  +----+----+  +-----+------+                 |
+|       +-------------+-----------+                         |
+|                     |                                     |
+|              +------v------+                              |
+|              |  Transport  |                              |
+|              |  (ZMQ/etc)  |                              |
+|              +-------------+                              |
 +-----------------------------------------------------------+
                        |
                 +------v------+
@@ -97,11 +97,14 @@ The registry uses a **pluggable architecture** with trait-based abstractions:
 |-------|---------|-----------------|
 | `RegistryKey` | Hash/identifier for blocks | `u64`, `Key128`, `PositionalKey`, `CompositeKey` |
 | `RegistryValue` | What's stored with the key | `u64`, `StorageLocation` |
-| `RegistryMetadata` | Optional metadata | `NoMetadata`, `TimestampMetadata`, `PositionMetadata` |
 | `Storage` | Key-value backend | `HashMapStorage` |
 | `Eviction` | Cache eviction policy | `NoEviction`, `TailEviction` |
 | `RegistryTransport` | Network communication | `InProcessTransport`, `ZmqTransport` |
 | `RegistryCodec` | Message serialization | `BinaryCodec` (versioned) |
+
+> **Note:** Metadata types (`NoMetadata`, `TimestampMetadata`, `PositionMetadata`) are available
+> but are composed into your `K` or `V` types rather than being a separate type parameter.
+> For example: `V = (StorageLocation, PositionMetadata)` or `K = (u64, TimestampMetadata)`.
 
 ### ZMQ Communication Pattern
 
@@ -124,19 +127,19 @@ Client                              Hub
 The recommended way to create clients and hubs:
 
 ```rust
-use registry::core::{client, hub, HashMapStorage, NoMetadata, ZmqTransport};
+use registry::core::{client, hub, HashMapStorage, ZmqTransport};
 use std::time::Duration;
 
 // Create a client with any transport
 let transport = ZmqTransport::connect_to("hub-host", 5555, 5556)?;
-let registry_client = client::<u64, u64, NoMetadata, _>(transport)
+let registry_client = client::<u64, u64, _>(transport)
     .batch_size(50)
     .batch_timeout(Duration::from_millis(20))
     .build();
 
 // Create a hub with any storage backend
 let storage = HashMapStorage::<u64, u64>::new();
-let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
+let registry_hub = hub::<u64, u64, _>(storage)
     .lease_ttl(Duration::from_secs(60))
     .build();
 ```
@@ -144,9 +147,9 @@ let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
 ### Client Operations
 
 ```rust
-use registry::core::{client, NoMetadata, Registry};
+use registry::core::{client, Registry};
 
-let registry_client = client::<u64, u64, NoMetadata, _>(transport).build();
+let registry_client = client::<u64, u64, _>(transport).build();
 
 // Check what can be stored
 let result = registry_client.can_offload(&[hash1, hash2, hash3]).await?;
@@ -155,7 +158,7 @@ let result = registry_client.can_offload(&[hash1, hash2, hash3]).await?;
 // result.leased: another worker is storing these (wait or skip)
 
 // After storing, register the blocks
-registry_client.register(&[(hash1, value1, NoMetadata)]).await?;
+registry_client.register(&[(hash1, value1), (hash2, value2)]).await?;
 registry_client.flush().await?;
 
 // Find matching blocks
@@ -165,10 +168,10 @@ let matches = registry_client.match_prefix(&hashes).await?;
 ### Serving a Hub
 
 ```rust
-use registry::core::{hub, HashMapStorage, NoMetadata, ZmqHubTransport, ZmqHubConfig};
+use registry::core::{hub, HashMapStorage, ZmqHubTransport, ZmqHubConfig};
 
 let storage = HashMapStorage::<u64, u64>::new();
-let registry_hub = hub::<u64, u64, NoMetadata, _>(storage)
+let registry_hub = hub::<u64, u64, _>(storage)
     .lease_ttl(Duration::from_secs(30))
     .build();
 
@@ -187,10 +190,10 @@ The client batches registrations for efficiency. Batches are flushed when:
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use registry::core::{client, NoMetadata};
+use registry::core::client;
 
 let registry_client = Arc::new(
-    client::<u64, u64, NoMetadata, _>(transport)
+    client::<u64, u64, _>(transport)
         .batch_size(50)
         .batch_timeout(Duration::from_millis(20))
         .build()
@@ -201,10 +204,30 @@ let cancel = CancellationToken::new();
 let _flush_task = registry_client.start_batch_flush_task(cancel.clone());
 
 // Registrations are automatically batched and flushed
-registry_client.register(&[(hash1, value1, NoMetadata)]).await?;
+registry_client.register(&[(hash1, value1)]).await?;
 
 // On shutdown
 cancel.cancel();
+```
+
+### Using Metadata (Composable)
+
+If you need metadata with your entries, compose it into your Value type:
+
+```rust
+use registry::core::{client, hub, HashMapStorage, PositionMetadata, StorageLocation};
+
+// Define a value type that includes metadata
+type MyValue = (StorageLocation, PositionMetadata);
+
+// Create hub and client with the composed type
+let storage = HashMapStorage::<u64, MyValue>::new();
+let registry_hub = hub::<u64, MyValue, _>(storage).build();
+
+// Register entries with metadata included in the value
+let location = StorageLocation { backend: StorageBackend::S3, path: "bucket/key".into(), size_bytes: 1024 };
+let metadata = PositionMetadata { position: 42 };
+registry_client.register(&[(hash, (location, metadata))]).await?;
 ```
 
 ## Configuration
@@ -332,14 +355,14 @@ registry/
     +-- mod.rs          # Core exports
     +-- key.rs          # RegistryKey trait + implementations
     +-- value.rs        # RegistryValue trait + implementations
-    +-- metadata.rs     # RegistryMetadata trait + implementations
+    +-- metadata.rs     # Metadata types (composable into K or V)
     +-- storage.rs      # Storage trait + HashMapStorage
     +-- eviction.rs     # Eviction trait + TailEviction
     +-- transport.rs    # RegistryTransport trait + InProcessTransport
     +-- codec.rs        # RegistryCodec trait + BinaryCodec (versioned)
     +-- registry.rs     # Registry trait + RegistryClient
     +-- hub.rs          # Generic RegistryHub with lease management
-    +-- lease.rs        # LeaseManager for race condition prevention and unnecessary writes
+    +-- lease.rs        # LeaseManager for race condition prevention
     +-- error.rs        # RegistryError types
     +-- zmq_transport.rs  # ZMQ client transport (with HWM)
     +-- zmq_hub.rs        # ZMQ hub server
