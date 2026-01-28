@@ -247,6 +247,16 @@ def update_metrics():
 endpoint.metrics.register_callback(update_metrics)
 ```
 
+### Examples
+
+Example scripts: [lib/bindings/python/examples/metrics/](https://github.com/ai-dynamo/dynamo/blob/v0.8.1/lib/bindings/python/examples/metrics/)
+
+```bash
+cd ~/dynamo/lib/bindings/python/examples/metrics
+DYN_SYSTEM_PORT=8081 ./server_with_loop.py
+DYN_SYSTEM_PORT=8081 ./server_with_callback.py
+```
+
 ---
 
 ## Related Documentation
@@ -254,4 +264,5 @@ endpoint.metrics.register_callback(update_metrics)
 - [Metrics Overview](metrics.md)
 - [Prometheus and Grafana Setup](prometheus-grafana.md)
 - [Distributed Runtime Architecture](../design-docs/distributed-runtime.md)
+- [Python Metrics Examples](https://github.com/ai-dynamo/dynamo/blob/v0.8.1/lib/bindings/python/examples/metrics/)
 
