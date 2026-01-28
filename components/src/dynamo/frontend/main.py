@@ -341,7 +341,7 @@ async def async_main():
     os.environ.pop("DYN_SYSTEM_PORT", None)
     flags = parse_args()
     dump_config(flags.dump_config_to, flags)
-
+    os.environ["DYN_EVENT_PLANE"] = flags.event_plane
     # Warn if DYN_SYSTEM_PORT is set (frontend doesn't use system metrics server)
     if os.environ.get("DYN_SYSTEM_PORT"):
         logger.warning(
