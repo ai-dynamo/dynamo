@@ -8,9 +8,10 @@ use std::{
 
 use dashmap::{DashMap, mapref::entry::Entry};
 use parking_lot::{Mutex, RwLock};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::oneshot;
 
 use crate::discovery::KvWorkerMonitor;
+use crate::discovery::runtime_configs::RuntimeConfigs;
 
 use dynamo_runtime::{
     component::{Client, Endpoint, build_transport_type},
@@ -24,7 +25,7 @@ use crate::{
         KvRouter, KvRouterConfig, protocols::WorkerId, router_endpoint_id,
         scheduler::DefaultWorkerSelector,
     },
-    local_model::runtime_config::{DisaggregatedEndpoint, ModelRuntimeConfig},
+    local_model::runtime_config::DisaggregatedEndpoint,
     model_card::ModelDeploymentCard,
     model_type::ModelType,
     types::{
@@ -83,74 +84,6 @@ pub struct ModelManager {
     /// Outer DashMap: keyed by EndpointId
     /// Inner RuntimeConfigs: shared with KvScheduler
     runtime_configs: DashMap<EndpointId, Arc<RuntimeConfigs>>,
-}
-
-/// Runtime configs for an endpoint with watch-based change notifications.
-/// Call `subscribe()` to get a subscriber with its own watch receiver.
-pub struct RuntimeConfigs {
-    pub configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
-    change_tx: watch::Sender<u64>,
-}
-
-impl RuntimeConfigs {
-    fn new() -> Self {
-        let (change_tx, _) = watch::channel(0u64);
-        Self {
-            configs: Arc::new(DashMap::new()),
-            change_tx,
-        }
-    }
-
-    /// Create a subscriber that can wait for config changes.
-    /// Each subscriber has its own watch receiver, so notifications are not lost.
-    pub fn subscribe(&self) -> RuntimeConfigsSubscriber {
-        RuntimeConfigsSubscriber {
-            configs: self.configs.clone(),
-            change_rx: self.change_tx.subscribe(),
-        }
-    }
-
-    /// Notify all subscribers of a change (internal use only).
-    fn notify_change(&self) {
-        // Increment counter to notify subscribers
-        self.change_tx.send_modify(|v| *v = v.wrapping_add(1));
-    }
-}
-
-/// A subscriber to runtime config changes.
-/// Each subscriber has its own watch receiver, ensuring no notifications are lost.
-pub struct RuntimeConfigsSubscriber {
-    pub configs: Arc<DashMap<WorkerId, Option<ModelRuntimeConfig>>>,
-    pub change_rx: watch::Receiver<u64>,
-}
-
-impl RuntimeConfigsSubscriber {
-    /// Wait for a config change notification.
-    /// Returns immediately if a change happened since the last call.
-    pub async fn wait_for_change(&mut self) -> Result<(), watch::error::RecvError> {
-        self.change_rx.changed().await
-    }
-
-    /// Wait until at least one worker has a Some config.
-    /// Returns the list of worker IDs that have configs.
-    /// This is race-safe: checks the DashMap first, only waits if empty.
-    pub async fn wait_for_some(&mut self) -> Vec<WorkerId> {
-        loop {
-            let ready: Vec<WorkerId> = self
-                .configs
-                .iter()
-                .filter(|r| r.value().is_some())
-                .map(|r| *r.key())
-                .collect();
-
-            if !ready.is_empty() {
-                return ready;
-            }
-
-            // Wait for next change; ignore RecvError (sender dropped = shutdown)
-            let _ = self.change_rx.changed().await;
-        }
-    }
 }
 
 impl Default for ModelManager {
@@ -728,7 +661,7 @@ impl ModelManager {
     }
 
     /// Spawn background task to watch runtime configs via discovery.
-    /// Blocks until at least one worker with a runtime config is available.
+    /// Does not block - consumers should use `subscribe().wait_for_some()` if they need workers.
     async fn spawn_runtime_config_watcher(
         &self,
         endpoint: &Endpoint,
@@ -789,42 +722,7 @@ impl ModelManager {
                 let new_instance_ids = instance_ids_rx.borrow_and_update().clone();
                 let new_configs = runtime_configs_rx.borrow_and_update().clone();
 
-                // Update the DashMap
-                // First, remove workers that no longer exist
-                let current_workers: HashSet<WorkerId> =
-                    inner.configs.iter().map(|r| *r.key()).collect();
-                let new_workers: HashSet<WorkerId> = new_instance_ids.iter().copied().collect();
-                let mut worker_removed = false;
-                for removed_worker in current_workers.difference(&new_workers) {
-                    inner.configs.remove(removed_worker);
-                    worker_removed = true;
-                }
-
-                // Then, add/update workers
-                // Track if any config became Some (for notify)
-                let mut config_added = false;
-                for worker_id in &new_instance_ids {
-                    let config = new_configs.get(worker_id).cloned();
-                    if config.is_some() {
-                        let prev_config = inner.configs.get(worker_id);
-                        let was_none = prev_config
-                            .as_ref()
-                            .map(|r| r.value().is_none())
-                            .unwrap_or(true);
-                        if was_none {
-                            tracing::info!(
-                                "ModelManager: Runtime config found for worker_id: {worker_id}"
-                            );
-                            config_added = true;
-                        }
-                    }
-                    inner.configs.insert(*worker_id, config);
-                }
-
-                // Notify when a config with Some value is added OR a worker is removed
-                if config_added || worker_removed {
-                    inner.notify_change();
-                }
+                inner.update(&new_instance_ids, &new_configs);
 
                 tracing::trace!(
                     "ModelManager: Updated runtime_configs with {} workers",

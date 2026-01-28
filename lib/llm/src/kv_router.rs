@@ -365,6 +365,9 @@ impl KvRouter {
             ))
         };
 
+        // Wait for at least one worker with a known runtime config before starting scheduler
+        workers_with_configs.subscribe().wait_for_some().await;
+
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
@@ -388,18 +391,16 @@ impl KvRouter {
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            // Wait for at least one worker with a known runtime config (not None)
-            // This ensures we have actual config data to make routing decisions
-            let ready_workers = workers_with_configs.subscribe().wait_for_some().await;
-            let count = ready_workers.len();
-
             let all_local_indexer = workers_with_configs
                 .configs
                 .iter()
                 .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
                 .all(|b| b);
 
-            tracing::info!("Found {count} worker(s), starting KV event subscriber");
+            tracing::info!(
+                "Found {} worker(s), starting KV event subscriber",
+                workers_with_configs.num_workers()
+            );
 
             let transport_kind = EventTransportKind::from_env_or_default();
 
@@ -415,7 +416,8 @@ impl KvRouter {
                     }
                 } else {
                     tracing::info!(
-                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                        "All {} workers have local_indexer enabled, using NATS Core subscription",
+                        workers_with_configs.num_workers()
                     );
                 }
 

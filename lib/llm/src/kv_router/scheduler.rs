@@ -107,7 +107,7 @@ impl KvScheduler {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
         // Get initial workers from DashMap for slot initialization.
-        // ModelManager guarantees at least one worker is present before KvRouter::new() is called.
+        // Caller must ensure at least one worker is present (via wait_for_some).
         let initial_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_with_configs
             .configs
             .iter()
