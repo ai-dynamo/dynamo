@@ -7,8 +7,13 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::watch;
 
+use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::discovery::{DiscoveryQuery, watch_and_extract_field};
+use dynamo_runtime::prelude::DistributedRuntimeProvider;
+
 use crate::kv_router::protocols::WorkerId;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
+use crate::model_card::ModelDeploymentCard;
 
 /// Runtime configs for an endpoint with watch-based change notifications.
 /// Call `subscribe()` to get a subscriber with its own watch receiver.
@@ -74,7 +79,7 @@ impl RuntimeConfigs {
                     .map(|r| r.value().is_none())
                     .unwrap_or(true);
                 if was_none {
-                    tracing::info!("ModelManager: Runtime config found for worker_id: {worker_id}");
+                    tracing::info!("RuntimeConfigs: config found for worker_id: {worker_id}");
                     config_added = true;
                 }
             }
@@ -85,6 +90,81 @@ impl RuntimeConfigs {
         if config_added || worker_removed {
             self.notify_change();
         }
+    }
+
+    /// Spawn background task to watch runtime configs via discovery.
+    /// Does not block - consumers should use `subscribe().wait_for_some()` if they need workers.
+    pub(crate) async fn start_watcher(
+        self: &Arc<Self>,
+        endpoint: &Endpoint,
+    ) -> anyhow::Result<()> {
+        let component = endpoint.component();
+        let cancellation_token = component.drt().primary_token();
+
+        // Set up discovery watch for EndpointModels
+        let discovery = component.drt().discovery();
+        let endpoint_id = endpoint.id();
+        let discovery_key = DiscoveryQuery::EndpointModels {
+            namespace: endpoint_id.namespace.clone(),
+            component: endpoint_id.component.clone(),
+            endpoint: endpoint_id.name.clone(),
+        };
+        let discovery_stream = discovery
+            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
+            .await?;
+
+        // Extract runtime_config from ModelDeploymentCard
+        let mut runtime_configs_rx =
+            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
+                card.runtime_config
+            });
+
+        // Also watch instance IDs
+        let client = endpoint.client().await?;
+        let mut instance_ids_rx = client.instance_avail_watcher();
+
+        // Spawn background task to watch for config changes
+        // Note: We don't block here - consumers should wait on notify for configs they need
+        let inner = self.clone();
+        let cancel_token = cancellation_token.clone();
+        tokio::spawn(async move {
+            tracing::trace!("RuntimeConfigs watcher started");
+            loop {
+                // Wait for either instances or configs to change
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        tracing::trace!("RuntimeConfigs watcher shutting down");
+                        break;
+                    }
+                    result = instance_ids_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("instance IDs watch sender shutdown");
+                            break;
+                        }
+                    }
+                    result = runtime_configs_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("runtime configs watch sender shutdown");
+                            break;
+                        }
+                    }
+                }
+
+                // Get the latest values from both channels
+                let new_instance_ids = instance_ids_rx.borrow_and_update().clone();
+                let new_configs = runtime_configs_rx.borrow_and_update().clone();
+
+                inner.update(&new_instance_ids, &new_configs);
+
+                tracing::trace!(
+                    "RuntimeConfigs: Updated with {} workers",
+                    inner.configs.len()
+                );
+            }
+            tracing::trace!("RuntimeConfigs watcher stopped");
+        });
+
+        Ok(())
     }
 }
 
