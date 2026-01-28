@@ -23,13 +23,13 @@
 //! requests share common prefixes (e.g., system prompts, few-shot examples).
 
 use crate::kv_router::indexer::OverlapScores;
-use crate::tokens::SequenceHash;
 use anyhow::Result;
 use dashmap::DashMap;
 use derive_getters::Getters;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::{EventPublisher, EventSubscriber};
+use dynamo_tokens::SequenceHash;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
