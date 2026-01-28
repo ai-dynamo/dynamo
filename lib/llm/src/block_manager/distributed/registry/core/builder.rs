@@ -240,9 +240,8 @@ mod tests {
     fn test_hub_builder() {
         let storage: HashMapStorage<u64, u64> = HashMapStorage::new();
 
-        let built_hub: RegistryHub<u64, u64, NoMetadata, _, _> = hub(storage)
-            .lease_ttl(Duration::from_secs(60))
-            .build();
+        let built_hub: RegistryHub<u64, u64, NoMetadata, _, _> =
+            hub(storage).lease_ttl(Duration::from_secs(60)).build();
 
         assert!(built_hub.is_empty());
 
