@@ -493,6 +493,13 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         let mut worker_logits = HashMap::new();
 
+        // Use override if provided, otherwise use default config
+        let overlap_weight = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.overlap_score_weight)
+            .unwrap_or(self.kv_router_config.overlap_score_weight);
+
         // Calculate logits for each worker with dp_rank
         // Outer loop: iterate over all workers from runtime config
         // Inner loop: iterate over all dp_ranks for each worker
@@ -517,13 +524,6 @@ impl WorkerSelector for DefaultWorkerSelector {
                     .get(&worker)
                     .unwrap_or(&(potential_prefill_block.floor() as usize))
                     as f64;
-
-                // Use override if provided, otherwise use default config
-                let overlap_weight = request
-                    .router_config_override
-                    .as_ref()
-                    .and_then(|cfg| cfg.overlap_score_weight)
-                    .unwrap_or(self.kv_router_config.overlap_score_weight);
 
                 // Calculate logit (lower is better)
                 let logit = overlap_weight * potential_prefill_block + decode_block;

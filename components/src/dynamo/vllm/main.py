@@ -79,9 +79,18 @@ async def worker():
     loop = asyncio.get_running_loop()
     overwrite_args(config)
 
-    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.request_plane == "nats" or (
+        config.event_plane == "nats" and config.use_kv_events
+    )
+
     runtime = DistributedRuntime(
-        loop, config.store_kv, config.request_plane, config.use_kv_events
+        loop, config.store_kv, config.request_plane, enable_nats
     )
 
     # Set up signal handler for graceful shutdown
