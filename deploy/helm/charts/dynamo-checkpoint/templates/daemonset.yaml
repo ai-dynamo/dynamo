@@ -115,7 +115,7 @@ spec:
               value: {{ .Values.daemonset.criu.timeout | quote }}
             {{- end }}
             # Storage type (for future S3/OCI support)
-            - name: DYNAMO_CHECKPOINT_STORAGE_TYPE
+            - name: DYN_CHECKPOINT_STORAGE_TYPE
               value: {{ .Values.storage.type | quote }}
           volumeMounts:
             {{- if eq .Values.storage.type "pvc" }}

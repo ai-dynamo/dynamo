@@ -116,31 +116,31 @@ const (
 	KubeLabelCheckpointName   = "nvidia.com/checkpoint-name"
 
 	// EnvCheckpointStorageType indicates the storage backend type (pvc, s3, oci)
-	EnvCheckpointStorageType = "DYNAMO_CHECKPOINT_STORAGE_TYPE"
+	EnvCheckpointStorageType = "DYN_CHECKPOINT_STORAGE_TYPE"
 	// EnvCheckpointLocation is the source location of the checkpoint
 	// For PVC: same as path (e.g., /checkpoints/{hash}.tar)
 	// For S3: s3://bucket/prefix/{hash}.tar
 	// For OCI: oci://registry/repo:{hash}
-	EnvCheckpointLocation = "DYNAMO_CHECKPOINT_LOCATION"
+	EnvCheckpointLocation = "DYN_CHECKPOINT_LOCATION"
 	// EnvCheckpointPath is the local path to the checkpoint tar file
 	// For PVC: same as location
 	// For S3/OCI: download destination (e.g., /tmp/{hash}.tar)
-	EnvCheckpointPath = "DYNAMO_CHECKPOINT_PATH"
+	EnvCheckpointPath = "DYN_CHECKPOINT_PATH"
 	// EnvCheckpointHash is the identity hash (for debugging/observability)
-	EnvCheckpointHash = "DYNAMO_CHECKPOINT_HASH"
+	EnvCheckpointHash = "DYN_CHECKPOINT_HASH"
 	// EnvCheckpointSignalFile is the full path to the signal file
 	// The DaemonSet writes this file after checkpoint is complete
 	// The checkpoint job pod waits for this file, then exits successfully
-	EnvCheckpointSignalFile = "DYNAMO_CHECKPOINT_SIGNAL_FILE"
+	EnvCheckpointSignalFile = "DYN_CHECKPOINT_SIGNAL_FILE"
 
 	// EnvCheckpointReadyFile is the full path to a file the worker creates
 	// when the model is loaded and ready for checkpointing.
 	// The readiness probe watches this file to trigger DaemonSet checkpoint.
-	EnvCheckpointReadyFile = "DYNAMO_CHECKPOINT_READY_FILE"
+	EnvCheckpointReadyFile = "DYN_CHECKPOINT_READY_FILE"
 
 	// CRIU-related environment variables for restore operations
 	// EnvRestoreMarkerFile is the file created by CRIU after successful restore
-	EnvRestoreMarkerFile = "DYNAMO_RESTORE_MARKER_FILE"
+	EnvRestoreMarkerFile = "DYN_RESTORE_MARKER_FILE"
 	// EnvCRIUWorkDir is the working directory for CRIU operations
 	EnvCRIUWorkDir = "CRIU_WORK_DIR"
 	// EnvCRIULogDir is the directory where CRIU writes logs

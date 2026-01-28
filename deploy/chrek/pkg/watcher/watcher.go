@@ -32,7 +32,7 @@ const (
 	LabelCheckpointHash = "nvidia.com/checkpoint-hash"
 
 	// EnvCheckpointSignalFile is the env var in the pod specifying the signal file path
-	EnvCheckpointSignalFile = "DYNAMO_CHECKPOINT_SIGNAL_FILE"
+	EnvCheckpointSignalFile = "DYN_CHECKPOINT_SIGNAL_FILE"
 )
 
 // SignalFile represents the content of a checkpoint completion signal file

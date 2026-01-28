@@ -201,7 +201,7 @@ COPY scripts/smart-entrypoint.sh /smart-entrypoint.sh
 RUN chmod +x /smart-entrypoint.sh
 
 # Set environment variables
-ENV DYNAMO_CHECKPOINT_PATH=/checkpoints \
+ENV DYN_CHECKPOINT_PATH=/checkpoints \
     RESTORE_TRIGGER=/tmp/restore-trigger \
     RESTORE_WAIT_TIMEOUT=300 \
     CRIU_LOG_LEVEL=4 \

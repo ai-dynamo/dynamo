@@ -82,7 +82,7 @@ async def wait_for_checkpoint_signal_file(signal_file: str) -> bool:
     """
     # Get restore marker file path (created by restore entrypoint before CRIU restore)
     restore_marker = os.environ.get(
-        "DYNAMO_RESTORE_MARKER_FILE", "/tmp/dynamo-restored"
+        "DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored"
     )
 
     logger.info("CHECKPOINT_READY: Model loaded, ready for container checkpoint")
@@ -142,8 +142,8 @@ async def worker():
         await fetch_llm(config.model)
 
     # Check checkpoint-related environment variables
-    signal_file = os.environ.get("DYNAMO_CHECKPOINT_SIGNAL_FILE")
-    ready_file = os.environ.get("DYNAMO_CHECKPOINT_READY_FILE")
+    signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
+    ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
 
     is_checkpoint_mode = signal_file is not None
 
@@ -154,7 +154,7 @@ async def worker():
     if is_checkpoint_mode:
         # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
         logger.info(
-            f"Checkpoint mode enabled (DYNAMO_CHECKPOINT_SIGNAL_FILE={signal_file})"
+            f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
         )
 
         # Set up vLLM engine (loads model into GPU)

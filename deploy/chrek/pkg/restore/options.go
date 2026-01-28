@@ -16,11 +16,11 @@ import (
 // These values are typically set via environment variables.
 type Config struct {
 	// CheckpointPath is the base directory containing checkpoints (default: /checkpoints)
-	// Env: DYNAMO_CHECKPOINT_PATH
+	// Env: DYN_CHECKPOINT_PATH
 	CheckpointPath string
 
 	// CheckpointHash is the ID/hash of the checkpoint to restore
-	// Env: DYNAMO_CHECKPOINT_HASH
+	// Env: DYN_CHECKPOINT_HASH
 	CheckpointHash string
 
 	// RestoreTrigger is the path to the trigger file that signals restore should start
@@ -76,8 +76,8 @@ const DefaultEmbeddedCheckpointPath = "/embedded-checkpoint"
 // ConfigFromEnv creates a Config from environment variables.
 func ConfigFromEnv() *Config {
 	cfg := &Config{
-		CheckpointPath:          getEnvOrDefault("DYNAMO_CHECKPOINT_PATH", "/checkpoints"),
-		CheckpointHash:          os.Getenv("DYNAMO_CHECKPOINT_HASH"),
+		CheckpointPath:          getEnvOrDefault("DYN_CHECKPOINT_PATH", "/checkpoints"),
+		CheckpointHash:          os.Getenv("DYN_CHECKPOINT_HASH"),
 		RestoreTrigger:          getEnvOrDefault("RESTORE_TRIGGER", "/tmp/restore-trigger"),
 		WaitForCheckpoint:       os.Getenv("WAIT_FOR_CHECKPOINT") == "1",
 		WaitTimeout:             parseDurationOrDefault("RESTORE_WAIT_TIMEOUT", 300*time.Second),
@@ -91,7 +91,7 @@ func ConfigFromEnv() *Config {
 		CRIUWorkDir:             getEnvOrDefault("CRIU_WORK_DIR", ""),
 		CUDAPluginDir:           os.Getenv("CUDA_PLUGIN_DIR"), // For CUDA plugin discovery during restore
 		CRIUTimeout:             uint32(parseIntOrDefault("CRIU_TIMEOUT", 0)),
-		RestoreMarkerFile:       getEnvOrDefault("DYNAMO_RESTORE_MARKER_FILE", "/tmp/dynamo-restored"),
+		RestoreMarkerFile:       getEnvOrDefault("DYN_RESTORE_MARKER_FILE", "/tmp/dynamo-restored"),
 	}
 	return cfg
 }
@@ -181,7 +181,7 @@ func ShouldRestore(cfg *Config, log *logrus.Entry) (string, bool) {
 		}
 	}
 
-	// Method 1: DYNAMO_CHECKPOINT_HASH is set and checkpoint is fully complete
+	// Method 1: DYN_CHECKPOINT_HASH is set and checkpoint is fully complete
 	if cfg.CheckpointHash != "" {
 		checkpointPath := cfg.CheckpointPath + "/" + cfg.CheckpointHash
 		// Check for checkpoint.done marker (written LAST after rootfs-diff.tar completes)

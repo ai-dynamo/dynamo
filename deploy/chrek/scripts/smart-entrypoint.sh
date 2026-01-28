@@ -3,7 +3,7 @@
 # Automatically detects checkpoints and falls back to cold start if not found
 #
 # Behavior:
-# 1. If DYNAMO_CHECKPOINT_HASH is set and checkpoint exists -> restore
+# 1. If DYN_CHECKPOINT_HASH is set and checkpoint exists -> restore
 # 2. If WAIT_FOR_CHECKPOINT=1 -> wait for checkpoint (restore-entrypoint handles this)
 # 3. Otherwise -> execute provided command (cold start)
 
@@ -15,8 +15,8 @@ if [ "${DEBUG:-0}" = "1" ]; then
 fi
 
 # Configuration from environment
-CHECKPOINT_PATH="${DYNAMO_CHECKPOINT_PATH:-/checkpoints}"
-CHECKPOINT_HASH="${DYNAMO_CHECKPOINT_HASH:-}"
+CHECKPOINT_PATH="${DYN_CHECKPOINT_PATH:-/checkpoints}"
+CHECKPOINT_HASH="${DYN_CHECKPOINT_HASH:-}"
 WAIT_FOR_CHECKPOINT="${WAIT_FOR_CHECKPOINT:-0}"
 
 # Log function for consistent output
@@ -35,7 +35,7 @@ should_restore_checkpoint() {
 
   # If checkpoint hash is not set, no restore
   if [ -z "$CHECKPOINT_HASH" ]; then
-    log "DYNAMO_CHECKPOINT_HASH not set, no checkpoint to restore"
+    log "DYN_CHECKPOINT_HASH not set, no checkpoint to restore"
     return 1
   fi
 
@@ -82,7 +82,7 @@ else
   if [ $# -eq 0 ]; then
     # No args provided - this is likely an error
     log "ERROR: No checkpoint to restore and no command provided"
-    log "Set DYNAMO_CHECKPOINT_HASH to restore a checkpoint, or provide a command to run"
+    log "Set DYN_CHECKPOINT_HASH to restore a checkpoint, or provide a command to run"
     exit 1
   fi
   

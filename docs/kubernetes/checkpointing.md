@@ -392,7 +392,7 @@ spec:
 
 3. Check environment variables:
    ```bash
-   kubectl exec <worker-pod> -- env | grep DYNAMO_CHECKPOINT
+   kubectl exec <worker-pod> -- env | grep DYN_CHECKPOINT
    ```
 
 ### Cold Start Despite Checkpoint
@@ -416,11 +416,11 @@ Check logs for "Falling back to cold start" message.
 
 | Variable | Description |
 |----------|-------------|
-| `DYNAMO_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` |
-| `DYNAMO_CHECKPOINT_LOCATION` | Source location (URI) |
-| `DYNAMO_CHECKPOINT_PATH` | Local path to tar file |
-| `DYNAMO_CHECKPOINT_HASH` | Identity hash (debugging) |
-| `DYNAMO_CHECKPOINT_SIGNAL_FILE` | Signal file (creation mode only) |
+| `DYN_CHECKPOINT_STORAGE_TYPE` | Backend: `pvc`, `s3`, `oci` |
+| `DYN_CHECKPOINT_LOCATION` | Source location (URI) |
+| `DYN_CHECKPOINT_PATH` | Local path to tar file |
+| `DYN_CHECKPOINT_HASH` | Identity hash (debugging) |
+| `DYN_CHECKPOINT_SIGNAL_FILE` | Signal file (creation mode only) |
 
 ## Complete Example
 
