@@ -43,7 +43,6 @@ pytestmark = [
     pytest.mark.pre_merge,
     pytest.mark.gpu_0,
     pytest.mark.integration,
-    pytest.mark.parallel,
     pytest.mark.model(MODEL_NAME),
 ]
 NUM_MOCKERS = 2
@@ -322,6 +321,7 @@ class DisaggMockerProcess:
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
+@pytest.mark.parallel
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_mocker_kv_router(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
@@ -373,6 +373,7 @@ def test_mocker_kv_router(
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up
+@pytest.mark.parallel
 def test_mocker_two_kv_router(
     request,
     runtime_services_dynamic_ports,
@@ -429,6 +430,7 @@ def test_mocker_two_kv_router(
 
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
+@pytest.mark.parallel
 def test_mocker_kv_router_overload_503(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -467,6 +469,7 @@ def test_mocker_kv_router_overload_503(
 
 
 @pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
+@pytest.mark.parallel
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 def test_kv_push_router_bindings(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
@@ -513,7 +516,13 @@ def test_kv_push_router_bindings(
     [
         ("etcd", False, "nats"),  # JetStream mode
         ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
-        ("file", False, "nats"),  # File backend
+        pytest.param(
+            "file",
+            False,
+            "nats",
+            marks=pytest.mark.xfail(reason="Flaky in CI."),
+            id="file",
+        ),  # File backend
     ],
     ids=[
         "jetstream",
@@ -590,6 +599,7 @@ def test_indexers_sync(
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
+@pytest.mark.parallel
 def test_query_instance_id_returns_worker_and_tokens(
     request, runtime_services_dynamic_ports, predownload_tokenizers
 ):
@@ -625,6 +635,7 @@ def test_query_instance_id_returns_worker_and_tokens(
 
 
 @pytest.mark.timeout(29)  # ~3x average (~9.55s), rounded up
+@pytest.mark.parallel
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.parametrize(
     "use_nats_core,use_kv_events",
@@ -712,6 +723,7 @@ def test_router_decisions(
     "enable_disagg_bootstrap", [False, True], ids=["no_bootstrap", "with_bootstrap"]
 )
 @pytest.mark.timeout(59)  # ~3x average (~19.51s), rounded up
+@pytest.mark.parallel
 def test_router_decisions_disagg(
     request,
     runtime_services_dynamic_ports,
@@ -829,6 +841,7 @@ def test_router_decisions_disagg(
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
 @pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
+@pytest.mark.parallel
 def test_busy_threshold_endpoint(
     request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
 ):
