@@ -9,7 +9,7 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
-    discovery::{DiscoveryQuery, watch_and_extract_field},
+    discovery::{DiscoveryQuery, EventTransportKind, watch_and_extract_field},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -50,7 +50,7 @@ use crate::{
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
-        subscriber::{start_kv_router_background, start_kv_router_background_nats_core},
+        subscriber::{start_kv_router_background, start_kv_router_background_event_plane},
     },
     local_model::runtime_config::ModelRuntimeConfig,
     model_card::ModelDeploymentCard,
@@ -420,13 +420,25 @@ impl KvRouter {
 
             tracing::info!("Found {count} worker(s), starting KV event subscriber");
 
+            let transport_kind = EventTransportKind::from_env_or_default();
+
             // Start subscriber - setup runs synchronously, then spawns background loop internally
             if all_local_indexer {
-                tracing::info!(
-                    "All {count} workers have local_indexer enabled, using NATS Core subscription"
-                );
+                if transport_kind == EventTransportKind::Zmq {
+                    if kv_router_config.router_snapshot_threshold.is_some()
+                        || kv_router_config.router_reset_states
+                    {
+                        tracing::warn!(
+                            "ZMQ event plane does not support KV snapshots or state reset; ignoring snapshot/reset settings"
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                    );
+                }
 
-                start_kv_router_background_nats_core(
+                start_kv_router_background_event_plane(
                     component.clone(),
                     kv_indexer.event_sender(),
                     kv_indexer.remove_worker_sender(),
@@ -435,9 +447,15 @@ impl KvRouter {
                         component.clone(),
                         runtime_configs_rx.clone(),
                     ),
+                    transport_kind,
                 )
                 .await?;
             } else {
+                if transport_kind == EventTransportKind::Zmq {
+                    tracing::warn!(
+                        "Not all workers have local_indexer enabled; falling back to JetStream for durability"
+                    );
+                }
                 tracing::info!(
                     "Not all workers have local_indexer enabled, using JetStream subscription"
                 );
@@ -596,7 +614,7 @@ impl KvRouter {
     pub async fn get_potential_loads(&self, tokens: &[u32]) -> Result<Vec<PotentialLoad>> {
         let isl_tokens = tokens.len();
         let block_hashes = compute_block_hash_for_seq(tokens, self.block_size, None);
-        let overlap_scores = self.indexer.find_matches(block_hashes).await?;
+        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
         let maybe_seq_hashes = self
             .kv_router_config

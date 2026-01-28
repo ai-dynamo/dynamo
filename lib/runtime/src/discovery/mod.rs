@@ -133,10 +133,17 @@ pub enum EventTransport {
         /// Subject prefix (e.g., "namespace.dynamo.component.backend")
         subject_prefix: String,
     },
-    /// ZMQ pub/sub - endpoint address
+    /// ZMQ pub/sub - endpoint address (direct mode)
     Zmq {
         /// ZMQ endpoint (e.g., "tcp://host:port")
         endpoint: String,
+    },
+    /// ZMQ broker endpoints (broker mode) - for discovery of brokers
+    ZmqBroker {
+        /// XSUB endpoints (publishers connect here)
+        xsub_endpoints: Vec<String>,
+        /// XPUB endpoints (subscribers connect here)
+        xpub_endpoints: Vec<String>,
     },
 }
 
@@ -145,7 +152,7 @@ impl EventTransport {
     pub fn kind(&self) -> EventTransportKind {
         match self {
             Self::Nats { .. } => EventTransportKind::Nats,
-            Self::Zmq { .. } => EventTransportKind::Zmq,
+            Self::Zmq { .. } | Self::ZmqBroker { .. } => EventTransportKind::Zmq,
         }
     }
 
@@ -164,10 +171,14 @@ impl EventTransport {
     }
 
     /// Get the subject prefix (NATS) or endpoint (ZMQ)
+    /// For ZmqBroker, returns the first XSUB endpoint
     pub fn address(&self) -> &str {
         match self {
             Self::Nats { subject_prefix } => subject_prefix,
             Self::Zmq { endpoint } => endpoint,
+            Self::ZmqBroker { xsub_endpoints, .. } => {
+                xsub_endpoints.first().map(|s| s.as_str()).unwrap_or("")
+            }
         }
     }
 }
