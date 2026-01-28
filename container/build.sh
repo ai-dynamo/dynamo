@@ -128,7 +128,7 @@ VLLM_RUNTIME_IMAGE_TAG="12.9.1-runtime-ubuntu24.04"
 VLLM_RUNTIME_IMAGE_TAG_CU13="13.0.2-runtime-ubuntu24.04"
 
 NONE_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-NONE_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+NONE_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 
 
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
