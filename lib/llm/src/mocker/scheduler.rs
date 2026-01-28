@@ -456,17 +456,8 @@ async fn simulate_decode(
 
     state.reset_active_tokens();
 
-    // Compute elapsed time and adjust sleep duration for accuracy
-    let elapsed = start_time.elapsed();
-    let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
-    let sleep_duration = expected_sleep.saturating_sub(elapsed);
-    if sleep_duration > Duration::ZERO {
-        tokio::time::sleep(sleep_duration).await;
-    }
-
-    // Process decoding - first process all KV signals
+    // Process decoding
     let uuids: Vec<Uuid> = state.decode.keys().cloned().collect();
-
     for uuid in uuids {
         let Some(sequence) = state.run(uuid) else {
             continue;
@@ -505,6 +496,14 @@ async fn simulate_decode(
         if send_failed || is_complete {
             state.complete(&uuid);
         }
+    }
+
+    // Compute elapsed time and adjust sleep duration for accuracy
+    let elapsed = start_time.elapsed();
+    let expected_sleep = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+    let sleep_duration = expected_sleep.saturating_sub(elapsed);
+    if sleep_duration > Duration::ZERO {
+        tokio::time::sleep(sleep_duration).await;
     }
 
     total_time
