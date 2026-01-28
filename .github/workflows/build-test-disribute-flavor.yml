@@ -266,6 +266,7 @@ jobs:
             echo "✅ Sanity check passed"
           fi
       - name: Run tests
+        if: ! (matrix.platform.arch == 'arm64' && inputs.framework == 'trtllm') # trtllm tests on arm64 are not supported
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
