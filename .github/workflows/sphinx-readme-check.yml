@@ -85,17 +85,18 @@ jobs:
           path: docs-output
           retention-days: 7
 
-      - name: Summary
-        if: always()
+      - name: Summary - Success
+        if: success()
         run: |
-          if [ $? -eq 0 ]; then
-            echo "## ✅ Sphinx Documentation Check Passed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "All README files and documentation were successfully validated by Sphinx." >> $GITHUB_STEP_SUMMARY
-            echo "No warnings or errors were found." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "## ❌ Sphinx Documentation Check Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "Sphinx found warnings or errors in the documentation." >> $GITHUB_STEP_SUMMARY
-            echo "Please review the build logs above and fix all issues before merging." >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "## ✅ Sphinx Documentation Check Passed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All README files and documentation were successfully validated by Sphinx." >> $GITHUB_STEP_SUMMARY
+          echo "No warnings or errors were found." >> $GITHUB_STEP_SUMMARY
+
+      - name: Summary - Failure
+        if: failure()
+        run: |
+          echo "## ❌ Sphinx Documentation Check Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Sphinx found warnings or errors in the documentation." >> $GITHUB_STEP_SUMMARY
+          echo "Please review the build logs above and fix all issues before merging." >> $GITHUB_STEP_SUMMARY
