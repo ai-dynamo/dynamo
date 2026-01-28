@@ -137,3 +137,10 @@ frontend:
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
+
+rust:
+  - '.github/workflows/pre-merge.yml'
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'deny.toml'
