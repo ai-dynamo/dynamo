@@ -196,7 +196,7 @@ helm install dynamo-platform ./platform/ \
   --create-namespace \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set imagePullSecrets[0].name=docker-imagepullsecret \
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
   --set etcd.enabled=false
 ```
 
