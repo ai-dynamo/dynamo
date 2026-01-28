@@ -253,9 +253,9 @@ pub fn validate_block_transfer(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-nixl"))]
 mod tests {
-    use super::super::tests::*;
+    use super::tests::*;
     use super::*;
 
     #[test]

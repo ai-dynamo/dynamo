@@ -49,8 +49,8 @@ pub mod preferences;
 pub mod strategy;
 pub mod validation;
 
-#[cfg(test)]
-mod tests;
+#[cfg(all(test, feature = "testing-nixl"))]
+pub(super) mod tests;
 
 // Re-export StorageKind
 pub use crate::block_manager::v2::memory::StorageKind;
