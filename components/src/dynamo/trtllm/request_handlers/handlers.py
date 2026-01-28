@@ -7,6 +7,8 @@ from typing import Optional
 from tensorrt_llm.llmapi import DisaggregatedParams
 
 from dynamo._core import Context
+from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
+from dynamo.common.multimodal.async_encoder_cache import AsyncEncoderCache
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.encode_helper import EncodeHelper
 from dynamo.trtllm.request_handlers.handler_base import (
@@ -31,6 +33,12 @@ class RequestHandlerFactory:
             raise ValueError(
                 f"Invalid disaggregation_mode '{config.disaggregation_mode.value}'"
             )
+        if config.disaggregation_mode.value == "prefill":
+            # Create encoder cache for prefill handler
+            capacity_bytes = int(config.encoder_cache_capacity_gb * 1024**3)
+            cache_manager = EncoderCacheManager(capacity_bytes)
+            encoder_cache = AsyncEncoderCache(cache_manager)
+            return PrefillHandler(config, encoder_cache=encoder_cache)
         return self.handlers[config.disaggregation_mode.value](config)
 
 
@@ -93,8 +101,13 @@ class PrefillHandler(HandlerBase):
     Handler for prefill-only workers in disaggregated serving.
     """
 
-    def __init__(self, config: RequestHandlerConfig):
+    def __init__(
+        self,
+        config: RequestHandlerConfig,
+        encoder_cache: AsyncEncoderCache,
+    ):
         super().__init__(config)
+        self._encoder_cache = encoder_cache
 
     async def remote_encode_full_epd(self, request: dict):
         """
