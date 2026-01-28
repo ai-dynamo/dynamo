@@ -124,6 +124,45 @@ impl KvConnectorWorker {
             failed_block_ids: HashSet::new(),
         })
     }
+
+    // TODO: Move this out of the bindings
+    /// Drains pending failures from the scheduler and accumulates failed block IDs.
+    fn process_pending_failures(&mut self) {
+        let failures = self.connector.drain_failures();
+        for (request_id, failed_uuids) in failures {
+            if let Some(uuid_to_blocks) = self.request_to_blocks.get(&request_id) {
+                for uuid in failed_uuids {
+                    if let Some(block_ids) = uuid_to_blocks.get(&uuid) {
+                        for &block_id in block_ids {
+                            self.failed_block_ids.insert(block_id as u32);
+                        }
+                        tracing::warn!(
+                            request_id = %request_id,
+                            operation_id = %uuid,
+                            block_ids = ?block_ids,
+                            "load operation failed; marking blocks as failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cleans up tracking state for a finished onboarding request.
+    ///
+    /// This method ensures failures are processed before removing the block ID mapping,
+    /// preserving the failure->block correlation.
+    fn cleanup_onboarding_request(&mut self, request_id: &str) {
+        // Process any pending failures first (ensures we can still map to block IDs)
+        self.process_pending_failures();
+
+        // Now safe to remove tracking state
+        self.maybe_finished_onboarding.remove(request_id);
+        self.request_to_blocks.remove(request_id);
+        if self.connector.has_slot(request_id) {
+            self.connector.remove_slot(request_id);
+        }
+    }
 }
 
 impl Worker for KvConnectorWorker {
@@ -470,41 +509,19 @@ impl Worker for KvConnectorWorker {
             }
         }
 
-        // remove the finished requests from the maybe finished set
+        // Clean up finished onboarding requests
         for request_id in &is_finished_onboarding {
-            self.maybe_finished_onboarding.remove(request_id);
-            // Clean up block_ids tracking for this request
-            self.request_to_blocks.remove(request_id);
-            if self.connector.has_slot(request_id) {
-                self.connector.remove_slot(request_id);
-            }
+            self.cleanup_onboarding_request(request_id);
         }
 
         (is_finished_offloading, is_finished_onboarding)
     }
 
     fn get_block_ids_with_load_errors(&mut self) -> HashSet<u32> {
-        // Drain failures from the scheduler and convert (request_id, uuid) -> block_ids
-        let failures = self.connector.drain_failures();
-        for (request_id, failed_uuids) in failures {
-            if let Some(uuid_to_blocks) = self.request_to_blocks.get(&request_id) {
-                for uuid in failed_uuids {
-                    if let Some(block_ids) = uuid_to_blocks.get(&uuid) {
-                        for &block_id in block_ids {
-                            self.failed_block_ids.insert(block_id as u32);
-                        }
-                        tracing::warn!(
-                            request_id = %request_id,
-                            operation_id = %uuid,
-                            block_ids = ?block_ids,
-                            "load operation failed; marking blocks as failed"
-                        );
-                    }
-                }
-            }
-        }
+        // Process any remaining failures that haven't been handled yet
+        self.process_pending_failures();
 
-        // Return and clear the failed block IDs
+        // Return and clear the accumulated failed block IDs
         std::mem::take(&mut self.failed_block_ids)
     }
 }
