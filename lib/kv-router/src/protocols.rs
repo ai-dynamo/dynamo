@@ -454,6 +454,105 @@ impl<'de> Deserialize<'de> for ExternalSequenceBlockHash {
 }
 
 // ------
+// Router Event Types
+// ------
+
+/// Errors that can occur during KV Cache Event processing.
+#[derive(Debug, thiserror::Error)]
+pub enum KvCacheEventError {
+    #[error("Failed to find parent block")]
+    ParentBlockNotFound,
+
+    #[error("Failed to find block")]
+    BlockNotFound,
+
+    #[error("Invalid block sequence")]
+    InvalidBlockSequence,
+}
+
+/// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RouterEvent {
+    /// The ID of the worker emitting the event.
+    pub worker_id: WorkerId,
+    /// The cache event associated with the worker.
+    pub event: KvCacheEvent,
+}
+
+impl RouterEvent {
+    /// Create a new `RouterEvent`.
+    ///
+    /// ### Arguments
+    ///
+    /// * `worker_id` - The ID of the worker emitting the event.
+    /// * `event` - The cache event.
+    ///
+    /// ### Returns
+    ///
+    /// A new `RouterEvent`.
+    pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
+        Self { worker_id, event }
+    }
+}
+
+/// Scores representing the overlap of workers (with their dp_rank).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlapScores {
+    /// Map of worker (with dp_rank) to score.
+    pub scores: std::collections::HashMap<WorkerWithDpRank, u32>,
+    /// List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
+    pub frequencies: Vec<usize>,
+    /// Map of worker to their tree size (number of blocks in the tree for that worker).
+    pub tree_sizes: std::collections::HashMap<WorkerWithDpRank, usize>,
+}
+
+impl Default for OverlapScores {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OverlapScores {
+    /// Create a new `OverlapScores`.
+    ///
+    /// ### Returns
+    ///
+    /// A new `OverlapScores`.
+    pub fn new() -> Self {
+        Self {
+            scores: std::collections::HashMap::new(),
+            frequencies: Vec::with_capacity(32),
+            tree_sizes: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Update the scores with a set of workers.
+    ///
+    /// ### Arguments
+    ///
+    /// * `workers` - An iterator over `WorkerWithDpRank` references.
+    pub fn update_scores<'a, I>(&mut self, workers: I)
+    where
+        I: IntoIterator<Item = &'a WorkerWithDpRank>,
+    {
+        for worker in workers {
+            let score = self.scores.entry(*worker).or_insert(0);
+            *score += 1;
+        }
+    }
+
+    /// Add an entry in the frequency list.
+    pub fn add_frequency(&mut self, frequency: usize) {
+        if frequency != 0 {
+            self.frequencies
+                .last()
+                .inspect(|elem| debug_assert!(**elem >= frequency));
+            self.frequencies.push(frequency);
+        }
+    }
+}
+
+// ------
 // TokensWithHashes
 // ------
 
@@ -556,7 +655,66 @@ impl TokensWithHashes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde_json;
+
+    #[test]
+    fn test_router_event_new() {
+        let worker_id = 0;
+        let kv_cache_event = KvCacheEvent {
+            event_id: 1,
+            data: KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: None,
+                blocks: vec![KvCacheStoredBlockData {
+                    block_hash: ExternalSequenceBlockHash(0),
+                    mm_extra_info: None,
+                    tokens_hash: LocalBlockHash(13226331709069118873),
+                }],
+            }),
+            dp_rank: 0,
+        };
+        let router_event = RouterEvent::new(worker_id, kv_cache_event);
+
+        assert_eq!(router_event.worker_id, worker_id);
+        assert_eq!(router_event.event.event_id, 1);
+        if let KvCacheEventData::Stored(store_op) = &router_event.event.data {
+            assert_eq!(store_op.blocks.len(), 1);
+            assert_eq!(
+                store_op.blocks[0].tokens_hash,
+                compute_block_hash(b"test data")
+            );
+            assert_eq!(store_op.blocks[0].block_hash, ExternalSequenceBlockHash(0));
+        } else {
+            panic!("Expected KvCacheEventData::Stored");
+        }
+    }
+
+    #[test]
+    fn test_overlap_scores_default() {
+        let overlap_scores: OverlapScores = Default::default();
+        assert!(overlap_scores.scores.is_empty());
+    }
+
+    #[rstest]
+    #[case(11)]
+    #[case(32)]
+    #[case(64)]
+    fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
+        // create a sequence of kv_block_size elements
+        let sequence = (0..kv_block_size).collect::<Vec<u32>>();
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
+        assert_eq!(hashes.len(), 1);
+
+        // create a sequence of kv_block_size + 1 elements
+        let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
+        assert_eq!(hashes.len(), 1);
+
+        // create a sequence of 2 * kv_block_size + 1 elements
+        let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
+        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
+        assert_eq!(hashes.len(), 2);
+    }
 
     #[test]
     fn test_local_block_hash_serialization() {
