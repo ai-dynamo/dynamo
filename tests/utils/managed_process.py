@@ -35,7 +35,7 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
 
 
 def terminate_process_tree(
-    pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
+    pid, logger=logging.getLogger(), immediate_kill=False, timeout=2
 ):
     try:
         parent = psutil.Process(pid)
@@ -277,7 +277,7 @@ class ManagedProcess:
                 )
             self._tee_proc = None
 
-    def _terminate_process_group(self, timeout: float = 5.0):
+    def _terminate_process_group(self, timeout: float = 2.0):
         """Terminate the entire process group/session started for the child.
 
         This catches cases where the launcher shell exits and its children are reparented,
@@ -296,10 +296,23 @@ class ManagedProcess:
             )
             return
 
-        # Give processes a brief moment to exit gracefully
-        time.sleep(timeout)
+        # Poll for process exit instead of fixed sleep to minimize teardown time
+        poll_interval = 0.1
+        elapsed = 0.0
+        while elapsed < timeout:
+            try:
+                # Check if any process in the group is still alive
+                os.killpg(self._pgid, 0)  # Signal 0 = check existence
+            except ProcessLookupError:
+                # Process group no longer exists - done
+                return
+            except Exception:
+                # Other errors (e.g., permission) - assume done
+                return
+            time.sleep(poll_interval)
+            elapsed += poll_interval
 
-        # Force kill if anything remains
+        # Force kill if anything remains after timeout
         try:
             os.killpg(self._pgid, signal.SIGKILL)
         except ProcessLookupError:

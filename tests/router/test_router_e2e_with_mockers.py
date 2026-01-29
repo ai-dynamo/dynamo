@@ -323,8 +323,15 @@ class DisaggMockerProcess:
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "use_nats_core", [True], indirect=True
+)  # Use NATS Core (local indexer)
 def test_mocker_kv_router(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    use_nats_core,
 ):
     """
     Test KV router with multiple mocker engine instances.
@@ -335,8 +342,12 @@ def test_mocker_kv_router(
     # runtime_services starts etcd and optionally nats based on request_plane
     logger.info(f"Starting mocker KV router test with request_plane={request_plane}")
 
-    # Create mocker args dictionary
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Create mocker args dictionary - use local indexer (NATS Core mode)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": use_nats_core,
+    }
 
     try:
         # Start mocker instances with the new CLI interface
@@ -372,6 +383,9 @@ def test_mocker_kv_router(
 
 
 @pytest.mark.parametrize("store_backend", ["etcd", "file"])
+@pytest.mark.parametrize(
+    "use_nats_core", [True], indirect=True
+)  # Use NATS Core (local indexer)
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up
 def test_mocker_two_kv_router(
     request,
@@ -379,6 +393,7 @@ def test_mocker_two_kv_router(
     predownload_tokenizers,
     file_storage_backend,
     store_backend,
+    use_nats_core,
 ):
     """
     Test with two KV routers and multiple mocker engine instances.
@@ -391,8 +406,12 @@ def test_mocker_two_kv_router(
         f"Starting mocker two KV router test with {store_backend} storage backend"
     )
 
-    # Create mocker args dictionary
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Create mocker args dictionary - use local indexer (NATS Core mode)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": use_nats_core,
+    }
 
     try:
         # Start mocker instances with the new CLI interface
@@ -420,6 +439,7 @@ def test_mocker_two_kv_router(
             test_payload=TEST_PAYLOAD,
             num_requests=NUM_REQUESTS,
             store_backend=store_backend,
+            skip_consumer_verification=use_nats_core,  # Skip JetStream checks in NATS Core mode
         )
 
     finally:
@@ -428,17 +448,21 @@ def test_mocker_two_kv_router(
 
 
 @pytest.mark.skip(reason="Flaky, temporarily disabled")
+@pytest.mark.parametrize(
+    "use_nats_core", [True], indirect=True
+)  # Use NATS Core (local indexer)
 @pytest.mark.timeout(60)  # ~3x average (~19.86s), rounded up (when enabled)
 def test_mocker_kv_router_overload_503(
-    request, runtime_services_dynamic_ports, predownload_tokenizers
+    request, runtime_services_dynamic_ports, predownload_tokenizers, use_nats_core
 ):
     """Test that KV router returns 503 when mocker workers are overloaded."""
     logger.info("Starting mocker KV router overload test for 503 status")
-    # Create mocker args dictionary with limited resources
+    # Create mocker args dictionary with limited resources - use local indexer (NATS Core mode)
     mocker_args = {
         "speedup_ratio": 10,
         "block_size": 4,  # Smaller block size
         "num_gpu_blocks": 64,  # Limited GPU blocks to exhaust quickly
+        "enable_local_indexer": use_nats_core,
     }
 
     try:
@@ -468,12 +492,24 @@ def test_mocker_kv_router_overload_503(
 
 @pytest.mark.timeout(22)  # ~3x average (~7.10s), rounded up
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "use_nats_core", [True], indirect=True
+)  # Use NATS Core (local indexer)
 def test_kv_push_router_bindings(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    use_nats_core,
 ):
     """Test KvPushRouter Python bindings with mocker engines."""
     logger.info("Starting KvPushRouter bindings test")
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Use local indexer (NATS Core mode)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": use_nats_core,
+    }
 
     try:
         # Start mocker instances
@@ -507,19 +543,19 @@ def test_kv_push_router_bindings(
             mockers.__exit__(None, None, None)
 
 
-# NO @pytest.mark.parallel - nats_core variant stops/restarts NATS
 @pytest.mark.parametrize(
     "store_backend,use_nats_core,request_plane",
     [
-        ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # NATS core mode (with gap detection)
-        ("file", False, "nats"),  # File backend
+        ("etcd", False, "nats"),  # JetStream mode - uses JetStream (default)
+        ("etcd", True, "tcp"),  # NATS core mode (with gap detection) - no JetStream
+        ("file", False, "nats"),  # File backend - uses JetStream (default)
     ],
     ids=[
         "jetstream",
         "nats_core",
         "file",
     ],
+    indirect=["request_plane", "use_nats_core"],
 )
 @pytest.mark.timeout(90)  # TODO: figure out a timeout
 def test_indexers_sync(
@@ -590,12 +626,20 @@ def test_indexers_sync(
 
 
 @pytest.mark.timeout(42)  # ~3x average (~13.80s), rounded up
+@pytest.mark.parametrize(
+    "use_nats_core", [True], indirect=True
+)  # Use NATS Core (local indexer)
 def test_query_instance_id_returns_worker_and_tokens(
-    request, runtime_services_dynamic_ports, predownload_tokenizers
+    request, runtime_services_dynamic_ports, predownload_tokenizers, use_nats_core
 ):
     """Test query_instance_id annotation with mocker engines."""
     logger.info("Starting KV router query_instance_id annotation test")
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Use local indexer (NATS Core mode)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": use_nats_core,
+    }
     os.makedirs(request.node.name, exist_ok=True)
 
     try:
@@ -629,11 +673,12 @@ def test_query_instance_id_returns_worker_and_tokens(
 @pytest.mark.parametrize(
     "use_nats_core,use_kv_events",
     [
-        (False, True),  # JetStream mode (default)
-        (True, True),  # NATS Core + local indexer mode
-        (False, False),  # Approximate mode (--no-kv-events)
+        (False, True),  # JetStream mode (default) - uses JetStream
+        (True, True),  # NATS Core + local indexer mode - no JetStream
+        (False, False),  # Approximate mode (--no-kv-events) - uses JetStream
     ],
     ids=["jetstream", "nats_core", "no_kv_events"],
+    indirect=["use_nats_core"],
 )
 def test_router_decisions(
     request,
@@ -828,9 +873,16 @@ def test_router_decisions_disagg(
 
 
 @pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize(
+    "use_nats_core", [True], indirect=True
+)  # Use NATS Core (local indexer)
 @pytest.mark.timeout(39)  # ~3x average (~12.84s), rounded up
 def test_busy_threshold_endpoint(
-    request, runtime_services_dynamic_ports, predownload_tokenizers, request_plane
+    request,
+    runtime_services_dynamic_ports,
+    predownload_tokenizers,
+    request_plane,
+    use_nats_core,
 ):
     """Test that the /busy_threshold endpoint can be hit and responds correctly.
 
@@ -846,7 +898,12 @@ def test_busy_threshold_endpoint(
         f"Starting busy_threshold endpoint test with request_plane={request_plane}"
     )
 
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    # Use local indexer (NATS Core mode)
+    mocker_args = {
+        "speedup_ratio": SPEEDUP_RATIO,
+        "block_size": BLOCK_SIZE,
+        "enable_local_indexer": use_nats_core,
+    }
 
     try:
         logger.info(f"Starting {NUM_MOCKERS} mocker instances")

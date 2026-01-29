@@ -55,9 +55,9 @@ const WORKER_QUERY_INITIAL_BACKOFF_MS: u64 = 200;
 // Discovery Helpers
 // ============================================================================
 
-/// Wait for at least one worker instance to be discovered.
-/// Returns a peekable stream of discovery events for the generate endpoint.
-async fn wait_for_worker_instance(
+/// Get the instance discovery stream for monitoring worker add/remove events.
+/// Waits for at least one instance to be discovered before returning.
+async fn get_instance_discovery_stream(
     component: &Component,
     cancellation_token: &CancellationToken,
 ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<DiscoveryEvent>> + Send>>> {
@@ -524,7 +524,7 @@ pub async fn start_kv_router_background(
 
     // Wait for at least one worker instance before proceeding
     let mut instance_event_stream =
-        wait_for_worker_instance(&component, &cancellation_token).await?;
+        get_instance_discovery_stream(&component, &cancellation_token).await?;
 
     // Watch for router deletions to clean up orphaned consumers via discovery
     let generate_endpoint = component.endpoint("generate");
@@ -762,7 +762,7 @@ pub async fn start_kv_router_background_event_plane(
     kv_events_tx: mpsc::Sender<RouterEvent>,
     remove_worker_tx: mpsc::Sender<WorkerId>,
     cancellation_token: CancellationToken,
-    worker_query_client: WorkerQueryClient,
+    mut worker_query_client: WorkerQueryClient,
     transport_kind: EventTransportKind,
 ) -> Result<()> {
     // Subscribe to KV events using the selected event plane transport
@@ -792,43 +792,34 @@ pub async fn start_kv_router_background_event_plane(
         }
     }
 
-    // Wait for at least one worker instance before proceeding
-    let mut instance_event_stream =
-        wait_for_worker_instance(&component, &cancellation_token).await?;
+    // Wait for at least one worker with a known runtime config before proceeding.
+    // This ensures we have actual config data (including enable_local_indexer) available.
+    tracing::info!("KV subscriber waiting for at least one worker with runtime config...");
+    let ready_workers = worker_query_client.wait_for_ready().await;
+    tracing::info!(
+        "KV subscriber found {} worker(s) with runtime config, proceeding",
+        ready_workers.len()
+    );
 
-    // Drain and process all existing workers before spawning the background loop.
-    // list_and_watch returns existing instances first, so we poll with a short timeout
-    // to process all initial workers synchronously before the router becomes "ready".
-    loop {
-        // Use a short timeout to detect when initial discovery events are exhausted
-        let poll_result =
-            tokio::time::timeout(Duration::from_millis(100), instance_event_stream.next()).await;
-
-        match poll_result {
-            Ok(Some(Ok(event))) => {
-                handle_worker_discovery(
-                    event,
-                    &worker_query_client,
-                    &kv_events_tx,
-                    &remove_worker_tx,
-                )
-                .await;
-            }
-            Ok(Some(Err(e))) => {
-                tracing::warn!("Error receiving discovery event during initial sync: {e}");
-            }
-            Ok(None) => {
-                // Stream ended
-                tracing::warn!("Discovery stream ended during initial sync");
-                break;
-            }
-            Err(_) => {
-                // Timeout - no more initial events
-                tracing::debug!("Initial worker discovery sync complete");
-                break;
+    // Recover initial state from all ready workers
+    for worker_id in &ready_workers {
+        if worker_query_client.has_local_indexer(*worker_id) {
+            match recover_from_worker(&worker_query_client, *worker_id, None, None, &kv_events_tx)
+                .await
+            {
+                Ok(count) => {
+                    tracing::info!("Successfully recovered {count} events from worker {worker_id}");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to recover from worker {worker_id}: {e}");
+                }
             }
         }
     }
+
+    // Get instance discovery stream for ongoing monitoring of worker add/remove events
+    let mut instance_event_stream =
+        get_instance_discovery_stream(&component, &cancellation_token).await?;
 
     tokio::spawn(async move {
         // Track last received event ID per worker for gap detection
