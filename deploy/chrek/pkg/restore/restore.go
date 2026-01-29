@@ -28,7 +28,7 @@ func Restore(ctx context.Context, opts *RestoreOptions, log *logrus.Entry) (int,
 
 	// 2. Generate external mount mappings if not already set
 	if opts.ExtMountMaps == nil {
-		extMounts, err := GenerateExtMountMaps(nil)
+		extMounts, err := GenerateExtMountMaps(nil, opts.CheckpointPath)
 		if err != nil {
 			return 0, fmt.Errorf("failed to generate mount maps: %w", err)
 		}
@@ -251,6 +251,18 @@ func Run(ctx context.Context, cfg *Config, log *logrus.Entry) error {
 		} else {
 			log.WithField("path", cfg.RestoreMarkerFile).Info("Wrote restore marker file")
 		}
+	}
+
+	// Prepare nvidia-ctk-hook symlink if needed
+	// NVIDIA Container Toolkit creates tmpfs mounts with random UUIDs, so the checkpoint's
+	// path may not exist in the restore container. Create a symlink to bridge the gap.
+	if ckptPath, restorePath, err := PrepareNvidiaCtkhookSymlink(checkpointPath); err != nil {
+		log.WithError(err).Warn("Failed to prepare nvidia-ctk-hook symlink")
+	} else if ckptPath != "" {
+		log.WithFields(logrus.Fields{
+			"checkpoint_path": ckptPath,
+			"restore_path":    restorePath,
+		}).Info("Created nvidia-ctk-hook symlink for CRIU mount remapping")
 	}
 
 	// Perform CRIU restore (CUDA plugin handles CUDA state automatically)

@@ -1,0 +1,17 @@
+# Quick patch to update vllm main.py, smart-entrypoint.sh, and restore-entrypoint with DYN_ prefix env vars
+# Usage: docker build -f Dockerfile.patch -t schwinns-dynamo-vllm-placeholder:patched .
+
+ARG BASE_IMAGE=nvcr.io/nvidian/dynamo-dev/schwinns-dynamo-vllm-placeholder:latest
+
+FROM ${BASE_IMAGE}
+
+# Copy the updated main.py with DYN_ prefix env vars
+COPY main.py /opt/dynamo/venv/lib/python3.12/site-packages/dynamo/vllm/main.py
+
+# Copy the updated smart-entrypoint.sh with DYN_ prefix env vars
+COPY scripts/smart-entrypoint.sh /smart-entrypoint.sh
+RUN chmod +x /smart-entrypoint.sh
+
+# Copy the updated restore-entrypoint binary with DYN_ prefix env vars
+COPY restore-entrypoint-new /restore-entrypoint
+RUN chmod +x /restore-entrypoint

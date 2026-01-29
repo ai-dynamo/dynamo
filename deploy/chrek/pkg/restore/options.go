@@ -155,7 +155,8 @@ func LoadRestoreOptions(checkpointPath string, logLevel int32) (*RestoreOptions,
 
 	// Pre-generate external mount maps using OCI-derived paths from metadata
 	// This uses masked/readonly paths from the OCI spec instead of hardcoded defaults
-	extMounts, err := GenerateExtMountMaps(meta)
+	// Also handles nvidia-ctk-hook path remapping between checkpoint and restore containers
+	extMounts, err := GenerateExtMountMaps(meta, checkpointPath)
 	if err != nil {
 		// Fall back to defaults if generation fails
 		return opts, nil
