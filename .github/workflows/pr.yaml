@@ -36,54 +36,6 @@ jobs:
   # ============================================================================
 
 
-  tmp-test-work:
-    strategy:
-      fail-fast: false # todo: evaluate this 
-      matrix:
-        platform:
-         - { arch: amd64, runner: prod-tester-amd-gpu-v1 }
-        #  - { arch: arm64, runner: prod-tester-arm-v1 }
-    name: test 
-    runs-on: ${{ matrix.platform.runner }}
-    env:
-      FRAMEWORK: sglang
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-      - name: Calculate target tag
-        id: calculate-target-tag
-        shell: bash
-        run: |
-          TEST_IMAGE=${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_DEFAULT_REGION }}.amazonaws.com/ai-dynamo/dynamo:7cd765ba0d94f51d9ec8e2c3fa80e4138c5cde9f-sglang-cuda12-amd64
-          echo "test_image=${TEST_IMAGE}" >> $GITHUB_OUTPUT
-      - name: Docker Login
-        uses: ./.github/actions/docker-login
-        with:
-          aws_default_region: ${{ secrets.AWS_DEFAULT_REGION }}
-          aws_account_id: ${{ secrets.AWS_ACCOUNT_ID }}
-          azure_acr_hostname: ${{ secrets.AZURE_ACR_HOSTNAME }}
-          azure_acr_user: ${{ secrets.AZURE_ACR_USER }}
-          azure_acr_password: ${{ secrets.AZURE_ACR_PASSWORD }}
-      - name: Pull relevant images
-        shell: bash
-        run: |
-          start_time=$(date +%s)
-          docker pull ${{ steps.calculate-target-tag.outputs.test_image }}
-          docker pull quay.io/minio/minio
-          end_time=$(date +%s)
-          duration=$((end_time - start_time))
-          echo "⏱️ Image pull duration: ${duration}s"
-      - name: Run tests
-        uses: ./.github/actions/pytest
-        with:
-          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', inputs.framework ) || format('pre_merge and {0} and gpu_0', inputs.framework ) }}
-          framework: sglang
-          test_type: "pre_merge"
-          platform_arch: ${{ matrix.platform.arch }}
-          enable_mypy: 'true'
-          hf_token: ${{ secrets.HF_TOKEN }}
-
   changed-files:
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
@@ -239,61 +191,61 @@ jobs:
 #           done
 
 
-# # ============================================================================
-# # FRAMEWORK PIPELINES (Build → Test → Copy)
-# # ============================================================================
-#   vllm-pipeline:
-#     needs: [changed-files]
-#     uses: ./.github/workflows/build-test-disribute-flavor.yml
-#     # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
-#     with:
-#       framework: vllm
-#       platforms: '["amd64", "arm64"]'
-#       cuda_versions: '["12.9", "13.0"]'
-#       extra_tags: |
-#         ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
-#         ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
-#       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-#       build_image: true
-#       run_tests: true
-#       copy_to_acr: true
-#       push_image: true
-#     secrets: inherit
+# ============================================================================
+# FRAMEWORK PIPELINES (Build → Test → Copy)
+# ============================================================================
+  vllm-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'vllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.vllm == 'true'
+    with:
+      framework: vllm
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-vllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-vllm-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      build_image: true
+      run_tests: true
+      copy_to_acr: true
+      push_image: true
+    secrets: inherit
 
-#   sglang-pipeline:
-#     needs: [changed-files]
-#     uses: ./.github/workflows/build-test-disribute-flavor.yml
-#     # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
-#     with:
-#       framework: sglang
-#       platforms: '["amd64", "arm64"]'
-#       cuda_versions: '["12.9", "13.0"]'
-#       extra_tags: |
-#         ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
-#         ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
-#       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-#       run_tests: true 
-#       copy_to_acr: true
-#     secrets: inherit
+  sglang-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    with:
+      framework: sglang
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_tests: true 
+      copy_to_acr: true
+    secrets: inherit
 
-#   trtllm-pipeline:
-#     needs: [changed-files]
-#     uses: ./.github/workflows/build-test-disribute-flavor.yml
-#     # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
-#     with:
-#       framework: trtllm
-#       platforms: '["amd64", "arm64"]'
-#       cuda_versions: '["12.9"]'
-#       extra_tags: |
-#         ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
-#         ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
-#       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
-#       builder_name: ${{ needs.changed-files.outputs.builder_name }}
-#       run_tests: true 
-#       copy_to_acr: true
-#     secrets: inherit
+  trtllm-pipeline:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'trtllm') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.trtllm == 'true'
+    with:
+      framework: trtllm
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-trtllm' || '' }}
+        ${{ github.ref_name == 'main' && format('main-trtllm-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_tests: true 
+      copy_to_acr: true
+    secrets: inherit
 
 
 #    # ============================================================================
