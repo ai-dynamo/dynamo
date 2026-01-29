@@ -21,8 +21,6 @@ spec:
               value: "128"
             - name: DYN_MODEL
               value: "RedHatAI/Llama-3.3-70B-Instruct-FP8-dynamic"
-            - name: DYN_DISCOVERY_TIMEOUT
-              value: "300"
       eppConfig:
         # This configuration uses Dynamo's KV-aware scorer for intelligent routing
         config:
