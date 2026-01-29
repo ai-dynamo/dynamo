@@ -74,21 +74,32 @@ jobs:
           echo "--- Docker Interface Check (if exists) ---"
           # Check for docker0 or other interfaces in /sys/class/net/
           ls -l /sys/class/net/
+      - name: 🚑 Fix Network MTU
+        run: |
+          # Force the docker bridge to a safe lower value
+          # We use 'ip link' inside the dind container context if possible,
+          # but often running this on the runner container works if they share the net namespace.
 
-      # - name: Set up Go
-      #   uses: actions/setup-go@v5
-      #   with:
-      #     go-version: '1.24'
-      # - name: Install dependencies
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     # Install system dependencies from apt
-      #     sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
-      #     # Install Rust (cargo + rustc)
-      #     curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
-      #     # Make cargo available to later steps
-      #     echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          sudo ip link set dev docker0 mtu 1440 || echo "docker0 not found yet, that's okay"
+
+          # Crucially, clamp the MSS (Maximum Segment Size) to prevent large packets
+          # This tells TCP connections "don't send me anything bigger than 1400 bytes"
+          sudo iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1400
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Install system dependencies from apt
+          sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
+          # Install Rust (cargo + rustc)
+          curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+          # Make cargo available to later steps
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       # - name: Install cbindgen
       #   shell: bash
       #   run: |
