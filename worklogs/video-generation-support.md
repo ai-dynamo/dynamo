@@ -1,132 +1,316 @@
-# Worklog: Video Generation Support (T2V/I2V)
+# Video Generation Support -- Implementation Deep Dive
 
 **Branch**: `ishan/video`
-**PR**: #5793 (draft)
+**PR**: #5793 (draft), built on image diffusion pattern from #5609
 **Date**: 2026-01-29
-**Base Pattern**: Image Diffusion PR #5609
 
 ---
 
-## Objective
+## What This PR Does
 
-Add video generation support to Dynamo, enabling text-to-video (T2V) and image-to-video (I2V) generation using SGLang's `DiffGenerator` with Wan video models. Exposes an OpenAI-compatible `/v1/videos/generations` HTTP endpoint.
+Adds a `/v1/videos/generations` HTTP endpoint to Dynamo that accepts a text prompt and returns a generated video (MP4). Under the hood, it uses SGLang's `DiffGenerator` class to run a Wan diffusion model (e.g. `Wan-AI/Wan2.1-T2V-1.3B-Diffusers`). Currently supports text-to-video (T2V) only; image-to-video (I2V) is a follow-up.
 
-## Architecture
+## How a Request Flows End-to-End
+
+Here's what happens when you curl the endpoint:
 
 ```
-Client (curl/SDK)
-  |
-  v
-Frontend (Rust/Axum)  -- /v1/videos/generations endpoint
-  |
-  v
-Runtime (etcd discovery, TCP request plane)
-  |
-  v
-Video Worker (Python)
-  |-- VideoGenerationWorkerHandler
-  |     |-- SGLang DiffGenerator (DiffusionPipeline)
-  |     |-- imageio (frames -> MP4)
-  |     |-- fsspec (upload to storage)
-  v
-Response (MP4 URL or base64)
+1. curl POST /v1/videos/generations
+       { "prompt": "A rocket ship", "model": "Wan-AI/...", "num_frames": 17 }
+                |
+                v
+2. Rust Frontend (Axum HTTP server)
+       - openai.rs:videos() handler receives the JSON, deserializes into NvCreateVideoRequest
+       - Looks up the model in ModelManager.videos_engines (populated at startup via etcd)
+       - Calls engine.generate(request) which sends the request over Dynamo's TCP request plane
+                |
+                v
+3. Dynamo Runtime (etcd + TCP)
+       - The video worker registered itself at startup via register_video_generation_model()
+       - etcd stores: "this model exists at this endpoint, type = Videos"
+       - The watcher (watcher.rs) saw the registration and created a PushRouter engine for it
+       - The request plane routes the request to the Python worker
+                |
+                v
+4. Python Video Worker (VideoGenerationWorkerHandler.generate())
+       - Receives request dict, validates into CreateVideoRequest pydantic model
+       - Calculates num_frames (fps * seconds if not explicit)
+       - Calls DiffGenerator.generate() in a thread pool (to not block asyncio)
+       - DiffGenerator runs the Wan diffusion pipeline (denoising loop on GPU)
+       - Returns dict with "frames": list of numpy arrays, each shape (H, W, 3) uint8
+                |
+                v
+5. Frame-to-MP4 Conversion (_frames_to_video)
+       - Takes the list of numpy frame arrays
+       - Uses imageio to encode them into an MP4 in-memory (BytesIO)
+       - Codec: libx264, pixel format: yuv420p
+       - Returns raw MP4 bytes
+                |
+                v
+6. Storage / Response
+       - If response_format="url": writes MP4 bytes to disk via fsspec, returns file:// URL
+       - If response_format="b64_json": base64-encodes the MP4 bytes, returns inline
+       - Wraps in VideoGenerationResponse and yields back through the runtime
+                |
+                v
+7. Back in Rust
+       - The Axum handler collects the streamed response via DeltaAggregator
+       - Returns JSON to the client with the video URL or base64 data
 ```
 
-## Files Changed (22 files, +1154/-9)
+## The Python Side -- What Each File Does
 
-### Python Layer
+### `main.py` -- Worker Startup (`init_video_generation`)
 
-| File | Change |
-|------|--------|
-| `components/src/dynamo/sglang/protocol.py` | Added `CreateVideoRequest`, `VideoData`, `VideoGenerationResponse` Pydantic models |
-| `components/src/dynamo/sglang/args.py` | Added `--video-generation-worker` and `--video-generation-fs-url` CLI args + dataclass fields |
-| `components/src/dynamo/sglang/request_handlers/video_generation/__init__.py` | NEW: module init, exports `VideoGenerationWorkerHandler` |
-| `components/src/dynamo/sglang/request_handlers/video_generation/video_generation_handler.py` | NEW: 375-line handler -- DiffGenerator invocation, frame-to-MP4 conversion (imageio), fsspec upload, base64 encoding |
-| `components/src/dynamo/sglang/request_handlers/__init__.py` | Added video generation handler export |
-| `components/src/dynamo/sglang/health_check.py` | Added `VideoGenerationHealthCheckPayload` class |
-| `components/src/dynamo/sglang/register.py` | Added `register_video_generation_model()` using `ModelType.Videos` + `ModelInput.Text` |
-| `components/src/dynamo/sglang/main.py` | Added `init_video_generation()` (~80 lines), worker dispatch branch for `video_generation_worker` |
+This is the entry point. When you pass `--video-generation-worker`, the `worker()` function in main.py dispatches to `init_video_generation()`. Here's what it does:
 
-### Rust Layer
+1. **Creates the DiffGenerator** (line 540):
+   ```python
+   from sglang.multimodal_gen import DiffGenerator
+   generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
+   ```
+   This loads the Wan model weights onto GPU(s). DiffGenerator handles tensor parallelism internally -- pass `--tp 2` and it shards across 2 GPUs.
 
-| File | Change |
-|------|--------|
-| `lib/llm/src/model_type.rs` | Added `Videos = 1 << 6`, `supports_videos()`, updated `as_vec()`, `units()`, `as_endpoint_types()` |
-| `lib/llm/src/endpoint_type.rs` | Added `Videos` variant, updated `as_str()` and `all()` |
-| `lib/llm/src/protocols/openai.rs` | Added `pub mod videos;` |
-| `lib/llm/src/protocols/openai/videos.rs` | NEW: `NvCreateVideoRequest`, `VideoData`, `NvVideosResponse` |
-| `lib/llm/src/protocols/openai/videos/aggregator.rs` | NEW: `DeltaAggregator` for video response streaming |
-| `lib/llm/src/protocols/openai/videos/nvext.rs` | NEW: `NvExt` struct for NVIDIA extensions |
-| `lib/llm/src/types.rs` | Added `OpenAIVideosUnaryEngine` and `OpenAIVideosStreamingEngine` type aliases |
-| `lib/llm/src/http/service/openai.rs` | Added `videos()` handler and `videos_router()` |
-| `lib/llm/src/http/service/service_v2.rs` | Added `videos_endpoints_enabled` to `StateFlags`, integrated `videos_router` |
-| `lib/llm/src/discovery/model_manager.rs` | Added `videos_engines` field, `add_videos_model()`, `remove_videos_model()`, `get_videos_engine()`, `list_videos_models()` |
-| `lib/llm/src/discovery/watcher.rs` | Added video model discovery in `handle_put()` and `handle_delete()` |
-| `lib/llm/src/http/service/metrics.rs` | Added `Videos` variant to `Endpoint` enum |
+2. **Creates the fsspec filesystem** (line 562):
+   ```python
+   fs = fsspec.filesystem(protocol, auto_mkdir=True)
+   ```
+   This is the storage backend. `file://` for local disk, but also supports `s3://`, `gs://`, `az://`.
 
-### Bindings
+3. **Wires up the Dynamo endpoint** (lines 577-603):
+   ```python
+   component = runtime.namespace(...).component(...)
+   generate_endpoint = component.endpoint(...)
+   handler = VideoGenerationWorkerHandler(component, generator, config, fs=fs)
+   await asyncio.gather(
+       generate_endpoint.serve_endpoint(handler.generate, ...),
+       register_video_generation_model(generator, generate_endpoint, ...),
+   )
+   ```
+   Two things happen concurrently:
+   - `serve_endpoint` starts listening for requests on the TCP request plane
+   - `register_video_generation_model` writes the model info to etcd so the frontend can discover it
 
-| File | Change |
-|------|--------|
-| `lib/bindings/python/rust/lib.rs` | Added `Videos` classattr to PyO3 `ModelType`, added `is_videos` tokenizer skip check |
-| `lib/bindings/python/src/dynamo/_core.pyi` | Added `Videos: ModelType` to type stub |
+### `video_generation_handler.py` -- The Core Handler
 
-## Bugs Found and Fixed During E2E Testing
+This is where the actual work happens. Key methods:
 
-1. **Missing `ModelType.Videos` Python binding** -- `register_video_generation_model` called `ModelType.Videos` which didn't exist in PyO3. Fixed by adding `#[classattr] const Videos` to `lib.rs` and updating `_core.pyi`.
+**`generate(request, context)`** -- The main entry point called by Dynamo runtime for each request. It:
+- Parses the request into `CreateVideoRequest`
+- Calls `_generate_video()` to produce raw MP4 bytes
+- Either uploads to fsspec (`response_format="url"`) or base64-encodes (`response_format="b64_json"`)
+- Yields a single `VideoGenerationResponse` dict
 
-2. **Tokenizer extraction failure for VAE/diffusion models** -- `register_llm` tried to load `tokenizer.json` from the video model directory (no tokenizer exists for diffusion models). Fixed by adding `is_videos` to the tokenizer skip condition in `lib.rs`.
+**`_generate_video(...)`** -- Calls SGLang's DiffGenerator:
+```python
+result = await asyncio.to_thread(
+    self.generator.generate,
+    sampling_params_kwargs=args,
+)
+frames = result.get("frames", [])
+video_bytes = await self._frames_to_video(frames, fps)
+```
+Key detail: `generator.generate()` is a blocking call (runs the full diffusion denoising loop). We run it in `asyncio.to_thread()` so it doesn't block the event loop. The result is a dict with a `"frames"` key containing a list of numpy arrays.
 
-3. **`sgl.Engine` import in health_check.py** -- Intermittent `AttributeError` when SGLang's lazy imports run in subprocess contexts. Pre-existing issue, not introduced by this PR.
+**`_frames_to_video(frames, fps)`** -- Encodes frames to MP4:
+```python
+with imageio.get_writer(buffer, format="mp4", fps=fps, codec="libx264",
+                         output_params=["-pix_fmt", "yuv420p"]) as writer:
+    for frame in np_frames:
+        writer.append_data(frame)
+```
+Uses `imageio-ffmpeg` under the hood. The `yuv420p` pixel format ensures broad compatibility.
 
-## Testing
+**`_upload_to_fs(video_bytes, user_id, request_id)`** -- Saves the MP4:
+```python
+full_path = f"{self.root_path}/{request_id}.mp4"
+await asyncio.to_thread(self.fs.pipe, full_path, video_bytes)
+```
+Files are saved as `{request_id}.mp4` flat in the configured directory.
 
-### SGLang Standalone (passed)
+### `protocol.py` -- Request/Response Types
+
+Pydantic models that define the API contract:
+
+```python
+class CreateVideoRequest(BaseModel):
+    prompt: str                          # Required: what to generate
+    model: str                           # Required: which model
+    seconds: Optional[int] = 4           # Duration
+    fps: Optional[int] = 24              # Frame rate
+    num_frames: Optional[int] = None     # Explicit frame count (overrides fps*seconds)
+    size: Optional[str] = "832x480"      # WxH
+    num_inference_steps: Optional[int] = 50  # Denoising steps (quality vs speed)
+    guidance_scale: float = 5.0          # CFG scale
+    response_format: Optional[str] = "url"   # "url" or "b64_json"
+```
+
+### `register.py` -- Model Registration
+
+```python
+async def register_video_generation_model(generator, endpoint, server_args, ...):
+    await register_llm(ModelInput.Text, ModelType.Videos, endpoint, model_name, model_name)
+```
+This writes to etcd: "model X is available at this endpoint, accepts Text input, produces Videos output". The Rust frontend watcher picks this up and creates a routing engine for it.
+
+### `health_check.py` -- Health Check Payload
+
+A minimal request payload used by Dynamo's readiness probes:
+```python
+class VideoGenerationHealthCheckPayload(HealthCheckPayload):
+    def __init__(self, model_path):
+        self.default_payload = {
+            "prompt": "test",
+            "model": model_path,
+            "num_frames": 8,
+            "size": "256x256",
+            "num_inference_steps": 1,  # Fast: just 1 step
+        }
+```
+
+### `args.py` -- CLI Arguments
+
+Two new flags:
+- `--video-generation-worker`: Tells main.py to run `init_video_generation` instead of a normal LLM worker
+- `--video-generation-fs-url`: Where to store generated videos (e.g. `file:///home/ubuntu/dynamo/videos`)
+
+## The Rust Side -- What Each File Does
+
+The Rust side handles HTTP routing, model discovery, and request forwarding. It doesn't do any video generation itself -- it just routes requests to the Python worker.
+
+### `model_type.rs` -- ModelType Bitflag
+
+```rust
+const Videos = 1 << 6;  // New bit in the ModelType bitflags
+```
+This is how Dynamo categorizes models. When the Python worker registers with `ModelType.Videos`, the Rust layer knows to route `/v1/videos/generations` requests to it. Other existing types: `Chat`, `Completions`, `Embeddings`, `Tensor`, `Images`.
+
+### `endpoint_type.rs` -- EndpointType Enum
+
+```rust
+Videos,  // Maps ModelType::Videos -> EndpointType::Videos
+```
+Used in the HTTP layer to decide which router to mount.
+
+### `videos.rs` (protocol) -- Rust Request/Response Types
+
+Mirror of the Python Pydantic models, but in Rust with serde:
+```rust
+pub struct NvCreateVideoRequest {
+    pub prompt: String,
+    pub model: String,
+    pub num_frames: Option<i32>,
+    // ... etc
+}
+
+pub struct NvVideosResponse {
+    pub id: String,
+    pub data: Vec<VideoData>,
+    pub inference_time_s: Option<f64>,
+    // ... etc
+}
+```
+The Axum handler deserializes the incoming JSON into `NvCreateVideoRequest`, sends it through the runtime, and gets back `NvVideosResponse`.
+
+### `openai.rs` (HTTP handler) -- The `/v1/videos/generations` Endpoint
+
+```rust
+async fn videos(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateVideoRequest>,
+) -> Result<Response, ErrorResponse> {
+    // 1. Look up model in ModelManager
+    let engine = state.manager().get_videos_engine(&model)?;
+    // 2. Send request through the runtime to the Python worker
+    let stream = engine.generate(request).await?;
+    // 3. Collect the response (videos don't stream tokens)
+    let response = NvVideosResponse::from_annotated_stream(stream).await?;
+    // 4. Return JSON
+    Ok(Json(response).into_response())
+}
+```
+
+### `model_manager.rs` -- Engine Management
+
+Stores the routing engine for video models:
+```rust
+videos_engines: RwLock<ModelEngines<OpenAIVideosStreamingEngine>>,
+```
+Methods: `add_videos_model()`, `remove_videos_model()`, `get_videos_engine()`, `list_videos_models()`. These are called by the watcher when models register/deregister via etcd.
+
+### `watcher.rs` -- Model Discovery
+
+Watches etcd for model registration events. When it sees a model with `ModelType::Videos`:
+```rust
+if model_type.supports_videos() {
+    let engine = PushRouter::new(...);
+    manager.add_videos_model(model_name, engine);
+}
+```
+This creates a `PushRouter` engine that forwards requests over the TCP request plane to the Python worker.
+
+### `service_v2.rs` -- Router Assembly
+
+```rust
+if state_flags.videos_endpoints_enabled {
+    let (docs, router) = videos_router(state.clone(), endpoint.path);
+    all_docs.extend(docs);
+    routers.push(router);
+}
+```
+Only mounts the `/v1/videos/generations` route if a video model is registered.
+
+### Python Bindings (`lib.rs`)
+
+Two critical changes:
+1. Expose `ModelType.Videos` to Python so `register_video_generation_model` can reference it
+2. Skip tokenizer loading for video models (diffusion models don't have tokenizers):
+   ```rust
+   let is_videos = model_type.inner.supports_videos();
+   if is_tensor_based || is_images || is_videos {
+       // skip tokenizer extraction
+   }
+   ```
+
+## How to Test
+
 ```bash
-cd ~/sglang
-python -c "
-from sglang.srt.entrypoints.engine import DiffGenerator
-gen = DiffGenerator(model_cfg='Wan-AI/Wan2.1-T2V-1.3B-Diffusers', tp=2)
-out = gen.generate(prompt='A curious raccoon exploring a garden', num_frames=17, height=480, width=832)
-print(type(out), out['frames'][0].shape)
-gen.shutdown()
-"
-```
-Result: 17 frames at 480x832, ~8s warm generation.
+# Install SGLang diffusion deps
+cd ~/sglang && uv pip install -e "python[diffusion]"
 
-### Dynamo E2E (passed)
-```bash
-# Terminal 1: Start worker
-cd ~/dynamo
-python -c "
-import dynamo.sglang.main as m
-import sys
-sys.argv = ['', '--model', 'Wan-AI/Wan2.1-T2V-1.3B-Diffusers',
-            '--video-generation-worker', '--video-generation-fs-url', 'file:///tmp/dynamo_videos',
-            '--tp', '2']
-import asyncio
-asyncio.run(m.worker())
-"
+# Rebuild Dynamo bindings
+cd ~/dynamo/lib/bindings/python && maturin develop --uv
 
-# Terminal 2: Send request
-curl http://localhost:8099/v1/videos/generations \
+# Launch (1.3B model, single GPU)
+bash examples/backends/sglang/launch/t2v.sh --wan-size 1b
+
+# Or 14B model (TP=2, both GPUs)
+bash examples/backends/sglang/launch/t2v.sh --wan-size 14b
+
+# Test
+curl http://localhost:8000/v1/videos/generations \
   -H "Content-Type: application/json" \
-  -d '{"prompt":"A curious raccoon exploring a garden","model":"Wan-AI/Wan2.1-T2V-1.3B-Diffusers","seconds":1,"fps":8,"num_frames":17,"size":"832x480","num_inference_steps":50,"response_format":"b64_json"}'
+  -d '{
+    "prompt": "A rocket ship taking off into space",
+    "model": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+    "num_frames": 17,
+    "size": "832x480",
+    "num_inference_steps": 50,
+    "response_format": "url"
+  }'
 ```
-Result: HTTP 200, valid MP4 video returned as base64.
+
+## Known Limitations
+
+- **No streaming**: The client blocks until the full video is generated (~15s for 1.3B, longer for 14B). DiffGenerator doesn't expose progress callbacks.
+- **No I2V**: The `input_reference` field exists in the protocol but is not wired up yet. Follow-up PR.
+- **Local file URLs**: When `response_format="url"` with `file://`, the returned URL is only accessible on the same machine. For production, use S3/GCS.
 
 ## Dependencies
 
-SGLang diffusion extras required on the worker:
-```bash
-cd ~/sglang && uv pip install -e "python[diffusion]"
-```
-Installs: diffusers, imageio, moviepy, opencv, remote-pdb, st_attn, vsa, etc.
-
-## Next Steps
-
-- [ ] Add I2V support (image-to-video via `input_reference` field)
-- [ ] Add progress streaming for long video generation
-- [ ] Add example YAML configs for video generation deployment
-- [ ] Add integration tests
-- [ ] Review and merge after team feedback on PR #5793
+SGLang diffusion extras (installed via `uv pip install -e "python[diffusion]"`):
+- `diffusers` -- Hugging Face diffusion pipeline
+- `imageio` + `imageio-ffmpeg` -- Frame-to-MP4 encoding
+- `fsspec` -- Filesystem abstraction for storage
+- `torch` -- GPU compute
