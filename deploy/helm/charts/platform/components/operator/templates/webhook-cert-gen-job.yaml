@@ -102,6 +102,14 @@ spec:
     spec:
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-webhook-cert-gen
       restartPolicy: OnFailure
+      {{- with .Values.controllerManager.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.controllerManager.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - name: cert-generator
         image: {{ .Values.webhook.certGenerator.image.repository }}:{{ .Values.webhook.certGenerator.image.tag }}

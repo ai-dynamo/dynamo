@@ -69,7 +69,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
-tmq = "0.5.0"
+tmq = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
