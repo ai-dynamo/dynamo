@@ -115,7 +115,6 @@ jobs:
   sglang-test:
     needs: [changed-files]
     uses: ./.github/workflows/build-test-disribute-flavor.yml
-    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
     with:
       framework: sglang
       platforms: '["amd64", "arm64"]'

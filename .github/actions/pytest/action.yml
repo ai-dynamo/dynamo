@@ -128,17 +128,17 @@ runs:
           if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
-            # CAUTION: If using 1 GPU, running too many parallel tests might OOM.
-            # '-n 4' is a safer default for single-GPU runners than 'auto'.
-            PARALLEL_OPTS="-n 4"
+            # We disable parallelization for GPU runs. Running parallel tests on 1 GPU will likely cause OOM.
+            PARALLEL_OPTS="-n 0"
           else
             echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
             # CPU-only mode: safe to use all available cores
             PARALLEL_OPTS="-n auto"
           fi
+          
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
-          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp/pytest_temp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
