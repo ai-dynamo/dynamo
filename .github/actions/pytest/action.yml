@@ -129,7 +129,7 @@ runs:
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
             # We disable parallelization for GPU runs. Running parallel tests on 1 GPU will likely cause OOM.
-            PARALLEL_OPTS="-n 0"
+            PARALLEL_OPTS="-n 4"
           else
             echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
             # CPU-only mode: safe to use all available cores
