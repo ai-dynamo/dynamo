@@ -51,7 +51,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --disaggregation-mode prefill \
   --encode-endpoint "$ENCODE_ENDPOINT" &
-#   --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  # --custom-jinja-template "$CUSTOM_TEMPLATE" &
 PREFILL_PID=$!
 
 # run decode worker
@@ -62,9 +62,8 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --modality "$MODALITY" \
   --allowed-local-media-path "$ALLOWED_LOCAL_MEDIA_PATH" \
   --max-file-size-mb "$MAX_FILE_SIZE_MB" \
-  --disaggregation-mode decode \
   --disaggregation-mode decode &
-#   --custom-jinja-template "$CUSTOM_TEMPLATE" &
+  # --custom-jinja-template "$CUSTOM_TEMPLATE" &
 DECODE_PID=$!
 
 wait $DYNAMO_PID
