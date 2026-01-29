@@ -114,9 +114,9 @@ spec:
           {{- end }}
           - name: NATS_SERVER
             value: "nats://{{ $platformName }}-nats.{{ $platformNs }}:4222"
-          - name: DYNAMO_NAMESPACE
+          - name: DYN_NAMESPACE
             value: "{{ $ns }}"
-          - name: DYNAMO_KV_BLOCK_SIZE
+          - name: DYN_KV_BLOCK_SIZE
             value: "{{ $kv }}"
           - name: USE_STREAMING
             value: "true"

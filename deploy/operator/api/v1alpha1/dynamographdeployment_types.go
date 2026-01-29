@@ -251,3 +251,23 @@ func (s *DynamoGraphDeployment) HasAnyMultinodeService() bool {
 func (s *DynamoGraphDeployment) GetDynamoNamespaceForService(service *DynamoComponentDeploymentSharedSpec) string {
 	return ComputeDynamoNamespace(service.GlobalDynamoNamespace, s.GetNamespace(), s.GetName())
 }
+
+// HasEPPService returns true if any service in the DGD has EPP component type
+func (dgd *DynamoGraphDeployment) HasEPPService() bool {
+	for _, component := range dgd.Spec.Services {
+		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
+			return true
+		}
+	}
+	return false
+}
+
+// GetEPPService returns the EPP service name and spec if present
+func (dgd *DynamoGraphDeployment) GetEPPService() (string, *DynamoComponentDeploymentSharedSpec, bool) {
+	for serviceName, component := range dgd.Spec.Services {
+		if component != nil && component.ComponentType == consts.ComponentTypeEPP {
+			return serviceName, component, true
+		}
+	}
+	return "", nil, false
+}

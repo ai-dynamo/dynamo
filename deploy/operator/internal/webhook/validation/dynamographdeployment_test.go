@@ -18,6 +18,7 @@
 package validation
 
 import (
+	"context"
 	"sort"
 	"strings"
 	"testing"
@@ -511,7 +512,7 @@ func TestDynamoGraphDeploymentValidator_Validate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			validator := NewDynamoGraphDeploymentValidator(tt.deployment)
-			_, err := validator.Validate()
+			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DynamoGraphDeploymentValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)

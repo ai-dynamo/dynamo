@@ -364,6 +364,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - inference.networking.k8s.io
+  resources:
+  - inferencepools
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - nvidia.com
   resources:
   - dynamocomponentdeployments

@@ -18,6 +18,11 @@
 set -euo pipefail
 trap 'echo "Error at line $LINENO. Exiting."' ERR
 
+# Namespace where the inference-gateway will be deployed
+# Defaults to 'default' if NAMESPACE env var is not set
+NAMESPACE=${NAMESPACE:-default}
+echo "Installing inference-gateway into namespace: $NAMESPACE"
+
 # Install the Gateway API
 GATEWAY_API_VERSION=v1.4.1
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/$GATEWAY_API_VERSION/standard-install.yaml
@@ -37,7 +42,7 @@ helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION kgateway \
   oci://cr.kgateway.dev/kgateway-dev/charts/kgateway \
   --set inferenceExtension.enabled=true
 
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/kgateway/gateway.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/gateway-api-inference-extension/refs/tags/${IGW_LATEST_RELEASE}/config/manifests/gateway/kgateway/gateway.yaml -n "$NAMESPACE"
 
-kubectl patch gateway inference-gateway --type='json' \
+kubectl patch gateway inference-gateway -n "$NAMESPACE" --type='json' \
   -p='[{"op": "replace", "path": "/spec/gatewayClassName", "value": "kgateway"}]'

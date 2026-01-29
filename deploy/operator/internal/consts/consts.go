@@ -20,6 +20,10 @@ const (
 	DynamoSystemPort     = 9090
 	DynamoSystemPortName = "system"
 
+	// EPP (Endpoint Picker Plugin) ports
+	EPPGRPCPort     = 9002
+	EPPGRPCPortName = "grpc"
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -67,8 +71,11 @@ const (
 	ComponentTypeWorker       = "worker"
 	ComponentTypePrefill      = "prefill"
 	ComponentTypeDecode       = "decode"
+	ComponentTypeEPP          = "epp"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
+	EPPServiceAccountName     = "epp-serviceaccount"
+	EPPClusterRoleName        = "epp-cluster-role"
 
 	DefaultIngressSuffix = "local"
 

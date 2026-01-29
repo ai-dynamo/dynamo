@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-agg
+spec:
+  services:
+    Epp:
+      envFromSecret: hf-token-secret
+      componentType: epp
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/frontend-image:my-tag
+          env:
+            - name: DYN_KV_BLOCK_SIZE
+              value: "16"
+            - name: DYN_MODEL
+              value: "Qwen/Qwen3-0.6B"  # Match your model
+            - name: DYN_DISCOVERY_TIMEOUT
+              value: "300"
+      eppConfig:
+        # This configuration uses Dynamo's KV-aware scorer for intelligent routing
+        config:
+          # Plugins define the behavior of EPP
+          plugins:
+            # Required: tells EPP which profile to use (even if you only have one)
+            - type: single-profile-handler
+            # Picker: chooses the final endpoint after scoring
+            - name: picker
+              type: max-score-picker
+            - name: dyn-kv
+              type: kv-aware-scorer
+          # Scheduling profiles configure which plugins are used and their weights
+          schedulingProfiles:
+            - name: default
+              plugins:
+                - pluginRef: dyn-kv
+                  weight: 1
+                - pluginRef: picker
+    Frontend:
+      envFromSecret: hf-token-secret
+      componentType: frontend
+      replicas: 1
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          env:
+            - name: DYN_LOG
+              value: "debug,dynamo_llm::kv_router=trace"
+            - name: DYN_STORE_KV
+              value: "mem"
+            - name: DYN_ROUTER_MODE
+              value: "kv"
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      componentType: worker
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:my-tag
+          workingDir: /workspace/examples/backends/vllm
+          command:
+            - python3
+            - -m
+            - dynamo.vllm
+          args:
+            - --model
+            - Qwen/Qwen3-0.6B
+          env:
+            - name: DYN_STORE_KV
+              value: "mem"

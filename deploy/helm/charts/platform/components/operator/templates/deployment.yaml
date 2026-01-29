@@ -131,6 +131,7 @@ spec:
         {{- if not .Values.namespaceRestriction.enabled }}
           - --dgdr-profiling-cluster-role-name={{ include "dynamo-operator.fullname" . }}-dgdr-profiling
           - --planner-cluster-role-name={{ include "dynamo-operator.fullname" . }}-planner
+          - --epp-cluster-role-name={{ include "dynamo-operator.fullname" . }}-epp
         {{- end }}
         {{- if .Values.discoveryBackend }}
           - --discovery-backend={{ .Values.discoveryBackend }}
