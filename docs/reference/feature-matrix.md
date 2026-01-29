@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES.
+All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Dynamo Feature Compatibility Matrices
 
 This document provides a comprehensive compatibility matrix for key Dynamo features across the supported backends.
