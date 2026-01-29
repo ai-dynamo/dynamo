@@ -175,9 +175,7 @@ class EncodeWorkerHandler:
                     projector=self.projector,
                 )
 
-                logger.info(f"Encoded embeddings shape: {embeddings.shape}")
-                logger.info(f"Encoded embeddings : {embeddings}")
-
+                # [gluo FIXME] This is specific to qwen vision processing..
                 # Split concatenated embeddings for each image item.
                 merge_size = self.vision_encoder.spatial_merge_size
                 sizes = (
@@ -203,10 +201,10 @@ class EncodeWorkerHandler:
                         splitted_idx
                     ].unsqueeze(0)
                     splitted_idx += 1
-                self.embedding_cache.set(
-                    embedding_lists[idx][0],
-                    (embedding_lists[idx][1], embedding_lists[idx][2]),
-                )
+                    self.embedding_cache.set(
+                        embedding_lists[idx][0],
+                        (embedding_lists[idx][1], embedding_lists[idx][2]),
+                    )
 
                 # Update request for transfer metadata
                 request.multimodal_inputs[idx].multimodal_input.image_url = None
@@ -232,7 +230,6 @@ class EncodeWorkerHandler:
                         f"/tmp/encoder_cache.{embedding_lists[idx][0]}.safetensors"
                     )
                 else:
-                    # [gluo FIXME] nixl_connector path needs to be update to handle multiple embeddings
                     descriptor = connect.Descriptor(embedding_lists[idx][2])
                     self.readables.append(
                         await self._connector.create_readable(descriptor)
