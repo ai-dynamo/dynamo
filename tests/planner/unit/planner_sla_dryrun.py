@@ -15,8 +15,8 @@
 
 import logging
 
+from dynamo.planner.utils.dryrun import run_sla_planner_dryrun
 from dynamo.planner.utils.planner_argparse import create_sla_planner_parser
-from dynamo.planner.utils.planner_core import Planner
 
 logger = logging.getLogger(__name__)
 
@@ -45,5 +45,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    planner = Planner(None, args, dryrun=True)
-    planner.dryrun_run()
+    run_sla_planner_dryrun(args)

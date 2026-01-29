@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, RADIX_STATE_BUCKET, RADIX_STATE_FILE,
-    indexer::{DumpRequest, GetWorkersRequest, RouterEvent, WorkerKvQueryResponse},
-    protocols::WorkerId,
+    indexer::{DumpRequest, GetWorkersRequest, WorkerKvQueryResponse},
+    protocols::{RouterEvent, WorkerId},
     router_discovery_query,
     worker_query::WorkerQueryClient,
 };

@@ -16,9 +16,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeromq::{Socket, SocketRecv, SubSocket};
 
-use dynamo_runtime::traits::{
-    DistributedRuntimeProvider, events::EventPublisher as EventPublisherTrait,
-};
+use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::transports::event_plane::EventPublisher;
 use dynamo_runtime::{
     component::{Component, Namespace},
@@ -42,7 +40,7 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent},
+    indexer::{KvIndexerMetrics, LocalKvIndexer},
     protocols::*,
     worker_query::start_worker_kv_query_endpoint,
 };
@@ -298,7 +296,7 @@ impl EventSink for EventPublisher {
 #[async_trait]
 impl EventSink for NatsQueue {
     async fn publish_event(&self, event: &RouterEvent) -> Result<()> {
-        self.publish(KV_EVENT_SUBJECT, event).await
+        NatsQueue::publish_event(self, KV_EVENT_SUBJECT, event).await
     }
 }
 
@@ -384,9 +382,9 @@ async fn start_event_processor_jetstream(
                     }
                 }
 
-                // Then publish to event plane for global distribution
-                if let Err(e) = publisher.publish_event(&router_event).await {
-                    tracing::error!("Failed to publish event to event plane: {}", e);
+                // Then publish to NATS JetStream for global distribution
+                if let Err(e) = publisher.publish_event(KV_EVENT_SUBJECT, &router_event).await {
+                    tracing::error!("Failed to publish event to NATS JetStream: {}", e);
                 }
 
             }

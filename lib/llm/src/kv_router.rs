@@ -44,11 +44,11 @@ use crate::{
     discovery::RuntimeConfigsWithNotify,
     kv_router::{
         approx::PruneConfig,
-        indexer::{KvIndexer, KvIndexerInterface, KvRouterError, OverlapScores, RouterEvent},
+        indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
         protocols::{
-            LocalBlockHash, RouterRequest, RouterResponse, TokensWithHashes, WorkerId,
-            WorkerSelectionResult, WorkerWithDpRank, compute_block_hash_for_seq,
-            compute_seq_hash_for_block,
+            LocalBlockHash, OverlapScores, RouterEvent, RouterRequest, RouterResponse,
+            TokensWithHashes, WorkerId, WorkerSelectionResult, WorkerWithDpRank,
+            compute_block_hash_for_seq, compute_seq_hash_for_block,
         },
         scheduler::{KvScheduler, KvSchedulerError, PotentialLoad, SchedulingRequest},
         sequence::SequenceError,
