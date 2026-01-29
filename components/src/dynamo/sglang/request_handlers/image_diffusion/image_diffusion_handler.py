@@ -54,16 +54,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         self.generator = generator  # DiffGenerator, not Engine
         self.fs = fs
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
-
-        fs_url_parts = self.fs_url.split("://")
-        self.protocol = fs_url_parts[0] if "://" in self.fs_url else "file"
-
-        self.root_path = ""  # s3 uses bucket
-        if self.protocol == "file":
-            self.root_path = fs_url_parts[1] if len(fs_url_parts) > 1 else "/"
+        self.url_base = config.dynamo_args.image_diffusion_url_base
+        self.storage_path_resolver = ImageStoragePathResolver(self.fs_url, self.url_base)
 
         logger.info(
-            f"Image diffusion worker handler initialized with fs_url={self.fs_url}"
+            f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.url_base}"
         )
 
     def cleanup(self) -> None:
@@ -187,6 +182,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             sampling_params_kwargs=args,
         )
 
+        if result is None:
+            raise RuntimeError("No result from generator")
+
         images = result["frames"] if "frames" in result else []
 
         # Convert images to bytes (handle PIL Images, numpy arrays, or bytes)
@@ -247,32 +245,52 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
 
         # Per-user storage path
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
-        full_path = f"{self.root_path}/{storage_path}"
 
         # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, storage_path, image_bytes)
+        await asyncio.to_thread(self.fs.pipe, self.storage_path_resolver.get_path(storage_path), image_bytes)
 
-        return self._generate_url(full_path, storage_path)
+        return self.storage_path_resolver.get_url(storage_path)
 
-    def _generate_url(self, full_path: str, storage_path: str) -> str:
-        """Generate public URL based on filesystem type.
 
-        Args:
-            full_path: Full filesystem path.
-            storage_path: Relative storage path (users/{user_id}/...).
+    def _encode_base64(self, image_bytes: bytes) -> str:
+        """Encode image as base64 string"""
+        return base64.b64encode(image_bytes).decode("utf-8")
 
-        Returns:
-            Public URL string.
-        """
-        # If no fs_url configured, return fallback path
-        if not self.fs_url:
-            return f"file://{full_path}"
 
-        # Parse filesystem type from URL
-        if self.fs_url.startswith("s3://"):
+class ImageStoragePathResolver:
+    """Path to an image on the filesystem or in a URL.
+
+    Args:
+        fs_base_url: Filesystem base URL (e.g., s3://bucket, gs://bucket, file:///local/path).
+        url_base: Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/images). When set, generated image URLs will use this base instead of filesystem URLs.
+    """
+
+    def __init__(self, fs_base_url: str, url_base: Optional[str] = None):
+        self.fs_base_url = fs_base_url.rstrip("/")
+        self.url_base = url_base.rstrip("/") if url_base else None
+
+        self.fs_root = None
+        if self.fs_base_url.startswith("file://"):
+            # Remove file:// and normalize path
+            path = self.fs_base_url.replace("file://", "", 1)
+            # Ensure single leading slash for absolute paths
+            if not path.startswith("/"):
+                path = "/" + path
+            self.fs_root = path
+
+    def get_path(self, storage_path: str) -> str:
+        """Returns the path to save image locally."""
+        if self.fs_root is not None:
+            return f"{self.fs_root}/{storage_path}"
+        return storage_path
+
+    def get_fs_url(self, storage_path: str) -> str:
+        """Returns the filesystem URL for the image."""
+
+        if self.fs_base_url.startswith("s3://"):
             # Extract bucket and construct S3 URL
             # s3://bucket/path -> https://bucket.s3.amazonaws.com/path
-            parts = self.fs_url.replace("s3://", "").split("/", 1)
+            parts = self.fs_base_url.replace("s3://", "").split("/", 1)
             bucket = parts[0]
             base_path = parts[1] if len(parts) > 1 else ""
             # Try to get region from environment or use default
@@ -280,29 +298,36 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
             if region != "us-east-1":
                 return f"https://{bucket}.s3.{region}.amazonaws.com/{base_path}/{storage_path}"
             return f"https://{bucket}.s3.amazonaws.com/{base_path}/{storage_path}"
-        elif self.fs_url.startswith("gs://"):
+
+        if self.fs_base_url.startswith("gs://"):
             # GCS URL format: gs://bucket/path -> https://storage.googleapis.com/bucket/path
-            bucket_path = self.fs_url.replace("gs://", "")
+            bucket_path = self.fs_base_url.replace("gs://", "")
             return f"https://storage.googleapis.com/{bucket_path}/{storage_path}"
-        elif self.fs_url.startswith("az://") or self.fs_url.startswith("abfss://"):
+
+        if self.fs_base_url.startswith("az://") or self.fs_base_url.startswith("abfss://"):
             # Azure Blob Storage
             # az://container@account/path -> https://account.blob.core.windows.net/container/path
-            if self.fs_url.startswith("az://"):
+            if self.fs_base_url.startswith("az://"):
                 # az://container@account/path format
-                az_path = self.fs_url.replace("az://", "")
+                az_path = self.fs_base_url.replace("az://", "")
                 if "@" in az_path:
                     container_account, path = az_path.split("/", 1)
                     container, account = container_account.split("@")
                     return f"https://{account}.blob.core.windows.net/{container}/{path}/{storage_path}"
-            return full_path  # Return as-is if format unclear
-        elif self.fs_url.startswith("file://"):
-            # Local filesystem
-            return f"file://{full_path}"
-        else:
-            # Unknown filesystem type, return path as-is
-            logger.warning(f"Unknown filesystem type for URL generation: {self.fs_url}")
-            return full_path
 
-    def _encode_base64(self, image_bytes: bytes) -> str:
-        """Encode image as base64 string"""
-        return base64.b64encode(image_bytes).decode("utf-8")
+        if self.fs_base_url.startswith("file://"):
+            return f"{self.fs_base_url}/{storage_path}"
+
+        raise ValueError(f"Unknown filesystem type for URL generation: {self.fs_base_url}")
+
+    def get_url(self, storage_path: str) -> str:
+        """Returns the URL for the image."""
+        if self.url_base is not None:
+            # Normalize path - remove leading slash if present
+            path = storage_path.lstrip("/")
+            return f"{self.url_base}/{path}"
+
+        # If no url_base configured, return filesystem URL
+        return self.get_fs_url(storage_path)
+
+

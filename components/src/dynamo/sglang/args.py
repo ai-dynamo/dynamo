@@ -143,6 +143,12 @@ DYNAMO_ARGS: Dict[str, Dict[str, Any]] = {
         "default": None,
         "help": "Filesystem URL for storing generated images using fsspec (e.g., s3://bucket/path, gs://bucket/path, file:///local/path). Supports any fsspec-compatible filesystem.",
     },
+    "image-diffusion-url-base": {
+        "flags": ["--image-diffusion-url-base"],
+        "type": str,
+        "default": os.environ.get("DYN_IMAGE_DIFFUSION_URL_BASE", None),
+        "help": "Base URL for rewriting image URLs in responses (e.g., http://localhost:8008/images). When set, generated image URLs will use this base instead of filesystem URLs. Can be set via DYN_IMAGE_DIFFUSION_URL_BASE env var.",
+    },
 }
 
 
@@ -188,6 +194,7 @@ class DynamoArgs:
     # image diffusion options
     image_diffusion_worker: bool = False
     image_diffusion_fs_url: Optional[str] = None
+    image_diffusion_url_base: Optional[str] = None
 
 
 class DisaggregationMode(Enum):
@@ -624,6 +631,7 @@ async def parse_args(args: list[str]) -> Config:
         diffusion_worker=diffusion_worker,
         image_diffusion_worker=getattr(parsed_args, "image_diffusion_worker", False),
         image_diffusion_fs_url=getattr(parsed_args, "image_diffusion_fs_url", None),
+        image_diffusion_url_base=getattr(parsed_args, "image_diffusion_url_base", None),
         dump_config_to=parsed_args.dump_config_to,
         enable_local_indexer=str(parsed_args.enable_local_indexer).lower() == "true",
         use_kv_events=use_kv_events,
