@@ -103,6 +103,21 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      - name: Debug Network
+        run: |
+          echo "--- Interface Config ---"
+          ip link  || true
+          echo "--- Route Config ---"
+          ip route  || true
+          echo "--- MTU Check ---"
+          cat /sys/class/net/eth0/mtu
+
+          echo "--- MTU Check (Direct) ---"
+          cat /sys/class/net/eth0/mtu
+
+          echo "--- Docker Interface Check (if exists) ---"
+          # Check for docker0 or other interfaces in /sys/class/net/
+          ls -l /sys/class/net/
       - name: Install dependencies
         shell: bash
         run: |
