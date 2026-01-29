@@ -182,6 +182,7 @@ pub(crate) struct ZmqKvEventListener {
 #[pymethods]
 impl ZmqKvEventListener {
     #[new]
+    #[pyo3(signature = (zmq_endpoint, zmq_topic, kv_block_size))]
     fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
         if kv_block_size == 0 {
             return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));

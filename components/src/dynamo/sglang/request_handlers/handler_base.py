@@ -42,6 +42,7 @@ class BaseWorkerHandler(ABC):
         self.engine = engine
         self.config = config
         self.generate_endpoint = generate_endpoint
+        self.publisher = publisher
         if publisher is not None:
             self.metrics_publisher = publisher.metrics_publisher
             self.kv_publisher = publisher.kv_publisher
@@ -202,7 +203,8 @@ class BaseWorkerHandler(ABC):
 
     def cleanup(self) -> None:
         """Cleanup resources. Override in subclasses as needed."""
-        pass
+        if self.publisher is not None:
+            self.publisher.cleanup()
 
     def _get_input_param(self, request: Dict[str, Any]) -> Dict[str, Any]:
         request_input = self.input_param_manager.get_input_param(
