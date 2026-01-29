@@ -1,10 +1,13 @@
 // Add RunLLM widget
+// SRI hash generated 2026-01-28 for widget.runllm.com stable version
 document.addEventListener("DOMContentLoaded", function () {
     var script = document.createElement("script");
     script.type = "module";
     script.id = "runllm-widget-script"
 
     script.src = "https://widget.runllm.com";
+    script.integrity = "sha384-QqwJ+8hU9YViRlUBPZVWpy2bExa4RhTG69vYK+NxsMWT8/WAixV9FUwCrsLLTZnk";
+    script.crossOrigin = "anonymous";
 
     script.setAttribute("version", "stable");
     script.setAttribute("runllm-keyboard-shortcut", "Mod+j"); // cmd-j or ctrl-j to open the widget.
