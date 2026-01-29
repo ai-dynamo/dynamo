@@ -28,9 +28,8 @@ Currently, these setups are only supported with the kGateway based Inference Gat
   - [7. Usage](#7-usage)
   - [8. Deleting the installation](#8-deleting-the-installation)
 - [Gateway API Inference Extension Details](#gateway-api-inference-extension-integration)
-  - [v1.2.1 API Changes](#v121-api-changes)
-  - [Building for v1.2.1](#building-for-v121)
-  - [Header-Only Routing for v1.2.1](#header-only-routing-for-v121)
+  - [Router bookkeeping operations](#router-bookkeeping-operations)
+  - [Header Routing Hints](#header-routing-hints)
 
 
 ## Prerequisites
@@ -69,6 +68,14 @@ kubectl get gateway inference-gateway
 ### 3. Setup secrets ###
 
 Follow the steps in [model deployment](../../examples/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../examples/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Make sure to enable kv-routing by adding the env var in the FrontEnd.
+```bash
+    mainContainer:
+      image: ...
+      env:
+        - name: DYN_ROUTER_MODE
+          value: "kv"
+```
 
 Sample commands to deploy model:
 
@@ -155,6 +162,7 @@ extraPodSpec:
 ```
 
 **Gateway Namespace** This example assumes your gateway is installed into `NAMESPACE=my-model`
+Note that this assumes your gateway is installed into `NAMESPACE=my-model` (examples' default)
 If you installed it into a different namespace, you need to adjust the HttpRoute entry in http-route.yaml.
 
 
@@ -400,18 +408,14 @@ kubectl delete -f https://github.com/kubernetes-sigs/gateway-api/releases/downlo
 
 This section documents the updated plugin implementation for Gateway API Inference Extension **v1.2.1**.
 
-### v1.2.1 API Changes
+### Router bookkeeping operations
+
+EPP performs Dynamo router book keeping operations so the FrontEnd's Router does not have to sync its state.
 
 
-### Building for v1.2.1
+### Header Routing Hints
 
-The plugin code for v1.2.1 is in:
-- `pkg/plugins/dynamo_kv_scorer/plugin.go`
-
-
-### Header-Only Routing for v1.2.1
-
-In v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
+Since v1.2.1, the EPP uses a **header-only approach** for communicating routing decisions.
 The plugins set HTTP headers that are forwarded to the backend workers.
 
 #### Headers Set by Dynamo Plugins

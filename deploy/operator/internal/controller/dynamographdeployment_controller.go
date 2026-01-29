@@ -63,9 +63,9 @@ type Reason string
 type Message string
 
 const (
-	FailedState  State = "failed"
-	ReadyState   State = "successful"
-	PendingState State = "pending"
+	DGDStateFailed  State = "failed"
+	DGDStateReady   State = "successful"
+	DGDStatePending State = "pending"
 )
 
 type etcdStorage interface {
@@ -112,7 +112,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reason := Reason("undefined")
 	message := Message("")
-	state := PendingState
+	state := DGDStatePending
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -127,14 +127,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 
 		if err != nil {
-			state = FailedState
+			state = DGDStateFailed
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
 		dynamoDeployment.SetState(string(state))
 
 		readyStatus := metav1.ConditionFalse
-		if state == ReadyState {
+		if state == DGDStateReady {
 			readyStatus = metav1.ConditionTrue
 		}
 
@@ -176,7 +176,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
 
 			// Set validation error state and reason (defer will update status)
-			state = FailedState
+			state = DGDStateFailed
 			reason = Reason("ValidationFailed")
 			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
 
@@ -357,12 +357,12 @@ func (r *DynamoGraphDeploymentReconciler) getUpdatedInProgressForGrove(ctx conte
 	}
 
 	if pcs.Status.ObservedGeneration == nil {
-		logger.Info("PodCliqueSet %s observedGeneration is nil", dgd.Name)
+		logger.Info("PodCliqueSet observedGeneration is nil", "name", dgd.Name)
 		return inProgress
 	}
 
 	if *pcs.Status.ObservedGeneration < pcs.Generation {
-		logger.Info("PodCliqueSet %s not yet reconciled: generation=%d, observedGeneration=%d", dgd.Name, pcs.Generation, *pcs.Status.ObservedGeneration)
+		logger.Info("PodCliqueSet not yet reconciled", "name", dgd.Name, "generation", pcs.Generation, "observedGeneration", *pcs.Status.ObservedGeneration)
 		return inProgress
 	}
 
@@ -929,14 +929,14 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 	if len(notReadyResources) == 0 {
 		return ReconcileResult{
-			State:         ReadyState,
+			State:         DGDStateReady,
 			Reason:        "all_resources_are_ready",
 			Message:       Message("All resources are ready"),
 			ServiceStatus: serviceStatuses,
 		}
 	}
 	return ReconcileResult{
-		State:         PendingState,
+		State:         DGDStatePending,
 		Reason:        "some_resources_are_not_ready",
 		Message:       Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ServiceStatus: serviceStatuses,

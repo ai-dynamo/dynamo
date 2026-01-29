@@ -70,13 +70,29 @@ async def worker():
     config = await parse_args(sys.argv[1:])
     dump_config(config.dynamo_args.dump_config_to, config)
 
+    # Setup GPU Memory Service if --load-format gms is used
+    if config.server_args.load_format == "gms":
+        from gpu_memory_service.integrations.sglang import setup_gms
+
+        config.server_args.load_format = setup_gms(config.server_args)
+
     loop = asyncio.get_running_loop()
-    # Enable NATS based on use_kv_events flag (derived from kv_events_config)
+
+    # Set DYN_EVENT_PLANE environment variable based on config
+    os.environ["DYN_EVENT_PLANE"] = config.dynamo_args.event_plane
+
+    # NATS is needed when:
+    # 1. Request plane is NATS, OR
+    # 2. Event plane is NATS AND use_kv_events is True
+    enable_nats = config.dynamo_args.request_plane == "nats" or (
+        config.dynamo_args.event_plane == "nats" and config.dynamo_args.use_kv_events
+    )
+
     runtime = DistributedRuntime(
         loop,
         config.dynamo_args.store_kv,
         config.dynamo_args.request_plane,
-        config.dynamo_args.use_kv_events,
+        enable_nats,
     )
 
     def signal_handler():
@@ -487,23 +503,13 @@ async def init_multimodal_encode_worker(runtime: DistributedRuntime, config: Con
 
     await pd_worker_client.wait_for_instances()
 
-    ready_event = asyncio.Event()
-
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
-            ),
-            register_llm_with_readiness_gate(
-                None,  # encode worker doesn't have engine
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                input_type=ModelInput.Text,
-                readiness_gate=ready_event,
-            ),
+        # Encode Worker is an internal component, should not register with Frontend
+        # Only needs to provide internal service endpoint for Processor to call
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.served_model_name)],
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
@@ -542,21 +548,32 @@ async def init_multimodal_worker(runtime: DistributedRuntime, config: Config):
     ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
+        if config.serving_mode == DisaggregationMode.DECODE:
+            # Decode Worker is an internal component, should not register with Frontend
+            # Only needs to provide internal service endpoint for Processor to call
+            await generate_endpoint.serve_endpoint(
                 handler.generate,
                 metrics_labels=[("model", server_args.served_model_name)],
                 graceful_shutdown=True,
                 health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                readiness_gate=ready_event,
-            ),
-        )
+            )
+        else:
+            # In aggregated mode, need to register with Frontend
+            await asyncio.gather(
+                generate_endpoint.serve_endpoint(
+                    handler.generate,
+                    metrics_labels=[("model", server_args.served_model_name)],
+                    graceful_shutdown=True,
+                    health_check_payload=health_check_payload,
+                ),
+                register_llm_with_readiness_gate(
+                    engine,
+                    generate_endpoint,
+                    server_args,
+                    dynamo_args,
+                    readiness_gate=ready_event,
+                ),
+            )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")
         raise
@@ -580,23 +597,15 @@ async def init_multimodal_prefill_worker(runtime: DistributedRuntime, config: Co
     await handler.async_init()
 
     health_check_payload = SglangPrefillHealthCheckPayload(engine).to_dict()
-    ready_event = asyncio.Event()
 
     try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(
-                handler.generate,
-                graceful_shutdown=True,
-                metrics_labels=[("model", server_args.served_model_name)],
-                health_check_payload=health_check_payload,
-            ),
-            register_llm_with_readiness_gate(
-                engine,
-                generate_endpoint,
-                server_args,
-                dynamo_args,
-                readiness_gate=ready_event,
-            ),
+        # Prefill Worker is an internal component, should not register with Frontend
+        # Only needs to provide internal service endpoint for Decode Worker to call
+        await generate_endpoint.serve_endpoint(
+            handler.generate,
+            graceful_shutdown=True,
+            metrics_labels=[("model", server_args.served_model_name)],
+            health_check_payload=health_check_payload,
         )
     except Exception as e:
         logging.error(f"Failed to serve endpoints: {e}")

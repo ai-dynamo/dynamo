@@ -17,10 +17,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 metadata:
   name: pod-read
 rules:
-# Gateway API inference resources
+# Gateway API inference resources (experimental API)
 - apiGroups: ["inference.networking.x-k8s.io"]
   resources: ["inferencepools", "inferenceobjectives", "inferencemodelrewrites"]
   verbs: ["get", "watch", "list"]
+# Gateway API inference resources (stable API)
 - apiGroups: ["inference.networking.k8s.io"]
   resources: ["inferencepools"]
   verbs: ["get", "watch", "list"]

@@ -41,6 +41,10 @@ spec:
           jsonPath: .status.conditions[?(@.type=='Available')].status
           name: Available
           type: string
+        - description: Backend framework (sglang, vllm, trtllm)
+          jsonPath: .spec.backendFramework
+          name: Backend
+          type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date
@@ -859,46 +863,6 @@ spec:
                             may reject unrecognized values.
                             More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
                           type: string
-                        data:
-                          description: Data configures the DataLayer. It is required if the new DataLayer is enabled.
-                          properties:
-                            sources:
-                              description: Sources is the list of sources to define to the DataLayer
-                              items:
-                                description: DataLayerSource contains the configuration of a DataSource of the DataLayer feature
-                                properties:
-                                  extractors:
-                                    description: |-
-                                      Extractors specifies the list of Plugin instances to be associated with
-                                      this Source. The entries are references to the names of entries of the Plugins
-                                      defined in the configuration's Plugins section
-                                    items:
-                                      description: DataLayerExtractor contains the configuration of an Extractor of the DataLayer feature
-                                      properties:
-                                        pluginRef:
-                                          description: |-
-                                            PluginRef specifies a partiular Plugin instance to be associated with
-                                            this Extractor. The reference is to the name of an entry of the Plugins
-                                            defined in the configuration's Plugins section
-                                          type: string
-                                      required:
-                                        - pluginRef
-                                      type: object
-                                    type: array
-                                  pluginRef:
-                                    description: |-
-                                      PluginRef specifies a partiular Plugin instance to be associated with
-                                      this Source. The reference is to the name of an entry of the Plugins
-                                      defined in the configuration's Plugins section
-                                    type: string
-                                required:
-                                  - extractors
-                                  - pluginRef
-                                type: object
-                              type: array
-                          required:
-                            - sources
-                          type: object
                         featureGates:
                           description: |-
                             FeatureGates is a set of flags that enable various experimental features with the EPP.
