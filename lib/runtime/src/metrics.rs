@@ -1252,6 +1252,37 @@ mod test_metricsregistry_prefixes {
     }
 
     #[tokio::test]
+    async fn test_expfmt_callback_only_registered_on_endpoint_is_included_once() {
+        // Sanity test: if an expfmt callback is registered only on the endpoint registry,
+        // scraping from the root (DRT) should still include it exactly once via the
+        // child-registry traversal.
+        let drt = create_test_drt_async().await;
+        let namespace = drt.namespace("ns_expfmt_ep_only").unwrap();
+        let component = namespace.component("comp_expfmt_ep_only").unwrap();
+        let endpoint = component.endpoint("ep_expfmt_ep_only");
+
+        let metric_line = "dynamo_component_active_decode_blocks{dp_rank=\"0\"} 0\n";
+        let callback: PrometheusExpositionFormatCallback =
+            Arc::new(move || Ok(metric_line.to_string()));
+
+        endpoint
+            .get_metrics_registry()
+            .add_expfmt_callback(callback);
+
+        let output = drt.metrics().prometheus_expfmt().unwrap();
+        let occurrences = output
+            .lines()
+            .filter(|line| line == &metric_line.trim_end_matches('\n'))
+            .count();
+
+        assert_eq!(
+            occurrences, 1,
+            "endpoint-registered exposition callback should appear once, got {} occurrences\n\n{}",
+            occurrences, output
+        );
+    }
+
+    #[tokio::test]
     async fn test_recursive_namespace() {
         // Create a distributed runtime for testing
         let drt = create_test_drt_async().await;

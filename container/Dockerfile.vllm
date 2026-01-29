@@ -161,10 +161,17 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-RUN yum groupinstall -y 'Development Tools' &&  \
-    dnf install -y almalinux-release-synergy && \
+RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
+        # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
+        autoconf \
+        automake \
+        libtool \
+        make \
+        # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
+        rpm-build \
+        rpm-sign \
         # Build tools
         cmake \
         ninja-build \
@@ -194,7 +201,8 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         libcurl-devel \
         openssl-devel \
         libuuid-devel \
-        zlib-devel
+        zlib-devel && \
+    dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
