@@ -86,6 +86,7 @@ Note that the default pip wheel built is not compatible with CUDA 13 at the mome
 | `DYN_KVBM_METRICS` | Enable metrics endpoint | `false` |
 | `DYN_KVBM_METRICS_PORT` | Metrics port | `6880` |
 | `DYN_KVBM_DISABLE_DISK_OFFLOAD_FILTER` | Disable disk offload filtering to remove SSD lifespan protection | `false` |
+| `DYN_KVBM_HOST_OFFLOAD_PREFIX_MIN_PRIORITY` | Minimum priority (0-100) for CPU offload with contiguous (prefix) semantics: offloading stops at the first block below threshold, and all subsequent blocks are also skipped. Used for priority-based filtering. | `0` (no filtering) |
 
 #### Disk Storage Configuration
 
