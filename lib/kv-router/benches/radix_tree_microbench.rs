@@ -1024,8 +1024,8 @@ fn main() {
         eprintln!("prefix_prompt_ratio must be between 0.0 and 1.0");
         std::process::exit(1);
     }
-    if !(0.0..1.0).contains(&args.warmup_ratio) {
-        eprintln!("warmup_ratio must be between 0.0 and 1.0 (exclusive)");
+    if !(0.0..=1.0).contains(&args.warmup_ratio) {
+        eprintln!("warmup_ratio must be between 0.0 and 1.0");
         std::process::exit(1);
     }
 
