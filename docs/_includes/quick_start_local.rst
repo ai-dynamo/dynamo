@@ -1,4 +1,10 @@
-Get started with Dynamo locally in just a few commands:
+This guide covers running Dynamo **using the CLI on your local machine or VM**.
+
+.. important::
+
+   **Looking to deploy on Kubernetes instead?**
+   See the `Kubernetes Installation Guide <../kubernetes/installation_guide.html>`_
+   and `Kubernetes Quickstart <../kubernetes/README.html>`_ for cluster deployments.
 
 **1. Install Dynamo**
 
