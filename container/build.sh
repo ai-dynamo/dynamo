@@ -165,6 +165,9 @@ USE_SCCACHE=""
 SCCACHE_BUCKET=""
 SCCACHE_REGION=""
 
+# Remote runtime image (skip local build, use pre-built image)
+REMOTE_RUNTIME=""
+
 get_options() {
     while :; do
         case $1 in
@@ -398,6 +401,14 @@ get_options() {
         --no-tag-latest)
             NO_TAG_LATEST=true
             ;;
+        --remote-runtime)
+            if [ "$2" ]; then
+                REMOTE_RUNTIME=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
          -?*)
             error 'ERROR: Unknown option: ' "$1"
             ;;
@@ -494,6 +505,16 @@ get_options() {
             error "ERROR: --sccache-region is required when --use-sccache is specified"
         fi
     fi
+
+    # Validate --remote-runtime constraints
+    if [[ -n "${REMOTE_RUNTIME:-}" ]]; then
+        if [[ -n "${TARGET:-}" && "${TARGET}" != "dev" && "${TARGET}" != "local-dev" ]]; then
+            error "ERROR:" "--remote-runtime can only be used with --target dev or --target local-dev"
+        fi
+        if [[ "${FRAMEWORK}" == "SGLANG" ]]; then
+            error "ERROR:" "--remote-runtime is not supported with SGLang (requires wheel_builder NIXL deps)"
+        fi
+    fi
 }
 
 
@@ -509,6 +530,10 @@ show_image_options() {
     echo "   Build Context: '${BUILD_CONTEXT}'"
     echo "   Build Arguments: '${BUILD_ARGS}'"
     echo "   Framework: '${FRAMEWORK}'"
+    if [[ -n "${REMOTE_RUNTIME:-}" ]]; then
+        echo "   Remote Runtime: '${REMOTE_RUNTIME}'"
+        echo "   Mode: Using pre-built runtime image (skips framework Dockerfile stages)"
+    fi
     if [ "$USE_SCCACHE" = true ]; then
         echo "   sccache: Enabled"
         echo "   sccache Bucket: '${SCCACHE_BUCKET}'"
@@ -555,6 +580,8 @@ show_help() {
     echo "  [--vllm-max-jobs number of parallel jobs for compilation (only used by vLLM framework)]"
     echo "  [--efa-version AWS EFA installer version (default: 1.45.1)]"
     echo "  [--no-tag-latest do not add latest-{framework} tag to built image]"
+    echo "  [--remote-runtime <image> use a pre-built runtime image instead of building]"
+    echo "                            (only valid with dev/local-dev targets, not SGLang)]"
     echo ""
     echo "  Note: When using --use-sccache, AWS credentials must be set:"
     echo "        export AWS_ACCESS_KEY_ID=your_access_key"
@@ -916,19 +943,58 @@ fi
 # Dev/local-dev targets: build from a concatenated Dockerfile:
 #   <framework Dockerfile> + container/dev/Dockerfile.dev
 if [[ -z "${TARGET:-}" || "${TARGET:-}" == "dev" || "${TARGET:-}" == "local-dev" ]]; then
+    _gen_remote_runtime_shim() {
+        local out="$1"
+        local dev_df="$2"
+
+        echo "INFO: Generating remote-runtime shim using: ${REMOTE_RUNTIME}" >&2
+
+        cat > "${out}" <<EOF
+# syntax=docker/dockerfile:1.10.0
+# Auto-generated shim for remote-runtime mode
+# Skips framework Dockerfile stages entirely - uses pre-built runtime image
+
+ARG ARCH=amd64
+ARG ARCH_ALT=x86_64
+ARG PYTHON_VERSION=3.12
+ARG FRAMEWORK
+
+# Use the pre-built runtime image directly
+FROM ${REMOTE_RUNTIME} AS runtime
+
+# Stub wheel_builder stage (required by Dockerfile.dev --mount=from=wheel_builder)
+# The mount target will be empty, so the conditional copy in Dockerfile.dev will be skipped
+FROM runtime AS wheel_builder
+
+EOF
+
+        # Append Dockerfile.dev
+        cat "${dev_df}" >> "${out}"
+    }
+
     _gen_dev_dockerfile_temp() {
         local fw_df dev_df out
         fw_df="$1"
         dev_df="${SOURCE_DIR}/dev/Dockerfile.dev"
-        if [[ ! -f "${fw_df}" ]]; then
-            error "ERROR:" "Framework Dockerfile not found: ${fw_df}"
-        fi
+
         if [[ ! -f "${dev_df}" ]]; then
             error "ERROR:" "Dev Dockerfile not found: ${dev_df}"
         fi
 
         out="$(mktemp -t dynamo-dev-combined.XXXXXX.Dockerfile)"
-        cat "${fw_df}" "${dev_df}" > "${out}"
+
+        if [[ -n "${REMOTE_RUNTIME:-}" ]]; then
+            # Generate shim: just FROM remote-runtime + Dockerfile.dev
+            # This skips the entire framework Dockerfile (no dynamo_base, wheel_builder, etc.)
+            _gen_remote_runtime_shim "${out}" "${dev_df}"
+        else
+            # Original: concatenate framework + dev
+            if [[ ! -f "${fw_df}" ]]; then
+                error "ERROR:" "Framework Dockerfile not found: ${fw_df}"
+            fi
+            cat "${fw_df}" "${dev_df}" > "${out}"
+        fi
+
         printf '\n' >> "${out}"
 
         if [[ ! -s "${out}" ]]; then
