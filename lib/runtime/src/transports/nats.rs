@@ -335,12 +335,6 @@ impl ClientOptions {
 
         let js_ctx = jetstream::new(client.clone());
 
-        // Validate JetStream is available
-        js_ctx
-            .query_account()
-            .await
-            .map_err(|e| anyhow::anyhow!("JetStream not available: {e}"))?;
-
         Ok(Client { client, js_ctx })
     }
 }

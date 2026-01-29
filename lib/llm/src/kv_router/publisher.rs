@@ -921,7 +921,7 @@ impl<'de> Visitor<'de> for RawKvEventVisitor {
 // -------------------------------------------------------------------------
 
 /// Metrics data passed through the channel for NATS publishing
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct WorkerMetrics {
     dp_rank: DpRank,
     active_decode_blocks: u64,
@@ -982,7 +982,7 @@ impl WorkerMetricsPublisher {
                 };
 
             let mut rx = nats_rx;
-            let mut last_active_decode_blocks: Option<u64> = Some(0);
+            let mut last_metrics: Option<WorkerMetrics> = None;
             let mut pending_publish: Option<WorkerMetrics> = None;
             let mut publish_timer =
                 Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
@@ -1001,16 +1001,13 @@ impl WorkerMetricsPublisher {
 
                         let metrics = rx.borrow_and_update().clone();
 
-                        // Check if active_decode_blocks has changed
-                        let has_changed = match last_active_decode_blocks {
-                            Some(last) => last != metrics.active_decode_blocks,
-                            None => true, // First time, consider it changed
-                        };
+                        // Check if metrics have changed
+                        let has_changed = last_metrics.as_ref() != Some(&metrics);
 
-                        // If load metrics changed, schedule a publish
+                        // If metrics changed, schedule a publish
                         if has_changed {
                             pending_publish = Some(metrics.clone());
-                            last_active_decode_blocks = Some(metrics.active_decode_blocks);
+                            last_metrics = Some(metrics);
 
                             // Start the 1ms timer
                             publish_timer.as_mut().reset(

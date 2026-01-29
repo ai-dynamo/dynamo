@@ -301,6 +301,10 @@ pub mod model {
 
         /// Hugging Face home directory
         pub const HF_HOME: &str = "HF_HOME";
+
+        /// Offline mode - skip API calls when model is cached
+        /// Set to "1" or "true" to enable
+        pub const HF_HUB_OFFLINE: &str = "HF_HUB_OFFLINE";
     }
 }
 
@@ -436,6 +440,7 @@ mod tests {
             model::huggingface::HF_TOKEN,
             model::huggingface::HF_HUB_CACHE,
             model::huggingface::HF_HOME,
+            model::huggingface::HF_HUB_OFFLINE,
             // Event Plane
             event_plane::DYN_EVENT_PLANE,
             event_plane::DYN_EVENT_PLANE_CODEC,
