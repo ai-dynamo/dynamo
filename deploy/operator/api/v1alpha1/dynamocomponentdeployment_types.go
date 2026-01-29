@@ -198,6 +198,7 @@ type DynamoComponentDeploymentStatus struct {
 // +kubebuilder:storageversion
 // +kubebuilder:printcolumn:name="DynamoComponent",type="string",JSONPath=".spec.dynamoComponent",description="Dynamo component"
 // +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type=='Available')].status",description="Available"
+// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=`.spec.backendFramework`,description="Backend framework (sglang, vllm, trtllm)"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:resource:shortName=dcd
 // DynamoComponentDeployment is the Schema for the dynamocomponentdeployments API
@@ -227,6 +228,15 @@ func init() {
 func (s *DynamoComponentDeployment) IsReady() (bool, string) {
 	ready, reason := s.Status.IsReady()
 	return ready, reason
+}
+
+// GetState returns "ready" or "not_ready" based on conditions
+func (d *DynamoComponentDeployment) GetState() string {
+	ready, _ := d.IsReady()
+	if ready {
+		return commonconsts.ResourceStateReady
+	}
+	return commonconsts.ResourceStateNotReady
 }
 
 func (s *DynamoComponentDeployment) GetServiceStatuses() map[string]ServiceReplicaStatus {

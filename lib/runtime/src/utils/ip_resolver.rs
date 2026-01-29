@@ -7,7 +7,29 @@ use crate::pipeline::network::tcp::server::{DefaultIpResolver, IpResolver};
 use local_ip_address::Error;
 use std::net::IpAddr;
 
-/// Get the local IP address for HTTP RPC host binding, using IpResolver with fallback to 127.0.0.1
+fn resolve_local_ip_with_resolver<R: IpResolver>(resolver: R) -> IpAddr {
+    let resolved_ip = resolver.local_ip().or_else(|err| match err {
+        Error::LocalIpAddressNotFound => resolver.local_ipv6(),
+        _ => Err(err),
+    });
+
+    match resolved_ip {
+        Ok(addr) => addr,
+        Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
+        Err(_) => IpAddr::from([127, 0, 0, 1]), // Fallback for any other error
+    }
+}
+
+fn format_ip_for_url(addr: IpAddr) -> String {
+    // Wrap IPv6 addresses with brackets for safe URL construction
+    // e.g., "2001:db8::1" becomes "[2001:db8::1]" so that "{host}:{port}" is valid
+    match addr {
+        IpAddr::V6(_) => format!("[{}]", addr),
+        IpAddr::V4(_) => addr.to_string(),
+    }
+}
+
+/// Get the local IP address for advertising endpoints, using IpResolver with fallback to 127.0.0.1
 ///
 /// This function attempts to resolve the local IP address using the provided resolver.
 /// If resolution fails, it falls back to 127.0.0.1 (localhost).
@@ -19,24 +41,18 @@ use std::net::IpAddr;
 ///
 /// # Returns
 /// A string representation of the resolved IP address (IPv6 addresses are bracketed)
+pub fn get_local_ip_for_advertise_with_resolver<R: IpResolver>(resolver: R) -> String {
+    format_ip_for_url(resolve_local_ip_with_resolver(resolver))
+}
+
+/// Get the local IP address for advertising endpoints using the default resolver.
+pub fn get_local_ip_for_advertise() -> String {
+    get_local_ip_for_advertise_with_resolver(DefaultIpResolver)
+}
+
+/// Get the local IP address for HTTP RPC host binding, using IpResolver with fallback to 127.0.0.1
 pub fn get_http_rpc_host_with_resolver<R: IpResolver>(resolver: R) -> String {
-    let resolved_ip = resolver.local_ip().or_else(|err| match err {
-        Error::LocalIpAddressNotFound => resolver.local_ipv6(),
-        _ => Err(err),
-    });
-
-    let addr = match resolved_ip {
-        Ok(addr) => addr,
-        Err(Error::LocalIpAddressNotFound) => IpAddr::from([127, 0, 0, 1]),
-        Err(_) => IpAddr::from([127, 0, 0, 1]), // Fallback for any other error
-    };
-
-    // Wrap IPv6 addresses with brackets for safe URL construction
-    // e.g., "2001:db8::1" becomes "[2001:db8::1]" so that "{host}:{port}" is valid
-    match addr {
-        IpAddr::V6(_) => format!("[{}]", addr),
-        IpAddr::V4(_) => addr.to_string(),
-    }
+    get_local_ip_for_advertise_with_resolver(resolver)
 }
 
 /// Get the local IP address for HTTP RPC host binding using the default resolver

@@ -294,4 +294,24 @@ impl ToolCallConfig {
             parser_config: ParserConfig::Dsml(DsmlParserConfig::default()),
         }
     }
+
+    pub fn minimax_m2() -> Self {
+        // MiniMax-M2.1 format:
+        // <minimax:tool_call>
+        // <invoke name="function_name">
+        // <parameter name="param_name">value</parameter>
+        // </invoke>
+        // </minimax:tool_call>
+        // Reference: https://huggingface.co/MiniMaxAI/MiniMax-M2.1/blob/main/docs/tool_calling_guide.md
+        Self {
+            parser_config: ParserConfig::Xml(XmlParserConfig {
+                tool_call_start_token: "<minimax:tool_call>".to_string(),
+                tool_call_end_token: "</minimax:tool_call>".to_string(),
+                function_start_token: "<invoke name=".to_string(),
+                function_end_token: "</invoke>".to_string(),
+                parameter_start_token: "<parameter name=".to_string(),
+                parameter_end_token: "</parameter>".to_string(),
+            }),
+        }
+    }
 }

@@ -51,6 +51,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 	commoncontroller "github.com/ai-dynamo/dynamo/deploy/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/operator/internal/dynamo"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	webhookvalidation "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook/validation"
 	rbacv1 "k8s.io/api/rbac/v1"
 )
@@ -60,9 +61,9 @@ type Reason string
 type Message string
 
 const (
-	FailedState  State = "failed"
-	ReadyState   State = "successful"
-	PendingState State = "pending"
+	DGDStateFailed  State = "failed"
+	DGDStateReady   State = "successful"
+	DGDStatePending State = "pending"
 )
 
 type etcdStorage interface {
@@ -108,7 +109,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 
 	reason := Reason("undefined")
 	message := Message("")
-	state := PendingState
+	state := DGDStatePending
 	// retrieve the CRD
 	dynamoDeployment := &nvidiacomv1alpha1.DynamoGraphDeployment{}
 	if err = r.Get(ctx, req.NamespacedName, dynamoDeployment); err != nil {
@@ -123,14 +124,14 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		}
 
 		if err != nil {
-			state = FailedState
+			state = DGDStateFailed
 			message = Message(err.Error())
 			logger.Error(err, "Reconciliation failed")
 		}
 		dynamoDeployment.SetState(string(state))
 
 		readyStatus := metav1.ConditionFalse
-		if state == ReadyState {
+		if state == DGDStateReady {
 			readyStatus = metav1.ConditionTrue
 		}
 
@@ -172,7 +173,7 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 			logger.Error(validationErr, "DynamoGraphDeployment validation failed, refusing to reconcile")
 
 			// Set validation error state and reason (defer will update status)
-			state = FailedState
+			state = DGDStateFailed
 			reason = Reason("ValidationFailed")
 			message = Message(fmt.Sprintf("Validation failed: %v", validationErr))
 
@@ -902,14 +903,14 @@ func (r *DynamoGraphDeploymentReconciler) checkResourcesReadiness(resources []Re
 
 	if len(notReadyResources) == 0 {
 		return ReconcileResult{
-			State:         ReadyState,
+			State:         DGDStateReady,
 			Reason:        "all_resources_are_ready",
 			Message:       Message("All resources are ready"),
 			ServiceStatus: serviceStatuses,
 		}
 	}
 	return ReconcileResult{
-		State:         PendingState,
+		State:         DGDStatePending,
 		Reason:        "some_resources_are_not_ready",
 		Message:       Message(fmt.Sprintf("Resources not ready: %s", strings.Join(notReadyReasons, "; "))),
 		ServiceStatus: serviceStatuses,
@@ -1174,7 +1175,7 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		For(&nvidiacomv1alpha1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
-		Named("dynamographdeployment").
+		Named(consts.ResourceTypeDynamoGraphDeployment).
 		Owns(&nvidiacomv1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
@@ -1229,7 +1230,9 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 				}),
 			)
 	}
-	return ctrlBuilder.Complete(r)
+	// Wrap with metrics collection
+	observedReconciler := observability.NewObservedReconciler(r, consts.ResourceTypeDynamoGraphDeployment)
+	return ctrlBuilder.Complete(observedReconciler)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {

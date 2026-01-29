@@ -14,6 +14,18 @@ use super::super::ToolDefinition;
 use super::super::config::XmlParserConfig;
 use super::response::{CalledFunction, ToolCallResponse, ToolCallType};
 
+/// Strip surrounding quotes from a string if present
+fn strip_quotes(s: &str) -> &str {
+    let trimmed = s.trim();
+    if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    }
+}
+
 /// Check if a chunk contains the start of a xml-style tool call.
 /// Format: <tool_call><function=name><parameter=foo>...</parameter></function></tool_call>
 pub fn detect_tool_call_start_xml(chunk: &str, config: &XmlParserConfig) -> bool {
@@ -140,7 +152,8 @@ fn parse_tool_call_block(
 
     // Find all function blocks.
     for func_cap in function_regex.captures_iter(block) {
-        let function_name = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        let function_name_raw = func_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+        let function_name = strip_quotes(function_name_raw);
         let function_body = func_cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
         if function_name.is_empty() {
@@ -154,7 +167,8 @@ fn parse_tool_call_block(
         let mut parameters: HashMap<String, serde_json::Value> = HashMap::new();
 
         for param_cap in parameter_regex.captures_iter(function_body) {
-            let param_name = param_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            let param_name_raw = param_cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
+            let param_name = strip_quotes(param_name_raw);
             let param_value = param_cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
             if !param_name.is_empty() {
