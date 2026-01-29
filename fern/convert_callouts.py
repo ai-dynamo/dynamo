@@ -46,16 +46,19 @@ to the fern/pages/ folder for the docs-website branch.
 
 Usage:
     # Convert a single file
-    python convert_admonitions.py input.md output.md
+    python convert_callouts.py input.md output.md
 
     # Convert a single file in-place
-    python convert_admonitions.py input.md
+    python convert_callouts.py input.md
 
     # Convert all markdown files in a directory
-    python convert_admonitions.py --dir /path/to/pages
+    python convert_callouts.py --dir /path/to/pages
 
     # Convert from stdin to stdout
-    cat input.md | python convert_admonitions.py -
+    cat input.md | python convert_callouts.py -
+
+    # Run tests
+    python convert_callouts.py --test
 """
 
 import argparse
@@ -211,6 +214,168 @@ def process_directory(dir_path: Path, recursive: bool = True) -> int:
     return count
 
 
+def run_tests():
+    """Run all test cases for the convert_admonitions function."""
+    import textwrap
+
+    passed = 0
+    failed = 0
+
+    def test(name: str, input_text: str, expected: str):
+        nonlocal passed, failed
+        result = convert_admonitions(input_text)
+        if result == expected:
+            print(f"  PASS: {name}")
+            passed += 1
+        else:
+            print(f"  FAIL: {name}")
+            print(f"    Input:\n{textwrap.indent(repr(input_text), '      ')}")
+            print(f"    Expected:\n{textwrap.indent(repr(expected), '      ')}")
+            print(f"    Got:\n{textwrap.indent(repr(result), '      ')}")
+            failed += 1
+
+    print("Running tests...\n")
+
+    # Test 1: Simple NOTE conversion (short content -> single line)
+    test(
+        "Simple NOTE - single line",
+        "> [!NOTE]\n> This is a note.\n",
+        "<Note>This is a note.</Note>\n",
+    )
+
+    # Test 2: Simple TIP conversion
+    test(
+        "Simple TIP - single line",
+        "> [!TIP]\n> This is a tip.\n",
+        "<Tip>This is a tip.</Tip>\n",
+    )
+
+    # Test 3: IMPORTANT -> Info mapping
+    test(
+        "IMPORTANT -> Info mapping",
+        "> [!IMPORTANT]\n> This is important.\n",
+        "<Info>This is important.</Info>\n",
+    )
+
+    # Test 4: WARNING conversion
+    test(
+        "WARNING conversion",
+        "> [!WARNING]\n> This is a warning.\n",
+        "<Warning>This is a warning.</Warning>\n",
+    )
+
+    # Test 5: CAUTION -> Error mapping
+    test(
+        "CAUTION -> Error mapping",
+        "> [!CAUTION]\n> This is a caution.\n",
+        "<Error>This is a caution.</Error>\n",
+    )
+
+    # Test 6: Multi-line content (should use multi-line format)
+    test(
+        "Multi-line content",
+        "> [!NOTE]\n> Line one.\n> Line two.\n",
+        "<Note>\nLine one.\nLine two.\n</Note>\n",
+    )
+
+    # Test 7: Long single line (>100 chars -> multi-line format)
+    long_content = "A" * 101
+    test(
+        "Long single line -> multi-line format",
+        f"> [!NOTE]\n> {long_content}\n",
+        f"<Note>\n{long_content}\n</Note>\n",
+    )
+
+    # Test 8: Case insensitivity
+    test(
+        "Case insensitivity (lowercase)",
+        "> [!note]\n> Lowercase note.\n",
+        "<Note>Lowercase note.</Note>\n",
+    )
+
+    test(
+        "Case insensitivity (mixed case)",
+        "> [!NoTe]\n> Mixed case note.\n",
+        "<Note>Mixed case note.</Note>\n",
+    )
+
+    # Test 9: Indented admonition
+    test(
+        "Indented admonition",
+        "  > [!NOTE]\n  > Indented note.\n",
+        "  <Note>Indented note.</Note>\n",
+    )
+
+    # Test 10: Multiple admonitions in one text
+    test(
+        "Multiple admonitions",
+        "> [!NOTE]\n> First note.\n\nSome text.\n\n> [!TIP]\n> A tip.\n",
+        "<Note>First note.</Note>\n\nSome text.\n\n<Tip>A tip.</Tip>\n",
+    )
+
+    # Test 11: Admonition with markdown formatting
+    test(
+        "Admonition with markdown formatting",
+        "> [!NOTE]\n> This has **bold** and `code`.\n",
+        "<Note>This has **bold** and `code`.</Note>\n",
+    )
+
+    # Test 12: Admonition with link
+    test(
+        "Admonition with link",
+        "> [!TIP]\n> See [the docs](https://example.com).\n",
+        "<Tip>See [the docs](https://example.com).</Tip>\n",
+    )
+
+    # Test 13: Empty content after type
+    test(
+        "Content on same line as blockquote marker",
+        "> [!NOTE]\n>\n",
+        "<Note></Note>\n",
+    )
+
+    # Test 14: Content with extra spaces
+    test(
+        "Content with leading space preserved",
+        "> [!NOTE]\n>  Two spaces before.\n",
+        "<Note> Two spaces before.</Note>\n",
+    )
+
+    # Test 15: No conversion needed (not an admonition)
+    test(
+        "Regular blockquote (no conversion)",
+        "> This is just a regular blockquote.\n",
+        "> This is just a regular blockquote.\n",
+    )
+
+    # Test 16: Admonition in middle of document
+    test(
+        "Admonition in middle of document",
+        "# Header\n\nSome paragraph.\n\n> [!WARNING]\n> Be careful!\n\nMore text.\n",
+        "# Header\n\nSome paragraph.\n\n<Warning>Be careful!</Warning>\n\nMore text.\n",
+    )
+
+    # Test 17: Tab-indented admonition
+    test(
+        "Tab-indented admonition",
+        "\t> [!NOTE]\n\t> Tab indented.\n",
+        "\t<Note>Tab indented.</Note>\n",
+    )
+
+    # Test 18: Multi-line with blank line in content (ends at blank)
+    test(
+        "Multi-line ending at blank line",
+        "> [!NOTE]\n> Line one.\n> Line two.\n\nAfter.\n",
+        "<Note>\nLine one.\nLine two.\n</Note>\n\nAfter.\n",
+    )
+
+    print(f"\n{'='*50}")
+    print(f"Results: {passed} passed, {failed} failed")
+    print(f"{'='*50}")
+
+    return failed == 0
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Convert GitHub-style admonitions to Fern format",
@@ -239,8 +404,19 @@ def main():
         action="store_true",
         help="Don't process subdirectories when using --dir",
     )
+    parser.add_argument(
+        "--test",
+        "-t",
+        action="store_true",
+        help="Run test cases",
+    )
 
     args = parser.parse_args()
+
+    if args.test:
+        # Run tests
+        success = run_tests()
+        sys.exit(0 if success else 1)
 
     if args.dir:
         # Process directory

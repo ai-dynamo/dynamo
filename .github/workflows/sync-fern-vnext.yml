@@ -115,16 +115,16 @@ jobs:
             cp main-checkout/fern/.gitignore fern-checkout/fern/.gitignore
           fi
 
-          # Sync convert_admonitions.py script
-          if [ -f main-checkout/fern/convert_admonitions.py ]; then
-            cp main-checkout/fern/convert_admonitions.py fern-checkout/fern/convert_admonitions.py
+          # Sync convert_callouts.py script
+          if [ -f main-checkout/fern/convert_callouts.py ]; then
+            cp main-checkout/fern/convert_callouts.py fern-checkout/fern/convert_callouts.py
           fi
 
-      - name: Convert GitHub admonitions to Fern format
+      - name: Convert GitHub callouts to Fern format
         run: |
-          echo "Converting GitHub-style admonitions to Fern format in pages/..."
-          python3 fern-checkout/fern/convert_admonitions.py --dir fern-checkout/fern/pages
-          echo "Admonition conversion complete."
+          echo "Converting GitHub-style callouts to Fern format in pages/..."
+          python3 fern-checkout/fern/convert_callouts.py --dir fern-checkout/fern/pages
+          echo "Callout conversion complete."
 
       - name: Update docs.yml preserving versions
         run: |
