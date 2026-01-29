@@ -88,9 +88,19 @@ else
 
   log "No checkpoint to restore"
   log "Executing command: $*"
-  log "=========================================="
 
-  # Execute the provided command
-  exec "$@"
+  # cuda-checkpoint --launch-job is REQUIRED for CUDA checkpoint support.
+  # It sets up CUDA_CHECKPOINT_JOB_FILE which the CUDA checkpoint mechanism
+  # needs to properly track the process tree for checkpoint/restore.
+  CUDA_CHECKPOINT_BIN="${CUDA_CHECKPOINT_BIN:-/usr/local/sbin/cuda-checkpoint}"
+  if [ ! -x "$CUDA_CHECKPOINT_BIN" ]; then
+    log "ERROR: cuda-checkpoint not found at $CUDA_CHECKPOINT_BIN"
+    log "cuda-checkpoint is required for CUDA checkpoint/restore support"
+    exit 1
+  fi
+
+  log "Launching with cuda-checkpoint --launch-job for CUDA checkpoint support"
+  log "=========================================="
+  exec "$CUDA_CHECKPOINT_BIN" --launch-job "$@"
 fi
 
