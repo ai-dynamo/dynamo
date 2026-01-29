@@ -330,6 +330,46 @@ For GPU checkpoints, CRIU uses the CUDA plugin:
 2. Check for network binding issues (port conflicts)
 3. Verify Kubernetes discovery is working
 
+## Performance Benchmarks
+
+Timing results from testing on RTX 5880 Ada (48GB) with Qwen/Qwen3-0.6B model:
+
+### Checkpoint Creation (CRIU Dump)
+
+| Operation | Duration |
+|-----------|----------|
+| CRIU dump (GPU + process state) | ~12.3 seconds |
+| Rootfs diff capture | ~0.7 seconds |
+| **Total checkpoint** | **~13.1 seconds** |
+
+### Restore (CRIU Restore)
+
+| Operation | Run 1 | Run 2 | Run 3 |
+|-----------|-------|-------|-------|
+| Apply rootfs diff | 142ms | 142ms | 147ms |
+| **CRIU restore** | **4.59s** | **4.09s** | **4.09s** |
+| GPU wake up | 5.3ms | 6.1ms | 4.8ms |
+| **Total restore** | **4.73s** | **4.23s** | **4.24s** |
+
+Average CRIU restore time: **~4.3 seconds**
+
+### Cold Start (For Comparison)
+
+| Operation | Duration |
+|-----------|----------|
+| Model loading | ~17 seconds |
+| torch.compile | ~15 seconds |
+| CUDA graph capture | ~4 seconds |
+| KV cache initialization | ~25 seconds |
+| **Total cold start** | **~91 seconds** |
+
+### Summary
+
+- **Restore is ~21x faster than cold start** (4.3s vs 91s)
+- CRIU checkpoint captures full GPU state including CUDA contexts and memory
+- The nvidia-ctk-hook UUID mismatch is handled via symlink creation
+- Inference works correctly after restore
+
 ## Rebuilding After Code Changes
 
 After modifying restore code:
