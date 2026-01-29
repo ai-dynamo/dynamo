@@ -20,6 +20,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -546,8 +547,8 @@ async def main():
     parser.add_argument(
         "--log-dir",
         "-l",
-        default="/tmp/dynamo_logs",
-        help="Base directory for logs (default: /tmp/dynamo_logs)",
+        default=os.path.join(tempfile.gettempdir(), "dynamo_logs"),
+        help="Base directory for logs (default: <tempdir>/dynamo_logs)",
     )
     parser.add_argument(
         "--service-name",
