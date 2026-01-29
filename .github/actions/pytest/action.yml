@@ -34,6 +34,10 @@ inputs:
     default: 'false'
   hf_token:
     required: false
+  parallel_mode:
+    description: 'Parallelization mode: auto (use all cores), none/0 (sequential), or a number of workers'
+    required: false
+    default: 'auto'
 
 
 runs:
@@ -128,13 +132,25 @@ runs:
           if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
             echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
             GPU_FLAGS="--gpus all"
-            # We disable parallelization for GPU runs. Running parallel tests on 1 GPU will likely cause OOM.
-            PARALLEL_OPTS="-n 4"
           else
             echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
-            # CPU-only mode: safe to use all available cores
-            PARALLEL_OPTS="-n auto"
           fi
+          
+          # Determine parallelization based on parallel_mode input
+          case "${{ inputs.parallel_mode }}" in
+            "auto")
+              PARALLEL_OPTS="-n auto"
+              echo "📊 Parallelization: auto (use all available cores)"
+              ;;
+            "none"|"0")
+              PARALLEL_OPTS="-n 0"
+              echo "📊 Parallelization: disabled (sequential execution) for GPU runs"
+              ;;
+            *)
+              PARALLEL_OPTS="-n ${{ inputs.parallel_mode }}"
+              echo "📊 Parallelization: ${{ inputs.parallel_mode }} workers"
+              ;;
+          esac
           
           # Construct final command with xdist parallelization (-n) and other options
           # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests

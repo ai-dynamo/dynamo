@@ -264,17 +264,35 @@ jobs:
           else
             echo "✅ Sanity check passed"
           fi
-      - name: Run tests
+      # Run CPU-only tests first (parallelized for speed)
+      # These are unit tests marked with gpu_0 that don't require GPU hardware
+      - name: Run CPU-only tests (parallelized)
         if: ${{ inputs.framework != 'trtllm' || matrix.platform.arch == 'amd64' }} # trtllm tests on arm64 are not supported
         uses: ./.github/actions/pytest
         with:
           image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
-          pytest_marks: ${{ matrix.platform.arch == 'amd64' && format('pre_merge and {0} and (gpu_0 or gpu_1)', inputs.framework ) || format('pre_merge and {0} and gpu_0', inputs.framework ) }}
+          pytest_marks: ${{ format('pre_merge and {0} and gpu_0', inputs.framework) }}
           framework: ${{ inputs.framework }}
-          test_type: "pre_merge"
+          test_type: "pre_merge_cpu"
           platform_arch: ${{ matrix.platform.arch }}
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'auto'
+
+      # Run GPU tests sequentially (only on amd64 runners with GPU)
+      # These are e2e tests marked with gpu_1 that require GPU hardware
+      - name: Run GPU tests (sequential)
+        if: ${{ matrix.platform.arch == 'amd64' && (inputs.framework != 'trtllm' || matrix.platform.arch == 'amd64') }}
+        uses: ./.github/actions/pytest
+        with:
+          image_tag: ${{ steps.calculate-target-tag.outputs.test_image }}
+          pytest_marks: ${{ format('pre_merge and {0} and gpu_1', inputs.framework) }}
+          framework: ${{ inputs.framework }}
+          test_type: "pre_merge_gpu"
+          platform_arch: ${{ matrix.platform.arch }}
+          enable_mypy: 'false' # already covered by CPU tests
+          hf_token: ${{ secrets.HF_TOKEN }}
+          parallel_mode: 'none'
 
  # ============================================================================
  # COPY TO ACR
