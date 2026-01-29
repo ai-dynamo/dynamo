@@ -123,6 +123,9 @@ In another terminal, start a worker:
    - **SGLang:** No flag needed (KV events disabled by default)
    - **TensorRT-LLM:** Do not use ``--publish-events-and-metrics``
 
+   The warning ``Cannot connect to ModelExpress server/transport error. Using direct download.``
+   is expected when running without NATS and can be safely ignored.
+
 **4. Test your deployment**
 
 .. code-block:: bash

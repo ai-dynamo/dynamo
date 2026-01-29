@@ -203,6 +203,8 @@ python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
 > - **SGLang:** No flag needed (KV events disabled by default)
 > - **TensorRT-LLM:** Do not use `--publish-events-and-metrics`
 >
+> The warning `Cannot connect to ModelExpress server/transport error. Using direct download.` is expected when running without NATS and can be safely ignored.
+>
 > See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
 
 #### Send a Request
