@@ -28,7 +28,9 @@ ETCD_CLIENT_PORT = 2379
 ETCD_PEER_PORT = 2380
 NATS_PORT = 4222
 DIST_INIT_PORT = 29500
-ETCD_LISTEN_ADDR = "http://0.0.0.0"
+# Protocol for internal service communication (configurable for TLS support)
+SERVICE_PROTOCOL = os.environ.get("SERVICE_PROTOCOL", "http")
+ETCD_LISTEN_ADDR = f"{SERVICE_PROTOCOL}://0.0.0.0"
 
 
 def setup_logging(level: int = logging.INFO) -> None:
@@ -337,7 +339,7 @@ def setup_head_prefill_node(prefill_host_ip: str, run_in_ci: bool = False) -> No
         f"{etcd_binary} --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
         f"--advertise-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
         f"--listen-peer-urls {ETCD_LISTEN_ADDR}:{ETCD_PEER_PORT} "
-        f"--initial-cluster default=http://{prefill_host_ip}:{ETCD_PEER_PORT}"
+        f"--initial-cluster default={SERVICE_PROTOCOL}://{prefill_host_ip}:{ETCD_PEER_PORT}"
     )
 
     etcd_process = run_command(etcd_cmd, background=True)
@@ -367,7 +369,7 @@ def setup_frontend_worker(
         setup_head_prefill_node(master_ip, run_in_ci)
     else:
         logging.info(f"Setting up additional frontend worker {worker_idx}")
-        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+        if not wait_for_etcd(f"{SERVICE_PROTOCOL}://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
     # All frontends run the ingress server
@@ -400,7 +402,7 @@ def setup_prefill_worker(
         setup_head_prefill_node(master_ip, run_in_ci)
     else:
         logging.info(f"Setting up prefill worker {worker_idx}, local rank {local_rank}")
-        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+        if not wait_for_etcd(f"{SERVICE_PROTOCOL}://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
@@ -438,7 +440,7 @@ def setup_decode_worker(
     total_gpus = nodes_per_worker * gpus_per_node
     logging.info(f"Setting up decode worker {worker_idx}, local rank {local_rank}")
 
-    if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+    if not wait_for_etcd(f"{SERVICE_PROTOCOL}://{master_ip}:{ETCD_CLIENT_PORT}"):
         raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
@@ -481,7 +483,7 @@ def setup_aggregated_worker(
         logging.info(
             f"Setting up aggregated worker {worker_idx}, local rank {local_rank}"
         )
-        if not wait_for_etcd(f"http://{master_ip}:{ETCD_CLIENT_PORT}"):
+        if not wait_for_etcd(f"{SERVICE_PROTOCOL}://{master_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
     # Setup environment variables for GPU script - use leader_ip as dist-init-addr
@@ -503,7 +505,7 @@ def setup_aggregated_worker(
 
 def setup_env(master_ip: str):
     nats_server = f"nats://{master_ip}:{NATS_PORT}"
-    etcd_endpoints = f"http://{master_ip}:{ETCD_CLIENT_PORT}"
+    etcd_endpoints = f"{SERVICE_PROTOCOL}://{master_ip}:{ETCD_CLIENT_PORT}"
 
     os.environ["NATS_SERVER"] = nats_server
     os.environ["ETCD_ENDPOINTS"] = etcd_endpoints
