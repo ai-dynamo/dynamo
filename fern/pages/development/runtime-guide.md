@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Dynamo Runtime"
 ---
+
+# Dynamo Runtime
 
 <h4>A Datacenter Scale Distributed Inference Serving Framework</h4>
 

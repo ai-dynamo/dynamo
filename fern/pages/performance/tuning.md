@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Disaggregation and Performance Tuning"
 ---
+
+# Disaggregation and Performance Tuning
 
 Disaggregation gains performance by separating the prefill and decode into different engines to reduce interferences between the two.
 However, performant disaggregation requires careful tuning of the inference parameters.

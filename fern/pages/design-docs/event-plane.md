@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Event Plane Architecture"
 ---
+
+# Event Plane Architecture
 
 This document describes Dynamo's event plane architecture, which handles service discovery, coordination, and event distribution using etcd and NATS.
 

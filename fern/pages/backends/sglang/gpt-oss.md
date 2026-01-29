@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Running gpt-oss-120b Disaggregated with SGLang"
 ---
+
+# Running gpt-oss-120b Disaggregated with SGLang
 
 The gpt-oss-120b guide for SGLang is largely identical to the [guide for vLLM](../vllm/gpt-oss.md),
 please ues the vLLM guide as a reference with the different deployment steps as highlighted below:

@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "dynamo.nixl_connect.RdmaMetadata"
 ---
+
+# dynamo.nixl_connect.RdmaMetadata
 
 A Pydantic type intended to provide JSON serialized NIXL metadata about a [`ReadableOperation`](readable-operation.md) or [`WritableOperation`](writable-operation.md) object.
 NIXL metadata contains detailed information about a worker process and how to access memory regions registered with the corresponding agent.

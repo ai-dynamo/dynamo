@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Dynamo NIXL Connect"
 ---
+
+# Dynamo NIXL Connect
 
 Dynamo NIXL Connect specializes in moving data between models/workers in a Dynamo Graph, and for the use cases where registration and memory regions need to be dynamic.
 Dynamo connect provides utilities for such use cases, using the NIXL-based I/O subsystem via a set of Python classes.

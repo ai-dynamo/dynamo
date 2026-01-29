@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "dynamo.nixl_connect.Connector"
 ---
+
+# dynamo.nixl_connect.Connector
 
 Core class for managing the connection between workers in a distributed environment.
 Use this class to create readable and writable operations, or read and write data to remote workers.
