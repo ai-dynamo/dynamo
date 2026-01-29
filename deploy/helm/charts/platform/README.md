@@ -149,10 +149,20 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
+| grove.tolerations | list | `[]` | Node tolerations for Grove pods |
+| grove.affinity | object | `{}` | Affinity rules for Grove pods |
 | kai-scheduler.enabled | bool | `false` | Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide |
+| kai-scheduler.global.tolerations | list | `[]` | Node tolerations for kai-scheduler pods |
+| kai-scheduler.global.affinity | object | `{}` | Affinity rules for kai-scheduler pods |
 | etcd.enabled | bool | `true` | Whether to enable etcd deployment, disable if you want to use an external etcd instance. For complete configuration options, see: https://github.com/bitnami/charts/tree/main/bitnami/etcd , all etcd settings should be prefixed with "etcd." |
 | etcd.image.repository | string | `"bitnamilegacy/etcd"` | following bitnami announcement for brownout - https://github.com/bitnami/charts/tree/main/bitnami/etcd#%EF%B8%8F-important-notice-upcoming-changes-to-the-bitnami-catalog, we need to use the legacy repository until we migrate to the new "secure" repository |
+| etcd.tolerations | list | `[]` | Node tolerations for etcd pods |
+| etcd.affinity | object | `{}` | Affinity rules for etcd pods |
 | nats.enabled | bool | `true` | Whether to enable NATS deployment, disable if you want to use an external NATS instance. For complete configuration options, see: https://github.com/nats-io/k8s/tree/main/helm/charts/nats , all nats settings should be prefixed with "nats." |
+| nats.podTemplate.merge.spec.tolerations | list | `[]` | Node tolerations for NATS pods |
+| nats.podTemplate.merge.spec.affinity | object | `{}` | Affinity rules for NATS pods |
+| nats.natsBox.podTemplate.merge.spec.tolerations | list | `[]` | Node tolerations for NATS Box pods |
+| nats.natsBox.podTemplate.merge.spec.affinity | object | `{}` | Affinity rules for NATS Box pods |
 
 ### NATS Configuration
 
