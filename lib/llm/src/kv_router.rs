@@ -9,7 +9,7 @@ use anyhow::Result;
 use derive_builder::Builder;
 use dynamo_runtime::{
     component::{Client, Endpoint},
-    discovery::{DiscoveryQuery, EventTransportKind, watch_and_extract_field},
+    discovery::{DiscoveryQuery, EventTransportKind},
     pipeline::{
         AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter, ResponseStream,
         SingleIn, async_trait,
@@ -41,7 +41,7 @@ pub use prefill_router::PrefillRouter;
 use worker_query::WorkerQueryClient;
 
 use crate::{
-    discovery::RuntimeConfigsWithNotify,
+    discovery::RuntimeConfigs,
     kv_router::{
         approx::PruneConfig,
         indexer::{KvIndexer, KvIndexerInterface, KvRouterError},
@@ -55,7 +55,6 @@ use crate::{
         subscriber::{start_kv_router_background, start_kv_router_background_event_plane},
     },
     local_model::runtime_config::ModelRuntimeConfig,
-    model_card::ModelDeploymentCard,
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
     protocols::common::timing::RequestPhase,
@@ -332,7 +331,7 @@ impl KvRouter {
     pub async fn new(
         endpoint: Endpoint,
         client: Client,
-        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
+        workers_with_configs: Arc<RuntimeConfigs>,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         kv_router_config: Option<KvRouterConfig>,
@@ -341,23 +340,6 @@ impl KvRouter {
         let kv_router_config = kv_router_config.unwrap_or_default();
         let component = endpoint.component();
         let cancellation_token = component.drt().primary_token();
-
-        // Watch for runtime config updates via discovery interface
-        // (still needed for WorkerQueryClient and background tasks)
-        let discovery = component.drt().discovery();
-        let endpoint_id = endpoint.id();
-        let discovery_key = DiscoveryQuery::EndpointModels {
-            namespace: endpoint_id.namespace.clone(),
-            component: endpoint_id.component.clone(),
-            endpoint: endpoint_id.name.clone(),
-        };
-        let discovery_stream = discovery
-            .list_and_watch(discovery_key.clone(), Some(cancellation_token.clone()))
-            .await?;
-        let runtime_configs_rx =
-            watch_and_extract_field(discovery_stream, |card: ModelDeploymentCard| {
-                card.runtime_config
-            });
 
         let indexer = if kv_router_config.overlap_score_weight == 0.0 {
             // When overlap_score_weight is zero, we don't need to track prefixes
@@ -385,6 +367,9 @@ impl KvRouter {
             ))
         };
 
+        // Wait for at least one worker with a known runtime config before starting scheduler
+        workers_with_configs.subscribe().wait_for_some().await;
+
         let scheduler = KvScheduler::start(
             component.clone(),
             block_size,
@@ -397,30 +382,27 @@ impl KvRouter {
 
         // Initialize worker query client using namespace abstraction
         // (created before background task so we can use it for startup recovery)
-        let worker_query_client =
-            worker_query::WorkerQueryClient::new(component.clone(), runtime_configs_rx.clone());
+        // Uses a subscriber from workers_with_configs
+        let worker_query_client = worker_query::WorkerQueryClient::new(
+            component.clone(),
+            workers_with_configs.subscribe(),
+        );
         tracing::info!("Worker query client initialized");
 
         // Start KV event subscriber background process (only when use_kv_events is enabled)
-        // model_manager.get_or_create_runtime_config_watcher() guarantees at least one worker exists.
         if kv_router_config.use_kv_events
             && let Indexer::KvIndexer(ref kv_indexer) = indexer
         {
-            // model_manager guarantees workers_with_configs is populated
-            // Wait for at least one worker before starting the subscriber
-            while workers_with_configs.configs.is_empty() {
-                tracing::info!("KV router waiting for at least one worker...");
-                workers_with_configs.notify.notified().await;
-            }
-
-            let count = workers_with_configs.configs.len();
             let all_local_indexer = workers_with_configs
                 .configs
                 .iter()
                 .filter_map(|r| r.value().as_ref().map(|c| c.enable_local_indexer))
                 .all(|b| b);
 
-            tracing::info!("Found {count} worker(s), starting KV event subscriber");
+            tracing::info!(
+                "Found {} worker(s), starting KV event subscriber",
+                workers_with_configs.num_workers()
+            );
 
             let transport_kind = EventTransportKind::from_env_or_default();
 
@@ -436,7 +418,8 @@ impl KvRouter {
                     }
                 } else {
                     tracing::info!(
-                        "All {count} workers have local_indexer enabled, using NATS Core subscription"
+                        "All {} workers have local_indexer enabled, using NATS Core subscription",
+                        workers_with_configs.num_workers()
                     );
                 }
 
@@ -447,7 +430,7 @@ impl KvRouter {
                     cancellation_token.clone(),
                     worker_query::WorkerQueryClient::new(
                         component.clone(),
-                        runtime_configs_rx.clone(),
+                        workers_with_configs.subscribe(),
                     ),
                     transport_kind,
                 )

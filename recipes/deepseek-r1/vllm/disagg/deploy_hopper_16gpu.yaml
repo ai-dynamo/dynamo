@@ -7,9 +7,6 @@ metadata:
   name: vllm-dsr1
 spec:
   backendFramework: vllm
-  envs:
-    - name: HF_HOME
-      value: /model-cache
   pvcs:
     - name: model-cache
       create: false
@@ -17,6 +14,9 @@ spec:
     Frontend:
       componentType: frontend
       replicas: 1
+      volumeMounts:
+        - name: model-cache
+          mountPoint: /model-cache
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -73,7 +73,7 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model deepseek-ai/DeepSeek-R1 \
+                --model /model-cache/deepseek-r1 \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
                 --all2all-backend deepep_low_latency \
                 --data-parallel-hybrid-lb \
@@ -132,7 +132,7 @@ spec:
           args:
             - |
               exec python3 -m dynamo.vllm \
-                --model deepseek-ai/DeepSeek-R1 \
+                --model /model-cache/deepseek-r1 \
                 --is-prefill-worker \
                 --served-model-name deepseek-ai/DeepSeek-R1 \
                 --all2all-backend deepep_high_throughput \
