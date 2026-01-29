@@ -1,27 +1,28 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Post-Merge CI Pipeline
+# This is a TEST workflow to verify coverage collection works
+# Use this to test without waiting for nightly build
+# You can delete this file once coverage is verified working
 
+name: Test Coverage Feature
 on:
-  push:
-    branches:
-      - main
-      - 'release/*.*.*'
+  pull_request:
+  workflow_dispatch:  # Manual trigger only
 
 permissions:
-  contents: read
+  contents: write  # Required for coverage-report job to push to coverage-snapshots branch
 
 jobs:
-  ci-pipeline:
-    name: Post-Merge CI
+  test-coverage:
+    name: Test Coverage Collection
     uses: ./.github/workflows/ci-test-suite.yml
     with:
-      pipeline_type: post_merge
-      include_nightly_marks: false
-      image_prefix: main
-      enable_slack_notification: true
-      enable_coverage: false
+      pipeline_type: test
+      include_nightly_marks: false  # Only run pre_merge tests for speed
+      image_prefix: test-coverage
+      enable_slack_notification: false
+      enable_coverage: true  # Enable coverage collection
     secrets:
       AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
