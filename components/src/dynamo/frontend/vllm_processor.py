@@ -56,11 +56,20 @@ class VllmProcessor:
         # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
         print(f"** VllmProcessor.generator request: {request}")
 
-        # tokenizer is CachedQwen2TokenizerFast, subclass of PreTrainedTokenizerBase (part of `transformers` library, not vllm)
-        templated = self.tokenizer.apply_chat_template(
-            conversation=request["messages"],
-            tokenize=False,
-        )
+        # There seem to be two incompatible versions of apply_chat_template, depending on the model
+        try:
+            # tokenizer is CachedQwen2TokenizerFast, subclass of PreTrainedTokenizerBase (part of `transformers` library, not vllm)
+            # This is not the type the source code declares.
+            templated = self.tokenizer.apply_chat_template(
+                conversation=request["messages"],
+                tokenize=False,
+            )
+        except TypeError:
+            # tokenizer is an impl of TokenizerLike. This is the declared type.
+            templated = self.tokenizer.apply_chat_template(
+                messages=request["messages"],
+                tokenize=False,
+            )
 
         print(f"*** Templated: {templated}")
 
