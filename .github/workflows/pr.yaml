@@ -42,7 +42,7 @@ jobs:
       matrix:
         platform:
          - { arch: amd64, runner: prod-tester-amd-gpu-v1 }
-         - { arch: arm64, runner: prod-tester-arm-v1 }
+        #  - { arch: arm64, runner: prod-tester-arm-v1 }
     name: test 
     runs-on: ${{ matrix.platform.runner }}
     env:

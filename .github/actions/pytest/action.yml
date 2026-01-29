@@ -105,6 +105,10 @@ runs:
         # Run pytest with detailed output and JUnit XML
         set +e  # Don't exit on test failures
 
+        # Define common docker flags for stability (Shared memory & limits)
+        # --ipc=host is critical for parallel pytest workers to communicate fast
+        DOCKER_OPTS="--ipc=host --ulimit memlock=-1 --ulimit stack=67108864"
+
         # Determine docker runtime flags and pytest command based on dry_run mode
         if [[ "${{ inputs.dry_run }}" == "true" ]]; then
           echo "🔍 Running pytest in dry-run mode (collect-only, no GPU required)"
@@ -117,24 +121,33 @@ runs:
             echo "🔍 Mypy type checking enabled"
             MYPY_FLAG="--mypy"
           fi
-          PYTEST_CMD="pytest --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
-
+          
           # Detect GPU availability and conditionally add GPU flags
           GPU_FLAGS=""
-          if command -v nvidia-smi &> /dev/null && nvidia-smi &> /dev/null; then
-            echo "✓ GPU detected, enabling GPU runtime"
-            GPU_FLAGS="--runtime=nvidia --gpus all"
+          # We check 'docker info' for the 'nvidia' runtime, which indicates the Daemon can spawn GPU containers.
+          if docker info 2>/dev/null | grep -i "runtimes" | grep -q "nvidia"; then
+            echo "✓ Docker Daemon supports Nvidia runtime, enabling GPU flags"
+            GPU_FLAGS="--gpus all"
+            # CAUTION: If using 1 GPU, running too many parallel tests might OOM.
+            # '-n 4' is a safer default for single-GPU runners than 'auto'.
+            PARALLEL_OPTS="-n 4"
           else
-            echo "⚠️  No GPU detected, running in CPU-only mode"
+            echo "⚠️  Nvidia runtime not found in Docker Daemon, running in CPU-only mode"
+            # CPU-only mode: safe to use all available cores
+            PARALLEL_OPTS="-n auto"
           fi
+          # Construct final command with xdist parallelization (-n) and other options
+          # --dist=loadscope groups tests by module/class to prevent race conditions in stateful tests
+          PYTEST_CMD="pytest ${PARALLEL_OPTS} --dist=loadscope --continue-on-collection-errors -v --tb=short --basetemp=/tmp -o cache_dir=/tmp/.pytest_cache --junitxml=/workspace/test-results/${{ env.PYTEST_XML_FILE }} --durations=10 ${MYPY_FLAG} -m \"${{ inputs.pytest_marks }}\""
         fi
 
         # Get absolute path for test-results directory and ensure it has proper permissions
         TEST_RESULTS_DIR="$(pwd)/test-results"
         chmod 777 "${TEST_RESULTS_DIR}"
         echo "📁 Test results will be saved to: ${TEST_RESULTS_DIR}"
+        echo "▶️ Executing: $PYTEST_CMD"
 
-        docker run ${GPU_FLAGS} --rm -w /workspace \
+        docker run ${GPU_FLAGS} ${DOCKER_OPTS} --rm -w /workspace \
           --network host \
           --env HF_TOKEN="${HF_TOKEN}" \
           --name ${{ env.CONTAINER_ID }}_pytest \
