@@ -120,6 +120,8 @@ sudo apt install python3-dev
 uv pip install "ai-dynamo[sglang]"
 ```
 
+> **Note:** For CUDA 13 (B300/GB300), the container is recommended. See [SGLang install docs](https://docs.sglang.ai/start/install.html) for details.
+
 ### TensorRT-LLM
 
 ```bash
@@ -153,6 +155,8 @@ docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/tensorrtl
 docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
 docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
 ```
+
+> **Tip:** To run frontend and worker in the same container, either run processes in background with `&` (see below), or open a second terminal and use `docker exec -it <container_id> bash`.
 
 See [Release Artifacts](docs/reference/release-artifacts.md#container-images) for available versions.
 

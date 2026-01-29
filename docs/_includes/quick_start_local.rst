@@ -32,6 +32,11 @@ Install system dependencies and the Dynamo wheel for your chosen backend:
    sudo apt install python3-dev
    uv pip install --prerelease=allow "ai-dynamo[sglang]"
 
+.. note::
+
+   For CUDA 13 (B300/GB300), the container is recommended. See
+   `SGLang install docs <https://docs.sglang.ai/start/install.html>`_ for details.
+
 **TensorRT-LLM**
 
 .. code-block:: bash
@@ -71,6 +76,13 @@ Pull and run prebuilt images from NVIDIA NGC. Container names follow the pattern
    # vLLM
    docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
    docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+
+.. tip::
+
+   To run frontend and worker in the same container, either:
+
+   - Run processes in background with ``&`` (see Run Dynamo section below), or
+   - Open a second terminal and use ``docker exec -it <container_id> bash``
 
 See `Release Artifacts <../reference/release-artifacts.html#container-images>`_ for available
 versions and backend guides for run instructions: `SGLang <../backends/sglang/README.html>`_ |
