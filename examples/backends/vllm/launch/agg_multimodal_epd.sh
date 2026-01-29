@@ -57,7 +57,7 @@ if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
     MAX_MODEL_LEN="2048"
 else
-    MAX_MODEL_LEN="34096"
+    MAX_MODEL_LEN="30426"
 fi
 
 # Set GPU memory utilization and model length based on deployment mode
