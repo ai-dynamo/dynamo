@@ -127,30 +127,14 @@ async def worker():
     if not config.served_model_name:
         config.served_model_name = config.engine_args.served_model_name = config.model
 
-    # Download the model if necessary using modelexpress.
-    # We want it on disk before we start vllm to avoid downloading from HuggingFace.
-    #
-    # We don't set `config.engine_args.model` to the local path fetch_llm returns
-    # because vllm will send that name to its Ray pipeline-parallel workers, which
-    # may not have the local path.
-    # vllm will attempt to download the model again, but find it in the HF cache.
-    # For non-HF models use a path instead of an HF name, and ensure all workers have
-    # that path (ideally via a shared folder).
-    if not os.path.exists(config.model):
-        await fetch_llm(config.model)
-
-    # Check checkpoint-related environment variables
+    # Check checkpoint-related environment variables EARLY
     signal_file = os.environ.get("DYN_CHECKPOINT_SIGNAL_FILE")
     ready_file = os.environ.get("DYN_CHECKPOINT_READY_FILE")
 
     is_checkpoint_mode = signal_file is not None
 
-    # CHECKPOINT MODE: Load engine BEFORE runtime creation
-    # This allows checkpointing GPU state before runtime connections are established
-    pre_created_engine = None
-    is_restored = False
+    # EARLY EXIT: Check if checkpoint already exists (before downloading model!)
     if is_checkpoint_mode:
-        # Check if checkpoint already exists (idempotency - PVC storage only)
         storage_type = os.environ.get("DYN_CHECKPOINT_STORAGE_TYPE")
         checkpoint_location = os.environ.get("DYN_CHECKPOINT_LOCATION")
         
@@ -165,18 +149,35 @@ async def worker():
                 logger.info(f"Found existing checkpoint: {checkpoint_location}")
                 logger.info(f"Marker file: {done_marker}")
                 logger.info("Skipping checkpoint creation (idempotent)")
+                logger.info("No model download or GPU initialization needed")
                 logger.info("=" * 60)
                 return
             else:
                 logger.info(f"No existing checkpoint found at: {checkpoint_location}")
                 logger.info("Will create new checkpoint")
-        
-        # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
+
+    # Download the model if necessary using modelexpress.
+    # We want it on disk before we start vllm to avoid downloading from HuggingFace.
+    #
+    # We don't set `config.engine_args.model` to the local path fetch_llm returns
+    # because vllm will send that name to its Ray pipeline-parallel workers, which
+    # may not have the local path.
+    # vllm will attempt to download the model again, but find it in the HF cache.
+    # For non-HF models use a path instead of an HF name, and ensure all workers have
+    # that path (ideally via a shared folder).
+    if not os.path.exists(config.model):
+        await fetch_llm(config.model)
+
+    # CHECKPOINT MODE: Load engine BEFORE runtime creation
+    # This allows checkpointing GPU state before runtime connections are established
+    pre_created_engine = None
+    is_restored = False
+    if is_checkpoint_mode:
         logger.info(
             f"Checkpoint mode enabled (DYN_CHECKPOINT_SIGNAL_FILE={signal_file})"
         )
 
-        # Set up vLLM engine (loads model into GPU)
+        # CHECKPOINT MODE: Load model, sleep, wait for signal file or restore
         pre_created_engine = setup_vllm_engine(config)
         engine_client = pre_created_engine[0]
 
