@@ -30,9 +30,6 @@ on:
       SCCACHE_S3_BUCKET:
         required: true
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name == 'main' && github.run_id || github.ref_name }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changed-files:
@@ -58,7 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { arch: arm64, runner: prod-builder-arm-v1 }
+          - { arch: arm64, runner: cpu-arm-r8g-4xlarge }
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - name: Checkout repository
