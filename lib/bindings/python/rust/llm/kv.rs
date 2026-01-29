@@ -915,6 +915,7 @@ impl KvRecorder {
                             "KvRecorder failed to send kv event; shutting down: {:?}",
                             e
                         );
+                        break;
                     }
                 }
             });
