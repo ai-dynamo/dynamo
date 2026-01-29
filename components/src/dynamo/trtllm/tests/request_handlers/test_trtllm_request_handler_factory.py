@@ -29,6 +29,14 @@ def mock_config():
 class TestRequestHandlerFactory:
     """Tests for RequestHandlerFactory."""
 
+    def test_invalid_mode_raises(self, mock_config):
+        """Test factory raises ValueError for invalid disaggregation_mode."""
+        mock_config.disaggregation_mode.value = "invalid_mode"
+        factory = RequestHandlerFactory()
+
+        with pytest.raises(ValueError, match="Invalid disaggregation_mode"):
+            factory.get_request_handler(mock_config)
+
     def test_creates_aggregated_handler(self, mock_config):
         """Test factory creates AggregatedHandler for prefill_and_decode mode."""
         factory = RequestHandlerFactory()
@@ -43,14 +51,6 @@ class TestRequestHandlerFactory:
         handler = factory.get_request_handler(mock_config)
 
         assert isinstance(handler, PrefillHandler)
-
-    def test_invalid_mode_raises(self, mock_config):
-        """Test factory raises ValueError for invalid disaggregation_mode."""
-        mock_config.disaggregation_mode.value = "invalid_mode"
-        factory = RequestHandlerFactory()
-
-        with pytest.raises(ValueError, match="Invalid disaggregation_mode"):
-            factory.get_request_handler(mock_config)
 
     def test_prefill_handler_with_encoder_cache(self):
         """Test factory creates PrefillHandler with EncoderCacheManager when capacity > 0."""
