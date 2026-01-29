@@ -32,4 +32,12 @@ impl ModelDeploymentCard {
         let json = self.inner.to_json().map_err(to_pyerr)?;
         Ok(json)
     }
+
+    fn source_path(&self) -> &str {
+        self.inner.source_path()
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
 }

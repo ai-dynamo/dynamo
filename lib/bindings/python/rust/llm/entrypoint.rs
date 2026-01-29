@@ -20,6 +20,7 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_llm::model_card::ModelDeploymentCard as RsModelDeploymentCard;
 use dynamo_llm::types::openai::chat_completions::OpenAIChatCompletionsStreamingEngine;
+use dynamo_runtime::discovery::ModelCardInstanceId as RsModelCardInstanceId;
 use dynamo_runtime::protocols::EndpointId;
 
 use super::model_card::ModelDeploymentCard;
@@ -310,7 +311,9 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallb
     let locals = factory.locals;
 
     Arc::new(
-        move |card: RsModelDeploymentCard| -> Pin<
+        move |instance_id: RsModelCardInstanceId,
+              card: RsModelDeploymentCard|
+              -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,
         > {
             let callback = callback.clone();
@@ -319,21 +322,23 @@ fn py_engine_factory_to_callback(factory: PyEngineFactory) -> EngineFactoryCallb
             Box::pin(async move {
                 // Acquire GIL to call Python callback and convert coroutine to future
                 let py_future = Python::with_gil(|py| {
+                    let py_instance_id =
+                        Py::new(py, crate::ModelCardInstanceId { inner: instance_id }).map_err(
+                            |e| anyhow::anyhow!("Failed to create Python ModelCardInstanceId: {e}"),
+                        )?;
                     // Create Python ModelDeploymentCard wrapper
                     let py_card = ModelDeploymentCard { inner: card };
                     let py_card_obj = Py::new(py, py_card)
-                        .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {}", e))?;
+                        .map_err(|e| anyhow::anyhow!("Failed to create Python MDC: {e}"))?;
 
                     // Call Python async function to get a coroutine
                     let coroutine = callback
-                        .call1(py, (py_card_obj,))
-                        .map_err(|e| anyhow::anyhow!("Failed to call engine_factory: {}", e))?;
+                        .call1(py, (py_instance_id, py_card_obj))
+                        .map_err(|e| anyhow::anyhow!("Failed to call engine_factory: {e}"))?;
 
                     // Use the TaskLocals captured at registration time
                     pyo3_async_runtimes::into_future_with_locals(&locals, coroutine.into_bound(py))
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to convert coroutine to future: {}", e)
-                        })
+                        .map_err(|e| anyhow::anyhow!("Failed to convert coroutine to future: {e}"))
                 })?;
 
                 // Await the Python coroutine (GIL is released during await)

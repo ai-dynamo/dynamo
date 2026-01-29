@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use dynamo_runtime::pipeline::RouterMode;
+use dynamo_runtime::{discovery::ModelCardInstanceId, pipeline::RouterMode};
 
 use crate::{
     backend::ExecutionContext, engines::StreamingEngine, kv_router::KvRouterConfig,
@@ -23,6 +23,7 @@ use crate::{
 /// Callback type for engine factory (async)
 pub type EngineFactoryCallback = Arc<
     dyn Fn(
+            ModelCardInstanceId,
             ModelDeploymentCard,
         ) -> Pin<
             Box<dyn Future<Output = anyhow::Result<OpenAIChatCompletionsStreamingEngine>> + Send>,

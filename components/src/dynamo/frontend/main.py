@@ -21,6 +21,7 @@ import logging
 import os
 import pathlib
 import signal
+import sys
 
 import uvloop
 
@@ -30,8 +31,6 @@ from dynamo.llm import (
     EngineType,
     EntrypointArgs,
     KvRouterConfig,
-    ModelDeploymentCard,
-    PythonAsyncEngine,
     RouterConfig,
     RouterMode,
     make_engine,
@@ -52,19 +51,14 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-async def _dummy_generator(request):
-    """Minimal generator that yields nothing. Work in progress."""
-    return
-    yield  # Makes this an async generator
-
-
-async def engine_factory(mdc: ModelDeploymentCard) -> PythonAsyncEngine:
+def setup_engine_factory(runtime: DistributedRuntime):  # Returns EngineFactory:
     """
-    Called by Rust when a model is discovered.
+    When using vllm pre and post processor, create the EngineFactory that
+    creates the engines that run requests.
     """
-    loop = asyncio.get_running_loop()
-    logger.info(f"Engine_factory called with MDC: {mdc.to_json_str()[:100]}...")
-    return PythonAsyncEngine(_dummy_generator, loop)
+    from .vllm_processor import EngineFactory
+
+    return EngineFactory(runtime).engine_factory
 
 
 def validate_model_name(value):
@@ -91,10 +85,34 @@ def parse_args():
     Returns:
         argparse.Namespace: Parsed command-line arguments.
     """
-    parser = argparse.ArgumentParser(
-        description="Dynamo Frontend: HTTP+Pre-processor+Router",
-        formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
-    )
+
+    # We need to know before we parse the arguments
+    full_args = " ".join(sys.argv)
+    is_vllm = "--processor vllm" in full_args or "--processor=vllm" in full_args
+
+    if not is_vllm:
+        # Normal case, Dynamo processor
+        parser = argparse.ArgumentParser(
+            description="Dynamo Frontend: HTTP+Pre-processor+Router",
+            formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
+        )
+    else:
+        # vllm processor
+        try:
+            from vllm.utils import FlexibleArgumentParser
+        except ImportError:
+            try:
+                from vllm.utils.argparse_utils import FlexibleArgumentParser
+            except ModuleNotFoundError as e:
+                logger.error(
+                    f"Flag '--processor vllm' requires vllm be installed. {e}."
+                )
+                sys.exit(1)
+
+        parser = FlexibleArgumentParser(
+            description="Dynamo Frontend: HTTP+Pre-processor+Router",
+        )
+
     parser.add_argument(
         "--version", action="version", version=f"Dynamo Frontend {__version__}"
     )
@@ -308,11 +326,22 @@ def parse_args():
         help="Determines how events are published [nats|zmq]",
     )
     parser.add_argument(
-        "--exp-python-factory",
-        action="store_true",
-        default=False,
-        help="[EXPERIMENTAL] Enable Python-based engine factory. When set, engines will be created via a Python callback instead of the default Rust pipeline.",
+        "--processor",
+        type=str,
+        choices=["dynamo", "vllm"],
+        default="dynamo",
+        help="[EXPERIMENTAL] When set to 'vllm', use local vllm for the pre and post processor.",
     )
+    if is_vllm:
+        try:
+            from vllm.engine.arg_utils import AsyncEngineArgs
+            from vllm.entrypoints.openai.cli_args import FrontendArgs
+
+            parser = FrontendArgs.add_cli_args(parser)
+            parser = AsyncEngineArgs.add_cli_args(parser)
+        except ModuleNotFoundError as e:
+            logger.error(f"Flag '--processor vllm' requires vllm be installed. {e}.")
+            sys.exit(1)
 
     flags = parser.parse_args()
 
@@ -433,8 +462,10 @@ async def async_main():
             "custom_backend_metrics_polling_interval"
         ] = flags.custom_backend_metrics_polling_interval
 
-    if flags.exp_python_factory:
-        kwargs["engine_factory"] = engine_factory
+    if flags.processor == "vllm":
+        # TODO: Do we also need to tell the engine factory when the model is removed,
+        # so it can "stop" vllm?
+        kwargs["engine_factory"] = setup_engine_factory(runtime)
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
