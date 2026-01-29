@@ -887,7 +887,9 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
         TRTLLM_WHEEL_VERSION=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
         if trtllm_version_incompatible "${TRTLLM_WHEEL_VERSION}"; then
-            use_trtllm_wheel_image "${TRTLLM_WHEEL_VERSION}"
+            if [ "$DRY_RUN" != "true" ]; then
+                use_trtllm_wheel_image "${TRTLLM_WHEEL_VERSION}"
+            fi
         else
             BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
             BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
