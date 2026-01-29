@@ -13,13 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Sync vNext docs from main to fern branch
+# Sync vNext docs from main to docs-website branch
 #
-# This workflow syncs the fern/ directory from main branch to the fern branch,
+# This workflow syncs the fern/ directory from main branch to the docs-website branch,
 # preserving versioned documentation (pages-vX.Y.Z/, versions/vX.Y.Z.yml) and
-# the versions section of docs.yml on the fern branch.
+# the versions section of docs.yml on the docs-website branch.
 #
-# The fern branch structure:
+# The docs-website branch structure:
 #   fern/
 #   ├── docs.yml              # Has all versions listed (Next + released versions)
 #   ├── fern.config.json
@@ -57,10 +57,10 @@ jobs:
           path: main-checkout
           fetch-depth: 1
 
-      - name: Checkout fern branch
+      - name: Checkout docs-website branch
         uses: actions/checkout@v4
         with:
-          ref: fern
+          ref: docs-website
           path: fern-checkout
           fetch-depth: 1
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -93,21 +93,21 @@ jobs:
       - name: Sync vNext content from main
         run: |
           # Sync pages/ directory (vNext content)
-          echo "Syncing pages/ from main to fern branch..."
+          echo "Syncing pages/ from main to docs-website branch..."
           rm -rf fern-checkout/fern/pages
           cp -r main-checkout/fern/pages fern-checkout/fern/pages
 
           # Sync versions/next.yml (vNext navigation)
-          echo "Syncing versions/next.yml from main to fern branch..."
+          echo "Syncing versions/next.yml from main to docs-website branch..."
           cp main-checkout/fern/versions/next.yml fern-checkout/fern/versions/next.yml
 
           # Sync assets/ directory
-          echo "Syncing assets/ from main to fern branch..."
+          echo "Syncing assets/ from main to docs-website branch..."
           rm -rf fern-checkout/fern/assets
           cp -r main-checkout/fern/assets fern-checkout/fern/assets
 
           # Sync fern.config.json
-          echo "Syncing fern.config.json from main to fern branch..."
+          echo "Syncing fern.config.json from main to docs-website branch..."
           cp main-checkout/fern/fern.config.json fern-checkout/fern/fern.config.json
 
           # Sync .gitignore if it exists
@@ -130,7 +130,7 @@ jobs:
         run: |
           cd fern-checkout/fern
 
-          # Extract the list of versioned entries from current docs.yml (on fern branch)
+          # Extract the list of versioned entries from current docs.yml (on docs-website branch)
           # These are entries after "path: ./versions/next.yml"
           # We need to preserve them while updating the rest from main
 
@@ -181,6 +181,6 @@ jobs:
 
           Source commit: ${{ github.sha }}"
 
-          git push origin fern
+          git push origin docs-website
 
-          echo "Successfully synced vNext docs to fern branch"
+          echo "Successfully synced vNext docs to docs-website branch"
