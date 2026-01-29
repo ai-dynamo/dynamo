@@ -281,7 +281,7 @@ kubectl get pods -n ${NAMESPACE}
    kubectl apply -f examples/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 
    # Port forward and test
-   kubectl port-forward svc/agg-vllm-frontend 8000:8000 -n ${NAMESPACE}
+   kubectl port-forward svc/vllm-agg-frontend 8000:8000 -n ${NAMESPACE}
    curl http://localhost:8000/v1/models
    ```
 
