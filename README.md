@@ -101,31 +101,60 @@ The Dynamo team recommends the `uv` Python package manager, although any way wor
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-### Install Python Development Headers
-
-Backend engines require Python development headers for JIT compilation. Install them with:
-
-```bash
-sudo apt install python3-dev
-```
-
-## 2. Select an Engine
-
-We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
+Create a virtual environment:
 
 ```bash
 uv venv venv
 source venv/bin/activate
 uv pip install pip
+```
 
-# For vLLM or SGLang:
-uv pip install "ai-dynamo[sglang]"  # or [vllm]
+## 2. Select an Engine
 
-# For TensorRT-LLM (requires pip, not uv):
+Install system dependencies and the Dynamo wheel for your chosen backend:
+
+### SGLang
+
+```bash
+sudo apt install python3-dev
+uv pip install "ai-dynamo[sglang]"
+```
+
+### TensorRT-LLM
+
+```bash
+sudo apt install python3-dev
 pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 ```
 
-> **Note:** TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the [TensorRT-LLM container](docs/reference/release-artifacts.md#container-images) for broader compatibility. See [Release Artifacts](docs/reference/release-artifacts.md#python-wheels) for wheel availability.
+> **Note:** TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the [TensorRT-LLM container](docs/reference/release-artifacts.md#container-images) for broader compatibility.
+
+### vLLM
+
+```bash
+sudo apt install python3-dev libxcb1
+uv pip install "ai-dynamo[vllm]"
+```
+
+### Containers
+
+Pull and run prebuilt images from NVIDIA NGC:
+
+```bash
+# SGLang
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+
+# TensorRT-LLM
+docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+
+# vLLM
+docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+```
+
+See [Release Artifacts](docs/reference/release-artifacts.md#container-images) for available versions.
 
 ## 3. Run Dynamo
 
