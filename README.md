@@ -176,17 +176,34 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 - **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
 - **Workers** – Set of pre-configured LLM serving engines.
 
+Start the frontend:
+
 ```bash
 # Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
 # For local dev: --store-kv file avoids etcd (workers and frontend must share a disk)
 python3 -m dynamo.frontend --http-port 8000 --store-kv file
-
-# Start the SGLang engine. You can run several of these for the same or different models.
-# The frontend will discover them automatically.
-python3 -m dynamo.sglang --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B --store-kv file
 ```
 
-> **Note:** vLLM workers publish KV cache events by default, which requires NATS. For dependency-free local development with vLLM, add `--kv-events-config '{"enable_kv_cache_events": false}'`. This keeps local prefix caching enabled while disabling event publishing. See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
+In another terminal, start a worker for your chosen backend:
+
+```bash
+# SGLang
+python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
+
+# TensorRT-LLM
+python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --store-kv file
+
+# vLLM (note: uses --model, not --model-path)
+python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
+  --kv-events-config '{"enable_kv_cache_events": false}'
+```
+
+> **Note:** For dependency-free local development, disable KV event publishing (avoids NATS):
+> - **vLLM:** Add `--kv-events-config '{"enable_kv_cache_events": false}'`
+> - **SGLang:** No flag needed (KV events disabled by default)
+> - **TensorRT-LLM:** Do not use `--publish-events-and-metrics`
+>
+> See [Service Discovery and Messaging](#service-discovery-and-messaging) for details.
 
 #### Send a Request
 

@@ -86,21 +86,42 @@ Verify your system configuration and dependencies:
 
 **3. Run Dynamo**
 
+Start the frontend, then start a worker for your chosen backend:
+
 .. code-block:: bash
 
    # Start the OpenAI compatible frontend (default port is 8000)
    # --store-kv file avoids needing etcd (frontend and workers must share a disk)
-   python -m dynamo.frontend --store-kv file
+   python3 -m dynamo.frontend --store-kv file
 
-   # In another terminal, start an SGLang worker
-   python -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
+In another terminal, start a worker:
+
+**SGLang**
+
+.. code-block:: bash
+
+   python3 -m dynamo.sglang --model-path Qwen/Qwen3-0.6B --store-kv file
+
+**TensorRT-LLM**
+
+.. code-block:: bash
+
+   python3 -m dynamo.trtllm --model-path Qwen/Qwen3-0.6B --store-kv file
+
+**vLLM**
+
+.. code-block:: bash
+
+   python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --store-kv file \
+     --kv-events-config '{"enable_kv_cache_events": false}'
 
 .. note::
 
-   vLLM workers publish KV cache events by default, which requires NATS. For
-   dependency-free local development with vLLM, add
-   ``--kv-events-config '{"enable_kv_cache_events": false}'``. This keeps local
-   prefix caching enabled while disabling event publishing.
+   For dependency-free local development, disable KV event publishing (avoids NATS):
+
+   - **vLLM:** Add ``--kv-events-config '{"enable_kv_cache_events": false}'``
+   - **SGLang:** No flag needed (KV events disabled by default)
+   - **TensorRT-LLM:** Do not use ``--publish-events-and-metrics``
 
 **4. Test your deployment**
 
