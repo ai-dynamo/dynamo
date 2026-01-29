@@ -55,7 +55,9 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         self.fs = fs
         self.fs_url = config.dynamo_args.image_diffusion_fs_url
         self.url_base = config.dynamo_args.image_diffusion_url_base
-        self.storage_path_resolver = ImageStoragePathResolver(self.fs_url, self.url_base)
+        self.storage_path_resolver = ImageStoragePathResolver(
+            self.fs_url, self.url_base
+        )
 
         logger.info(
             f"Image diffusion worker handler initialized with fs_url={self.fs_url}, url_base={self.url_base}"
@@ -247,10 +249,11 @@ class ImageDiffusionWorkerHandler(BaseGenerativeHandler):
         storage_path = f"users/{user_id}/generations/{request_id}/{image_filename}"
 
         # Use pipe() for writing bytes (standard fsspec API)
-        await asyncio.to_thread(self.fs.pipe, self.storage_path_resolver.get_path(storage_path), image_bytes)
+        await asyncio.to_thread(
+            self.fs.pipe, self.storage_path_resolver.get_path(storage_path), image_bytes
+        )
 
         return self.storage_path_resolver.get_url(storage_path)
-
 
     def _encode_base64(self, image_bytes: bytes) -> str:
         """Encode image as base64 string"""
@@ -304,7 +307,9 @@ class ImageStoragePathResolver:
             bucket_path = self.fs_base_url.replace("gs://", "")
             return f"https://storage.googleapis.com/{bucket_path}/{storage_path}"
 
-        if self.fs_base_url.startswith("az://") or self.fs_base_url.startswith("abfss://"):
+        if self.fs_base_url.startswith("az://") or self.fs_base_url.startswith(
+            "abfss://"
+        ):
             # Azure Blob Storage
             # az://container@account/path -> https://account.blob.core.windows.net/container/path
             if self.fs_base_url.startswith("az://"):
@@ -318,7 +323,9 @@ class ImageStoragePathResolver:
         if self.fs_base_url.startswith("file://"):
             return f"{self.fs_base_url}/{storage_path}"
 
-        raise ValueError(f"Unknown filesystem type for URL generation: {self.fs_base_url}")
+        raise ValueError(
+            f"Unknown filesystem type for URL generation: {self.fs_base_url}"
+        )
 
     def get_url(self, storage_path: str) -> str:
         """Returns the URL for the image."""
@@ -329,5 +336,3 @@ class ImageStoragePathResolver:
 
         # If no url_base configured, return filesystem URL
         return self.get_fs_url(storage_path)
-
-
