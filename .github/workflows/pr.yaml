@@ -449,7 +449,6 @@ jobs:
   # Clean up ephemeral Kubernetes namespace and resources
   # ============================================================================
 
-
   clean-k8s-builder:
     name: Clean K8s builder if exists
     runs-on: prod-default-small-v2
