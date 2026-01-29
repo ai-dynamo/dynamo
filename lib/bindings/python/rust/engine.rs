@@ -8,19 +8,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::{PyAny, PyErr};
 use pyo3_async_runtimes::TaskLocals;
-use pythonize::{depythonize, pythonize};
+use pythonize::pythonize;
 pub use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::{StreamExt, wrappers::ReceiverStream};
 use tokio_util::sync::CancellationToken;
 
+use super::context::{Context, callable_accepts_kwarg};
+use crate::bridge;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 pub use dynamo_runtime::{
     pipeline::{AsyncEngine, AsyncEngineContextProvider, Data, ManyOut, ResponseStream, SingleIn},
     protocols::annotated::Annotated,
 };
-
-use super::context::{Context, callable_accepts_kwarg};
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -136,9 +136,8 @@ enum ResponseProcessingError {
 
     #[error("deserialize error: {0}")]
     DeserializeError(String),
-
-    #[error("gil offload error: {0}")]
-    OffloadError(String),
+    // #[error("gil offload error: {0}")]
+    // OffloadError(String),
 }
 
 #[async_trait::async_trait]
@@ -179,20 +178,17 @@ where
         //
         // Since we cannot predict the GIL contention, we will always use the blocking task and pay the
         // cost. The Python GIL is the gift that keeps on giving -- performance hits...
-        let stream = tokio::task::spawn_blocking(move || {
-            Python::with_gil(|py| {
+        let stream = bridge::Bridge::global()
+            .with_gil(move |py| {
                 let py_request = pythonize(py, &request)?;
 
-                // Create context with trace information
                 let py_ctx = Py::new(py, Context::new(ctx_python.clone(), current_trace_context))?;
 
                 let gen_result = if has_context {
-                    // Pass context as a kwarg
                     let kwarg = PyDict::new(py);
                     kwarg.set_item("context", &py_ctx)?;
                     generator.call(py, (py_request,), Some(&kwarg))
                 } else {
-                    // Legacy: No `context` arg
                     generator.call1(py, (py_request,))
                 }?;
 
@@ -202,8 +198,7 @@ where
                     gen_result.into_bound(py),
                 )
             })
-        })
-        .await??;
+            .await?;
 
         let stream = Box::pin(stream);
 
@@ -259,13 +254,6 @@ where
                                 );
                                 msg
                             }
-                            ResponseProcessingError::OffloadError(e) => {
-                                let msg = format!(
-                                    "critical error: failed to offload the python async generator to a new thread: {}",
-                                    e
-                                );
-                                msg
-                            }
                         };
 
                         Annotated::from_error(msg)
@@ -307,25 +295,33 @@ async fn process_item<Resp>(
 where
     Resp: Data + for<'de> Deserialize<'de>,
 {
-    let item = item.map_err(|e| {
-        println!();
-        let mut is_py_generator_exit = false;
-        Python::with_gil(|py| {
-            e.display(py);
-            is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
-        });
-        if is_py_generator_exit {
-            ResponseProcessingError::PyGeneratorExit(e.to_string())
-        } else {
-            ResponseProcessingError::PythonException(e.to_string())
+    let bridge = bridge::Bridge::global();
+
+    let item = match item {
+        Ok(obj) => obj,
+        Err(e) => {
+            let msg = e.to_string();
+
+            let is_py_generator_exit = bridge
+                .with_gil(move |py| {
+                    e.display(py);
+                    Ok(e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py))
+                })
+                .await
+                .map_err(|e| ResponseProcessingError::PythonException(e.to_string()))?;
+
+            return Err(if is_py_generator_exit {
+                ResponseProcessingError::PyGeneratorExit(msg)
+            } else {
+                ResponseProcessingError::PythonException(msg)
+            });
         }
-    })?;
-    let response = tokio::task::spawn_blocking(move || {
-        Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
-    })
-    .await
-    .map_err(|e| ResponseProcessingError::OffloadError(e.to_string()))?
-    .map_err(|e| ResponseProcessingError::DeserializeError(e.to_string()))?;
+    };
+
+    let response: Resp = bridge
+        .depythonize::<Resp>(item)
+        .await
+        .map_err(|e| ResponseProcessingError::DeserializeError(e.to_string()))?;
 
     let response = Annotated::from_data(response);
 
