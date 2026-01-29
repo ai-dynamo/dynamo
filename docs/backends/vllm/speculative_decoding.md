@@ -35,7 +35,8 @@ docker compose -f deploy/docker-compose.yml up -d
 ### 2. Build the Container
 
 ```bash
-./container/build.sh --framework VLLM
+python container/render.py --framework=vllm --target=runtime
+docker build -t dynamo:vllm-latest -f container/rendered.Dockerfile .
 ```
 
 ### 3. Run the Container
