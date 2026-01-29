@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Understanding KVBM components"
 ---
+
+# Understanding KVBM components
 
 KVBM design takes inspiration from the KV block managers used in vLLM and SGLang, with an added influence from historical memory tiering strategies common in general GPU programming. For more details, [See KVBM Reading](kvbm-reading.md). The figure below illustrates the internal components of KVBM.
 

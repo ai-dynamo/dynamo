@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "vLLM Multimodal"
 ---
+
+# vLLM Multimodal
 
 This document provides a comprehensive guide for multimodal inference using vLLM backend in Dynamo.
 
