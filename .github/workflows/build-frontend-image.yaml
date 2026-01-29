@@ -74,17 +74,30 @@ jobs:
           echo "--- Docker Interface Check (if exists) ---"
           # Check for docker0 or other interfaces in /sys/class/net/
           ls -l /sys/class/net/
-      - name: 🚑 Fix Network MTU
+      - name: 🚑 Fix Network MTU (Privileged Side-Loader)
         run: |
-          # Force the docker bridge to a safe lower value
-          # We use 'ip link' inside the dind container context if possible,
-          # but often running this on the runner container works if they share the net namespace.
+          echo "Attempting to fix MTU using a privileged helper container..."
 
-          sudo ip link set dev docker0 mtu 1440 || echo "docker0 not found yet, that's okay"
+          # We spin up a tiny Alpine container with --privileged and --net=host.
+          # This allows it to see and modify the Runner Pod's network interfaces.
 
-          # Crucially, clamp the MSS (Maximum Segment Size) to prevent large packets
-          # This tells TCP connections "don't send me anything bigger than 1400 bytes"
-          sudo iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1400
+          docker run --rm --privileged --net=host alpine sh -c '
+            apk add --no-cache iproute2 iptables &&
+
+            # 1. Lower the Docker Bridge MTU (if it exists) to be safe
+            if ip link show docker0 > /dev/null 2>&1; then
+              ip link set dev docker0 mtu 1400
+              echo "Successfully set docker0 MTU to 1400"
+            else
+              echo "docker0 interface not found, skipping..."
+            fi &&
+
+            # 2. The "Big Hammer": Clamp TCP MSS
+            # This forces all TCP connections leaving the pod to negotiate smaller packet sizes
+            # preventing the "Black Hole" drop.
+            iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1360
+            echo "Successfully applied iptables MSS clamp"
+          '
 
       - name: Set up Go
         uses: actions/setup-go@v5
