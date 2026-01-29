@@ -20,5 +20,5 @@ Key features include:
 
 > [!TIP]
 > **New to SLA Planner?** Start with the [SLA Planner Quick Start Guide](sla-planner-quickstart.md) for a complete, step-by-step workflow.
-> 
+>
 > **Prerequisites**: SLA-based planner requires pre-deployment profiling (2-4 hours on real silicon or a few minutes using simulator) before deployment. The Quick Start guide includes everything you need.
