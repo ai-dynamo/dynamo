@@ -94,4 +94,4 @@ curl localhost:8000/v1/chat/completions \
 
 - **GitHub Issues**: [Report bugs or request features](https://github.com/ai-dynamo/dynamo/issues)
 - **Discussions**: [Ask questions and share ideas](https://github.com/ai-dynamo/dynamo/discussions)
-- **Reference**: [CLI Reference](../reference/cli.md) | [Glossary](../reference/glossary.md) | [Support Matrix](./support-matrix.md)
+- **Reference**: [CLI Reference](../reference/cli.md) | [Glossary](../reference/glossary.md) | [Support Matrix](../reference/support-matrix.md)
