@@ -98,7 +98,12 @@ Verify your system configuration and dependencies:
 
 **3. Run Dynamo**
 
-Start the frontend, then start a worker for your chosen backend:
+Start the frontend, then start a worker for your chosen backend.
+
+.. tip::
+
+   To run in a single terminal (useful in containers), append ``> logfile.log 2>&1 &``
+   to run processes in background. Example: ``python3 -m dynamo.frontend --store-kv file > dynamo.frontend.log 2>&1 &``
 
 .. code-block:: bash
 
@@ -106,7 +111,7 @@ Start the frontend, then start a worker for your chosen backend:
    # --store-kv file avoids needing etcd (frontend and workers must share a disk)
    python3 -m dynamo.frontend --store-kv file
 
-In another terminal, start a worker:
+In another terminal (or same terminal if using background mode), start a worker:
 
 **SGLang**
 

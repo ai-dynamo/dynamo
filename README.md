@@ -182,13 +182,15 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 
 Start the frontend:
 
+> **Tip:** To run in a single terminal (useful in containers), append `> logfile.log 2>&1 &` to run processes in background. Example: `python3 -m dynamo.frontend --store-kv file > dynamo.frontend.log 2>&1 &`
+
 ```bash
 # Start an OpenAI compatible HTTP server with prompt templating, tokenization, and routing.
 # For local dev: --store-kv file avoids etcd (workers and frontend must share a disk)
 python3 -m dynamo.frontend --http-port 8000 --store-kv file
 ```
 
-In another terminal, start a worker for your chosen backend:
+In another terminal (or same terminal if using background mode), start a worker for your chosen backend:
 
 ```bash
 # SGLang
