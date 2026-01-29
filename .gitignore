@@ -122,3 +122,5 @@ package-lock.json
 
 # Compiled static libraries
 *.a
+
+core

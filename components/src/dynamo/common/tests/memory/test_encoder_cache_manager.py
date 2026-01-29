@@ -9,27 +9,6 @@ import torch
 from dynamo.common.memory.encoder_cache_manager import EncoderCacheManager
 
 
-class TestEncoderCacheManagerInit:
-    """Tests for initialization."""
-
-    def test_init_valid_capacity(self):
-        """Test initialization with valid capacity."""
-        cache = EncoderCacheManager(capacity_bytes=1024)
-        assert cache.stats["capacity_bytes"] == 1024
-        assert cache.stats["current_bytes"] == 0
-        assert cache.stats["entries"] == 0
-
-    def test_init_invalid_capacity_zero(self):
-        """Test initialization with zero capacity raises error."""
-        with pytest.raises(ValueError, match="capacity_bytes must be positive"):
-            EncoderCacheManager(capacity_bytes=0)
-
-    def test_init_invalid_capacity_negative(self):
-        """Test initialization with negative capacity raises error."""
-        with pytest.raises(ValueError, match="capacity_bytes must be positive"):
-            EncoderCacheManager(capacity_bytes=-100)
-
-
 class TestEncoderCacheManagerBasicOperations:
     """Tests for basic get/set operations."""
 

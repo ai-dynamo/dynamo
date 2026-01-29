@@ -1,0 +1,6 @@
+[TEST] 2026-01-28T19:13:15 INFO NatsServer: Running command: nats-server -js --trace --store_dir /tmp/nats_oeumv58z -p 4222 in /workspace
+[TEST] 2026-01-28T19:13:15 INFO NatsServer: Checking Port: 4222
+[TEST] 2026-01-28T19:13:15 INFO NatsServer: SUCCESS: Check Port: 4222
+[TEST] 2026-01-28T19:13:15 INFO EtcdServer: Running command: etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd_f_efxu_w in /workspace
+[TEST] 2026-01-28T19:13:15 INFO EtcdServer: Checking Port: 2379
+[TEST] 2026-01-28T19:13:15 INFO EtcdServer: SUCCESS: Check Port: 2379
