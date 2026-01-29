@@ -7,6 +7,7 @@
 #   vllm     -> vllm build and test
 #   sglang   -> sglang build and test
 #   trtllm   -> trtllm build and test
+#   frontend -> frontend EPP image build
 #
 # Filters for coverage only (no CI triggered):
 #   docs, examples, ignore, planner
@@ -16,6 +17,7 @@ all:
 
 docs:
   - 'docs/**'
+  - 'fern/**'
   - '**/*.md'
   - '**/*.rst'
   - '**/*.txt'
@@ -78,6 +80,7 @@ core:
   - 'components/src/dynamo/mocker/**'
   - 'components/src/dynamo/frontend/**'
   - 'components/src/dynamo/common/**'
+  - 'components/src/dynamo/gpu_memory_service/**'
   - '*.toml'
   - '*.lock'
   - '*.py'
@@ -99,6 +102,7 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/global_router/**'
 
 vllm:
   - 'container/Dockerfile.vllm'
@@ -118,3 +122,25 @@ trtllm:
   - 'examples/backends/trtllm/**'
   - 'components/src/dynamo/trtllm/**'
   - 'container/build_trtllm_wheel.sh'
+
+frontend:
+  - *ci
+  - '.cargo/config.toml'
+  - 'lib/**'
+  - '*.toml'
+  - '*.lock'
+  - 'container/build.sh'
+  - 'container/Dockerfile'
+  - 'container/deps/*'
+  - 'components/src/dynamo/router/**'
+  - 'components/src/dynamo/mocker/**'
+  - 'components/src/dynamo/frontend/**'
+  - 'components/src/dynamo/common/**'
+  - 'deploy/inference-gateway/**'
+
+rust:
+  - '.github/workflows/pre-merge.yml'
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'deny.toml'

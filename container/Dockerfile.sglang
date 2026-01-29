@@ -36,12 +36,13 @@ ARG BASE_IMAGE_TAG
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 ARG RUNTIME_IMAGE="lmsysorg/sglang"
-ARG RUNTIME_IMAGE_TAG="v0.5.7-runtime"
+ARG RUNTIME_IMAGE_TAG="v0.5.8-runtime"
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -147,10 +148,17 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=dynamo_base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=dynamo_base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-RUN yum groupinstall -y 'Development Tools' &&  \
-    dnf install -y almalinux-release-synergy && \
+RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
+        # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
+        autoconf \
+        automake \
+        libtool \
+        make \
+        # Install GCC toolset 14 (CUDA compatible, max version 14)
+        rpm-build \
+        rpm-sign \
         # Build tools
         cmake \
         ninja-build \
@@ -176,7 +184,8 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel && \
+    dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -442,6 +451,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        source ${VIRTUAL_ENV}/bin/activate && \
+        uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
+    fi
+
 ##################################
 ########## Runtime Image #########
 ##################################
@@ -500,12 +516,21 @@ COPY --chmod=775 --chown=dynamo:0 --from=wheel_builder /workspace/nixl/build/src
 
 ENV SGLANG_VERSION="${RUNTIME_IMAGE_TAG%%-*}"
 # Install packages as root to ensure they go to system location (/usr/local/lib/python3.12/dist-packages)
+ARG ENABLE_GPU_MEMORY_SERVICE
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
     pip install --no-cache-dir --break-system-packages \
         /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
         /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
         /opt/dynamo/wheelhouse/nixl/nixl*.whl \
-        sglang==${SGLANG_VERSION}
+        sglang==${SGLANG_VERSION} && \
+    if [ "${ENABLE_GPU_MEMORY_SERVICE}" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        pip install --no-cache-dir --break-system-packages "$GMS_WHEEL"; \
+    fi
 
 # Install common and test dependencies as root
 RUN --mount=type=bind,source=.,target=/mnt/local_src \
@@ -527,7 +552,7 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
             nvidia-nccl-cu12==2.28.3 \
             nvidia-cudnn-cu12==9.16.0.29 \
-            nvidia-cutlass-dsl==4.3.0; \
+            nvidia-cutlass-dsl==4.3.5; \
     elif [ "$CUDA_MAJOR" = "13" ]; then \
         # CUDA 13: Install CuDNN for PyTorch 2.9.1 compatibility
         pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \

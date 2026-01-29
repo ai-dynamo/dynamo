@@ -9,44 +9,11 @@ use crate::block_manager::block::{BlockDataProvider, BlockDataProviderMut};
 use anyhow::Result;
 use cudarc::driver::CudaStream;
 use cudarc::driver::result as cuda_result;
+use cudarc::driver::sys::{CUevent_flags, CUresult, cuMemcpyHtoDAsync_v2};
 use dynamo_runtime::config::environment_names::cuda as env_cuda;
 use std::ops::Range;
 use std::sync::Mutex;
 use std::sync::OnceLock;
-
-/// Simple pinned memory allocation
-pub fn allocate_pinned_memory(size: usize) -> Result<u64, TransferError> {
-    // 16-byte alignment for vectorized operations
-    let aligned_size = (size + 15) & !15;
-
-    if aligned_size == 0 {
-        return Err(TransferError::ExecutionError(
-            "Invalid allocation size".to_string(),
-        ));
-    }
-
-    unsafe {
-        let result = cuda_result::malloc_host(aligned_size, 0);
-        match result {
-            Ok(ptr) => {
-                let ptr_value = ptr as u64;
-                tracing::debug!(
-                    "Allocated pinned memory: {}KB, ptr=0x{:x}",
-                    aligned_size / 1024,
-                    ptr_value
-                );
-                Ok(ptr_value)
-            }
-            Err(e) => {
-                tracing::error!("Pinned memory allocation failed: {}", e);
-                Err(TransferError::ExecutionError(format!(
-                    "Pinned memory allocation failed: {}",
-                    e
-                )))
-            }
-        }
-    }
-}
 
 // Global storage for kernel function - store as usize to avoid Send/Sync issues
 static COPY_KERNEL_MODULE: Mutex<Option<usize>> = Mutex::new(None);
@@ -169,10 +136,17 @@ unsafe fn launch_copy_kernel_direct(
     };
 
     if result != cudarc::driver::sys::cudaError_enum::CUDA_SUCCESS {
-        tracing::error!("Kernel launch failed: {:?}", result);
+        tracing::error!(
+            "Kernel launch failed: {:?} - kernel params: {} pairs, layer_size={}, src=0x{:x}, dst=0x{:x}",
+            result,
+            address_count,
+            layer_size,
+            src_pinned_ptr,
+            dst_pinned_ptr
+        );
         return Err(TransferError::ExecutionError(format!(
-            "CUDA kernel launch failed: {:?}",
-            result
+            "CUDA kernel launch failed: {:?} (address_count={}, layer_size={})",
+            result, address_count, layer_size
         )));
     }
 
@@ -217,7 +191,7 @@ pub fn copy_blocks_with_customized_kernel<'a, Source, Destination>(
     destinations: &'a mut [Destination],
     stream: &CudaStream,
     ctx: &crate::block_manager::block::transfer::TransferContext,
-) -> Result<Option<(Vec<u64>, usize)>, TransferError>
+) -> Result<(), TransferError>
 where
     Source: BlockDataProvider,
     Destination: BlockDataProviderMut,
@@ -239,35 +213,86 @@ where
         src_addresses.len()
     );
 
-    // Use pool-based approach with TransferResources
-    let resources = crate::block_manager::block::transfer::context::TransferResources::acquire_for_kernel_launch(
-        ctx,
-        src_addresses.len()
-    )?;
+    let size = src_addresses.len() * std::mem::size_of::<u64>();
 
-    // Copy addresses to pinned buffers
-    resources.copy_addresses_to_buffers(&src_addresses, &dst_addresses)?;
+    let pool = ctx.cuda_mem_pool().ok_or_else(|| {
+        TransferError::ExecutionError(
+            "TransferContext was not instantiated with a CudaPool; please report this error"
+                .to_string(),
+        )
+    })?;
 
-    tracing::debug!(
-        " Using pooled pinned buffers: src=0x{:x}, dst=0x{:x} ({} address pairs)",
-        resources.src_ptr(),
-        resources.dst_ptr(),
-        src_addresses.len()
-    );
+    // Allocate DEVICE memory from pool (stream-ordered)
+    let src_buffer = pool.alloc_async(size, stream).map_err(|e| {
+        TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e))
+    })?;
+    let dst_buffer = pool.alloc_async(size, stream).map_err(|e| {
+        TransferError::ExecutionError(format!("CUDA pool allocation failed: {}", e))
+    })?;
 
-    // Launch kernel with pooled resources (addresses already copied)
+    // Copy address buffers from host to device using stream-ordered H2D memcpy
+    let result_src = unsafe {
+        cuMemcpyHtoDAsync_v2(
+            src_buffer,
+            src_addresses.as_ptr() as *const std::ffi::c_void,
+            size,
+            stream.cu_stream(),
+        )
+    };
+    if result_src != CUresult::CUDA_SUCCESS {
+        return Err(TransferError::ExecutionError(format!(
+            "H2D memcpy for src buffer failed: {:?}",
+            result_src
+        )));
+    }
+
+    let result_dst = unsafe {
+        cuMemcpyHtoDAsync_v2(
+            dst_buffer,
+            dst_addresses.as_ptr() as *const std::ffi::c_void,
+            size,
+            stream.cu_stream(),
+        )
+    };
+    if result_dst != CUresult::CUDA_SUCCESS {
+        return Err(TransferError::ExecutionError(format!(
+            "H2D memcpy for dst buffer failed: {:?}",
+            result_dst
+        )));
+    }
+
+    // Record event and synchronize to ensure H2D completes before host vectors drop
+    // This is critical: the async H2D memcpy is still reading from src_addresses/dst_addresses
+    // host memory when it returns. We must wait for completion before those vectors are dropped.
+    let h2d_event = stream
+        .record_event(Some(CUevent_flags::CU_EVENT_BLOCKING_SYNC))
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to record H2D event: {}", e)))?;
+
+    // Launch kernel (reads from device buffers)
     unsafe {
         launch_copy_kernel_direct(
-            resources.src_ptr(),
-            resources.dst_ptr(),
+            src_buffer,
+            dst_buffer,
             src_addresses.len(),
             dims.layer_size,
             stream,
         )?;
     }
 
-    tracing::debug!("vectorized_copy completed - resources will be returned to pool automatically");
-    Ok(None) // No manual cleanup needed - TransferResources handles it via Drop
+    // Free buffers immediately (stream-ordered - CUDA ensures kernel completes first)
+    pool.free_async(src_buffer, stream)
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to free src buffer: {}", e)))?;
+    pool.free_async(dst_buffer, stream)
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to free dst buffer: {}", e)))?;
+
+    // By synchronizing here, we enqueue all the work to the stream, then wait.
+    // There is cpu overheads associated with each of those calls.
+    // We might as well amortize the transfer of the pointers with those launch overheads.
+    h2d_event
+        .synchronize()
+        .map_err(|e| TransferError::ExecutionError(format!("Failed to sync H2D event: {}", e)))?;
+
+    Ok(())
 }
 
 /// Copy a block from a source to a destination using CUDA memcpy
