@@ -71,6 +71,11 @@ pub enum RequestType {
     /// If Immediate, then the [`super::scheduler::TransferSchedulerClient`] will immediately return a
     /// [`ImmediateTransferCompletionHandle`].
     Immediate,
+
+    /// If CreateSlot, then the [`super::scheduler::TransferSchedulerClient`] will create a slot
+    /// for the request_id before transfers start. This is used to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    CreateSlot,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -102,6 +107,10 @@ pub struct LeaderTransferRequest {
 pub enum TransferToSchedulerMessage {
     ScheduleRequest(TransferScheduleRequest),
     ImmediateResult(ImmediateTransferResult),
+    /// Create a slot for tracking operations before transfers start.
+    /// This enables synchronous slot creation to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    CreateSlot(String),
 }
 
 /// Issued by the TransferEngine, received by the Scheduler.
@@ -297,5 +306,20 @@ impl TransferCompletionHandle for CancelledTransferCompletionHandle {
 
     async fn mark_complete(&self, _result: anyhow::Result<()>) {
         // Do nothing
+    }
+}
+
+/// Completion handle for slot creation requests.
+/// Slot creation is fire-and-forget - no completion tracking needed.
+pub struct CreateSlotCompletionHandle;
+
+#[async_trait::async_trait]
+impl TransferCompletionHandle for CreateSlotCompletionHandle {
+    fn scheduler_decision(&self) -> SchedulingDecision {
+        SchedulingDecision::Execute
+    }
+
+    async fn mark_complete(&self, _result: anyhow::Result<()>) {
+        // Nothing to do - slot creation is a fire-and-forget operation
     }
 }

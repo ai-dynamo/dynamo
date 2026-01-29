@@ -35,6 +35,18 @@ impl TransferSchedulerClient {
         Self { scheduler_tx }
     }
 
+    /// Create a slot for the given request_id before transfers start.
+    /// This enables synchronous slot creation to fix the race condition where
+    /// transfers complete before the worker slot exists.
+    ///
+    /// This is idempotent - if the slot already exists, it's a no-op.
+    pub async fn create_slot(&self, request_id: String) -> Result<(), SchedulerError> {
+        self.scheduler_tx
+            .send(TransferToSchedulerMessage::CreateSlot(request_id))
+            .await
+            .map_err(|_| SchedulerError::Disconnected)
+    }
+
     /// If the [SchedulingDecision::Execute] is returned, the caller receives a completion handle.
     /// The completion handle be marked as completed after the
     ///
@@ -47,6 +59,16 @@ impl TransferSchedulerClient {
     ) -> anyhow::Result<Box<dyn TransferCompletionHandle>> {
         let scheduler_tx = self.scheduler_tx.clone();
         match request.request_type {
+            RequestType::CreateSlot => {
+                // Create a slot for this request_id before any transfers start.
+                // This is used to fix the race condition where transfers complete
+                // before the worker slot exists.
+                tracing::debug!("creating slot via transfer scheduler");
+                scheduler_tx
+                    .send(TransferToSchedulerMessage::CreateSlot(request.request_id))
+                    .await?;
+                Ok(Box::new(CreateSlotCompletionHandle))
+            }
             RequestType::Immediate => {
                 let handle = ImmediateTransferCompletionHandle::new(
                     request.request_id,
@@ -231,6 +253,11 @@ impl WorkerSchedulerClient {
 
         match request.request_type {
             RequestType::Immediate => {}
+            RequestType::CreateSlot => {
+                // CreateSlot is handled via the transfer channel, not through enqueue_request.
+                // This case should not be reached in normal operation.
+                tracing::warn!("CreateSlot request type passed to enqueue_request - ignoring");
+            }
             RequestType::Scheduled => {
                 self.scheduler_tx
                     .send(SchedulerMessage::EnqueueRequest(request))
@@ -245,9 +272,25 @@ impl WorkerSchedulerClient {
 
     pub fn is_complete(&self, request_id: &str) -> bool {
         match self.slots.get(request_id) {
-            Some(slot) => slot.is_complete(),
-            None => true,
+            Some(slot) => slot.completed.load(Ordering::Relaxed) == slot.operations.len() as u64,
+            None => {
+                // Return false for missing slots to prevent premature completion signals.
+                // This handles the race condition where transfers complete before the worker
+                // slot is created. Returning false ensures we don't falsely signal completion.
+                tracing::warn!(request_id, "is_complete called for missing slot - returning false");
+                false
+            }
         }
+    }
+
+    /// Check if a slot has any operations registered.
+    /// Returns false if the slot doesn't exist or has no operations.
+    /// This is used to determine if a request had cache hits - requests with no cache hits
+    /// have no operations and should not signal finished_sending (the leader handles cleanup).
+    pub fn has_operations(&self, request_id: &str) -> bool {
+        self.slots
+            .get(request_id)
+            .map_or(false, |slot| !slot.operations.is_empty())
     }
 
     /// Clone the scheduler channel for async use.
@@ -390,6 +433,9 @@ impl Scheduler {
                     Some(TransferToSchedulerMessage::ImmediateResult(result)) => {
                         self.handle_immediate_result(result);
                     }
+                    Some(TransferToSchedulerMessage::CreateSlot(request_id)) => {
+                        self.handle_create_slot_from_transfer(request_id);
+                    }
                     None => {
                         return false;
                     }
@@ -504,6 +550,30 @@ impl Scheduler {
             layers_completed,
             "layer {last_layer_name} is complete"
         );
+    }
+
+    /// Handle a CreateSlot message from the transfer channel.
+    /// This creates a slot early (before metadata arrives) to prevent race conditions
+    /// where transfers complete before the worker slot is created.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request_id))]
+    fn handle_create_slot_from_transfer(&mut self, request_id: String) {
+        if self.slots.contains_key(&request_id) {
+            tracing::debug!("slot already exists, skipping creation");
+            return;
+        }
+
+        tracing::debug!("creating slot from transfer channel before metadata arrives");
+
+        // Create a slot with a new shared atomic counter.
+        // Note: This slot won't be visible to the WorkerSchedulerClient until
+        // bind_connector_metadata creates the worker-side slot. However, immediate
+        // transfer results can now increment the completed counter here.
+        let completed = Arc::new(AtomicU64::new(0));
+        let slot_details = SchedulerCreateSlotDetails {
+            request_id: request_id.clone(),
+            completed,
+        };
+        self.add_slot(slot_details);
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %result.request_id, operation_id = %result.uuid))]

@@ -402,17 +402,23 @@ impl Worker for KvConnectorWorker {
         for request_id in self.maybe_finished_offloading.iter() {
             if self.connector.has_slot(request_id) {
                 if self.connector.is_complete(request_id) {
-                    tracing::debug!(request_id, "request slot is finished");
-                    is_finished_offloading.insert(request_id.clone());
+                    // Only signal finished_sending for requests that had operations.
+                    // For requests with no cache hits (no operations), the leader handles
+                    // cleanup via request_finished() returning false.
+                    if self.connector.has_operations(request_id) {
+                        tracing::debug!(request_id, "request slot is finished (has operations)");
+                        is_finished_offloading.insert(request_id.clone());
+                    } else {
+                        tracing::debug!(request_id, "request slot is finished (no operations - leader handles cleanup)");
+                    }
                 } else {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                // made this condition more strict slot existence checks were added as a prerequesite
-                // to be added to the maybe_finished_offloading set.
-                panic!(
-                    "request slot missing for {request_id}; however, it was present when added to the maybe finished offloading set"
-                );
+                // Slot not yet created - this can happen due to race conditions where
+                // the finished request arrives before the slot is created via metadata.
+                // Will check again on next iteration.
+                tracing::debug!(request_id, "slot not yet created for offloading check, will retry");
             }
         }
 
@@ -436,15 +442,23 @@ impl Worker for KvConnectorWorker {
         for request_id in self.maybe_finished_onboarding.iter() {
             if self.connector.has_slot(request_id) {
                 if self.connector.is_complete(request_id) {
-                    tracing::debug!(request_id, "request slot is finished");
-                    is_finished_onboarding.insert(request_id.clone());
+                    // Only signal finished_sending for requests that had operations.
+                    // For requests with no cache hits (no operations), the leader handles
+                    // cleanup via request_finished() returning false.
+                    if self.connector.has_operations(request_id) {
+                        tracing::debug!(request_id, "request slot is finished (has operations)");
+                        is_finished_onboarding.insert(request_id.clone());
+                    } else {
+                        tracing::debug!(request_id, "request slot is finished (no operations - leader handles cleanup)");
+                    }
                 } else {
                     tracing::debug!(request_id, "request slot is not finished");
                 }
             } else {
-                panic!(
-                    "request slot missing for {request_id}; however, it was present when added to the maybe finished onboarding set"
-                );
+                // Slot not yet created - this can happen due to race conditions where
+                // operations are enqueued before the slot is created via metadata.
+                // Will check again on next iteration.
+                tracing::debug!(request_id, "slot not yet created for onboarding check, will retry");
             }
         }
 

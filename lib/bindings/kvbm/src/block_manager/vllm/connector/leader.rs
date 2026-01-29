@@ -6,7 +6,7 @@ pub mod slot;
 
 use super::*;
 use dynamo_llm::block_manager::metrics_kvbm::{KvbmMetrics, KvbmMetricsRegistry};
-use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
+use slot::{ConnectorSlotManager, Slot, SlotError, SlotManager, SlotState};
 
 use crate::block_manager::BlockManagerBuilder;
 use crate::block_manager::{
@@ -306,6 +306,17 @@ impl Leader for KvConnectorLeader {
         // the second call will show num_external_tokens == 0
         // this call is just letting us know the other blocks that are being used for the remainder of the prefill
         if num_external_tokens > 0 {
+            // Create scheduler slot BEFORE starting async transfers.
+            // This fixes the race condition where transfers complete before the worker
+            // slot is created, which previously caused is_complete() to return true
+            // for missing slots.
+            if let Err(e) = self.slot_manager().ensure_scheduler_slot(&request_id) {
+                tracing::warn!(
+                    request_id = request_id,
+                    "failed to ensure scheduler slot: {:?}; continuing anyway", e
+                );
+            }
+
             let num_computed_tokens = block_ids.len() * self.block_size - num_external_tokens;
             slot.record_cached_device_tokens(num_computed_tokens);
             slot.advance_computed_position(num_computed_tokens)?;
@@ -566,26 +577,33 @@ impl Leader for KvConnectorLeader {
         //            The worker side of the connector API will later call `finish_requests()`
         //            to notify vLLM when the request is truly complete.
         //
-        // TODO(jthomson04): This is a temporary fix to ensure vLLM 0.11.2 compatibility.
-        //     IMPORTANT: We must ALWAYS return `true` here, even when the slot is already Finished.
+        // CRITICAL: We must return `true` if the slot EVER had operations (onboarding or offloading),
+        // even if those operations have already completed (SlotState::Finished). This is because:
+        // 1. Worker's slot tracks all operations that were registered
+        // 2. Worker will signal `finished_sending` when its operations are complete
+        // 3. If we return `false` here, vLLM frees the request immediately
+        // 4. Then worker signals `finished_sending` for the freed request → CRASH!
         //
-        //      Why? If we return `false`, vLLM removes the request from `self.requests` immediately.
-        //      However, our worker connector may still report completion later via `finish_requests()`.
-        //      When that happens, vLLM's scheduler.py has an assertion `req_id in self.requests`
-        //      that will fail because the request was already removed from the hash table.
-        //
-        //      By always returning `true`, we ensure vLLM keeps the request in its hash table until
-        //      our worker explicitly signals completion, avoiding the race condition.
-        //
-        //      If the slot is already Finished (no pending operations), we clean it up from our side
-        //      but still return `true` so vLLM waits for the worker's completion signal.
-        if let SlotState::Finished = slot.state() {
-            self.slot_manager().remove_slot(&request_id)?;
+        // Only return `false` for requests that NEVER had any operations (no cache hits, no offloading).
+        // For these requests, the worker has no operations to track and won't signal `finished_sending`.
+        if slot.had_operations() {
+            // Slot had operations - vLLM must wait for worker's finished_sending signal
+            // Don't remove the slot here - it will be cleaned up when the worker signals
+            tracing::debug!(
+                request_id = %request_id,
+                state = ?slot.state(),
+                "request_finished returning true (had operations) - vLLM will wait for finished_sending"
+            );
+            Ok(true)
         } else {
-            debug_assert!(matches!(slot.state(), SlotState::Finishing));
+            // No operations ever - vLLM can free immediately, worker won't signal
+            self.slot_manager().remove_slot(&request_id)?;
+            tracing::debug!(
+                request_id = %request_id,
+                "request_finished returning false (no operations) - vLLM can free immediately"
+            );
+            Ok(false)
         }
-
-        Ok(true)
     }
 
     fn has_slot(&self, request_id: String) -> bool {
