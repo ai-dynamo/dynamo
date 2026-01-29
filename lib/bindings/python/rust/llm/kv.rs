@@ -360,7 +360,7 @@ impl KvEventPublisher {
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct OverlapScores {
-    inner: llm_rs::kv_router::indexer::OverlapScores,
+    inner: llm_rs::kv_router::protocols::OverlapScores,
 }
 
 #[pymethods]
@@ -386,7 +386,7 @@ enum RadixTreeRequest {
     FindMatches {
         local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash>,
         early_exit: bool,
-        response_tx: mpsc::SyncSender<llm_rs::kv_router::indexer::OverlapScores>,
+        response_tx: mpsc::SyncSender<llm_rs::kv_router::protocols::OverlapScores>,
     },
     ApplyEvent {
         worker_id: WorkerId,
@@ -402,7 +402,7 @@ enum RadixTreeRequest {
         response_tx: mpsc::SyncSender<()>,
     },
     DumpTreeAsEvents {
-        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::indexer::RouterEvent>>,
+        response_tx: mpsc::SyncSender<Vec<llm_rs::kv_router::protocols::RouterEvent>>,
     },
     Shutdown,
 }
@@ -616,8 +616,10 @@ impl RadixTree {
                 >(&kv_cache_event_bytes)
                 {
                     Ok(kv_cache_event) => {
-                        let router_event =
-                            llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+                        let router_event = llm_rs::kv_router::protocols::RouterEvent::new(
+                            worker_id,
+                            kv_cache_event,
+                        );
                         match radix_tree.apply_event(router_event) {
                             Ok(_) => Ok(()),
                             Err(e) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -898,7 +900,7 @@ impl KvRecorder {
             // Spawn a task to forward events to the recorder
             tokio::spawn(async move {
                 while let Some(event) = kv_events_rx.next().await {
-                    let event: llm_rs::kv_router::indexer::RouterEvent =
+                    let event: llm_rs::kv_router::protocols::RouterEvent =
                         serde_json::from_slice(&event.payload).unwrap();
                     tracing::debug!("KvRecorder received kv event: {:?}", event);
                     if let Err(e) = event_tx.send(event).await {
