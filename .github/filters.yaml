@@ -17,6 +17,7 @@ all:
 
 docs:
   - 'docs/**'
+  - 'fern/**'
   - '**/*.md'
   - '**/*.rst'
   - '**/*.txt'
@@ -110,6 +111,7 @@ deploy:
 planner:
   - 'components/src/dynamo/planner/**'
   - 'tests/planner/**'
+  - 'components/src/dynamo/global_router/**'
 
 vllm:
   - 'container/Dockerfile.vllm'
@@ -148,3 +150,10 @@ frontend:
   - 'components/src/dynamo/common/**'
   - 'deploy/inference-gateway/**'
   - 'container/templates/frontend.Dockerfile'
+
+rust:
+  - '.github/workflows/pre-merge.yml'
+  - '**/*.rs'
+  - '**/Cargo.toml'
+  - '**/Cargo.lock'
+  - 'deny.toml'

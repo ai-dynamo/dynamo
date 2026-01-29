@@ -19,7 +19,7 @@ maintainers:
     url: https://www.nvidia.com
 description: A Helm chart for NVIDIA Dynamo Platform.
 type: application
-version: 0.8.0
+version: 0.9.0
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator

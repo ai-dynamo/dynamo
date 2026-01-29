@@ -78,6 +78,19 @@ runs:
             --cuda-version=${{ inputs.cuda_version }} \
             --show-result
         echo "::endgroup::"
+    - name: Build EPP image
+      if: ${{ inputs.target == frontend }}
+      shell: bash
+      env:
+        ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
+      run: |
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        ${BUILD_CONTEXT}/deploy/inference-gateway/epp
+        make -C deploy/inference-gateway/epp all DYNAMO_DIR="." DOCKER_PROXY=${DOCKER_PROXY}
+
+        EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+        EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
+        EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
     - name: Build image
       id: build
       shell: bash

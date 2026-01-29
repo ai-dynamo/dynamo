@@ -91,6 +91,10 @@ mkdir -p $LOG_DIR
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
+# [NOTE] depending on the warmup and KV allocation setting of vLLM,
+# the GPU memory requires for vLLM reservation and runtime spike (not
+# reserved by vLLM) can be different and cause model fails to start,
+# adjust '--gpu-memory-utilization' as needed
 for ((i=0; i<GPUS_PER_NODE; i++)); do
     dp_rank=$((i + NODE_RANK * GPUS_PER_NODE))
     CUDA_VISIBLE_DEVICES=$i \
@@ -107,7 +111,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --max-model-len 4096 \
         --data-parallel-address $MASTER_ADDR \
         --data-parallel-rpc-port 13345 \
-        --gpu-memory-utilization 0.95 \
+        --gpu-memory-utilization 0.91 \
         --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
 done
 
