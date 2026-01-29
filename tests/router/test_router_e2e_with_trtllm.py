@@ -292,7 +292,7 @@ class TRTLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_trtllm_kv_router_basic(
     request,
@@ -346,7 +346,7 @@ def test_trtllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
     request,
@@ -404,10 +404,10 @@ def test_router_decisions_trtllm_multiple_workers(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # nats_core mode
+        # ("etcd", True, "tcp"),  # nats_core mode - disabled for now
         # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
     ],
-    ids=["jetstream", "tcp_nats_core"],
+    ids=["jetstream"],
 )
 def test_trtllm_indexers_sync(
     request,

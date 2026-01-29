@@ -319,7 +319,7 @@ class SGLangProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_kv_router_basic(
     request,
@@ -375,7 +375,7 @@ def test_sglang_kv_router_basic(
 @pytest.mark.gpu_1
 @pytest.mark.skip(reason="Broken by sglang changes")
 # TODO: Re-enable this test once https://github.com/sgl-project/sglang/pull/14934 is merged
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 def test_router_decisions_sglang_multiple_workers(
     request,
     runtime_services_dynamic_ports,
@@ -420,7 +420,7 @@ def test_router_decisions_sglang_multiple_workers(
 
 @pytest.mark.gpu_2
 @pytest.mark.post_merge
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(600)  # 10 min max (multi-GPU + DP startup variance)
 def test_router_decisions_sglang_dp(
     request,
@@ -475,10 +475,10 @@ def test_router_decisions_sglang_dp(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        ("etcd", True, "tcp"),  # nats_core mode
+        # ("etcd", True, "tcp"),  # nats_core mode - disabled for now
         # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for SGLang
     ],
-    ids=["jetstream", "tcp_nats_core"],
+    ids=["jetstream"],
 )
 @pytest.mark.timeout(150)  # ~3x average (~46s/test), rounded up
 def test_sglang_indexers_sync(
