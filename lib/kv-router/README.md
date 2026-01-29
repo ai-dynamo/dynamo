@@ -33,6 +33,20 @@ block2 in B: seq_hash = hash(hash(hash(block0') + block1') + block2) = 0x2222
 
 **Computation**: `seq_hash[i] = hash(seq_hash[i-1] || local_hash[i])` where `seq_hash[0] = local_hash[0]`
 
+> **Important: Engine-Provided Hashes**
+>
+> In practice, the `ExternalSequenceBlockHash` may come directly from the inference engine (e.g., vLLM, TensorRT-LLM) using a rolling hash algorithm that we don't know or control. The engine computes these hashes internally and reports them via KV cache events.
+>
+> **Implications for index implementations:**
+>
+> - **RadixTree**: Can handle engine-provided hashes because it traverses the tree structure using `LocalBlockHash` for navigation and only uses `ExternalSequenceBlockHash` as an opaque identifier for lookups. It doesn't need to recompute hashes.
+>
+> - **NestedMap**: Requires the ability to compute `ExternalSequenceBlockHash` incrementally for its lazy hash optimization in `find_matches`. To use NestedMap, one of the following is required:
+>   1. **Force a known hasher**: Configure the engine to use a specific hashing algorithm that the router can replicate, OR
+>   2. **Recompute on the relay**: Have the publisher/relay layer recompute the rolling hash using a known algorithm before forwarding events to the router.
+>
+> Without this, NestedMap's `find_matches` will fail when encountering `SeqEntry::Multi` cases (multiple seq_hashes at the same position+local_hash) because it cannot disambiguate which entry to use.
+
 ### 3. Worker ID (`WorkerWithDpRank`)
 
 **What**: Identifies which worker (inference server) has this block cached.
