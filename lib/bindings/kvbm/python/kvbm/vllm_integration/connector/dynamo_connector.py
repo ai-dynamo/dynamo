@@ -139,3 +139,10 @@ class DynamoConnector(KVConnectorBase_V1):
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         return self._worker.get_finished(finished_req_ids)
+
+    @override
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Return block IDs that failed to load asynchronously."""
+        if self._worker is None:
+            return set()
+        return self._worker.get_block_ids_with_load_errors()
