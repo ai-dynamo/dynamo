@@ -58,15 +58,15 @@ pub enum DynamoLlmResult {
 }
 
 /// Default timeout for discovery sync (seconds).
-const DEFAULT_DISCOVERY_TIMEOUT_SECS: u64 = 300;
+const DEFAULT_DISCOVERY_TIMEOUT_SEC: u64 = 10;
 
 /// Get discovery timeout from environment variable or use default.
-/// Reads DYNAMO_DISCOVERY_TIMEOUT_SEC env var (in seconds).
+/// Reads DYN_DISCOVERY_TIMEOUT_SEC env var (in seconds).
 fn get_discovery_timeout_secs() -> u64 {
-    std::env::var("DYNAMO_DISCOVERY_TIMEOUT_SEC")
+    std::env::var("DYN_DISCOVERY_TIMEOUT_SEC")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SECS)
+        .unwrap_or(DEFAULT_DISCOVERY_TIMEOUT_SEC)
 }
 
 /// Wait for the discovery daemon to sync and return at least one instance.
@@ -133,7 +133,6 @@ pub unsafe extern "C" fn dynamo_llm_init(
                 // immediately after, and it needs discovery.list() to return data
                 // the discovery daemon takes time to query K8s and returns async, so we need to wait.
                 let timeout_secs = get_discovery_timeout_secs();
-                tracing::info!("Using discovery timeout of {} seconds", timeout_secs);
                 let instance_count = wait_for_discovery_sync(drt, timeout_secs).await;
                 if instance_count == 0 {
                     tracing::error!(
@@ -1439,7 +1438,6 @@ pub async fn create_worker_selection_pipeline_chat(
     // (dynamo_llm_init already does this when it initializes)
     if needs_sync {
         let timeout_secs = get_discovery_timeout_secs();
-        tracing::info!("Using discovery timeout of {} seconds", timeout_secs);
         let instance_count = wait_for_discovery_sync(distributed_runtime, timeout_secs).await;
         if instance_count == 0 {
             return Err(anyhow::anyhow!(

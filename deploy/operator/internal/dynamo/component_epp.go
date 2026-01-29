@@ -74,12 +74,12 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 	// EPP-specific environment variables
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
-			Name:  "DYNAMO_KV_BLOCK_SIZE",
+			Name:  "DYN_KV_BLOCK_SIZE",
 			Value: "16",
 		},
 		{
-			// DYNAMO_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
-			Name:  "DYNAMO_DISCOVERY_TIMEOUT_SEC",
+			// DYN_DISCOVERY_TIMEOUT_SEC is how long to wait for workers to register (in seconds)
+			Name:  "DYN_DISCOVERY_TIMEOUT_SEC",
 			Value: "300",
 		},
 		{
@@ -89,19 +89,6 @@ func (e *EPPDefaults) GetBaseContainer(context ComponentContext) (corev1.Contain
 		{
 			Name:  "RUST_LOG",
 			Value: "debug,dynamo_llm::kv_router=trace",
-		},
-		{
-			// HF_TOKEN is needed to download model config files from HuggingFace without rate limiting
-			Name: "HF_TOKEN",
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{
-						Name: "hf-token-secret",
-					},
-					Key:      "HF_TOKEN",
-					Optional: ptr.To(true),
-				},
-			},
 		},
 	}...)
 
