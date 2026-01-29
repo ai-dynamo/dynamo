@@ -253,6 +253,9 @@ def test_request_cancellation_trtllm_aggregated(
                 logger.info(f"{description} detected successfully")
 
 
+@pytest.mark.xfail(
+    reason="Decode worker cancellation is temporarily disabled", strict=True
+)
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_decode_cancel(
     request, runtime_services_dynamic_ports, predownload_models
@@ -429,6 +432,9 @@ def test_request_cancellation_trtllm_prefill_cancel(
                 )
 
 
+@pytest.mark.xfail(
+    reason="Decode worker cancellation is temporarily disabled", strict=True
+)
 @pytest.mark.xfail(reason="Test fails only on CI", strict=False)
 @pytest.mark.timeout(195)  # 3x average
 def test_request_cancellation_trtllm_kv_transfer_cancel(
