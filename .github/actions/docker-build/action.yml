@@ -84,13 +84,19 @@ runs:
       env:
         ECR_HOSTNAME: ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_default_region }}.amazonaws.com
       run: |
+        sudo apt-get update && sudo apt-get install -y git build-essential protobuf-compiler
+        curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        cargo install cbindgen
+
         DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
-        ${BUILD_CONTEXT}/deploy/inference-gateway/epp
-        make -C deploy/inference-gateway/epp all DYNAMO_DIR="." DOCKER_PROXY=${DOCKER_PROXY}
+        pushd deploy/inference-gateway/epp
+        make all DOCKER_PROXY=${DOCKER_PROXY}
+        popd
 
         EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
-        EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
-        EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
+        EPP_IMAGE="dynamo/dynamo-epp:${EPP_GIT_TAG}"
+        echo "EPP_IMAGE=${EPP_IMAGE}" >> $GITHUB_ENV
     - name: Build image
       id: build
       shell: bash
@@ -140,6 +146,11 @@ runs:
           fi
         fi
 
+        EPP_IMAGE_ARG=""
+        if [[ ${{ inputs.target == framework }} ]]; then
+          EPP_IMAGE_ARG="--build-arg EPP_IMAGE=${EPP_IMAGE}"
+        fi
+
           # --build-arg USE_SCCACHE=true \
           # --build-arg SCCACHE_BUCKET=${SCCACHE_BUCKET} \
           # --build-arg SCCACHE_REGION=${SCCACHE_REGION} \
@@ -150,7 +161,8 @@ runs:
           --tag "$IMAGE_TAG" \
           --load \
           -f ./container/rendered.Dockerfile \
-          $CACHE_ARGS . 2>&1 | tee "${BUILD_LOG_FILE}"
+          $CACHE_ARGS \
+          $EPP_IMAGE_ARG . 2>&1 | tee "${BUILD_LOG_FILE}"
 
         BUILD_EXIT_CODE=${PIPESTATUS[0]}
 
