@@ -139,10 +139,10 @@ In another terminal (or same terminal if using background mode), start a worker:
 
    - **vLLM:** Add ``--kv-events-config '{"enable_kv_cache_events": false}'``
    - **SGLang:** No flag needed (KV events disabled by default)
-   - **TensorRT-LLM:** Do not use ``--publish-events-and-metrics``
+   - **TensorRT-LLM:** No flag needed (KV events disabled by default)
 
-   The warning ``Cannot connect to ModelExpress server/transport error. Using direct download.``
-   is expected when running without NATS and can be safely ignored.
+   **TensorRT-LLM only:** The warning ``Cannot connect to ModelExpress server/transport error. Using direct download.``
+   is expected and can be safely ignored.
 
 **4. Test your deployment**
 
