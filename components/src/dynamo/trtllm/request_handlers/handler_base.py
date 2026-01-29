@@ -42,6 +42,7 @@ from dynamo.trtllm.utils.disagg_utils import (
     DisaggregatedParams,
     DisaggregatedParamsCodec,
 )
+from dynamo.trtllm.utils.response_utils import ResponseUtils
 
 configure_dynamo_logging()
 
@@ -101,76 +102,6 @@ class HandlerBase:
             return (
                 result["finish_reason"] == "stop" or result["finish_reason"] == "error"
             )
-
-    @staticmethod
-    def _extract_logprobs(
-        output, num_output_tokens_so_far: int
-    ) -> tuple[list[float] | None, list[list[dict]] | None]:
-        """
-        Extract logprobs from the TRTLLM output for new tokens.
-
-        Args:
-            output: TRTLLM CompletionOutput object
-            num_output_tokens_so_far: Number of tokens already processed
-        Returns:
-            Tuple of (log_probs, top_logprobs) in Dynamo's expected format:
-            - log_probs: List of log probabilities for each new token
-            - top_logprobs: List of top logprobs dicts for each new token
-        """
-        if output.logprobs is None:
-            return None, None
-
-        # Get logprobs for new tokens only
-        new_logprobs = output.logprobs[num_output_tokens_so_far:]
-        if not new_logprobs:
-            return None, None
-
-        # From TRTLLM CompletionOutput API, logprobs: (TokenLogprobs | List[float], optional)
-        # Expect TokenLogprobs output when logprobs is set, check edge case where list[float] is returned instead
-        if isinstance(new_logprobs[0], float):
-            return [float(lp) for lp in new_logprobs], None
-
-        log_probs = []
-        top_logprobs = []
-
-        for token_idx, token_logprobs_dict in enumerate(new_logprobs):
-            if token_logprobs_dict is None:
-                continue
-
-            # Get the actual token_id that was generated at this position
-            actual_token_id = output.token_ids[num_output_tokens_so_far + token_idx]
-
-            # Extract log probability for the selected token
-            if actual_token_id in token_logprobs_dict:
-                selected_logprob = token_logprobs_dict[actual_token_id]
-                log_probs.append(float(selected_logprob.logprob))
-            else:
-                # Fallback: use the first logprob if selected token not found
-                first_logprob = next(iter(token_logprobs_dict.values()), None)
-                if first_logprob:
-                    log_probs.append(float(first_logprob.logprob))
-
-            # Build top_logprobs list for this token position
-            # NOTE: TRTLLM LogProb API doesn't have decoded_token, will default to None
-            token_top_logprobs = []
-            for tok_id, logprob_info in token_logprobs_dict.items():
-                token_top_logprobs.append(
-                    {
-                        "rank": logprob_info.rank
-                        if hasattr(logprob_info, "rank")
-                        else 0,
-                        "token_id": tok_id,
-                        "token": (
-                            logprob_info.decoded_token
-                            if hasattr(logprob_info, "decoded_token")
-                            else None
-                        ),
-                        "logprob": float(logprob_info.logprob),
-                    }
-                )
-            top_logprobs.append(token_top_logprobs)
-
-        return log_probs if log_probs else None, top_logprobs if top_logprobs else None
 
     async def _handle_cancellation_and_shutdown(
         self, generation_result: GenerationResult, context: Context
@@ -712,7 +643,7 @@ class HandlerBase:
                     out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
 
                     # Extract logprobs from the output
-                    log_probs, top_logprobs = self._extract_logprobs(
+                    log_probs, top_logprobs = ResponseUtils.extract_logprobs(
                         output, num_output_tokens_so_far
                     )
                     if log_probs:
