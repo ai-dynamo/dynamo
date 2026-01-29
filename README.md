@@ -50,6 +50,14 @@ Dynamo is inference engine agnostic (supports TRT-LLM, vLLM, SGLang) and provide
 
 Built in Rust for performance and Python for extensibility, Dynamo is fully open-source with an OSS-first development approach.
 
+## Supported Engines
+
+| Engine | Docs | Best For |
+|--------|------|----------|
+| SGLang | [Guide](docs/backends/sglang/) | High-throughput serving |
+| TensorRT-LLM | [Guide](docs/backends/trtllm/) | Maximum performance |
+| vLLM | [Guide](docs/backends/vllm/) | Broadest feature coverage |
+
 ## Framework Support Matrix
 
 | Feature                                                              | [vLLM](docs/backends/vllm/README.md) | [SGLang](docs/backends/sglang/README.md) | [TensorRT-LLM](docs/backends/trtllm/README.md) |
@@ -265,22 +273,6 @@ See [recipes/README.md](recipes/README.md) for the full list and deployment inst
 
 - [Amazon EKS](examples/deployments/EKS/)
 - [Google GKE](examples/deployments/GKE/)
-
-# Concepts
-
-## Engines
-
-Dynamo is inference engine agnostic. Install the wheel for your chosen engine and run with `python3 -m dynamo.<engine> --help`.
-
-| Engine | Install | Docs | Best For |
-|--------|---------|------|----------|
-| vLLM | `uv pip install ai-dynamo[vllm]` | [Guide](docs/backends/vllm/) | Broadest feature coverage |
-| SGLang | `uv pip install ai-dynamo[sglang]` | [Guide](docs/backends/sglang/) | High-throughput serving |
-| TensorRT-LLM | `pip install --pre --extra-index-url https://pypi.nvidia.com ai-dynamo[trtllm]` | [Guide](docs/backends/trtllm/) | Maximum performance |
-
-> **Note:** TensorRT-LLM requires `pip` (not `uv`) due to URL-based dependencies. See the [TRT-LLM guide](docs/backends/trtllm/) for container setup and prerequisites.
-
-Use `CUDA_VISIBLE_DEVICES` to specify which GPUs to use. Engine-specific options (context length, multi-GPU, etc.) are documented in each backend guide.
 
 ## Service Discovery and Messaging
 
