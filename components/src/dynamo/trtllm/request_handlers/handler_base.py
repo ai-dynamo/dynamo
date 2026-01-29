@@ -205,9 +205,15 @@ class HandlerBase:
                 except asyncio.CancelledError:
                     pass
 
-            # Abort the generation
-            generation_result.abort()
-            logging.debug(f"Aborted Request ID: {context.id()}")
+            # Abort the generation (skip on DECODE workers to prevent engine hangs
+            # in disaggregated setups where abort() can cause the engine to get stuck)
+            if self.disaggregation_mode != DisaggregationMode.DECODE:
+                generation_result.abort()
+                logging.debug(f"Aborted Request ID: {context.id()}")
+            else:
+                logging.debug(
+                    f"Skipping abort for Request ID: {context.id()} on DECODE worker"
+                )
 
             # Check which event triggered and return the reason
             if shutdown_task and shutdown_task in done:
@@ -229,21 +235,9 @@ class HandlerBase:
 
         If shutdown event was triggered, raises GeneratorExit on exit.
 
-        Note: Cancellation monitoring is disabled for DECODE workers to avoid
-        engine hangs when requests are cancelled in disaggregated setups.
-
         Yields:
-            asyncio.Task: The monitoring task (or None if monitoring is disabled)
+            asyncio.Task: The monitoring task
         """
-        # Disable cancellation monitoring for DECODE workers to prevent engine hangs
-        # in disaggregated setups where abort() can cause the engine to get stuck
-        if self.disaggregation_mode == DisaggregationMode.DECODE:
-            logging.debug(
-                "Cancellation monitoring disabled for DECODE worker to prevent engine hangs"
-            )
-            yield None
-            return
-
         monitor_task = asyncio.create_task(
             self._handle_cancellation_and_shutdown(generation_result, context)
         )
