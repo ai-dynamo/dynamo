@@ -20,6 +20,7 @@ pub mod nvext;
 pub mod responses;
 pub mod tools;
 pub mod validate;
+pub mod videos;
 
 use validate::{
     BEST_OF_RANGE, FREQUENCY_PENALTY_RANGE, MIN_P_RANGE, N_RANGE, PRESENCE_PENALTY_RANGE,
