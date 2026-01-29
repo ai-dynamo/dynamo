@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Expert Parallelism Load Balancer (EPLB) in SGLang"
 ---
+
+# Expert Parallelism Load Balancer (EPLB) in SGLang
 
 Mixture-of-Experts (MoE) models utilize a technique called Expert Parallelism (EP), where experts are distributed across multiple GPUs. While this allows for much larger and more powerful models, it can lead to an uneven workload distribution. Because the load on different experts may vary depending on the workload, some GPUs can become bottlenecks, forcing the entire system to wait. This imbalance leads to wasted compute cycles and increased memory usage.
 

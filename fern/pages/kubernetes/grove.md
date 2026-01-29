@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Grove Deployment Guide"
 ---
+
+# Grove Deployment Guide
 
 Grove is a Kubernetes API specifically designed to address the orchestration challenges of modern AI workloads, particularly disaggregated inference systems. Grove provides seamless integration with NVIDIA Dynamo for comprehensive AI infrastructure management.
 

@@ -1,8 +1,9 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Installation Guide for Dynamo Kubernetes Platform"
 ---
+
+# Installation Guide for Dynamo Kubernetes Platform
 
 Deploy and manage Dynamo inference graphs on Kubernetes with automated orchestration and scaling, using the Dynamo Kubernetes Platform.
 
@@ -152,37 +153,34 @@ VALIDATION ERROR: Cannot install cluster-wide Dynamo operator.
 Found existing namespace-restricted Dynamo operators in namespaces: ...
 ```
 
-<Tip>
-For multinode deployments, you need to install multinode orchestration components:
-**Option 1 (Recommended): Grove + KAI Scheduler**
-- Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
-- When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
-```bash
---set "grove.enabled=true"
---set "kai-scheduler.enabled=true"
-```
-**Option 2: LeaderWorkerSet (LWS) + Volcano**
-- If using LWS for multinode deployments, you must also install Volcano (required dependency):
-- [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
-- [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
-- These must be installed manually before deploying multinode workloads with LWS.
-See the [Multinode Deployment Guide](deployment/multinode-deployment.md) for details on orchestrator selection.
-</Tip>
+> [!TIP]
+> For multinode deployments, you need to install multinode orchestration components:
+> **Option 1 (Recommended): Grove + KAI Scheduler**
+> - Grove and KAI Scheduler can be installed manually or through the dynamo-platform helm install command.
+> - When using the dynamo-platform helm install command, Grove and KAI Scheduler are NOT installed by default. You can enable their installation by setting the following flags:
+> ```bash
+> --set "grove.enabled=true"
+> --set "kai-scheduler.enabled=true"
+> ```
+> **Option 2: LeaderWorkerSet (LWS) + Volcano**
+> - If using LWS for multinode deployments, you must also install Volcano (required dependency):
+> - [LWS Installation](https://github.com/kubernetes-sigs/lws#installation)
+> - [Volcano Installation](https://volcano.sh/en/docs/installation/) (required for gang scheduling with LWS)
+> - These must be installed manually before deploying multinode workloads with LWS.
+> See the [Multinode Deployment Guide](deployment/multinode-deployment.md) for details on orchestrator selection.
 
-<Tip>
-By default, Model Express Server is not used.
-If you wish to use an existing Model Express Server, you can set the modelExpressURL to the existing server's URL in the helm install command:
-</Tip>
+> [!TIP]
+> By default, Model Express Server is not used.
+> If you wish to use an existing Model Express Server, you can set the modelExpressURL to the existing server's URL in the helm install command:
 
 ```bash
 --set "dynamo-operator.modelExpressURL=http://model-express-server.model-express.svc.cluster.local:8080"
 ```
 
-<Tip>
-By default, Dynamo Operator is installed cluster-wide and will monitor all namespaces.
-If you wish to restrict the operator to monitor only a specific namespace (the helm release namespace by default), you can set the namespaceRestriction.enabled to true.
-You can also change the restricted namespace by setting the targetNamespace property.
-</Tip>
+> [!TIP]
+> By default, Dynamo Operator is installed cluster-wide and will monitor all namespaces.
+> If you wish to restrict the operator to monitor only a specific namespace (the helm release namespace by default), you can set the namespaceRestriction.enabled to true.
+> You can also change the restricted namespace by setting the targetNamespace property.
 
 ```bash
 --set "dynamo-operator.namespaceRestriction.enabled=true"

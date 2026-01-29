@@ -1,14 +1,14 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "SLA-Driven Profiling and Planner Deployment Quick Start Guide"
 ---
+
+# SLA-Driven Profiling and Planner Deployment Quick Start Guide
 
 Complete workflow to deploy SLA-optimized Dynamo models using DynamoGraphDeploymentRequests (DGDR). This guide shows how to automatically profile models and deploy them with optimal configurations that meet your Service Level Agreements (SLAs).
 
-<Warning>
-**Prerequisites**: This guide assumes you have a Kubernetes cluster with GPU nodes and have completed the [Dynamo Platform installation](../kubernetes/installation-guide.md).
-</Warning>
+> [!WARNING]
+> **Prerequisites**: This guide assumes you have a Kubernetes cluster with GPU nodes and have completed the [Dynamo Platform installation](../kubernetes/installation-guide.md).
 
 ## Overview
 
@@ -130,9 +130,8 @@ spec:
   autoApply: true  # Auto-deploy after profiling
 ```
 
-<Tip>
-For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](../benchmarks/sla-driven-profiling.md#dgdr-configuration-reference).
-</Tip>
+> [!TIP]
+> For detailed explanations of all configuration options (SLA, hardware, sweep, AIC, planner), see the [DGDR Configuration Reference](../benchmarks/sla-driven-profiling.md#dgdr-configuration-reference).
 
 ### Step 2: Apply the DGDR
 
@@ -167,9 +166,8 @@ kubectl logs -f job/profile-sla-aic -n $NAMESPACE
 - `Ready`: DGD successfully deployed and running
 - `Failed`: Error occurred (check events for details)
 
-<Note>
-With AI Configurator, profiling completes in **20-30 seconds**! This is much faster than online profiling which takes 2-4 hours.
-</Note>
+> [!NOTE]
+> With AI Configurator, profiling completes in **20-30 seconds**! This is much faster than online profiling which takes 2-4 hours.
 
 ### Step 4: Access Your Deployment
 
@@ -202,9 +200,8 @@ The dashboard displays:
 - **Predicted Metrics**: Planner's load predictions and recommended replica counts
 - **Correction Factors**: How the planner adjusts predictions based on observed vs expected performance
 
-<Tip>
-Use the **Namespace** dropdown at the top of the dashboard to filter metrics for your specific deployment namespace.
-</Tip>
+> [!TIP]
+> Use the **Namespace** dropdown at the top of the dashboard to filter metrics for your specific deployment namespace.
 
 ## DGDR Configuration Details
 
@@ -260,9 +257,8 @@ sweep:
   aic_backend_version: "0.20.0"
 ```
 
-<Note>
-For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](../benchmarks/sla-driven-profiling.md#profiling-method).
-</Note>
+> [!NOTE]
+> For detailed comparison, supported configurations, and limitations, see [SLA-Driven Profiling Documentation](../benchmarks/sla-driven-profiling.md#profiling-method).
 
 ### Hardware Configuration
 
@@ -530,9 +526,8 @@ kubectl logs -l job-name=profile-sla-aic -n $NAMESPACE
 | **SLA cannot be met** | Relax TTFT/ITL targets or add more GPUs |
 | **DGD not deployed** | Verify `autoApply: true` in DGDR spec |
 
-<Note>
-For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](../benchmarks/sla-driven-profiling.md#troubleshooting).
-</Note>
+> [!NOTE]
+> For comprehensive troubleshooting including AI Configurator constraints, performance debugging, and backend-specific issues, see [SLA-Driven Profiling Troubleshooting](../benchmarks/sla-driven-profiling.md#troubleshooting).
 
 ## Configuration Reference
 

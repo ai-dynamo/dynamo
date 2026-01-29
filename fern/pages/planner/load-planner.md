@@ -1,18 +1,17 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "Load-based Planner"
 ---
+
+# Load-based Planner
 
 This document covers load-based planner in `examples/llm/components/planner.py`.
 
-<Warning>
-Load-based planner is inoperable as vllm, sglang, and trtllm examples all do not use prefill queues. Please use SLA planner for now.
-</Warning>
+> [!WARNING]
+> Load-based planner is inoperable as vllm, sglang, and trtllm examples all do not use prefill queues. Please use SLA planner for now.
 
-<Warning>
-Bare metal deployment with local connector is deprecated. The only option to deploy load-based planner is via k8s. We will update the examples in this document soon.
-</Warning>
+> [!WARNING]
+> Bare metal deployment with local connector is deprecated. The only option to deploy load-based planner is via k8s. We will update the examples in this document soon.
 
 ## Load-based Scaling Up/Down Prefill/Decode Workers
 

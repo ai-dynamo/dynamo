@@ -1,24 +1,22 @@
 ---
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-title: "SLA-based Planner"
 ---
 
-<Tip>
-**New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Profiling + Planner Quick Start Guide](sla-planner-quickstart.md).
-</Tip>
+# SLA-based Planner
+
+> [!TIP]
+> **New to SLA Planner?** For a complete workflow including profiling and deployment, see the [SLA Profiling + Planner Quick Start Guide](sla-planner-quickstart.md).
 
 This document covers information regarding the SLA-based planner in `examples/common/utils/planner_core.py`.
 
 The SLA (Service Level Agreement)-based planner is an intelligent autoscaling system that monitors system performance and adjusts the number of prefill and decode workers to meet specified TTFT and ITL targets. Unlike the load-based planner that scales based on resource utilization thresholds, the SLA planner uses predictive modeling and performance interpolation to proactively scale the workers.
 
-<Note>
-Currently, SLA-based planner only supports disaggregated setup.
-</Note>
+> [!NOTE]
+> Currently, SLA-based planner only supports disaggregated setup.
 
-<Warning>
-Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
-</Warning>
+> [!WARNING]
+> Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
 
 ## Architecture Overview
 
@@ -131,17 +129,15 @@ next_num_d = math.ceil(next_num_req * next_osl / self.args.adjustment_interval /
 
 Finally, SLA planner applies the change by scaling up/down the number of prefill and decode workers to the calculated number of replica in the next interval.
 
-<Note>
-SLA-planner scales up/down the P/D engines non-blockingly. If `adjustment-interval` is too short, the previous scaling operations may not finish before the new scaling operations are issued. Make sure to set a large enough `adjustment-interval`.
-</Note>
+> [!NOTE]
+> SLA-planner scales up/down the P/D engines non-blockingly. If `adjustment-interval` is too short, the previous scaling operations may not finish before the new scaling operations are issued. Make sure to set a large enough `adjustment-interval`.
 
 ## Deploying
 
 For complete deployment instructions, see the [SLA Planner Quick Start Guide](sla-planner-quickstart.md).
 
-<Note>
-The SLA planner requires a frontend that reports metrics at the `/metrics` HTTP endpoint with the number of requests, ISL, OSL, TTFT, and ITL in the correct format. The dynamo frontend provides these metrics automatically.
-</Note>
+> [!NOTE]
+> The SLA planner requires a frontend that reports metrics at the `/metrics` HTTP endpoint with the number of requests, ISL, OSL, TTFT, and ITL in the correct format. The dynamo frontend provides these metrics automatically.
 
 ### Virtual Deployment
 
