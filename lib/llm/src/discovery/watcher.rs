@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::Sender;
 
 use anyhow::Context as _;
+use dashmap::DashSet;
 use futures::StreamExt;
 
 use dynamo_runtime::{
@@ -59,6 +60,7 @@ pub struct ModelWatcher {
     model_update_tx: Option<Sender<ModelUpdate>>,
     engine_factory: Option<EngineFactoryCallback>,
     metrics: Arc<Metrics>,
+    registering_models: DashSet<String>,
 }
 
 const ALL_MODEL_TYPES: &[ModelType] = &[
@@ -85,6 +87,7 @@ impl ModelWatcher {
             model_update_tx: None,
             engine_factory,
             metrics,
+            registering_models: DashSet::new(),
         }
     }
 
@@ -340,6 +343,58 @@ impl ModelWatcher {
         mcid: &ModelCardInstanceId,
         card: &mut ModelDeploymentCard,
     ) -> anyhow::Result<()> {
+        // Check if model is already registered before downloading config.
+        // This prevents duplicate HuggingFace API calls when multiple workers register
+        // the same model.
+        // Prefill and decode models are tracked separately, so registering one
+        // doesn't block the other (they can arrive in any order).
+        let already_registered = if card.model_type.supports_prefill() {
+            self.manager.has_prefill_model(card.name())
+        } else {
+            self.manager.has_decode_model(card.name())
+        };
+
+        if already_registered {
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
+            tracing::debug!(
+                model_name = card.name(),
+                namespace = mcid.namespace,
+                model_type = %card.model_type,
+                "Model already registered, skipping config download"
+            );
+            return Ok(());
+        }
+
+        // Use registering_models set to prevent concurrent registrations.
+        let model_key = card.name().to_string();
+        if !self.registering_models.insert(model_key.clone()) {
+            self.manager
+                .save_model_card(&mcid.to_path(), card.clone())?;
+            tracing::debug!(
+                model_name = card.name(),
+                namespace = mcid.namespace,
+                "Model registration in progress by another worker, skipping"
+            );
+            return Ok(());
+        }
+
+        // We acquired the registration lock. Use a helper to ensure cleanup on all exit paths.
+        let result = self.do_model_registration(mcid, card).await;
+
+        // Always remove from registering set, whether success or failure
+        self.registering_models.remove(&model_key);
+
+        result
+    }
+
+    /// Inner function that performs the actual model registration.
+    /// Called by handle_put after acquiring the registration lock.
+    async fn do_model_registration(
+        &self,
+        mcid: &ModelCardInstanceId,
+        card: &mut ModelDeploymentCard,
+    ) -> anyhow::Result<()> {
         card.download_config().await?;
 
         let component = self
@@ -351,25 +406,6 @@ impl ModelWatcher {
         tracing::debug!(model_name = card.name(), "adding model");
         self.manager
             .save_model_card(&mcid.to_path(), card.clone())?;
-
-        // Skip duplicate registrations based on model type.
-        // Prefill and decode models are tracked separately, so registering one
-        // doesn't block the other (they can arrive in any order).
-        let already_registered = if card.model_type.supports_prefill() {
-            self.manager.has_prefill_model(card.name())
-        } else {
-            self.manager.has_decode_model(card.name())
-        };
-
-        if already_registered {
-            tracing::debug!(
-                model_name = card.name(),
-                namespace = mcid.namespace,
-                model_type = %card.model_type,
-                "Model already registered, skipping"
-            );
-            return Ok(());
-        }
 
         if let Some(tx) = &self.model_update_tx {
             tx.send(ModelUpdate::Added(card.clone())).await.ok();
