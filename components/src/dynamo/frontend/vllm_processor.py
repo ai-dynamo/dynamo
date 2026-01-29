@@ -20,13 +20,15 @@ from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, OutputProcessorOutput
 
 from dynamo.llm import (
+    KvPushRouter,
     ModelCardInstanceId,
     ModelDeploymentCard,
     PythonAsyncEngine,
+    RouterConfig,
     RouterMode,
     fetch_llm,
 )
-from dynamo.runtime import Client, DistributedRuntime
+from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +44,13 @@ class VllmProcessor:
         tokenizer: TokenizerLike,
         input_processor: InputProcessor,
         output_processor: OutputProcessor,
-        router: Client,
+        router,  # Client or KvPushRouter
     ):
         self.tokenizer = tokenizer
         self.input_processor = input_processor
         self.output_processor = output_processor
         self.router = router
+        self.is_kv_router = isinstance(router, KvPushRouter)
 
     # Ideally we would map NVCreateChatCompletionRequest into Python so it can be type checked, but
     # it has a lot of fields.
@@ -153,7 +156,17 @@ class VllmProcessor:
 
         # Dynamo Router. This goes to the backend, waits, gets the streaming response, returns it.
         # Stream is AsyncResponseStream
-        dynamo_stream = await self.router.random(dynamo_preproc)
+        if self.is_kv_router:
+            dynamo_stream = await self.router.generate(
+                token_ids=tokens,
+                model=dynamo_preproc["model"],
+                stop_conditions=dynamo_preproc["stop_conditions"],
+                sampling_options=dynamo_preproc["sampling_options"],
+                output_options=dynamo_preproc["output_options"],
+            )
+        else:
+            # Round robin or random, depending on cmd line flag
+            dynamo_stream = await self.router.generate(dynamo_preproc)
 
         # dynamo_response: Annotated
         async for dynamo_response in dynamo_stream:
@@ -164,7 +177,11 @@ class VllmProcessor:
             # Stream got: Annotated(data={'token_ids': [7281]}, event=None, comment=[], id=None)
             print(f"Stream got: {dynamo_response}")
 
-            output = dynamo_response.data()
+            if self.is_kv_router:
+                output = dynamo_response
+            else:
+                output = dynamo_response.data()
+
             if output is None or "token_ids" not in output:
                 yield {
                     "finish_reason": "error: No outputs from vLLM engine",
@@ -225,9 +242,15 @@ class VllmProcessor:
 
 
 class EngineFactory:
-    def __init__(self, runtime: DistributedRuntime, router_mode: RouterMode):
+    def __init__(
+        self,
+        runtime: DistributedRuntime,
+        router_config: RouterConfig,
+        kv_cache_block_size: int | None,
+    ):
         self.runtime = runtime
-        self.router_mode = router_mode
+        self.router_config = router_config
+        self.kv_cache_block_size = kv_cache_block_size
 
     async def engine_factory(
         self,
@@ -268,7 +291,16 @@ class EngineFactory:
             .component(component_name)
             .endpoint(endpoint_name)
         )
-        router = await generate_endpoint.client2(self.router_mode)
+
+        if self.router_config.router_mode == RouterMode.KV:
+            router = KvPushRouter(
+                endpoint=generate_endpoint,
+                block_size=self.kv_cache_block_size or 16,
+                kv_router_config=self.router_config.kv_router_config,
+            )
+        else:
+            router = await generate_endpoint.client2(self.router_config.router_mode)
+
         gen = VllmProcessor(tokenizer, input_processor, output_processor, router)
 
         return PythonAsyncEngine(gen.generator, loop)
