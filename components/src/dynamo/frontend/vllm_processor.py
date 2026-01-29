@@ -12,6 +12,7 @@ import time
 import uuid
 
 from vllm.config import CacheConfig, LoadConfig, ModelConfig, VllmConfig
+from vllm.inputs.data import TokensPrompt
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
@@ -58,20 +59,20 @@ class VllmProcessor:
 
         # There seem to be two incompatible versions of apply_chat_template, depending on the model
         try:
-            # tokenizer is CachedQwen2TokenizerFast, subclass of PreTrainedTokenizerBase (part of `transformers` library, not vllm)
+            # tokenizer is a subclass of PreTrainedTokenizerBase (part of `transformers` library, not vllm)
             # This is not the type the source code declares.
-            templated = self.tokenizer.apply_chat_template(
+            tokens = self.tokenizer.apply_chat_template(
                 conversation=request["messages"],
-                tokenize=False,
+                tokenize=True,
             )
         except TypeError:
             # tokenizer is an impl of TokenizerLike. This is the declared type.
-            templated = self.tokenizer.apply_chat_template(
+            tokens = self.tokenizer.apply_chat_template(
                 messages=request["messages"],
-                tokenize=False,
+                tokenize=True,
             )
 
-        print(f"*** Templated: {templated}")
+        print(f"*** Templated and tokenized: {tokens}")
 
         if "max_completion_tokens" in request:
             max_tokens = request["max_completion_tokens"]
@@ -92,7 +93,7 @@ class VllmProcessor:
         # This calls update_from_generation_config and update_from_tokenizer on SamplingParams
         vllm_preproc: EngineCoreRequest = self.input_processor.process_inputs(
             request_id,
-            templated,
+            TokensPrompt(prompt_token_ids=tokens),
             sampling_params,
             # arrival_time: float | None = None,
             # lora_request: LoRARequest | None = None,
@@ -117,7 +118,7 @@ class VllmProcessor:
         sp = vllm_preproc.sampling_params
         dynamo_preproc = {
             "model": request["model"],
-            "token_ids": vllm_preproc.prompt_token_ids,
+            "token_ids": tokens,
             # protocols.common.StopConditions
             "stop_conditions": {
                 "max_tokens": sp.max_tokens,
