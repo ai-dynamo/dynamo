@@ -22,6 +22,8 @@ import (
 	"fmt"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/observability"
 	internalwebhook "github.com/ai-dynamo/dynamo/deploy/operator/internal/webhook"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -118,13 +120,17 @@ func (h *DynamoComponentDeploymentHandler) ValidateDelete(ctx context.Context, o
 }
 
 // RegisterWithManager registers the webhook with the manager.
-// The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic.
+// The handler is automatically wrapped with LeaseAwareValidator to add namespace exclusion logic
+// and ObservedValidator to add metrics collection.
 func (h *DynamoComponentDeploymentHandler) RegisterWithManager(mgr manager.Manager) error {
 	// Wrap the handler with lease-aware logic for cluster-wide coordination
-	validator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+	leaseAwareValidator := internalwebhook.NewLeaseAwareValidator(h, internalwebhook.GetExcludedNamespaces())
+
+	// Wrap with metrics collection
+	observedValidator := observability.NewObservedValidator(leaseAwareValidator, consts.ResourceTypeDynamoComponentDeployment)
 
 	webhook := admission.
-		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoComponentDeployment{}, validator).
+		WithCustomValidator(mgr.GetScheme(), &nvidiacomv1alpha1.DynamoComponentDeployment{}, observedValidator).
 		WithRecoverPanic(true)
 	mgr.GetWebhookServer().Register(dynamoComponentDeploymentWebhookPath, webhook)
 	return nil

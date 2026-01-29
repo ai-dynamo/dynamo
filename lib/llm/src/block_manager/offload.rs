@@ -154,12 +154,22 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         };
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
-        let device_offload_transfer_ctx = Arc::new(TransferContext::new(
-            config.nixl_agent.clone(),
-            cuda_ctx.new_stream()?,
-            config.async_rt_handle.clone(),
-            Some(pool_config),
-        ));
+        let device_offload_transfer_ctx = Arc::new(
+            TransferContext::new(
+                config.nixl_agent.clone(),
+                cuda_ctx.new_stream()?,
+                config.async_rt_handle.clone(),
+                Some(pool_config.clone()),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create device offload transfer context with CUDA memory pool: {}. \
+                     This is a critical error - the system cannot operate without CUDA memory pools. \
+                     Please ensure sufficient GPU memory is available.",
+                    e
+                )
+            })?,
+        );
 
         // Device -> Host offload
         let device_to_host_task = OffloadManager::offload_worker(
@@ -192,12 +202,20 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         )?
         .detach();
 
-        let transfer_ctx = Arc::new(TransferContext::new(
-            config.nixl_agent.clone(),
-            cuda_ctx.new_stream()?,
-            config.async_rt_handle.clone(),
-            None,
-        ));
+        let transfer_ctx = Arc::new(
+            TransferContext::new(
+                config.nixl_agent.clone(),
+                cuda_ctx.new_stream()?,
+                config.async_rt_handle.clone(),
+                Some(pool_config),
+            )
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to create transfer context for host onboard operations: {}",
+                    e
+                )
+            })?,
+        );
 
         // Host -> Disk offload
         let host_to_disk_task = OffloadManager::offload_worker(

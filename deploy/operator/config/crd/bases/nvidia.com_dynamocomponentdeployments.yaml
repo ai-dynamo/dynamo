@@ -41,6 +41,10 @@ spec:
           jsonPath: .status.conditions[?(@.type=='Available')].status
           name: Available
           type: string
+        - description: Backend framework (sglang, vllm, trtllm)
+          jsonPath: .spec.backendFramework
+          name: Backend
+          type: string
         - jsonPath: .metadata.creationTimestamp
           name: Age
           type: date

@@ -32,7 +32,19 @@ spec:
     singular: dynamographdeployment
   scope: Namespaced
   versions:
-    - name: v1alpha1
+    - additionalPrinterColumns:
+        - description: Ready status of the graph deployment
+          jsonPath: .status.conditions[?(@.type=="Ready")].status
+          name: Ready
+          type: string
+        - description: Backend framework (sglang, vllm, trtllm)
+          jsonPath: .spec.backendFramework
+          name: Backend
+          type: string
+        - jsonPath: .metadata.creationTimestamp
+          name: Age
+          type: date
+      name: v1alpha1
       schema:
         openAPIV3Schema:
           description: DynamoGraphDeployment is the Schema for the dynamographdeployments API.

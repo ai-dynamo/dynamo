@@ -214,11 +214,21 @@ dynamo-operator:
 grove:
   # -- Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide
   enabled: false
+  # -- Node tolerations for Grove pods
+  tolerations: []
+  # -- Affinity for Grove pods
+  affinity: {}
 
 # Kai Scheduler component - advanced workload scheduling
 kai-scheduler:
   # -- Whether to enable Kai Scheduler for intelligent resource allocation, if enabled, the Kai Scheduler operator will be deployed cluster-wide
   enabled: false
+  # Global configuration for kai-scheduler (applies to all components including crd-upgrader)
+  global:
+    # -- Node tolerations for kai-scheduler pods
+    tolerations: []
+    # -- Affinity for kai-scheduler pods
+    affinity: {}
 
 # etcd configuration - distributed key-value store for operator state
 etcd:
@@ -272,6 +282,9 @@ etcd:
 
   # Node tolerations for etcd pods (allows scheduling on specific nodes)
   tolerations: []
+
+  # Affinity for etcd pods
+  affinity: {}
 
 # NATS configuration - messaging system for operator communication
 nats:
@@ -592,6 +605,8 @@ nats:
       spec:
         # Node tolerations for NATS pods (allows scheduling on specific nodes)
         tolerations: []
+        # Affinity for NATS pods
+        affinity: {}
     patch: []
 
   # Headless service for StatefulSet pod discovery
@@ -711,4 +726,6 @@ nats:
         spec:
           # Node tolerations for NATS Box pods
           tolerations: []
+          # Affinity for NATS Box pods
+          affinity: {}
       patch: []

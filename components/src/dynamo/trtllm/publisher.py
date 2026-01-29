@@ -33,13 +33,7 @@ from typing import Awaitable, Callable, Optional, Union
 import msgpack
 import zmq
 
-from dynamo.llm import (
-    ForwardPassMetrics,
-    KvEventPublisher,
-    KvStats,
-    WorkerMetricsPublisher,
-    WorkerStats,
-)
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -360,43 +354,12 @@ class Publisher:
 
     def _init_publish_metrics_thread(self):
         # Need to publish stats once so that worker can be selected.
-        # Publishing some dummy values...
-        request_active_slots = 0
-        request_total_slots = 4
-        kv_active_block = 0
-        kv_total_blocks = 4
-        num_requests_waiting = 0
-        gpu_cache_usage_perc = 0.0
-        gpu_prefix_cache_hit_rate = 0.0
-
-        num_requests_waiting = 0
-        gpu_cache_usage_perc = 0.0
-        gpu_prefix_cache_hit_rate = 0.0
-
         if self.metrics_publisher is None:
             logging.error("KV metrics publisher not initialized!")
             return
 
-        worker_stats = WorkerStats(
-            request_active_slots=request_active_slots,
-            request_total_slots=request_total_slots,
-            num_requests_waiting=num_requests_waiting,
-            data_parallel_rank=None,
-        )
-
-        kv_stats = KvStats(
-            kv_active_blocks=kv_active_block,
-            kv_total_blocks=kv_total_blocks,
-            gpu_cache_usage_perc=gpu_cache_usage_perc,
-            gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
-        )
-
-        metrics = ForwardPassMetrics(
-            worker_stats=worker_stats,
-            kv_stats=kv_stats,
-            spec_decode_stats=None,
-        )
-        self.metrics_publisher.publish(metrics)
+        # Publish initial metrics with 0 active blocks
+        self.metrics_publisher.publish(None, 0)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -432,49 +395,12 @@ class Publisher:
 
         stats = self.engine.llm.get_stats_async(timeout=5)
         async for stat in stats:
-            request_active_slots = stat["numActiveRequests"]
-            request_total_slots = stat["maxNumActiveRequests"]
-            kv_active_block = stat["kvCacheStats"]["usedNumBlocks"]
-            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-            reused_blocks = stat["kvCacheStats"]["reusedBlocks"]
-            freeNumBlocks = stat["kvCacheStats"]["freeNumBlocks"]
-            allocTotalBlocks = stat["kvCacheStats"]["allocTotalBlocks"]
-            allocNewBlocks = stat["kvCacheStats"]["allocNewBlocks"]
-            # NOTE: num paused requests is always 0 when using guarantee no evict scheduler (default).
-            num_requests_waiting = (
-                stat["numQueuedRequests"]
-                + stat["inflightBatchingStats"]["numPausedRequests"]
-            )
-            gpu_cache_usage_perc = allocTotalBlocks / kv_total_blocks
-            gpu_prefix_cache_hit_rate = stat["kvCacheStats"]["cacheHitRate"]
+            kv_active_blocks = stat["kvCacheStats"]["usedNumBlocks"]
 
-            logging.debug(
-                f"Publishing stats: request_active_slots: {request_active_slots}, request_total_slots: {request_total_slots}, kv_active_block: {kv_active_block}, kv_total_blocks: {kv_total_blocks}, num_requests_waiting: {num_requests_waiting}, reused_blocks: {reused_blocks}, freeNumBlocks: {freeNumBlocks}, allocTotalBlocks: {allocTotalBlocks}, allocNewBlocks: {allocNewBlocks}, gpu_cache_usage_perc: {gpu_cache_usage_perc}, gpu_prefix_cache_hit_rate: {gpu_prefix_cache_hit_rate}"
-            )
+            logging.debug(f"Publishing stats: kv_active_blocks: {kv_active_blocks}")
 
-            worker_stats = WorkerStats(
-                request_active_slots=request_active_slots,
-                request_total_slots=request_total_slots,
-                num_requests_waiting=num_requests_waiting,
-                data_parallel_rank=None,
-            )
-
-            kv_stats = KvStats(
-                kv_active_blocks=kv_active_block,
-                kv_total_blocks=kv_total_blocks,
-                gpu_cache_usage_perc=gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
-            )
-
-            # TODO: get spec_decode_stats from engine
-            spec_decode_stats = None
-
-            metrics = ForwardPassMetrics(
-                worker_stats=worker_stats,
-                kv_stats=kv_stats,
-                spec_decode_stats=spec_decode_stats,
-            )
-            self.metrics_publisher.publish(metrics)
+            # TRT-LLM doesn't use data parallelism currently (dp_rank=None)
+            self.metrics_publisher.publish(None, kv_active_blocks)
 
         return True
 

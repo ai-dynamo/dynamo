@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import base64
+import dataclasses
 
 from tensorrt_llm.llmapi import DisaggregatedParams
 
@@ -30,18 +31,10 @@ class DisaggregatedParamsCodec:
         if disaggregated_params is None:
             return None
 
-        opaque_state = (
-            base64.b64decode(disaggregated_params.opaque_state)
-            if disaggregated_params.opaque_state is not None
-            else None
-        )
-        return DisaggregatedParams(
-            request_type=disaggregated_params.request_type,
-            first_gen_tokens=disaggregated_params.first_gen_tokens,
-            ctx_request_id=disaggregated_params.ctx_request_id,
-            opaque_state=opaque_state,
-            draft_tokens=disaggregated_params.draft_tokens,
-        )
+        opaque_state = disaggregated_params.opaque_state
+        if isinstance(opaque_state, str):
+            opaque_state = base64.b64decode(opaque_state)
+        return dataclasses.replace(disaggregated_params, opaque_state=opaque_state)
 
     @staticmethod
     def encode(
@@ -50,15 +43,7 @@ class DisaggregatedParamsCodec:
         if disaggregated_params is None:
             return None
 
-        encoded_opaque_state = (
-            base64.b64encode(disaggregated_params.opaque_state).decode("utf-8")
-            if disaggregated_params.opaque_state is not None
-            else None
-        )
-        return DisaggregatedParams(
-            request_type=disaggregated_params.request_type,
-            first_gen_tokens=disaggregated_params.first_gen_tokens,
-            ctx_request_id=disaggregated_params.ctx_request_id,
-            opaque_state=encoded_opaque_state,
-            draft_tokens=disaggregated_params.draft_tokens,
-        )
+        opaque_state = disaggregated_params.opaque_state
+        if isinstance(opaque_state, (bytes, bytearray)):
+            opaque_state = base64.b64encode(opaque_state).decode("utf-8")
+        return dataclasses.replace(disaggregated_params, opaque_state=opaque_state)
