@@ -60,11 +60,11 @@ jobs:
         uses: actions/checkout@v4
       - name: Debug Network
         run: |
-          sudo apt-get update && sudo apt-get install -y iproute2
+          sudo apt-get install -y iproute2 || true
           echo "--- Interface Config ---"
-          ip link
+          ip link  || true
           echo "--- Route Config ---"
-          ip route
+          ip route  || true
           echo "--- MTU Check ---"
           cat /sys/class/net/eth0/mtu
 
