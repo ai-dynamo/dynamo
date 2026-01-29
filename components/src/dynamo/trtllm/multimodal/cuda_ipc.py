@@ -27,7 +27,7 @@ async def extract_embeddings_from_handles(
     properly.
 
     Args:
-        handles: List of CUDA IPC handle dictionaries from encoder response
+        handles: List of CUDA IPC handle dictionaries from encoder response.
 
     Returns:
         List of embedding tensors on CPU.
@@ -45,7 +45,7 @@ def _extract_embeddings_sync(handles: List[Dict[str, Any]]) -> List[torch.Tensor
     for i, handle_dict in enumerate(handles):
         try:
             container = SharedTensorContainer.from_dict(handle_dict)
-            tensor = container.get_local_view().cpu()
+            tensor = container.get_local_view().clone().cpu()
             tensors.append(tensor)
             logger.debug(
                 f"Extracted embedding {i}: shape={tensor.shape}, dtype={tensor.dtype}"
