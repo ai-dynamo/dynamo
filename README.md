@@ -87,6 +87,7 @@ Built in Rust for performance and Python for extensibility, Dynamo is fully open
 |------|----------|------|--------------|
 | [**Local Quick Start**](#local-quick-start) | Test on a single machine | ~5 min | 1 GPU, Ubuntu 24.04 |
 | [**Kubernetes Deployment**](#kubernetes-deployment) | Production multi-node clusters | ~30 min | K8s cluster with GPUs |
+| [**Building from Source**](#building-from-source) | Contributors and development | ~15 min | Ubuntu, Rust, Python |
 
 ## Contributing
 
