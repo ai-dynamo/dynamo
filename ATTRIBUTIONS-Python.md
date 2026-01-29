@@ -73744,7 +73744,7 @@ This supplement is an exhibit to the Agreement and is incorporated as an integra
   - `Homepage`: https://github.com/nvidia/tensorrt
 
 
-## tensorrt_llm (1.2.0rc6)
+## tensorrt_llm (1.3.0rc1)
 
 ### Licenses
 License: `Apache License 2.0`
