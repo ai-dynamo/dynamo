@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for PrefillHandler."""
+"""Unit tests for AggregatedHandler."""
 
 import pytest
 import torch
 from tensorrt_llm.llmapi import DisaggregatedParams
 
-from dynamo.trtllm.request_handlers.handlers import PrefillHandler
+from dynamo.trtllm.request_handlers.aggregated_handler import AggregatedHandler
 from dynamo.trtllm.tests.request_handlers.utils import (
     create_mock_encoder_cache,
     run_generate_with_mock_fetch,
@@ -23,33 +23,21 @@ pytestmark = [
 ]
 
 FETCH_PATCH_PATH = (
-    "dynamo.trtllm.request_handlers.handlers.fetch_embeddings_from_encoder"
+    "dynamo.trtllm.request_handlers.aggregated_handler.fetch_embeddings_from_encoder"
 )
 
 
-class TestPrefillHandlerInit:
-    """Tests for PrefillHandler initialization."""
-
-    def test_init_with_encoder_cache(self):
-        """Test PrefillHandler can be initialized with encoder_cache."""
-        config = create_mock_request_handler_config(disaggregation_mode="prefill")
-        cache = create_mock_encoder_cache()
-
-        handler = PrefillHandler(config, encoder_cache=cache)
-
-        assert handler.engine == config.engine
-        assert handler._encoder_cache == cache
-
-
-class TestPrefillHandlerGenerate:
-    """Tests for PrefillHandler.generate method."""
+class TestAggregatedHandlerGenerate:
+    """Tests for AggregatedHandler.generate method."""
 
     @pytest.mark.asyncio
     async def test_embeddings_passed_to_generate_locally(self):
         """Cache path: List[Tensor] passed as embeddings."""
-        config = create_mock_request_handler_config(disaggregation_mode="prefill")
+        config = create_mock_request_handler_config(
+            disaggregation_mode="prefill_and_decode"
+        )
         setup_multimodal_config(config, ["http://example.com/image.jpg"])
-        handler = PrefillHandler(config, encoder_cache=create_mock_encoder_cache())
+        handler = AggregatedHandler(config, encoder_cache=create_mock_encoder_cache())
 
         expected_embeddings = [torch.randn(10, 256)]
 
@@ -63,9 +51,11 @@ class TestPrefillHandlerGenerate:
     @pytest.mark.asyncio
     async def test_disaggregated_params_passed_to_generate_locally(self):
         """No-cache path: DisaggregatedParams passed as ep_params."""
-        config = create_mock_request_handler_config(disaggregation_mode="prefill")
+        config = create_mock_request_handler_config(
+            disaggregation_mode="prefill_and_decode"
+        )
         setup_multimodal_config(config, ["http://example.com/image.jpg"])
-        handler = PrefillHandler(config, encoder_cache=None)
+        handler = AggregatedHandler(config, encoder_cache=None)
 
         expected_params = DisaggregatedParams(request_type="context_only")
 
