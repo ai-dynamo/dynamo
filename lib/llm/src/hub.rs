@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 
+use hf_hub::Cache;
 use modelexpress_client::{
     Client as MxClient, ClientConfig as MxClientConfig, ModelProvider as MxModelProvider,
 };
@@ -13,73 +13,43 @@ use modelexpress_common::download as mx;
 use dynamo_runtime::config::environment_names::model as env_model;
 
 /// Check if a model is already cached in the HuggingFace hub cache directory.
-/// Returns the path to the cached model if found, None otherwise.
+/// Returns the path to the cached model directory if found, None otherwise.
 ///
-/// For tokenizer-only downloads (ignore_weights=true), we check for tokenizer files.
-/// For full downloads, we also check for weight files (*.safetensors or *.bin).
+/// Uses hf-hub's Cache API to check for cached files. For tokenizer-only downloads
+/// (ignore_weights=true), we check for config.json and tokenizer files.
+/// For full downloads, we also require weight files to be present.
 fn get_cached_model_path(model_name: &str, ignore_weights: bool) -> Option<PathBuf> {
-    let cache_dir = get_model_express_cache_dir();
+    let cache = Cache::new(get_model_express_cache_dir());
+    let repo = cache.model(model_name.to_string());
 
-    // HuggingFace hub cache structure: models--{org}--{model}/snapshots/{sha}/
-    let safe_name = model_name.replace('/', "--");
-    let model_dir = cache_dir.join(format!("models--{}", safe_name));
+    // Check for required config file
+    let config_path = repo.get("config.json")?;
 
-    let snapshots_dir = model_dir.join("snapshots");
-    if !snapshots_dir.exists() {
+    // Check for tokenizer files (at least one must exist)
+    let has_tokenizer =
+        repo.get("tokenizer.json").is_some() || repo.get("tokenizer_config.json").is_some();
+
+    if !has_tokenizer {
         return None;
     }
 
-    // Find the most recent snapshot (by modification time)
-    let mut snapshots: Vec<_> = fs::read_dir(&snapshots_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().ok().is_some_and(|ft| ft.is_dir()))
-        .collect();
+    // For full downloads, check for weight files
+    if !ignore_weights {
+        // Check common weight file patterns - at least one must exist
+        let has_weights = repo.get("model.safetensors").is_some()
+            || repo.get("pytorch_model.bin").is_some()
+            || repo.get("model.safetensors.index.json").is_some()
+            || repo.get("pytorch_model.bin.index.json").is_some();
 
-    if snapshots.is_empty() {
-        return None;
+        if !has_weights {
+            return None;
+        }
     }
 
-    // Sort by modification time (most recent first)
-    snapshots.sort_by(|a, b| {
-        let a_time = a.metadata().and_then(|m| m.modified()).ok();
-        let b_time = b.metadata().and_then(|m| m.modified()).ok();
-        b_time.cmp(&a_time)
-    });
-
-    for snapshot in snapshots {
-        let snapshot_path = snapshot.path();
-
-        // Check for required tokenizer files
-        let has_tokenizer = snapshot_path.join("tokenizer.json").exists()
-            || snapshot_path.join("tokenizer_config.json").exists();
-        let has_config = snapshot_path.join("config.json").exists();
-
-        if !has_tokenizer || !has_config {
-            continue;
-        }
-
-        // For full downloads, also check for weight files
-        if !ignore_weights {
-            let has_weights = fs::read_dir(&snapshot_path).ok().is_some_and(|entries| {
-                entries.filter_map(|e| e.ok()).any(|e| {
-                    let name = e.file_name();
-                    let name = name.to_string_lossy();
-                    name.ends_with(".safetensors")
-                        || name.ends_with(".bin")
-                        || name.ends_with(".pt")
-                })
-            });
-            if !has_weights {
-                continue;
-            }
-        }
-
-        tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
-        return Some(snapshot_path);
-    }
-
-    None
+    // Return the parent directory (snapshot dir) containing the model files
+    let snapshot_path = config_path.parent()?.to_path_buf();
+    tracing::info!("Found cached model '{model_name}' at {snapshot_path:?}, skipping download");
+    Some(snapshot_path)
 }
 
 /// Check if offline mode is enabled via HF_HUB_OFFLINE environment variable.
