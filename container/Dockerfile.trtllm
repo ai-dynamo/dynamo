@@ -51,6 +51,7 @@ ARG HAS_TRTLLM_CONTEXT=0
 ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
 ARG TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 ARG GITHUB_TRTLLM_COMMIT
+ARG TRTLLM_WHEEL_IMAGE="trtllm_wheel_image_empty"
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -78,8 +79,15 @@ ARG NIXL_LIBFABRIC_REF
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+# Empty fallback for TRTLLM wheel image copy
+FROM alpine:3.20 AS trtllm_wheel_image_empty
+RUN mkdir -p /app/tensorrt_llm
+
 # Copy artifacts from NGC PyTorch image
 FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
+
+# Resolve TRTLLM wheel image (can be a stage name or a registry image)
+FROM ${TRTLLM_WHEEL_IMAGE} AS trtllm_wheel_image
 
 ##################################
 ########## Base Image ############
@@ -552,9 +560,9 @@ ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
 ARG GITHUB_TRTLLM_COMMIT
-
 # Copy wheel build context (may be empty for download path)
 COPY --from=trtllm_wheel / /trtllm_wheel/
+COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 RUN uv pip install --no-cache "cuda-python==13.0.2"
 
@@ -576,9 +584,13 @@ RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
         fi; \
+    elif [ -n "$(find /trtllm_wheel_image -name "*.whl" | head -n 1)" ]; then \
+        # Install from wheel embedded in the TRTLLM release image
+        WHEEL_FILE="$(find /trtllm_wheel_image -name "*.whl" | head -n 1)"; \
+        uv pip install --no-cache "$WHEEL_FILE" triton==3.5.1; \
     else \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-        # TRTLLM 1.2.0rc6.post has issues installing from pypi with uv, installing from direct wheel link works best
+        # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
         # explicitly installing triton 3.5.1 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \

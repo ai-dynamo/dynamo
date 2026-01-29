@@ -115,10 +115,11 @@ DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
 DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc1"
 # TensorRT-LLM wheels on PyPI might not be compatible with the NGC PyTorch.
-# We will use the NGC image to extract the wheel from.
+# For incompatible versions, we install the wheel from the NGC image during the Docker build.
 # The following versions are not ABI compatible with the NGC PyTorch.
 TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc1")
 TENSORRTLLM_PIP_WHEEL=""
+TRTLLM_WHEEL_IMAGE=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
@@ -705,12 +706,6 @@ trtllm_version_incompatible() {
     return 1
 }
 
-get_trtllm_wheel_image_for_version() {
-    local version="$1"
-    echo "nvcr.io/nvidia/tensorrt-llm/release:${version}"
-    return 0
-}
-
 _is_semver_ref() {
     local ref="$1"
     local semver_regex='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+|[A-Za-z][0-9A-Za-z.-]+)?$'
@@ -729,73 +724,6 @@ get_github_trtllm_ref() {
     fi
     echo "$commit"
     return 0
-}
-
-extract_trtllm_wheel_from_image() {
-    local image="$1"
-    local dest_dir="$2"
-
-    if [ -z "$image" ]; then
-        echo "ERROR: TRTLLM wheel image is empty"
-        return 1
-    fi
-
-    mkdir -p "$dest_dir/raw" "$dest_dir/flat"
-    echo "Extracting TRTLLM wheel from image: $image"
-
-    if ! command -v docker >/dev/null 2>&1; then
-        echo "ERROR: docker is required to extract TRTLLM wheel from the NGC image."
-        return 1
-    fi
-
-    if ! docker pull "$image" >/dev/null; then
-        echo "ERROR: Failed to pull TRTLLM wheel image: $image"
-        return 1
-    fi
-
-    local container_id
-    container_id=$(docker create "$image")
-    if [ -z "$container_id" ]; then
-        echo "ERROR: Failed to create container from image: $image"
-        return 1
-    fi
-
-    if ! docker cp "${container_id}:/app/tensorrt_llm" "$dest_dir/raw"; then
-        docker rm -f "$container_id" >/dev/null
-        echo "ERROR: Failed to copy /app/tensorrt_llm from image: $image"
-        return 1
-    fi
-    docker rm -f "$container_id" >/dev/null
-
-    # Portable copy: prefer cp -n, fallback to plain cp if unsupported.
-    _cp_no_clobber() {
-        if cp -n "$1" "$2" 2>/dev/null; then
-            return 0
-        fi
-        cp "$1" "$2"
-    }
-    export -f _cp_no_clobber
-    find "$dest_dir/raw" \( -name "*.whl" -o -name "*.txt" \) \
-        -exec bash -c '_cp_no_clobber "$0" "$1"' {} "$dest_dir/flat/" \;
-    return 0
-}
-
-use_trtllm_wheel_image() {
-    local version="$1"
-    local wheel_image
-
-    wheel_image=$(get_trtllm_wheel_image_for_version "${version}")
-    TENSORRTLLM_PIP_WHEEL_DIR=$(mktemp -d /tmp/trtllm_wheel.XXXX)
-    if ! extract_trtllm_wheel_from_image "${wheel_image}" "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
-        error "ERROR: Failed to extract TRTLLM wheel from ${wheel_image}"
-    fi
-    if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}/flat"; then
-        error "ERROR: No valid TRTLLM wheel found in extracted image directory."
-    fi
-    echo "Installing TensorRT-LLM from wheel extracted from NGC image"
-    BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=1"
-    BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=${TENSORRTLLM_PIP_WHEEL_DIR}/flat"
-    PRINT_TRTLLM_WHEEL_FILE=$(find "${TENSORRTLLM_PIP_WHEEL_DIR}/flat" -name "*.whl" | head -n 1)
 }
 
 function determine_user_intention_trtllm() {
@@ -887,20 +815,20 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
         TRTLLM_WHEEL_VERSION=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
         if trtllm_version_incompatible "${TRTLLM_WHEEL_VERSION}"; then
-            if [ "$DRY_RUN" != "true" ]; then
-                use_trtllm_wheel_image "${TRTLLM_WHEEL_VERSION}"
-            fi
+            TRTLLM_WHEEL_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:${TRTLLM_WHEEL_VERSION}"
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TRTLLM_WHEEL_IMAGE=${TRTLLM_WHEEL_IMAGE}"
+            PRINT_TRTLLM_WHEEL_FILE=${TRTLLM_WHEEL_IMAGE}
         else
             BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
             BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
             BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
-
-            # Create a dummy directory to satisfy the build context requirement
-            # There is no way to conditionally copy the build context in dockerfile.
-            mkdir -p /tmp/dummy_dir
-            BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
             PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
         fi
+        # Create a dummy directory to satisfy the build context requirement
+        # There is no way to conditionally copy the build context in dockerfile.
+        mkdir -p /tmp/trtllm_wheel_context
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/trtllm_wheel_context"
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
