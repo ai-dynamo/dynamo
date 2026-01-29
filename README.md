@@ -113,14 +113,19 @@ sudo apt install python3-dev
 
 We publish Python wheels specialized for each of our supported engines: vllm, sglang, and trtllm. The examples that follow use SGLang; continue reading for other engines.
 
-```
+```bash
 uv venv venv
 source venv/bin/activate
 uv pip install pip
 
-# Choose one
-uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
+# For vLLM or SGLang:
+uv pip install "ai-dynamo[sglang]"  # or [vllm]
+
+# For TensorRT-LLM (requires pip, not uv):
+pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 ```
+
+> **Note:** TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the [TensorRT-LLM container](docs/reference/release-artifacts.md#container-images) for broader compatibility. See [Release Artifacts](docs/reference/release-artifacts.md#python-wheels) for wheel availability.
 
 ## 3. Run Dynamo
 
