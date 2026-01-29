@@ -17,8 +17,7 @@ use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
-use super::indexer::OverlapScores;
-use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
 use dynamo_tokens::SequenceHash;

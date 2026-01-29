@@ -42,7 +42,7 @@ fn create_kv_stream_name(component: &Component, subject: &str) -> String {
 
 use crate::kv_router::{
     KV_EVENT_SUBJECT, KV_METRICS_SUBJECT, WORKER_KV_INDEXER_BUFFER_SIZE,
-    indexer::{KvIndexerMetrics, LocalKvIndexer, RouterEvent},
+    indexer::{KvIndexerMetrics, LocalKvIndexer},
     protocols::*,
     worker_query::start_worker_kv_query_endpoint,
 };
