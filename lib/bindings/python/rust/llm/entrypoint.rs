@@ -92,8 +92,12 @@ impl KvRouterConfig {
 #[pyclass]
 #[derive(Clone, Debug)]
 pub struct RouterConfig {
-    router_mode: RouterMode,
-    kv_router_config: KvRouterConfig,
+    #[pyo3(get, set)]
+    pub router_mode: RouterMode,
+
+    #[pyo3(get, set)]
+    pub kv_router_config: KvRouterConfig,
+
     /// Threshold for active decode blocks utilization (0.0-1.0)
     active_decode_blocks_threshold: Option<f64>,
     /// Threshold for active prefill tokens utilization (literal token count)

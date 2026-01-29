@@ -48,7 +48,9 @@ logger = logging.getLogger(__name__)
 
 
 def setup_engine_factory(
-    runtime: DistributedRuntime, router_mode: RouterMode
+    runtime: DistributedRuntime,
+    router_mode: RouterMode,
+    kv_cache_block_size: int | None,
 ):  # Returns EngineFactory:
     """
     When using vllm pre and post processor, create the EngineFactory that
@@ -56,7 +58,7 @@ def setup_engine_factory(
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime, router_mode).engine_factory
+    return EngineFactory(runtime, router_mode, kv_cache_block_size).engine_factory
 
 
 def validate_model_name(value):
@@ -439,19 +441,19 @@ async def async_main():
         router_mode = RouterMode.RoundRobin
         kv_router_config = None
 
+    router_config = RouterConfig(
+        router_mode,
+        kv_router_config,
+        active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
+        active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
+        active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
+        enforce_disagg=flags.enforce_disagg,
+    )
     kwargs = {
         "http_host": flags.http_host,
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
-        "router_config": RouterConfig(
-            router_mode,
-            kv_router_config,
-            active_decode_blocks_threshold=flags.active_decode_blocks_threshold,
-            active_prefill_tokens_threshold=flags.active_prefill_tokens_threshold,
-            active_prefill_tokens_threshold_frac=flags.active_prefill_tokens_threshold_frac,
-            enforce_disagg=flags.enforce_disagg,
-        ),
-        "migration_limit": flags.migration_limit,
+        "router_config": router_config,
     }
 
     if flags.model_name:
@@ -470,7 +472,9 @@ async def async_main():
     if flags.processor == "vllm":
         # TODO: Do we also need to tell the engine factory when the model is removed,
         # so it can "stop" vllm?
-        kwargs["engine_factory"] = setup_engine_factory(runtime, router_mode)
+        kwargs["engine_factory"] = setup_engine_factory(
+            runtime, router_config, flags.kv_cache_block_size
+        )
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)
