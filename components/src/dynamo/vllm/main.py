@@ -315,7 +315,7 @@ def setup_vllm_engine(config, stat_logger=None):
             os.environ["VLLM_LORA_MODULES_LOADING_TIMEOUT"] = "600"
 
     if engine_args.load_format == "gms":
-        engine_args.worker_cls = "gpu_memory_service.vllm_integration.worker.GMSWorker"
+        engine_args.worker_cls = "gpu_memory_service.integrations.vllm.worker.GMSWorker"
 
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (

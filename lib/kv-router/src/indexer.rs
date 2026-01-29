@@ -54,20 +54,114 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "metrics")]
 use std::sync::OnceLock;
 use std::{
-    cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     iter,
-    rc::Rc,
     sync::{Arc, Mutex},
     thread::JoinHandle,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::approx::{BlockEntry, PruneConfig, PruneManager};
+use crate::flat_hashmap::FlatHashMap;
 use crate::protocols::*;
+pub use crate::radix_tree::RadixTree;
 use dynamo_tokens::SequenceHash;
+
+// ------
+// KvIndex - Unified interface for RadixTree and FlatHashMap
+// ------
+
+/// Unified interface for KV cache indexing.
+///
+/// Both `RadixTree` and `FlatHashMap` implement the same core operations:
+/// - `find_matches`: Find workers with matching cached blocks
+/// - `apply_event`: Apply store/remove events
+/// - `remove_worker`: Remove a worker's entries
+/// - `get_workers`: Get all tracked workers
+/// - `dump_tree_as_events`: Dump state as events
+/// - `current_size`: Get total (worker, block) pairs
+pub enum KvIndex {
+    Tree(RadixTree),
+    Flat(FlatHashMap),
+}
+
+impl KvIndex {
+    /// Create a new KvIndex using RadixTree.
+    pub fn new_tree() -> Self {
+        KvIndex::Tree(RadixTree::new())
+    }
+
+    /// Create a new KvIndex using RadixTree with frequency tracking.
+    pub fn new_tree_with_frequency(expiration_duration: Option<std::time::Duration>) -> Self {
+        KvIndex::Tree(RadixTree::new_with_frequency(expiration_duration))
+    }
+
+    /// Create a new KvIndex using FlatHashMap.
+    pub fn new_flat() -> Self {
+        KvIndex::Flat(FlatHashMap::new())
+    }
+
+    /// Find matches for a sequence of local block hashes.
+    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
+        match self {
+            KvIndex::Tree(tree) => tree.find_matches(sequence, early_exit),
+            KvIndex::Flat(map) => map.find_matches(sequence, early_exit),
+        }
+    }
+
+    /// Apply a RouterEvent to the index.
+    pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
+        match self {
+            KvIndex::Tree(tree) => tree.apply_event(event),
+            KvIndex::Flat(map) => {
+                map.apply_event(event);
+                Ok(())
+            }
+        }
+    }
+
+    /// Remove a worker and all their blocks from the index.
+    pub fn remove_worker(&mut self, worker_id: WorkerId) {
+        match self {
+            KvIndex::Tree(tree) => tree.remove_worker(worker_id),
+            KvIndex::Flat(map) => map.remove_worker(worker_id),
+        }
+    }
+
+    /// Clear all blocks for a worker but keep the worker tracked.
+    pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
+        match self {
+            KvIndex::Tree(tree) => tree.clear_all_blocks(worker_id),
+            KvIndex::Flat(map) => map.clear_all_blocks(worker_id),
+        }
+    }
+
+    /// Get all worker IDs currently tracked.
+    pub fn get_workers(&self) -> Vec<WorkerId> {
+        match self {
+            KvIndex::Tree(tree) => tree.get_workers(),
+            KvIndex::Flat(map) => map.get_workers(),
+        }
+    }
+
+    /// Dump the index as a series of RouterEvents.
+    pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
+        match self {
+            KvIndex::Tree(tree) => tree.dump_tree_as_events(),
+            KvIndex::Flat(map) => map.dump_tree_as_events(),
+        }
+    }
+
+    /// Returns the total number of (worker, block) pairs stored.
+    pub fn current_size(&self) -> usize {
+        match self {
+            KvIndex::Tree(tree) => tree.current_size(),
+            KvIndex::Flat(map) => map.current_size(),
+        }
+    }
+}
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -83,47 +177,6 @@ pub enum KvRouterError {
 
     #[error("Prune operation failed: {0}")]
     PruneFailed(String),
-}
-
-/// Errors that can occur during KV Cache Event processing.
-#[derive(Debug, thiserror::Error)]
-pub enum KvCacheEventError {
-    #[error("Failed to find parent block")]
-    ParentBlockNotFound,
-
-    #[error("Failed to find block")]
-    BlockNotFound,
-
-    #[error("Invalid block sequence")]
-    InvalidBlockSequence,
-}
-
-/// A shared reference to a [`RadixBlock`].
-type SharedRadixBlock = Rc<RefCell<RadixBlock>>;
-
-/// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct RouterEvent {
-    /// The ID of the worker emitting the event.
-    pub worker_id: WorkerId,
-    /// The cache event associated with the worker.
-    pub event: KvCacheEvent,
-}
-
-impl RouterEvent {
-    /// Create a new `RouterEvent`.
-    ///
-    /// ### Arguments
-    ///
-    /// * `worker_id` - The ID of the worker emitting the event.
-    /// * `event` - The cache event.
-    ///
-    /// ### Returns
-    ///
-    /// A new `RouterEvent`.
-    pub fn new(worker_id: WorkerId, event: KvCacheEvent) -> Self {
-        Self { worker_id, event }
-    }
 }
 
 // -------
@@ -171,450 +224,6 @@ impl MaybeError for WorkerKvQueryResponse {
             WorkerKvQueryResponse::Error(msg) => Some(anyhow::Error::msg(msg.clone())),
             _ => None,
         }
-    }
-}
-
-/// A block in the Radix Tree.
-#[derive(Debug)]
-struct RadixBlock {
-    /// A map of child blocks, keyed by their local block hash.
-    children: HashMap<LocalBlockHash, SharedRadixBlock>,
-    /// The set of workers that have this block cached.
-    workers: HashSet<WorkerWithDpRank>,
-    /// The external sequence block hash for this block (None for root).
-    /// This is the same for all workers under the simplifying assumption.
-    block_hash: Option<ExternalSequenceBlockHash>,
-    /// A buffer of times that this block was last traversed
-    recent_uses: VecDeque<Instant>,
-}
-
-impl RadixBlock {
-    /// Create a new `RadixBlock` (used for root node).
-    ///
-    /// ### Returns
-    ///
-    /// A new `RadixBlock` with no block_hash.
-    pub fn new() -> Self {
-        Self {
-            children: HashMap::new(),
-            workers: HashSet::new(),
-            block_hash: None,
-            recent_uses: VecDeque::new(),
-        }
-    }
-
-    /// Create a new `RadixBlock` with a specific block hash.
-    ///
-    /// ### Returns
-    ///
-    /// A new `RadixBlock` with the given block_hash.
-    pub fn with_hash(block_hash: ExternalSequenceBlockHash) -> Self {
-        Self {
-            children: HashMap::new(),
-            workers: HashSet::new(),
-            block_hash: Some(block_hash),
-            recent_uses: VecDeque::new(),
-        }
-    }
-}
-
-pub struct RadixTree {
-    /// This is the root of the radix/prefix tree
-    /// This will only contain root blocks
-    root: SharedRadixBlock,
-
-    /// Per-worker lookup table for O(1) block access.
-    /// Maps worker -> (block_hash -> block).
-    lookup: HashMap<WorkerWithDpRank, HashMap<ExternalSequenceBlockHash, SharedRadixBlock>>,
-
-    /// The time buffer the radix tree should check when considering frequence of block accesses
-    expiration_duration: Option<Duration>,
-}
-
-impl Default for RadixTree {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Dropping Radix blocks can cause a cascade of drops that can overflow the stack.
-// This custom drop implementation avoids this using an iterative approach.
-impl Drop for RadixTree {
-    fn drop(&mut self) {
-        let mut stack: Vec<SharedRadixBlock> = Vec::new();
-        // Break root -> children edge up front
-        {
-            let mut root = self.root.borrow_mut();
-            stack.extend(root.children.drain().map(|(_, v)| v));
-        }
-
-        // Remove all lookup references (they may include blocks not reachable from root)
-        for (_, worker_blocks) in self.lookup.drain() {
-            stack.extend(worker_blocks.into_values());
-        }
-
-        // Iteratively free any uniquely-owned blocks without recursion
-        while let Some(block) = stack.pop() {
-            match Rc::try_unwrap(block) {
-                Ok(cell) => {
-                    // We own the cell, so we can take inner and it will drop after this block.
-                    let mut inner: RadixBlock = cell.into_inner();
-                    stack.extend(inner.children.drain().map(|(_, v)| v));
-                }
-                Err(rc) => {
-                    // We don't own the cell, just call drop on it.
-                    drop(rc);
-                }
-            }
-        }
-    }
-}
-
-impl RadixTree {
-    /// Create a new `RadixTree`.
-    ///
-    /// ### Returns
-    ///
-    /// A new `RadixTree`.
-    pub fn new_with_frequency(expiration_duration: Option<Duration>) -> Self {
-        Self {
-            root: Rc::new(RefCell::new(RadixBlock::new())),
-            lookup: HashMap::new(),
-            expiration_duration,
-        }
-    }
-
-    pub fn new() -> Self {
-        Self::new_with_frequency(None)
-    }
-
-    /// Traverse the radix tree to find the best match for a given sequence of [`LocalBlockHash`]es.
-    ///
-    /// ### Arguments
-    ///
-    /// * `sequence` - A vector of `LocalBlockHash` representing the sequence to match.
-    /// * `early_exit` - A boolean indicating whether to exit early if a single match is found.
-    ///
-    /// ### Returns
-    ///
-    /// An `OverlapScores` representing the match scores.
-    pub fn find_matches(&self, sequence: Vec<LocalBlockHash>, early_exit: bool) -> OverlapScores {
-        let mut scores = OverlapScores::new();
-        let mut current = self.root.clone();
-        let now = Instant::now();
-
-        tracing::trace!(
-            "RadixTree::find_matches: looking for sequence={:?}",
-            sequence.iter().map(|h| h.0).collect::<Vec<_>>()
-        );
-
-        for (idx, block_hash) in sequence.iter().enumerate() {
-            let next_block = {
-                let current_borrow = current.borrow();
-                current_borrow.children.get(block_hash).cloned()
-            };
-            if let Some(block) = next_block {
-                scores.update_scores(block.borrow().workers.iter());
-
-                if let Some(expiration_duration) = self.expiration_duration {
-                    let mut block_mut = block.borrow_mut();
-
-                    while let Some(access_time) = block_mut.recent_uses.front() {
-                        if now.duration_since(*access_time) > expiration_duration {
-                            block_mut.recent_uses.pop_front();
-                        } else {
-                            break;
-                        }
-                    }
-                    scores.add_frequency(block_mut.recent_uses.len());
-                    block_mut.recent_uses.push_back(now);
-                }
-
-                if early_exit && block.borrow().workers.len() == 1 {
-                    break;
-                }
-
-                current = block;
-            } else {
-                tracing::trace!(
-                    "RadixTree::find_matches: block not found at index {} for hash {}",
-                    idx,
-                    block_hash.0
-                );
-                break;
-            }
-        }
-
-        tracing::trace!("RadixTree::find_matches: final scores={:?}", scores.scores);
-
-        // Populate tree sizes for all workers that have scores
-        for worker in scores.scores.keys() {
-            let tree_size = self
-                .lookup
-                .get(worker)
-                .expect("worker in scores must exist in lookup table")
-                .len();
-            scores.tree_sizes.insert(*worker, tree_size);
-        }
-
-        scores
-    }
-
-    /// Apply a [`RouterEvent`] to the radix tree.
-    ///
-    /// ### Arguments
-    ///
-    /// * `event` - The `RouterEvent` to apply.
-    pub fn apply_event(&mut self, event: RouterEvent) -> Result<(), KvCacheEventError> {
-        let (worker_id, kv_event) = (event.worker_id, event.event);
-        let (id, op) = (kv_event.event_id, kv_event.data);
-
-        // Construct WorkerWithDpRank from worker_id and dp_rank from the event
-        let worker = WorkerWithDpRank::new(worker_id, kv_event.dp_rank);
-
-        tracing::trace!(id, "RadixTree::apply_event: Store operation: {:?}", op);
-
-        let worker_lookup = self.lookup.entry(worker).or_default();
-
-        match op {
-            KvCacheEventData::Stored(op) => {
-                // find the parent block from this worker's lookup
-                let mut current = match op.parent_hash {
-                    Some(parent) => match worker_lookup.get(&parent) {
-                        Some(current) => current.clone(),
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                parent_hash = ?op.parent_hash,
-                                num_blocks = op.blocks.len(),
-                                "Failed to find parent block; skipping store operation"
-                            );
-                            return Err(KvCacheEventError::ParentBlockNotFound);
-                        }
-                    },
-                    None => self.root.clone(),
-                };
-
-                for block_data in op.blocks {
-                    let mut parent_mut = current.borrow_mut();
-                    let child = match parent_mut.children.get(&block_data.tokens_hash) {
-                        Some(block) => {
-                            // Verify our simplifying assumption: block_hash is uniform across workers
-                            if block.borrow().block_hash != Some(block_data.block_hash) {
-                                tracing::warn!(
-                                    expected = ?block_data.block_hash,
-                                    actual = ?block.borrow().block_hash,
-                                    "block_hash mismatch: sequence hashes should be uniform across workers"
-                                );
-                            }
-                            block.clone()
-                        }
-                        None => {
-                            // create new block or reuse existing from worker's lookup
-                            let new_block = worker_lookup
-                                .get(&block_data.block_hash)
-                                .cloned()
-                                .unwrap_or_else(|| {
-                                    Rc::new(RefCell::new(RadixBlock::with_hash(
-                                        block_data.block_hash,
-                                    )))
-                                });
-
-                            // insert into radix tree
-                            parent_mut
-                                .children
-                                .insert(block_data.tokens_hash, new_block.clone());
-
-                            new_block
-                        }
-                    };
-
-                    // Update child and check for self referential blocks
-                    {
-                        // Try to borrow the child mutably - if it fails, it's already borrowed
-                        // which means a self referencing block.
-                        let mut child_mut = match child.try_borrow_mut() {
-                            Ok(b) => b,
-                            Err(_) => {
-                                tracing::warn!(
-                                    worker_id = worker.worker_id.to_string(),
-                                    dp_rank = worker.dp_rank,
-                                    id,
-                                    block_hash = ?block_data.block_hash,
-                                    "Detected self referencing block in store event; rejecting sequence"
-                                );
-                                return Err(KvCacheEventError::InvalidBlockSequence);
-                            }
-                        };
-
-                        // add our worker to the block
-                        child_mut.workers.insert(worker);
-                    }
-
-                    // add the block to the worker's lookup table
-                    worker_lookup.insert(block_data.block_hash, child.clone());
-
-                    // drop child so we can shift current to this block
-                    drop(parent_mut);
-
-                    current = child;
-                }
-                Ok(())
-            }
-            KvCacheEventData::Removed(remove) => {
-                let mut kv_cache_err: Option<KvCacheEventError> = None;
-                for block in remove.block_hashes {
-                    // lookup block in worker's table
-                    let entry = match worker_lookup.get(&block) {
-                        Some(entry) => entry.clone(),
-                        None => {
-                            tracing::warn!(
-                                worker_id = worker.worker_id.to_string(),
-                                dp_rank = worker.dp_rank,
-                                id,
-                                block_hash = ?block,
-                                "Failed to find block to remove; skipping remove operation"
-                            );
-                            // Kv cache removed events may be batched; we should try to apply all
-                            // operations in the batch before returning an error. Return the first
-                            // error.
-                            if kv_cache_err.is_none() {
-                                kv_cache_err = Some(KvCacheEventError::BlockNotFound);
-                            }
-                            continue;
-                        }
-                    };
-
-                    let mut guard = entry.borrow_mut();
-                    guard.workers.remove(&worker);
-                    if guard.workers.is_empty() {
-                        // if no workers are using this block, that is true for all children
-                        guard.children.clear();
-                    }
-                    // remove the block from the worker's lookup table
-                    worker_lookup.remove(&block);
-                }
-                kv_cache_err.map_or(Ok(()), Err)
-            }
-            KvCacheEventData::Cleared => {
-                self.clear_all_blocks(worker.worker_id);
-                Ok(())
-            }
-        }
-    }
-
-    /// Helper function to remove or clear blocks for a worker.
-    /// If `keep_worker` is true, the worker remains in lookup with empty blocks.
-    /// If `keep_worker` is false, the worker is completely removed from lookup.
-    fn remove_or_clear_worker_blocks(&mut self, worker_id: WorkerId, keep_worker: bool) {
-        // Collect all WorkerWithDpRank keys that match this worker_id
-        let workers: Vec<WorkerWithDpRank> = self
-            .lookup
-            .keys()
-            .filter(|w| w.worker_id == worker_id)
-            .copied()
-            .collect();
-
-        for worker in workers {
-            if let Some((worker_key, blocks)) = self.lookup.remove_entry(&worker) {
-                for (_, block) in blocks {
-                    block.borrow_mut().workers.remove(&worker);
-                    // If no workers are using this block, that is true for all children
-                    if block.borrow().workers.is_empty() {
-                        block.borrow_mut().children.clear();
-                    }
-                }
-
-                if keep_worker {
-                    // Re-insert worker with empty blocks map to keep it tracked
-                    self.lookup.insert(worker_key, HashMap::new());
-                }
-            }
-        }
-    }
-
-    pub fn remove_worker(&mut self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, false);
-    }
-
-    pub fn clear_all_blocks(&mut self, worker_id: WorkerId) {
-        self.remove_or_clear_worker_blocks(worker_id, true);
-    }
-
-    /// Get all worker IDs currently tracked in the radix tree.
-    /// Returns unique worker_ids (ignoring dp_rank differences).
-    pub fn get_workers(&self) -> Vec<WorkerId> {
-        let mut worker_ids: Vec<WorkerId> = self.lookup.keys().map(|w| w.worker_id).collect();
-        worker_ids.sort_unstable();
-        worker_ids.dedup();
-        worker_ids
-    }
-
-    /// Dump the radix tree as a series of RouterEvents that can reconstruct the tree.
-    /// Uses BFS traversal to ensure that the tree reconstruction is unique,
-    /// though the exact event ordering will be lost.
-    pub fn dump_tree_as_events(&self) -> Vec<RouterEvent> {
-        tracing::debug!(
-            "Dumping radix tree as events (contains information about {:?} workers)",
-            self.lookup.len()
-        );
-
-        let mut events = Vec::new();
-        let mut event_id = 0u64;
-
-        // Queue entries: (current_block, parent_hash, tokens_hash)
-        let mut queue = VecDeque::new();
-
-        // Process root's children first
-        let root_borrow = self.root.borrow();
-        for (tokens_hash, child_block) in &root_borrow.children {
-            queue.push_back((child_block.clone(), None, *tokens_hash));
-        }
-        drop(root_borrow);
-
-        while let Some((current_block, parent_hash, tokens_hash)) = queue.pop_front() {
-            let current_borrow = current_block.borrow();
-
-            // Get this block's hash (same for all workers)
-            let block_hash = current_borrow
-                .block_hash
-                .expect("non-root block must have block_hash");
-
-            // For each worker that has this block
-            for worker in &current_borrow.workers {
-                // Create a store event for this worker
-                let event = RouterEvent {
-                    worker_id: worker.worker_id,
-                    event: KvCacheEvent {
-                        event_id,
-                        data: KvCacheEventData::Stored(KvCacheStoreData {
-                            parent_hash,
-                            blocks: vec![KvCacheStoredBlockData {
-                                block_hash,
-                                mm_extra_info: None,
-                                tokens_hash,
-                            }],
-                        }),
-                        dp_rank: worker.dp_rank,
-                    },
-                };
-                events.push(event);
-                event_id += 1;
-            }
-
-            // Enqueue children with this block's hash as their parent
-            for (child_tokens_hash, child_block) in &current_borrow.children {
-                queue.push_back((child_block.clone(), Some(block_hash), *child_tokens_hash));
-            }
-        }
-
-        events
-    }
-
-    pub fn current_size(&self) -> usize {
-        self.lookup.values().map(|m| m.len()).sum()
     }
 }
 
@@ -714,63 +323,6 @@ impl KvIndexerMetrics {
                     .with_label_values(&[event_type, error_label])
                     .inc_by(1);
             }
-        }
-    }
-}
-
-/// Scores representing the overlap of workers (with their dp_rank).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OverlapScores {
-    // map of worker (with dp_rank) to score
-    pub scores: HashMap<WorkerWithDpRank, u32>,
-    // List of frequencies that the blocks have been accessed. Entries with value 0 are omitted.
-    pub frequencies: Vec<usize>,
-    // Map of worker to their tree size (number of blocks in the tree for that worker)
-    pub tree_sizes: HashMap<WorkerWithDpRank, usize>,
-}
-
-impl Default for OverlapScores {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl OverlapScores {
-    /// Create a new `OverlapScores`.
-    ///
-    /// ### Returns
-    ///
-    /// A new `OverlapScores`.
-    pub fn new() -> Self {
-        Self {
-            scores: HashMap::new(),
-            frequencies: Vec::with_capacity(32),
-            tree_sizes: HashMap::new(),
-        }
-    }
-
-    /// Update the scores with a set of workers.
-    ///
-    /// ### Arguments
-    ///
-    /// * `workers` - An iterator over `WorkerWithDpRank` references.
-    pub fn update_scores<'a, I>(&mut self, workers: I)
-    where
-        I: IntoIterator<Item = &'a WorkerWithDpRank>,
-    {
-        for worker in workers {
-            let score = self.scores.entry(*worker).or_insert(0);
-            *score += 1;
-        }
-    }
-
-    /// Add an entry in the frequency list.
-    pub fn add_frequency(&mut self, frequency: usize) {
-        if frequency != 0 {
-            self.frequencies
-                .last()
-                .inspect(|elem| debug_assert!(**elem >= frequency));
-            self.frequencies.push(frequency);
         }
     }
 }
@@ -2061,6 +1613,7 @@ mod tests {
     use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash};
     use rstest::rstest;
     use rstest_reuse::{self, *};
+    use std::time::Instant;
     use tokio::time;
     use tokio_util::sync::CancellationToken;
 
@@ -2103,584 +1656,6 @@ mod tests {
                 dp_rank: 0,
             },
         }
-    }
-
-    fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
-        RouterEvent {
-            worker_id,
-            event: KvCacheEvent {
-                event_id,
-                data: KvCacheEventData::Removed(KvCacheRemoveData {
-                    block_hashes: hashes
-                        .iter()
-                        .map(|i| ExternalSequenceBlockHash(*i * 100))
-                        .collect(),
-                }),
-                dp_rank: 0,
-            },
-        }
-    }
-
-    #[test]
-    fn test_radix_tree() {
-        setup();
-
-        let mut trie = RadixTree::new();
-
-        let worker_1 = 0;
-        let worker_2 = 1;
-
-        trie.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
-            .unwrap();
-
-        let scores = trie.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
-        );
-
-        assert_eq!(trie.lookup.len(), 1);
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(trie.root.borrow().workers.len(), 0);
-        assert_eq!(trie.root.borrow().children.len(), 1);
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .workers
-                .len(),
-            1
-        );
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .children
-                .len(),
-            1
-        );
-
-        trie.apply_event(create_store_event(worker_2, 1, vec![1, 4, 5], None))
-            .unwrap();
-
-        let scores = trie.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap(),
-            &1
-        );
-
-        assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(trie.root.borrow().workers.len(), 0);
-        assert_eq!(trie.root.borrow().children.len(), 1);
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .workers
-                .len(),
-            2
-        );
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .children
-                .len(),
-            2
-        );
-
-        trie.apply_event(create_remove_event(worker_2, 2, vec![5]))
-            .unwrap();
-        assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap()
-                .len(),
-            2
-        );
-        assert_eq!(trie.root.borrow().workers.len(), 0);
-        assert_eq!(trie.root.borrow().children.len(), 1);
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .workers
-                .len(),
-            2
-        );
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .children
-                .len(),
-            2
-        );
-
-        trie.apply_event(create_remove_event(worker_2, 3, vec![4]))
-            .unwrap();
-
-        assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(trie.root.borrow().workers.len(), 0);
-        assert_eq!(trie.root.borrow().children.len(), 1);
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .workers
-                .len(),
-            2
-        );
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .children
-                .len(),
-            2
-        );
-
-        trie.apply_event(create_store_event(
-            worker_2,
-            4,
-            vec![2, 6, 7],
-            Some(ExternalSequenceBlockHash(100)),
-        ))
-        .unwrap();
-
-        let scores = trie.find_matches(
-            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-            false,
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap(),
-            &3
-        );
-        assert_eq!(
-            scores
-                .scores
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap(),
-            &2
-        );
-
-        assert_eq!(trie.lookup.len(), 2);
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .len(),
-            3
-        );
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_2))
-                .unwrap()
-                .len(),
-            4
-        );
-        assert_eq!(trie.root.borrow().workers.len(), 0);
-        assert_eq!(trie.root.borrow().children.len(), 1);
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .workers
-                .len(),
-            2
-        );
-        assert_eq!(
-            trie.root
-                .borrow()
-                .children
-                .get(&LocalBlockHash(1))
-                .unwrap()
-                .borrow()
-                .children
-                .len(),
-            2
-        );
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .get(&ExternalSequenceBlockHash(200))
-                .unwrap()
-                .borrow()
-                .workers
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn test_radix_tree_apply_event_errors() {
-        let mut trie = RadixTree::new();
-        let worker_0 = 0;
-
-        // Parent block not found
-        let result = trie.apply_event(create_store_event(
-            worker_0,
-            0,
-            vec![1, 2, 3],
-            Some(ExternalSequenceBlockHash(12345)),
-        ));
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            KvCacheEventError::ParentBlockNotFound
-        ));
-
-        // Block not found for remove event.
-        let result = trie.apply_event(create_remove_event(worker_0, 0, vec![1, 2, 3]));
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            KvCacheEventError::BlockNotFound
-        ));
-
-        // Parent appears in blocks: parent=1, blocks=[1, 2, 3]
-        // This should be rejected as block 1 (hash 100) is the parent - this is
-        // a self referencing block.
-        trie.apply_event(create_store_event(worker_0, 4, vec![1], None))
-            .unwrap();
-        let result = trie.apply_event(create_store_event(
-            worker_0,
-            5,
-            vec![1, 2, 3],
-            Some(ExternalSequenceBlockHash(100)),
-        ));
-        assert!(matches!(
-            result.unwrap_err(),
-            KvCacheEventError::InvalidBlockSequence
-        ));
-    }
-
-    #[test]
-    fn test_radix_tree_large_stores() {
-        setup();
-        let mut trie = RadixTree::new();
-        for i in 0..=16 {
-            let len = 1 << i;
-            let worker_id = i;
-            tracing::info!("Testing sequence of length {}", len);
-            let sequence = (1..len + 1).collect::<Vec<u64>>();
-            trie.apply_event(create_store_event(worker_id, 1, sequence, None))
-                .unwrap();
-        }
-    }
-
-    #[test]
-    fn test_remove_worker() {
-        setup();
-        let mut trie = RadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-
-        assert!(
-            trie.find_matches(vec![LocalBlockHash(0)], false)
-                .scores
-                .is_empty()
-        );
-
-        trie.apply_event(create_store_event(worker_0, 0, vec![0], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![0], None))
-            .unwrap();
-
-        let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(
-            result.len() == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
-                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
-        );
-
-        trie.remove_worker(worker_0);
-
-        let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(result.len() == 1 && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1);
-    }
-
-    #[test]
-    fn test_clear_all_blocks() {
-        let mut trie = RadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-
-        assert!(
-            trie.find_matches(vec![LocalBlockHash(0)], false)
-                .scores
-                .is_empty()
-        );
-
-        // Test clearing an empty worker
-        trie.clear_all_blocks(worker_0);
-        assert!(
-            !trie
-                .lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-
-        // Test clearing a worker with shared blocks
-        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None))
-            .unwrap();
-
-        let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
-        assert!(
-            result.len() == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 1
-                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
-        );
-
-        trie.clear_all_blocks(worker_0);
-
-        assert!(
-            trie.lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .unwrap()
-                .is_empty()
-        );
-        let result = trie
-            .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
-            .scores;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 2);
-        let result = trie
-            .find_matches(
-                vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
-                false,
-            )
-            .scores;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
-
-        // Test re-adding blocks after clearing worker
-        trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None))
-            .unwrap();
-        let result = trie
-            .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
-            .scores;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_0)], 2);
-
-        // Test multiple clears
-        trie.clear_all_blocks(worker_0);
-        trie.clear_all_blocks(worker_0);
-        assert!(
-            trie.lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-
-        // Test clearing all workers
-        trie.clear_all_blocks(worker_0);
-        trie.clear_all_blocks(worker_1);
-        assert!(!trie.lookup.is_empty());
-        assert!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_1))
-                .unwrap()
-                .is_empty()
-        );
-
-        // Test clearing a worker that has been removed
-        trie.apply_event(create_store_event(worker_0, 0, vec![6], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![6], None))
-            .unwrap();
-        trie.remove_worker(worker_0);
-        trie.clear_all_blocks(worker_0);
-        assert!(
-            !trie
-                .lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
-
-        // Test clearing a worker that doesn't exist
-        let worker_fake = 2;
-        assert!(
-            !trie
-                .lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
-        );
-        trie.clear_all_blocks(worker_fake);
-        assert!(
-            !trie
-                .lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_fake))
-        );
-        assert!(
-            trie.lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_1))
-        );
-        let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[&WorkerWithDpRank::from_worker_id(worker_1)], 1);
-    }
-
-    #[test]
-    fn test_early_stopping() {
-        setup();
-        let mut trie = RadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-
-        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 2], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![0], None))
-            .unwrap();
-
-        let result = trie
-            .find_matches(
-                vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
-                true,
-            )
-            .scores;
-
-        assert!(
-            result.len() == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
-        );
-
-        let result = trie
-            .find_matches(vec![LocalBlockHash(0), LocalBlockHash(1)], true)
-            .scores;
-        assert!(
-            result.len() == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_0)] == 2
-                && result[&WorkerWithDpRank::from_worker_id(worker_1)] == 1
-        );
-    }
-
-    #[rstest]
-    #[case(11)]
-    #[case(32)]
-    #[case(64)]
-    fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
-        setup();
-        // create a sequence of 64 elements
-        let sequence = (0..kv_block_size).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
-        assert_eq!(hashes.len(), 1);
-
-        // create a sequence of 65 elements
-        let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
-        assert_eq!(hashes.len(), 1);
-
-        // create a sequence of 129 elements
-        let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
-        let hashes = compute_block_hash_for_seq(&sequence, kv_block_size, None);
-        assert_eq!(hashes.len(), 2);
     }
 
     fn make_indexer(
@@ -2872,54 +1847,6 @@ mod tests {
         // The third access did not touch the last block
         let overlap = kv_indexer.find_matches(block_hashes.clone()).await.unwrap();
         assert_eq!(overlap.frequencies, vec![3, 3, 3, 2]);
-    }
-
-    #[test]
-    fn test_router_event_new() {
-        setup();
-        let worker_id = 0;
-        let kv_cache_event = KvCacheEvent {
-            event_id: 1,
-            data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: None,
-                blocks: vec![KvCacheStoredBlockData {
-                    block_hash: ExternalSequenceBlockHash(0),
-                    mm_extra_info: None,
-                    tokens_hash: LocalBlockHash(13226331709069118873),
-                }],
-            }),
-            dp_rank: 0,
-        };
-        let router_event = RouterEvent::new(worker_id, kv_cache_event);
-
-        assert_eq!(router_event.worker_id, worker_id);
-        assert_eq!(router_event.event.event_id, 1);
-        if let KvCacheEventData::Stored(store_op) = &router_event.event.data {
-            assert_eq!(store_op.blocks.len(), 1);
-            assert_eq!(
-                store_op.blocks[0].tokens_hash,
-                compute_block_hash(b"test data")
-            );
-            assert_eq!(store_op.blocks[0].block_hash, ExternalSequenceBlockHash(0));
-        } else {
-            panic!("Expected KvCacheEventData::Stored");
-        }
-    }
-
-    #[test]
-    fn test_radix_tree_default() {
-        setup();
-        let radix_tree: RadixTree = Default::default();
-        assert!(radix_tree.root.borrow().children.is_empty());
-        assert!(radix_tree.root.borrow().workers.is_empty());
-        assert!(radix_tree.lookup.is_empty());
-    }
-
-    #[test]
-    fn test_overlap_scores_default() {
-        setup();
-        let overlap_scores: OverlapScores = Default::default();
-        assert!(overlap_scores.scores.is_empty());
     }
 
     #[tokio::test]
@@ -3140,126 +2067,6 @@ mod tests {
                 .get(),
             1
         );
-    }
-
-    #[test]
-    fn test_remove_worker_verifies_hash_removal() {
-        setup();
-        let mut trie = RadixTree::new();
-
-        let worker_0 = 0;
-        let worker_1 = 1;
-        let worker_2 = 2;
-
-        // Add blocks for multiple workers
-        trie.apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_1, 0, vec![1, 2, 3], None))
-            .unwrap();
-        trie.apply_event(create_store_event(worker_2, 0, vec![1, 4, 5], None))
-            .unwrap();
-
-        // Verify worker_0 has 3 blocks in lookup
-        assert_eq!(
-            trie.lookup
-                .get(&WorkerWithDpRank::from_worker_id(worker_0))
-                .unwrap()
-                .len(),
-            3
-        );
-
-        // Verify that blocks have the correct workers
-        let block_1 = trie
-            .lookup
-            .get(&WorkerWithDpRank::from_worker_id(worker_0))
-            .unwrap()
-            .get(&ExternalSequenceBlockHash(100))
-            .unwrap();
-        assert_eq!(block_1.borrow().workers.len(), 3); // worker_0, worker_1, and worker_2 (all have hash 1)
-        assert!(
-            block_1
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert!(
-            block_1
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_1))
-        );
-        assert!(
-            block_1
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_2))
-        );
-
-        // Remove worker_0
-        trie.remove_worker(worker_0);
-
-        // Verify worker_0 is completely removed from lookup table
-        assert!(
-            !trie
-                .lookup
-                .contains_key(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert_eq!(trie.lookup.len(), 2);
-
-        // Verify that worker_0's hash is removed from the workers set
-        let block_1 = trie
-            .lookup
-            .get(&WorkerWithDpRank::from_worker_id(worker_1))
-            .unwrap()
-            .get(&ExternalSequenceBlockHash(100))
-            .unwrap();
-        assert_eq!(block_1.borrow().workers.len(), 2); // worker_1 and worker_2 remain
-        assert!(
-            !block_1
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_0))
-        );
-        assert!(
-            block_1
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_1))
-        );
-        assert!(
-            block_1
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_2))
-        );
-
-        // Verify that blocks with no remaining workers have their children cleared
-        // This tests the optimization where empty blocks clear their children
-        let block_2 = trie
-            .lookup
-            .get(&WorkerWithDpRank::from_worker_id(worker_1))
-            .unwrap()
-            .get(&ExternalSequenceBlockHash(200))
-            .unwrap();
-        assert_eq!(block_2.borrow().workers.len(), 1); // only worker_1
-        assert!(
-            block_2
-                .borrow()
-                .workers
-                .contains(&WorkerWithDpRank::from_worker_id(worker_1))
-        );
-
-        // Verify match results no longer include worker_0
-        let result = trie
-            .find_matches(
-                vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
-                false,
-            )
-            .scores;
-        assert_eq!(result.len(), 2);
-        assert!(!result.contains_key(&WorkerWithDpRank::from_worker_id(worker_0)));
-        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_1)));
-        assert!(result.contains_key(&WorkerWithDpRank::from_worker_id(worker_2)));
     }
 
     // LocalKvIndexer tests
@@ -3573,5 +2380,304 @@ mod tests {
             }
             _ => panic!("Expected Stored event"),
         }
+    }
+}
+
+/// Tests for KvIndex enum (parametrized over RadixTree and FlatHashMap variants).
+#[cfg(test)]
+mod kv_index_tests {
+    use super::*;
+    use crate::protocols::{ExternalSequenceBlockHash, LocalBlockHash, compute_seq_hash_for_block};
+    use rstest::rstest;
+    use rstest_reuse::{self, *};
+
+    /// Create a store event with proper sequence hashes computed from local hashes.
+    fn make_store_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
+        let local_block_hashes: Vec<LocalBlockHash> =
+            local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
+        let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+        RouterEvent {
+            worker_id,
+            event: KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Stored(KvCacheStoreData {
+                    parent_hash: None,
+                    blocks: local_block_hashes
+                        .iter()
+                        .zip(seq_hashes.iter())
+                        .map(|(&local, &seq)| KvCacheStoredBlockData {
+                            tokens_hash: local,
+                            block_hash: ExternalSequenceBlockHash(seq),
+                            mm_extra_info: None,
+                        })
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        }
+    }
+
+    /// Create a remove event for blocks with given local hashes.
+    fn make_remove_event(worker_id: u64, local_hashes: &[u64]) -> RouterEvent {
+        let local_block_hashes: Vec<LocalBlockHash> =
+            local_hashes.iter().map(|&h| LocalBlockHash(h)).collect();
+        let seq_hashes = compute_seq_hash_for_block(&local_block_hashes);
+
+        RouterEvent {
+            worker_id,
+            event: KvCacheEvent {
+                event_id: 0,
+                data: KvCacheEventData::Removed(KvCacheRemoveData {
+                    block_hashes: seq_hashes
+                        .iter()
+                        .map(|&h| ExternalSequenceBlockHash(h))
+                        .collect(),
+                }),
+                dp_rank: 0,
+            },
+        }
+    }
+
+    #[template]
+    #[rstest]
+    fn kv_index_template(#[values("tree", "flat")] variant: &str) {}
+
+    fn make_kv_index(variant: &str) -> KvIndex {
+        match variant {
+            "tree" => KvIndex::new_tree(),
+            "flat" => KvIndex::new_flat(),
+            _ => panic!("Unknown variant: {}", variant),
+        }
+    }
+
+    #[apply(kv_index_template)]
+    fn test_store_and_find(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Store a sequence for worker 0
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+
+        assert_eq!(index.current_size(), 3);
+
+        // Find matches using local hashes
+        let scores = index.find_matches(
+            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+            false,
+        );
+        assert_eq!(scores.scores.len(), 1);
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    }
+
+    #[apply(kv_index_template)]
+    fn test_partial_match(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Store [1, 2, 3] for worker 0
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+
+        // Find matches for [1, 2, 999] - should match first 2 then stop
+        let scores = index.find_matches(
+            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(999)],
+            false,
+        );
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+    }
+
+    #[apply(kv_index_template)]
+    fn test_remove(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Store sequence for worker 0
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+        assert_eq!(index.current_size(), 3);
+
+        // Remove all blocks
+        index.apply_event(make_remove_event(0, &[1, 2, 3])).unwrap();
+        assert_eq!(index.current_size(), 0);
+
+        // Find should return nothing
+        let scores = index.find_matches(
+            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+            false,
+        );
+        assert!(scores.scores.is_empty());
+    }
+
+    #[apply(kv_index_template)]
+    fn test_multiple_workers_shared_prefix(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Worker 0 has [1, 2], Worker 1 has [1, 3]
+        // Since sequence hashes are cumulative, [1] has same hash for both,
+        // but [1, 2] and [1, 3] have different hashes.
+        index.apply_event(make_store_event(0, &[1, 2])).unwrap();
+        index.apply_event(make_store_event(1, &[1, 3])).unwrap();
+
+        // Query [1] - both workers should match
+        let scores = index.find_matches(vec![LocalBlockHash(1)], false);
+        assert_eq!(scores.scores.len(), 2);
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 1);
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+
+        // Query [1, 2] - worker 0 matches both, worker 1 matches only first block
+        let scores = index.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+        assert_eq!(scores.scores.len(), 2);
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+    }
+
+    #[apply(kv_index_template)]
+    fn test_remove_worker(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+        index.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
+        assert_eq!(index.current_size(), 6);
+
+        index.remove_worker(0);
+        assert_eq!(index.current_size(), 3);
+
+        let scores = index.find_matches(
+            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+            false,
+        );
+        assert_eq!(scores.scores.len(), 1);
+        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+    }
+
+    #[apply(kv_index_template)]
+    fn test_get_workers(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        index.apply_event(make_store_event(0, &[1])).unwrap();
+        index.apply_event(make_store_event(2, &[1])).unwrap();
+        index.apply_event(make_store_event(1, &[1])).unwrap();
+
+        let workers = index.get_workers();
+        assert_eq!(workers, vec![0, 1, 2]);
+    }
+
+    #[apply(kv_index_template)]
+    fn test_early_exit(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Worker 0 has [0, 1, 2], Worker 1 has [0] only
+        index.apply_event(make_store_event(0, &[0, 1, 2])).unwrap();
+        index.apply_event(make_store_event(1, &[0])).unwrap();
+
+        // Query [0, 1, 2] with early_exit=true
+        // Should stop after [0, 1] since only worker 0 has block 1
+        let scores = index.find_matches(
+            vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
+            true,
+        );
+
+        // Both workers should appear in results
+        assert_eq!(scores.scores.len(), 2);
+        // Worker 0 got 2 points (blocks 0 and 1, stopped early)
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 2);
+        // Worker 1 got 1 point (block 0 only)
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(1, 0)).unwrap(), 1);
+
+        // Without early_exit, worker 0 should get all 3 blocks
+        let scores = index.find_matches(
+            vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(2)],
+            false,
+        );
+        assert_eq!(*scores.scores.get(&WorkerWithDpRank::new(0, 0)).unwrap(), 3);
+    }
+
+    #[apply(kv_index_template)]
+    fn test_large_stores(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Test sequences of increasing sizes
+        for i in 0..10 {
+            let len = 1 << i; // 1, 2, 4, 8, ..., 512
+            let worker_id = i;
+            let sequence: Vec<u64> = (1..=len).map(|x| x + (i as u64 * 10000)).collect();
+            index
+                .apply_event(make_store_event(worker_id, &sequence))
+                .unwrap();
+            assert!(index.current_size() > 0);
+        }
+    }
+
+    #[apply(kv_index_template)]
+    fn test_dump_and_restore(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Store some data
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+        index.apply_event(make_store_event(1, &[1, 2, 4])).unwrap();
+
+        let original_size = index.current_size();
+        let workers_before = index.get_workers();
+
+        // Dump the tree as events
+        let events = index.dump_tree_as_events();
+        assert!(!events.is_empty());
+
+        // Create a new index and replay events
+        let mut restored = make_kv_index(variant);
+        for event in events {
+            let _ = restored.apply_event(event);
+        }
+
+        // Verify the restored index has same size and workers
+        assert_eq!(restored.current_size(), original_size);
+        assert_eq!(restored.get_workers(), workers_before);
+
+        // Verify find_matches produces same results
+        let original_scores = index.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+        let restored_scores =
+            restored.find_matches(vec![LocalBlockHash(1), LocalBlockHash(2)], false);
+        assert_eq!(original_scores.scores, restored_scores.scores);
+    }
+
+    #[apply(kv_index_template)]
+    fn test_clear_all_blocks(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        // Store some data for two workers
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+        index.apply_event(make_store_event(1, &[1, 2, 3])).unwrap();
+        assert_eq!(index.current_size(), 6);
+
+        // Clear worker 0's blocks
+        index.clear_all_blocks(0);
+
+        // Worker 0's blocks should be gone, worker 1's remain
+        assert_eq!(index.current_size(), 3);
+
+        let scores = index.find_matches(
+            vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
+            false,
+        );
+        assert_eq!(scores.scores.len(), 1);
+        assert!(scores.scores.contains_key(&WorkerWithDpRank::new(1, 0)));
+    }
+
+    #[apply(kv_index_template)]
+    fn test_empty_query(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+
+        // Empty query should return empty scores
+        let scores = index.find_matches(vec![], false);
+        assert!(scores.scores.is_empty());
+    }
+
+    #[apply(kv_index_template)]
+    fn test_miss_query(variant: &str) {
+        let mut index = make_kv_index(variant);
+
+        index.apply_event(make_store_event(0, &[1, 2, 3])).unwrap();
+
+        // Query for non-existent blocks
+        let scores = index.find_matches(vec![LocalBlockHash(999), LocalBlockHash(998)], false);
+        assert!(scores.scores.is_empty());
     }
 }
