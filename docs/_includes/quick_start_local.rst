@@ -42,6 +42,7 @@ Install system dependencies and the Dynamo wheel for your chosen backend:
 .. code-block:: bash
 
    sudo apt install python3-dev
+   pip install torch==2.9.0 torchvision --index-url https://download.pytorch.org/whl/cu130
    pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 
 .. note::
