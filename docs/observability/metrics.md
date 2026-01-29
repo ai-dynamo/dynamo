@@ -123,19 +123,6 @@ DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model <model>
 curl http://localhost:8081/metrics
 ```
 
-### KV Router Statistics (kvstats)
-
-KV router statistics are automatically exposed by LLM workers and KV router components on the backend system status port (port 8081) with the `dynamo_component_kvstats_*` prefix. These metrics provide insights into GPU memory usage and cache efficiency:
-
-- `dynamo_component_kvstats_active_blocks`: Number of active KV cache blocks currently in use (gauge)
-- `dynamo_component_kvstats_total_blocks`: Total number of KV cache blocks available (gauge)
-- `dynamo_component_kvstats_gpu_cache_usage_percent`: GPU cache usage as a percentage (0.0-1.0) (gauge)
-- `dynamo_component_kvstats_gpu_prefix_cache_hit_rate`: GPU prefix cache hit rate as a percentage (0.0-1.0) (gauge)
-
-These metrics are published by:
-- **LLM Workers**: vLLM and TRT-LLM backends publish these metrics through their respective publishers
-- **KV Router**: The KV router component aggregates and exposes these metrics for load balancing decisions
-
 ### Specialized Component Metrics
 
 Some components expose additional metrics specific to their functionality:
