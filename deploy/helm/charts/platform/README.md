@@ -19,7 +19,7 @@ limitations under the License.
 
 A Helm chart for NVIDIA Dynamo Platform.
 
-![Version: 0.7.1](https://img.shields.io/badge/Version-0.7.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
+![Version: 0.8.0](https://img.shields.io/badge/Version-0.8.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square)
 
 ## 🚀 Overview
 
@@ -86,7 +86,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 
 | Repository | Name | Version |
 |------------|------|---------|
-| file://components/operator | dynamo-operator | 0.6.1 |
+| file://components/operator | dynamo-operator | 0.7.1 |
 | https://charts.bitnami.com/bitnami | etcd | 12.0.18 |
 | https://nats-io.github.io/k8s/helm/charts/ | nats | 1.3.2 |
 | oci://ghcr.io/nvidia/grove | grove(grove-charts) | v0.1.0-alpha.3 |
@@ -99,6 +99,7 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.enabled | bool | `true` | Whether to enable the Dynamo Kubernetes operator deployment |
 | dynamo-operator.natsAddr | string | `""` | NATS server address for operator communication (leave empty to use the bundled NATS chart). Format: "nats://hostname:port" |
 | dynamo-operator.etcdAddr | string | `""` | etcd server address for operator state storage (leave empty to use the bundled etcd chart). Format: "http://hostname:port" or "https://hostname:port" |
+| dynamo-operator.nats.enabled | bool | `true` | Whether the NATS is enabled |
 | dynamo-operator.modelExpressURL | string | `""` | URL for the Model Express server if not deployed by this helm chart. This is ignored if Model Express server is installed by this helm chart (global.model-express.enabled is true). |
 | dynamo-operator.namespaceRestriction | object | `{"enabled":false,"lease":{"duration":"30s","renewInterval":"10s"},"targetNamespace":null}` | Namespace access controls for the operator |
 | dynamo-operator.namespaceRestriction.enabled | bool | `false` | Whether to restrict operator to specific namespaces. By default, the operator will run with cluster-wide permissions. Only 1 instance of the operator should be deployed in the cluster. If you want to deploy multiple operator instances, you can set this to true and specify the target namespace (by default, the target namespace is the helm release namespace). |
@@ -148,6 +149,26 @@ The chart includes built-in validation to prevent all operator conflicts:
 | dynamo-operator.webhook.certManager.certificate.renewBefore | string | `"360h"` | Time before certificate expiration to trigger renewal (e.g., "360h" for 15 days). cert-manager will attempt to renew the certificate when this threshold is reached. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.duration | string | `"87600h"` | Duration for the root CA certificate (e.g., "87600h" for 10 years). The root CA typically has a much longer lifetime than the leaf certificates it signs. |
 | dynamo-operator.webhook.certManager.certificate.rootCA.renewBefore | string | `"720h"` | Time before root CA expiration to trigger renewal (e.g., "720h" for 30 days). Renewing a CA can be disruptive as all signed certificates must be reissued. |
+| dynamo-operator.checkpoint.enabled | bool | `false` | Whether to enable checkpoint/restore functionality. When enabled, deploys the checkpoint-agent DaemonSet for creating container checkpoints. |
+| dynamo-operator.checkpoint.storage.type | string | `"pvc"` | Storage backend type. Options: "pvc" (PersistentVolumeClaim), "s3" (S3-compatible object storage), "oci" (OCI registry) |
+| dynamo-operator.checkpoint.storage.signalHostPath | string | `"/var/lib/chrek/signals"` | Host path for signal files used for communication between checkpoint job pods and the DaemonSet. Both components mount this path to coordinate checkpoint completion. |
+| dynamo-operator.checkpoint.storage.pvc.pvcName | string | `"checkpoint-storage"` | Name of an existing PVC for storing checkpoint tar files. This PVC must be created separately with RWX (ReadWriteMany) access mode to allow multiple nodes to read checkpoints. |
+| dynamo-operator.checkpoint.storage.pvc.basePath | string | `"/checkpoints"` | Base path within the PVC for storing checkpoint tar files. Each checkpoint is stored as {basePath}/{identityHash}.tar |
+| dynamo-operator.checkpoint.storage.s3.uri | string | `""` | S3 URI in format: s3://[endpoint/]bucket/prefix. Examples: "s3://my-bucket/checkpoints" (AWS S3), "s3://minio.example.com/my-bucket/checkpoints" (MinIO) |
+| dynamo-operator.checkpoint.storage.s3.credentialsSecretRef | string | `""` | Reference to a secret containing AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally AWS_REGION. If not provided, uses IRSA/Workload Identity for authentication. |
+| dynamo-operator.checkpoint.storage.oci.uri | string | `""` | OCI URI in format: oci://registry/repository. Examples: "oci://myregistry.io/checkpoints", "oci://ghcr.io/myorg/checkpoints" |
+| dynamo-operator.checkpoint.storage.oci.credentialsSecretRef | string | `""` | Reference to a docker config secret for registry authentication |
+| dynamo-operator.checkpoint.agent.image.repository | string | `"nvcr.io/nvidia/ai-dynamo/checkpoint-agent"` | Container image repository for the checkpoint agent |
+| dynamo-operator.checkpoint.agent.image.tag | string | `"latest"` | Container image tag for the checkpoint agent |
+| dynamo-operator.checkpoint.agent.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the checkpoint agent |
+| dynamo-operator.checkpoint.agent.resources | object | `{"limits":{"cpu":"500m","memory":"512Mi"},"requests":{"cpu":"100m","memory":"128Mi"}}` | Resource limits and requests for checkpoint agent containers |
+| dynamo-operator.checkpoint.agent.nodeSelector | object | `{}` | Node selector for checkpoint agent pods. Use this to restrict checkpoint agents to specific nodes (e.g., GPU nodes). |
+| dynamo-operator.checkpoint.agent.tolerations | list | `[]` | Node tolerations for checkpoint agent pods |
+| dynamo-operator.checkpoint.agent.affinity | object | `{}` | Affinity rules for checkpoint agent pods |
+| dynamo-operator.checkpoint.agent.podLabels | object | `{}` | Additional labels to add to checkpoint agent pods |
+| dynamo-operator.checkpoint.agent.podAnnotations | object | `{}` | Additional annotations to add to checkpoint agent pods |
+| dynamo-operator.checkpoint.agent.imagePullSecrets | list | `[]` | Image pull secrets for the checkpoint agent container image |
+| dynamo-operator.checkpoint.agent.containerRuntimeSocket | string | `"/run/containerd/containerd.sock"` | Path to the container runtime socket. The checkpoint agent needs access to the container runtime to perform checkpoint operations. Change to /var/run/docker.sock for Docker runtime. |
 | grove.enabled | bool | `false` | Whether to enable Grove for multi-node inference coordination, if enabled, the Grove operator will be deployed cluster-wide |
 | grove.tolerations | list | `[]` | Node tolerations for Grove pods |
 | grove.affinity | object | `{}` | Affinity rules for Grove pods |
@@ -176,7 +197,7 @@ For detailed etcd configuration options beyond `etcd.enabled`, please refer to t
 
 ## 📚 Additional Resources
 
-- [Dynamo Kubernetes Platform Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
+- [Dynamo Cloud Deployment Installation Guide](../../../../docs/kubernetes/installation_guide.md)
 - [NATS Documentation](https://docs.nats.io/)
 - [etcd Documentation](https://etcd.io/docs/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
