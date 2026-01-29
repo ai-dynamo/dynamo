@@ -6,10 +6,10 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+  name: {{ include "chrek.fullname" . }}-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "dynamo-checkpoint.labels" . | nindent 4 }}
+    {{- include "chrek.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 rules:
   # Watch pods in this namespace to detect checkpoint-source pods becoming ready
@@ -20,9 +20,9 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+  name: {{ include "chrek.fullname" . }}-agent
   labels:
-    {{- include "dynamo-checkpoint.labels" . | nindent 4 }}
+    {{- include "chrek.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 rules:
   # Watch pods cluster-wide to detect checkpoint-source pods on assigned nodes

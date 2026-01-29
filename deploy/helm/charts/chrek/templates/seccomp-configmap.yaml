@@ -5,10 +5,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "dynamo-checkpoint.fullname" . }}-seccomp
+  name: {{ include "chrek.fullname" . }}-seccomp
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "dynamo-checkpoint.labels" . | nindent 4 }}
+    {{- include "chrek.labels" . | nindent 4 }}
     app.kubernetes.io/component: seccomp
 data:
   block-iouring.json: |

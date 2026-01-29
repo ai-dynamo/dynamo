@@ -1,5 +1,5 @@
 apiVersion: v2
-name: dynamo-checkpoint
+name: chrek
 description: Checkpoint/Restore infrastructure for Dynamo (PVC + DaemonSet + CRIU Agent)
 type: application
 version: 0.1.0

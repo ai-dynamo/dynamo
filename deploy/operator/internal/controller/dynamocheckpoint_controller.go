@@ -48,6 +48,17 @@ type CheckpointReconciler struct {
 	Recorder record.EventRecorder
 }
 
+// Helper function to compute checkpoint location from operator config
+func (r *CheckpointReconciler) getCheckpointLocation(identityHash string) string {
+	basePath := checkpoint.GetPVCBasePath(&r.Config.Checkpoint)
+	return fmt.Sprintf("%s/%s", basePath, identityHash)
+}
+
+// Helper function to get checkpoint storage type from operator config
+func (r *CheckpointReconciler) getCheckpointStorageType() nvidiacomv1alpha1.DynamoCheckpointStorageType {
+	return nvidiacomv1alpha1.DynamoCheckpointStorageType(commonController.CheckpointStorageTypePVC)
+}
+
 // GetRecorder returns the event recorder (implements controller_common.Reconciler interface)
 func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
@@ -193,14 +204,9 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
 		ckpt.Status.CreatedAt = &now
 
-		// Set checkpoint location and storage type for restore pods
-		// These are derived from operator config (helm values), not CR spec
-		basePath := r.Config.Checkpoint.Storage.PVC.BasePath
-		if basePath == "" {
-			basePath = consts.CheckpointBasePath
-		}
-		ckpt.Status.Location = fmt.Sprintf("%s/%s", basePath, ckpt.Status.IdentityHash)
-		ckpt.Status.StorageType = nvidiacomv1alpha1.DynamoCheckpointStorageType(commonController.CheckpointStorageTypePVC)
+		// Set checkpoint location and storage type using helper functions
+		ckpt.Status.Location = r.getCheckpointLocation(ckpt.Status.IdentityHash)
+		ckpt.Status.StorageType = r.getCheckpointStorageType()
 
 		meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 			Type:               string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
@@ -299,6 +305,10 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 	if len(podTemplate.Spec.Containers) > 0 {
 		mainContainer := &podTemplate.Spec.Containers[0]
 
+		// Compute checkpoint location and storage type using helper functions
+		checkpointLocation := r.getCheckpointLocation(ckpt.Status.IdentityHash)
+		storageType := string(r.getCheckpointStorageType())
+
 		// Add checkpoint-related env vars
 		mainContainer.Env = append(mainContainer.Env,
 			// Signal file: DaemonSet writes this after checkpoint completes
@@ -319,12 +329,12 @@ func (r *CheckpointReconciler) buildCheckpointJob(ckpt *nvidiacomv1alpha1.Dynamo
 			// Checkpoint location: For idempotency check
 			corev1.EnvVar{
 				Name:  consts.EnvCheckpointLocation,
-				Value: ckpt.Status.Location,
+				Value: checkpointLocation,
 			},
 			// Storage type: For idempotency check (pvc, s3, oci)
 			corev1.EnvVar{
 				Name:  consts.EnvCheckpointStorageType,
-				Value: string(ckpt.Status.StorageType),
+				Value: storageType,
 			},
 		)
 

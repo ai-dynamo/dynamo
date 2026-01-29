@@ -366,7 +366,7 @@ spec:
 
 2. Check the DaemonSet:
    ```bash
-   kubectl logs daemonset/dynamo-checkpoint-agent -n dynamo-system
+   kubectl logs daemonset/chrek-agent -n dynamo-system
    ```
 
 3. Verify storage access:

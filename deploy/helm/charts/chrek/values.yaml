@@ -1,4 +1,4 @@
-# Dynamo Checkpoint/Restore Infrastructure
+# Chrek - Checkpoint/Restore Infrastructure
 # This chart deploys the checkpoint storage (PVC) and CRIU agent (DaemonSet)
 # in a single namespace. Install this chart in each namespace where you want
 # to enable checkpoint/restore functionality for DynamoGraphDeployments.
@@ -13,7 +13,7 @@ storage:
     # Create a new PVC (set to false if using existing PVC)
     create: true
     # PVC name - must match operator configuration
-    name: dynamo-checkpoint-pvc
+    name: chrek-pvc
     # PVC size
     size: 100Gi
     # Storage class (leave empty for default)
@@ -35,7 +35,7 @@ storage:
     uri: ""
   
   # Host path for signal files (inter-pod communication)
-  signalHostPath: /var/lib/dynamo-checkpoint/signals
+  signalHostPath: /var/lib/chrek/signals
 
 # DaemonSet configuration for chrek (checkpoint/restore) agent
 daemonset:

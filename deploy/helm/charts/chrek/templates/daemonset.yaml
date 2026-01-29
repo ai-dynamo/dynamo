@@ -4,10 +4,10 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: {{ include "dynamo-checkpoint.fullname" . }}-agent
+  name: {{ include "chrek.fullname" . }}-agent
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "dynamo-checkpoint.labels" . | nindent 4 }}
+    {{- include "chrek.labels" . | nindent 4 }}
     app.kubernetes.io/component: checkpoint-agent
 spec:
   selector:
@@ -27,7 +27,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      serviceAccountName: {{ include "dynamo-checkpoint.serviceAccountName" . }}
+      serviceAccountName: {{ include "chrek.serviceAccountName" . }}
       hostPID: true
       hostIPC: true
       hostNetwork: true
@@ -159,7 +159,7 @@ spec:
         # Seccomp profile ConfigMap (used by initContainer)
         - name: seccomp-profiles
           configMap:
-            name: {{ include "dynamo-checkpoint.fullname" . }}-seccomp
+            name: {{ include "chrek.fullname" . }}-seccomp
         # Host seccomp directory (for deploying the profile)
         - name: host-seccomp
           hostPath:

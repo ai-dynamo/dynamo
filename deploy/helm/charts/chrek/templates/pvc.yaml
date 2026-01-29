@@ -8,7 +8,7 @@ metadata:
   name: {{ .Values.storage.pvc.name }}
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: {{ include "dynamo-checkpoint.name" . }}
+    app.kubernetes.io/name: {{ include "chrek.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/component: storage
 spec:
