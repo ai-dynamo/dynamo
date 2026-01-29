@@ -47,14 +47,16 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-def setup_engine_factory(runtime: DistributedRuntime):  # Returns EngineFactory:
+def setup_engine_factory(
+    runtime: DistributedRuntime, router_mode: RouterMode
+):  # Returns EngineFactory:
     """
     When using vllm pre and post processor, create the EngineFactory that
     creates the engines that run requests.
     """
     from .vllm_processor import EngineFactory
 
-    return EngineFactory(runtime).engine_factory
+    return EngineFactory(runtime, router_mode).engine_factory
 
 
 def validate_model_name(value):
@@ -468,7 +470,7 @@ async def async_main():
     if flags.processor == "vllm":
         # TODO: Do we also need to tell the engine factory when the model is removed,
         # so it can "stop" vllm?
-        kwargs["engine_factory"] = setup_engine_factory(runtime)
+        kwargs["engine_factory"] = setup_engine_factory(runtime, router_mode)
 
     e = EntrypointArgs(EngineType.Dynamic, **kwargs)
     engine = await make_engine(runtime, e)

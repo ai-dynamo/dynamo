@@ -23,6 +23,7 @@ from dynamo.llm import (
     ModelCardInstanceId,
     ModelDeploymentCard,
     PythonAsyncEngine,
+    RouterMode,
     fetch_llm,
 )
 from dynamo.runtime import Client, DistributedRuntime
@@ -224,11 +225,14 @@ class VllmProcessor:
 
 
 class EngineFactory:
-    def __init__(self, runtime: DistributedRuntime):
+    def __init__(self, runtime: DistributedRuntime, router_mode: RouterMode):
         self.runtime = runtime
+        self.router_mode = router_mode
 
     async def engine_factory(
-        self, instance_id: ModelCardInstanceId, mdc: ModelDeploymentCard
+        self,
+        instance_id: ModelCardInstanceId,
+        mdc: ModelDeploymentCard,
     ) -> PythonAsyncEngine:
         """
         Called by Rust when a model is discovered.
@@ -264,7 +268,7 @@ class EngineFactory:
             .component(component_name)
             .endpoint(endpoint_name)
         )
-        router = await generate_endpoint.client()
+        router = await generate_endpoint.client2(self.router_mode)
         gen = VllmProcessor(tokenizer, input_processor, output_processor, router)
 
         return PythonAsyncEngine(gen.generator, loop)
