@@ -470,7 +470,7 @@ class Publisher:
         return True
 
     def _handle_kv_event(self, event):
-        logging.info(f"KV cache event received: {event}")
+        logging.debug(f"KV cache event received: {event}")
         # drop the events that is not emitted from the global attention layer.
         if self.should_drop_event(event):
             return
