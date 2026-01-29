@@ -73,7 +73,6 @@ jobs:
           end_time=$(date +%s)
           duration=$((end_time - start_time))
           echo "⏱️ Image pull duration: ${duration}s"
-          echo "## ⏱️ Pulled ${{ steps.calculate-target-tag.outputs.test_image }} in ${duration} seconds" >> $GITHUB_STEP_SUMMARY
       - name: Run tests
         uses: ./.github/actions/pytest
         with:
@@ -85,33 +84,52 @@ jobs:
           enable_mypy: 'true'
           hf_token: ${{ secrets.HF_TOKEN }}
 
+  changed-files:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
+    outputs:
+      core: ${{ steps.changes.outputs.core }}
+      operator: ${{ steps.changes.outputs.operator }}
+      deploy: ${{ steps.changes.outputs.deploy }}
+      vllm: ${{ steps.changes.outputs.vllm }}
+      sglang: ${{ steps.changes.outputs.sglang }}
+      trtllm: ${{ steps.changes.outputs.trtllm }}
+      builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+      - name: Export builder name
+        id: export-builder-name
+        run: |
+          echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
 
 
-#   changed-files:
-#     runs-on: ubuntu-latest
-#     environment: ${{ github.event_name == 'workflow_dispatch' && 'protected-deploy' || '' }}
-#     outputs:
-#       core: ${{ steps.changes.outputs.core }}
-#       operator: ${{ steps.changes.outputs.operator }}
-#       deploy: ${{ steps.changes.outputs.deploy }}
-#       vllm: ${{ steps.changes.outputs.vllm }}
-#       sglang: ${{ steps.changes.outputs.sglang }}
-#       trtllm: ${{ steps.changes.outputs.trtllm }}
-#       builder_name: ${{ steps.export-builder-name.outputs.builder_name }}
-#     steps:
-#       - name: Checkout code
-#         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
-#         with:
-#           fetch-depth: 0
-#       - name: Check for changes
-#         id: changes
-#         uses: ./.github/actions/changed-files
-#         with:
-#           gh_token: ${{ github.token }}
-#       - name: Export builder name
-#         id: export-builder-name
-#         run: |
-#           echo "builder_name=${{ env.BUILDER_NAME }}" >> $GITHUB_OUTPUT
+
+  sglang-test:
+    needs: [changed-files]
+    uses: ./.github/workflows/build-test-disribute-flavor.yml
+    # if: github.ref_name == 'main' || contains(github.event.inputs.build_flavors, 'sglang') || github.event.inputs.run_full_flow == 'true' || needs.changed-files.outputs.core == 'true' || needs.changed-files.outputs.sglang == 'true'
+    with:
+      framework: sglang
+      platforms: '["amd64", "arm64"]'
+      cuda_versions: '["12.9", "13.0"]'
+      extra_tags: |
+        ${{ github.ref_name == 'main' && 'main-sglang' || '' }}
+        ${{ github.ref_name == 'main' && format('main-sglang-{0}', github.sha) || '' }}
+      no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
+      builder_name: ${{ needs.changed-files.outputs.builder_name }}
+      run_tests: true 
+      copy_to_acr: true
+    secrets: inherit
+
+
 
 #   backend-status-check:
 #     runs-on: ubuntu-latest
