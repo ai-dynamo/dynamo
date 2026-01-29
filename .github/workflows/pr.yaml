@@ -188,7 +188,7 @@ jobs:
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       build_image: true
       run_tests: true
-      copy_to_acr: false
+      copy_to_acr: true
       push_image: true
     secrets: inherit
 
@@ -206,7 +206,7 @@ jobs:
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true 
-      copy_to_acr: false
+      copy_to_acr: true
     secrets: inherit
 
   trtllm-pipeline:
@@ -223,7 +223,7 @@ jobs:
       no_cache: ${{ github.ref_name == 'main' || github.event.inputs.no_cache_builds == 'true' }}
       builder_name: ${{ needs.changed-files.outputs.builder_name }}
       run_tests: true 
-      copy_to_acr: false
+      copy_to_acr: true
     secrets: inherit
 
 
