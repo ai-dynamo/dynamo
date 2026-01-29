@@ -72,7 +72,10 @@ setup(
         "gpu_memory_service.client",
         "gpu_memory_service.client.torch",
         "gpu_memory_service.client.torch.extensions",
-        "gpu_memory_service.vllm_integration",
+        "gpu_memory_service.integrations",
+        "gpu_memory_service.integrations.common",
+        "gpu_memory_service.integrations.sglang",
+        "gpu_memory_service.integrations.vllm",
     ],
     package_dir={
         "gpu_memory_service": ".",
@@ -83,7 +86,10 @@ setup(
         "gpu_memory_service.client": "client",
         "gpu_memory_service.client.torch": "client/torch",
         "gpu_memory_service.client.torch.extensions": "client/torch/extensions",
-        "gpu_memory_service.vllm_integration": "vllm_integration",
+        "gpu_memory_service.integrations": "integrations",
+        "gpu_memory_service.integrations.common": "integrations/common",
+        "gpu_memory_service.integrations.sglang": "integrations/sglang",
+        "gpu_memory_service.integrations.vllm": "integrations/vllm",
     },
     package_data={
         "gpu_memory_service.client.torch.extensions": ["*.cpp"],
