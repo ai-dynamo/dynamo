@@ -4,9 +4,6 @@
 name: Release Pipeline
 
 on:
-  push:
-    branches:
-      - 'test-runner'
   workflow_dispatch:
     inputs:
       rc_number:

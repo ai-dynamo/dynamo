@@ -6,9 +6,7 @@ name: Build Frontend Image
 on:
   push:
     branches:
-    - main
-    - "pull-request/[0-9]+"
-    # Note: release/* branches are handled by release.yml which calls this workflow
+      - 'test-runner'
   workflow_call:
     secrets:
       AWS_ACCOUNT_ID:
@@ -62,12 +60,21 @@ jobs:
         uses: actions/checkout@v4
       - name: Debug Network
         run: |
+          sudo apt-get update && sudo apt-get install -y iproute2
           echo "--- Interface Config ---"
           ip link
           echo "--- Route Config ---"
           ip route
           echo "--- MTU Check ---"
           cat /sys/class/net/eth0/mtu
+
+          echo "--- MTU Check (Direct) ---"
+          cat /sys/class/net/eth0/mtu
+
+          echo "--- Docker Interface Check (if exists) ---"
+          # Check for docker0 or other interfaces in /sys/class/net/
+          ls -l /sys/class/net/
+
       # - name: Set up Go
       #   uses: actions/setup-go@v5
       #   with:
