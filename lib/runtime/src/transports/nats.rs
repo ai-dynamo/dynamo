@@ -18,7 +18,6 @@
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
 use crate::metrics::MetricsHierarchy;
 use crate::protocols::EndpointId;
-use crate::traits::events::EventPublisher;
 
 use anyhow::Result;
 use async_nats::connection::State;
@@ -840,27 +839,26 @@ impl NatsQueue {
     }
 }
 
-#[async_trait]
-impl EventPublisher for NatsQueue {
-    fn subject(&self) -> String {
+impl NatsQueue {
+    pub fn event_subject(&self) -> String {
         self.stream_name.clone()
     }
 
-    async fn publish(
+    pub async fn publish_event(
         &self,
         event_name: impl AsRef<str> + Send + Sync,
         event: &(impl Serialize + Send + Sync),
     ) -> Result<()> {
         let bytes = serde_json::to_vec(event)?;
-        self.publish_bytes(event_name, bytes).await
+        self.publish_event_bytes(event_name, bytes).await
     }
 
-    async fn publish_bytes(
+    pub async fn publish_event_bytes(
         &self,
         event_name: impl AsRef<str> + Send + Sync,
         bytes: Vec<u8>,
     ) -> Result<()> {
-        let subject = format!("{}.{}", self.subject(), event_name.as_ref());
+        let subject = format!("{}.{}", self.event_subject(), event_name.as_ref());
 
         // Note: enqueue_task requires &mut self, but EventPublisher requires &self
         // We need to ensure the client is connected and use it directly
@@ -1036,10 +1034,10 @@ mod tests {
             "message4".to_string(),
         ];
 
-        // Using the EventPublisher trait to publish messages
+        // Publish messages using NatsQueue
         for (idx, msg) in message_strings.iter().enumerate() {
             queue1
-                .publish("queue", msg)
+                .publish_event("queue", msg)
                 .await
                 .unwrap_or_else(|_| panic!("Failed to publish message {}", idx + 1));
         }
