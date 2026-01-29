@@ -20,50 +20,38 @@ repository.workspace = true
 readme.workspace = true
 
 [features]
-default = ["rustls"]
-# Enable rustls for TLS support
-rustls = ["reqwest/rustls-tls-native-roots"]
-# Enable rustls and webpki-roots
-rustls-webpki-roots = ["reqwest/rustls-tls-webpki-roots"]
-# Enable native-tls for TLS support
-native-tls = ["reqwest/native-tls"]
-# Remove dependency on OpenSSL
-native-tls-vendored = ["reqwest/native-tls-vendored"]
 realtime = ["dep:tokio-tungstenite"]
 # Bring your own types
 byot = []
 
 [dependencies]
+futures = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+derive_builder = { workspace = true }
+bytes = { workspace = true }
+
+eventsource-stream = "0.2.3"
 async-openai-macros = "0.1.0"
 backoff = { version = "0.4.0", features = ["tokio"] }
 base64 = "0.22.1"
-futures = "0.3.31"
-rand = "0.9.0"
-reqwest = { version = "0.12.24", features = [
-  "json",
-  "stream",
-  "multipart",
-], default-features = false }
 reqwest-eventsource = "0.6.0"
-serde = { version = "1.0.217", features = ["derive", "rc"] }
-serde_json = "1.0.135"
-thiserror = "2.0.11"
-tokio = { version = "1.43.0", features = ["fs", "macros"] }
-tokio-stream = "0.1.17"
-tokio-util = { version = "0.7.13", features = ["codec", "io-util"] }
-tracing = "0.1.41"
-url = { workspace = true }
-uuid = { workspace = true }
-derive_builder = "0.20.2"
 secrecy = { version = "0.10.3", features = ["serde"] }
-bytes = "1.9.0"
-eventsource-stream = "0.2.3"
 tokio-tungstenite = { version = "0.26.1", optional = true, default-features = false }
 utoipa = { version = "5.3", features = ["url", "uuid"] }
 
 [dev-dependencies]
 tokio-test = "0.4.4"
-serde_json = "1.0"
+serde_json = { workspace = true }
 
 [[test]]
 name = "bring-your-own-type"

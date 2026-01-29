@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import logging
 import os
 import shutil
@@ -142,7 +143,8 @@ class EncodeWorkerHandler:
                 image_embeds = self.image_processor(images=image, return_tensors="pt")
 
                 # Encode the image embeddings using model-specific encoder
-                embeddings = encode_image_embeddings(
+                embeddings = await asyncio.to_thread(
+                    encode_image_embeddings,
                     model_name=self.model,
                     image_embeds=image_embeds,
                     vision_encoder=self.vision_encoder,

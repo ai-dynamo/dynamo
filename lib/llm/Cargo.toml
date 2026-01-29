@@ -41,6 +41,8 @@ required-features = ["block-manager", "testing-cuda"]
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
+dynamo-tokens = { workspace = true }
+dynamo-kv-router = { workspace = true, features = ["metrics"] }
 dynamo-memory = { path = "../memory", optional = true }
 
 # workspace
@@ -208,8 +210,3 @@ name = "bench_local_transfer_v2"
 path = "bin/bench_local_transfer_v2.rs"
 required-features = ["block-manager-bench"]
 
-[[bench]]
-name = "radix_tree_microbench"
-path = "benches/radix_tree_microbench.rs"
-harness = false
-required-features = ["kv-router-stress"]

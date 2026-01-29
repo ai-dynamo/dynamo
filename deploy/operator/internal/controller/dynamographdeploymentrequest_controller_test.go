@@ -140,7 +140,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State
-			}, timeout, interval).Should(Equal(StatePending))
+			}, timeout, interval).Should(Equal(DGDRStatePending))
 
 			// Verify observedGeneration is set
 			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
@@ -190,7 +190,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 				var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 				_ = k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)
 				return updated.Status.State
-			}, timeout, interval).Should(Equal(StatePending))
+			}, timeout, interval).Should(Equal(DGDRStatePending))
 		})
 	})
 
@@ -424,7 +424,7 @@ var _ = Describe("DynamoGraphDeploymentRequest Controller", func() {
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Update status to Profiling using Status subresource
-			dgdr.Status.State = StateProfiling
+			dgdr.Status.State = DGDRStateProfiling
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// Create completed profiling job
@@ -499,7 +499,7 @@ spec:
 			Expect(updated.Status.GeneratedDeployment).NotTo(BeNil())
 
 			// Verify state transitioned to Ready (since autoApply is false by default)
-			Expect(updated.Status.State).Should(Equal(StateReady))
+			Expect(updated.Status.State).Should(Equal(DGDRStateReady))
 		})
 	})
 
@@ -539,7 +539,7 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Update status to Profiling using Status subresource
-			dgdr.Status.State = StateProfiling
+			dgdr.Status.State = DGDRStateProfiling
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// Create completed profiling job
@@ -609,7 +609,7 @@ spec:
 			// Get updated DGDR and check state is Deploying
 			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
-			Expect(updated.Status.State).Should(Equal(StateDeploying))
+			Expect(updated.Status.State).Should(Equal(DGDRStateDeploying))
 
 			// Reconcile again to create DGD
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{
@@ -680,7 +680,7 @@ spec:
 			observedGeneration := current.Status.ObservedGeneration
 
 			// Manually set state to Profiling to simulate in-progress profiling
-			current.Status.State = StateProfiling
+			current.Status.State = DGDRStateProfiling
 			Expect(k8sClient.Status().Update(ctx, &current)).Should(Succeed())
 
 			// Try to modify spec
@@ -702,7 +702,7 @@ spec:
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &current)).Should(Succeed())
 			Expect(current.Generation).Should(BeNumerically(">", initialGeneration))
 			Expect(current.Status.ObservedGeneration).Should(Equal(observedGeneration))
-			Expect(current.Status.State).Should(Equal(StateProfiling)) // State unchanged
+			Expect(current.Status.State).Should(Equal(DGDRStateProfiling)) // State unchanged
 
 			// Verify event was recorded
 			Eventually(func() bool {
@@ -752,12 +752,12 @@ spec:
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Update status to Ready with Deployment info using Status subresource
-			dgdr.Status.State = StateReady
+			dgdr.Status.State = DGDRStateReady
 			dgdr.Status.Deployment = &nvidiacomv1alpha1.DeploymentStatus{
 				Name:      "test-dgd-to-delete",
 				Namespace: namespace,
 				Created:   true,
-				State:     "Ready",
+				State:     DGDRStateReady,
 			}
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
@@ -770,7 +770,7 @@ spec:
 			// Get updated DGDR and check state transitioned to DeploymentDeleted
 			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
-			Expect(updated.Status.State).Should(Equal(StateDeploymentDeleted))
+			Expect(updated.Status.State).Should(Equal(DGDRStateDeploymentDeleted))
 		})
 	})
 })
@@ -1249,7 +1249,7 @@ var _ = Describe("DGDR Error Handling", func() {
 			defer func() { _ = k8sClient.Delete(ctx, dgdr) }()
 
 			// Set status to Profiling
-			dgdr.Status.State = StateProfiling
+			dgdr.Status.State = DGDRStateProfiling
 			Expect(k8sClient.Status().Update(ctx, dgdr)).Should(Succeed())
 
 			// Create failed job
@@ -1331,7 +1331,7 @@ var _ = Describe("DGDR Error Handling", func() {
 			// Verify DGDR transitioned to Failed state
 			var updated nvidiacomv1alpha1.DynamoGraphDeploymentRequest
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: dgdrName, Namespace: namespace}, &updated)).Should(Succeed())
-			Expect(updated.Status.State).Should(Equal(StateFailed))
+			Expect(updated.Status.State).Should(Equal(DGDRStateFailed))
 
 			// Verify error condition contains detailed error
 			condition := meta.FindStatusCondition(updated.Status.Conditions, ConditionTypeProfiling)

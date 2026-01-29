@@ -1,0 +1,312 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Multi-DGD deployment for hierarchical planner example with vLLM workers
+# Architecture:
+#   DGD 1 (hierarchical): Frontend + GlobalRouter
+#   DGD 2 (prefill-pool-0): Local Router + vLLM Prefill Worker (1 GPU)
+#   DGD 3 (prefill-pool-1): Local Router + vLLM Prefill Worker (1 GPU)
+#   DGD 4 (decode-pool-0): Local Router + vLLM Decode Worker (1 GPU)
+#
+# IMPORTANT: This file uses ${K8S_NAMESPACE} as a placeholder for the Kubernetes namespace.
+# The K8s operator prepends the K8s namespace to the Dynamo namespace.
+# For example, if K8S_NAMESPACE="my-namespace" and dynamoNamespace is "prefill-pool-0",
+# the actual Dynamo namespace becomes "my-namespace-prefill-pool-0".
+#
+# vLLM workers register at:
+#   - Prefill: <namespace>.prefill.generate
+#   - Decode:  <namespace>.backend.generate
+#
+# USAGE: See README.md for deployment instructions using envsubst.
+# =============================================================================
+# ConfigMap for global router configuration
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hierarchical-global-router-config
+data:
+  global_router_config.json: |
+    {
+        "num_prefill_pools": 2,
+        "num_decode_pools": 1,
+        "prefill_pool_dynamo_namespaces": ["${K8S_NAMESPACE}-prefill-pool-0", "${K8S_NAMESPACE}-prefill-pool-1"],
+        "decode_pool_dynamo_namespaces": ["${K8S_NAMESPACE}-decode-pool-0"],
+        "prefill_pool_selection_strategy": {
+            "ttft_min": 10,
+            "ttft_max": 1000,
+            "ttft_resolution": 2,
+            "isl_min": 0,
+            "isl_max": 32000,
+            "isl_resolution": 2,
+            "prefill_pool_mapping": [[0,1],[0,1]]
+        },
+        "decode_pool_selection_strategy": {
+            "itl_min": 10,
+            "itl_max": 100,
+            "itl_resolution": 2,
+            "context_length_min": 0,
+            "context_length_max": 32000,
+            "context_length_resolution": 2,
+            "decode_pool_mapping": [[0,0],[0,0]]
+        }
+    }
+---
+# =============================================================================
+# DGD 1: Frontend + Global Router (namespace: hierarchical)
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: hierarchical-frontend
+spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        key: HF_TOKEN
+        name: hf-token-secret
+  services:
+    Frontend:
+      componentType: frontend
+      dynamoNamespace: hierarchical
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --router-mode
+          - round-robin
+          - --namespace
+          - ${K8S_NAMESPACE}-hierarchical
+          command:
+          - python
+          - -m
+          - dynamo.frontend
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+    GlobalRouter:
+      componentType: default
+      dynamoNamespace: hierarchical
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --config
+          - /workspace/config/global_router_config.json
+          - --model-name
+          - Qwen/Qwen3-0.6B
+          - --default-ttft-target
+          - "100"
+          - --default-itl-target
+          - "10"
+          - --namespace
+          - ${K8S_NAMESPACE}-hierarchical
+          command:
+          - python
+          - -m
+          - dynamo.global_router
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+          volumeMounts:
+          - mountPath: /workspace/config
+            name: global-router-config
+            readOnly: true
+        volumes:
+        - configMap:
+            name: hierarchical-global-router-config
+          name: global-router-config
+      replicas: 1
+---
+# =============================================================================
+# DGD 2: Prefill Pool 0 - Local Router + vLLM Worker (namespace: prefill-pool-0)
+# Actual Dynamo namespace: ${K8S_NAMESPACE}-prefill-pool-0
+# vLLM prefill worker registers at: ${K8S_NAMESPACE}-prefill-pool-0.prefill.generate
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: prefill-pool-0
+spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        key: HF_TOKEN
+        name: hf-token-secret
+  services:
+    LocalRouter:
+      componentType: default
+      dynamoNamespace: prefill-pool-0
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-prefill-pool-0.prefill.generate
+          - --block-size
+          - "16"
+          - --no-track-active-blocks
+          command:
+          - python
+          - -m
+          - dynamo.router
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      dynamoNamespace: prefill-pool-0
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --is-prefill-worker
+          - --tensor-parallel-size
+          - "1"
+          - --gpu-memory-utilization
+          - "0.90"
+          - --block-size
+          - "16"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+---
+# =============================================================================
+# DGD 3: Prefill Pool 1 - Local Router + vLLM Worker (namespace: prefill-pool-1)
+# Actual Dynamo namespace: ${K8S_NAMESPACE}-prefill-pool-1
+# vLLM prefill worker registers at: ${K8S_NAMESPACE}-prefill-pool-1.prefill.generate
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: prefill-pool-1
+spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        key: HF_TOKEN
+        name: hf-token-secret
+  services:
+    LocalRouter:
+      componentType: default
+      dynamoNamespace: prefill-pool-1
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-prefill-pool-1.prefill.generate
+          - --block-size
+          - "16"
+          - --no-track-active-blocks
+          command:
+          - python
+          - -m
+          - dynamo.router
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+    VllmPrefillWorker:
+      componentType: worker
+      subComponentType: prefill
+      dynamoNamespace: prefill-pool-1
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --is-prefill-worker
+          - --tensor-parallel-size
+          - "1"
+          - --gpu-memory-utilization
+          - "0.90"
+          - --block-size
+          - "16"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
+---
+# =============================================================================
+# DGD 4: Decode Pool 0 - Local Router + vLLM Worker (namespace: decode-pool-0)
+# Actual Dynamo namespace: ${K8S_NAMESPACE}-decode-pool-0
+# vLLM decode worker registers at: ${K8S_NAMESPACE}-decode-pool-0.backend.generate
+# =============================================================================
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: decode-pool-0
+spec:
+  envs:
+  - name: HF_TOKEN
+    valueFrom:
+      secretKeyRef:
+        key: HF_TOKEN
+        name: hf-token-secret
+  services:
+    LocalRouter:
+      componentType: default
+      dynamoNamespace: decode-pool-0
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --endpoint
+          - ${K8S_NAMESPACE}-decode-pool-0.backend.generate
+          - --block-size
+          - "16"
+          - --kv-overlap-score-weight
+          - "0"
+          command:
+          - python
+          - -m
+          - dynamo.router
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+    VllmDecodeWorker:
+      componentType: worker
+      subComponentType: decode
+      dynamoNamespace: decode-pool-0
+      envFromSecret: hf-token-secret
+      extraPodSpec:
+        mainContainer:
+          args:
+          - --model
+          - Qwen/Qwen3-0.6B
+          - --tensor-parallel-size
+          - "1"
+          - --gpu-memory-utilization
+          - "0.90"
+          - --block-size
+          - "16"
+          command:
+          - python3
+          - -m
+          - dynamo.vllm
+          image: ${VLLM_IMAGE}
+          workingDir: /workspace
+      replicas: 1
+      resources:
+        limits:
+          gpu: "1"
+        requests:
+          gpu: "1"
