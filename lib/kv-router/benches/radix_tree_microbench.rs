@@ -15,16 +15,96 @@
 
 use clap::{Parser, ValueEnum};
 use dynamo_kv_router::{
-    compute_block_hash_for_seq,
-    indexer::{RadixTree, RouterEvent},
+    OverlapScores, RadixTree, RouterEvent, compute_block_hash_for_seq,
+    flat_hashmap::FlatHashMap,
     protocols::{
         ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData,
         KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash, WorkerId,
+        compute_seq_hash_for_block,
     },
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::{Duration, Instant};
+
+/// Unified interface for RadixTree and FlatHashMap benchmarking.
+///
+/// Both structures have feature parity for store, remove, find_matches, and current_size.
+/// The key difference is find_matches input:
+/// - RadixTree: uses LocalBlockHash (tokens_hash)
+/// - FlatHashMap: uses ExternalSequenceBlockHash (cumulative sequence hash)
+enum KvIndex {
+    Tree(RadixTree),
+    Flat(FlatHashMap),
+}
+
+impl KvIndex {
+    fn name(&self) -> &'static str {
+        match self {
+            KvIndex::Tree(_) => "RadixTree",
+            KvIndex::Flat(_) => "FlatHashMap",
+        }
+    }
+
+    fn apply_event(&mut self, event: RouterEvent) {
+        match self {
+            KvIndex::Tree(tree) => {
+                let _ = tree.apply_event(event);
+            }
+            KvIndex::Flat(map) => {
+                map.apply_event(event);
+            }
+        }
+    }
+
+    fn find_matches_timed(&self, seq: &SequenceData, early_exit: bool) -> Duration {
+        let local_hashes = seq.local_hashes.clone();
+        let start = Instant::now();
+        let _ = match self {
+            KvIndex::Tree(tree) => tree.find_matches(local_hashes, early_exit),
+            KvIndex::Flat(map) => map.find_matches(local_hashes, early_exit),
+        };
+        start.elapsed()
+    }
+
+    fn find_matches_miss_timed(&self, depth: usize, i: usize, early_exit: bool) -> Duration {
+        let miss_hashes: Vec<LocalBlockHash> = (0..depth)
+            .map(|j| LocalBlockHash(0xBAD_C0DE_0000_0000 | ((i as u64) << 16) | (j as u64)))
+            .collect();
+        let start = Instant::now();
+        let _ = match self {
+            KvIndex::Tree(tree) => tree.find_matches(miss_hashes, early_exit),
+            KvIndex::Flat(map) => map.find_matches(miss_hashes, early_exit),
+        };
+        start.elapsed()
+    }
+
+    fn find_matches_partial_timed(
+        &self,
+        seq: &SequenceData,
+        half: usize,
+        i: usize,
+        early_exit: bool,
+    ) -> Duration {
+        let mut partial = seq.local_hashes[..half].to_vec();
+        partial.extend(
+            (0..half).map(|j| LocalBlockHash(0xDEAD_0000 | ((i as u64) << 16) | (j as u64))),
+        );
+        let start = Instant::now();
+        let _ = match self {
+            KvIndex::Tree(tree) => tree.find_matches(partial, early_exit),
+            KvIndex::Flat(map) => map.find_matches(partial, early_exit),
+        };
+        start.elapsed()
+    }
+
+    fn current_size(&self) -> usize {
+        match self {
+            KvIndex::Tree(tree) => tree.current_size(),
+            KvIndex::Flat(map) => map.current_size(),
+        }
+    }
+}
 
 /// Sweep benchmark mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -60,6 +140,10 @@ struct Args {
     /// Number of iterations per operation for timing
     #[arg(long, default_value = "1000")]
     iterations: usize,
+
+    /// Warmup ratio (0.0 to 1.0) - fraction of iterations to discard for warmup
+    #[arg(long, default_value = "0.1")]
+    warmup_ratio: f64,
 
     /// Prefix prompt ratio (0.0 to 1.0) - portion of sequence from the beginning that is a shared prefix
     #[arg(long, default_value = "0.25")]
@@ -116,6 +200,10 @@ struct Args {
     /// Random seed for reproducibility
     #[arg(long, default_value = "42")]
     seed: u64,
+
+    /// Use flat HashMap baseline instead of radix tree (for comparison)
+    #[arg(long)]
+    flat_hashmap: bool,
 }
 
 /// Pre-generated sequence data for benchmarking
@@ -127,13 +215,14 @@ struct SequenceData {
 }
 
 impl SequenceData {
-    fn new(seq_id: u64, worker_id: WorkerId, depth: usize) -> Self {
-        let local_hashes: Vec<LocalBlockHash> = (0..depth)
-            .map(|block_idx| LocalBlockHash((seq_id << 32) | (block_idx as u64)))
-            .collect();
-
-        let external_hashes: Vec<ExternalSequenceBlockHash> = (0..depth)
-            .map(|block_idx| ExternalSequenceBlockHash((seq_id << 32) | (block_idx as u64)))
+    /// Create a new SequenceData from local_hashes.
+    /// Automatically computes external_hashes using compute_seq_hash_for_block (cumulative hashes).
+    /// This ensures FlatHashMap can correctly identify block positions.
+    fn from_local_hashes(worker_id: WorkerId, local_hashes: Vec<LocalBlockHash>) -> Self {
+        let seq_hashes = compute_seq_hash_for_block(&local_hashes);
+        let external_hashes = seq_hashes
+            .into_iter()
+            .map(ExternalSequenceBlockHash)
             .collect();
 
         Self {
@@ -190,28 +279,42 @@ fn generate_sequences(
     seed: u64,
 ) -> Vec<SequenceData> {
     let mut sequences = Vec::with_capacity(num_sequences);
-    let prefix_length: usize = (depth as f64 * prefix_prompt_ratio).round() as usize;
+    let prefix_length = (depth as f64 * prefix_prompt_ratio).round() as usize;
     let mut rng: StdRng = StdRng::seed_from_u64(seed);
 
     for seq_id in 0..num_sequences {
+        let seq_id_u64 = seq_id as u64;
         let worker_id = (seq_id % num_workers) as WorkerId;
-        let mut seq = SequenceData::new(seq_id as u64, worker_id, depth);
 
-        if num_prefix_prompts > 0 && prefix_length > 0 {
-            let group_id = rng.random_range(0..num_prefix_prompts);
-            for i in 0..prefix_length {
-                seq.local_hashes[i] =
-                    LocalBlockHash(0xDEAD_BEEF_0000_0000 | ((group_id as u64) << 32) | (i as u64));
-            }
-        }
+        // Determine prefix group for this sequence
+        let group_id = if num_prefix_prompts > 0 && prefix_length > 0 {
+            Some(rng.random_range(0..num_prefix_prompts) as u64)
+        } else {
+            None
+        };
 
-        sequences.push(seq);
+        // Build local_hashes: shared prefix (if applicable) + unique suffix
+        let local_hashes: Vec<LocalBlockHash> = (0..depth)
+            .map(|block_idx| {
+                let block_idx_u64 = block_idx as u64;
+                if let Some(gid) = group_id {
+                    if block_idx < prefix_length {
+                        // Shared prefix based on group_id
+                        return LocalBlockHash(0xDEAD_BEEF_0000_0000 | (gid << 32) | block_idx_u64);
+                    }
+                }
+                // Unique suffix (or no shared prefix)
+                LocalBlockHash((seq_id_u64 << 32) | block_idx_u64)
+            })
+            .collect();
+
+        sequences.push(SequenceData::from_local_hashes(worker_id, local_hashes));
     }
 
     sequences
 }
 
-/// Build a pre-populated tree (prints timing info)
+/// Build a pre-populated RadixTree (for sweep/dump benchmarks that specifically need RadixTree)
 fn build_tree(sequences: &[SequenceData]) -> RadixTree {
     let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
     print!(
@@ -237,6 +340,45 @@ fn build_tree(sequences: &[SequenceData]) -> RadixTree {
     );
 
     tree
+}
+
+/// Build a pre-populated KvIndex (prints timing info)
+fn build_index(sequences: &[SequenceData], use_flat_hashmap: bool) -> KvIndex {
+    let num_blocks: usize = sequences.iter().map(|s| s.local_hashes.len()).sum();
+    let name = if use_flat_hashmap {
+        "FlatHashMap"
+    } else {
+        "RadixTree"
+    };
+    print!(
+        "  Building {} with {} sequences ({} blocks)... ",
+        name,
+        sequences.len(),
+        num_blocks
+    );
+    std::io::Write::flush(&mut std::io::stdout()).unwrap();
+
+    let start = Instant::now();
+    let mut index = if use_flat_hashmap {
+        KvIndex::Flat(FlatHashMap::new())
+    } else {
+        KvIndex::Tree(RadixTree::new())
+    };
+
+    for (event_id, seq) in sequences.iter().enumerate() {
+        let event = seq.to_store_event(event_id as u64);
+        index.apply_event(event);
+    }
+    let elapsed = start.elapsed();
+
+    println!(
+        "done in {:.2?} ({:.2} sequences/sec, {:.2} blocks/sec)",
+        elapsed,
+        sequences.len() as f64 / elapsed.as_secs_f64(),
+        num_blocks as f64 / elapsed.as_secs_f64()
+    );
+
+    index
 }
 
 /// Statistics for a set of timing measurements
@@ -304,14 +446,18 @@ fn bench_hash(args: &Args) {
         })
         .collect();
 
-    let mut durations = Vec::with_capacity(args.iterations);
+    let warmup_iters = (args.iterations as f64 * args.warmup_ratio) as usize;
+    let measured_iters = args.iterations - warmup_iters;
+    let mut durations = Vec::with_capacity(measured_iters);
 
     for (i, tokens) in token_sequences.iter().enumerate() {
         let start = Instant::now();
         let _ = compute_block_hash_for_seq(tokens, args.block_size, None);
         let elapsed = start.elapsed();
 
-        durations.push(elapsed);
+        if i >= warmup_iters {
+            durations.push(elapsed);
+        }
 
         if args.verbose && (i + 1) % 100 == 0 {
             println!("  Completed {}/{} iterations", i + 1, args.iterations);
@@ -322,57 +468,16 @@ fn bench_hash(args: &Args) {
     stats.print("COMPUTE_BLOCK_HASH", args.depth);
 }
 
-/// Benchmark store_block operation
-fn bench_store(args: &Args) {
-    println!("\n=== Benchmarking STORE_BLOCK ===");
-
-    let num_sequences = args.size / args.depth;
-    let bench_iters = args.iterations.min(num_sequences);
-
-    let all_sequences = generate_sequences(
-        num_sequences,
-        args.depth,
-        args.num_workers,
-        args.prefix_prompt_ratio,
-        args.num_prefix_prompts,
-        args.seed,
-    );
-    let split_point = num_sequences.saturating_sub(bench_iters);
-    let pre_sequences = &all_sequences[..split_point];
-    let bench_sequences = &all_sequences[split_point..];
-
-    // Build tree once, then store sequences sequentially
-    // Tree grows from (size - iterations) to size over the benchmark
-    let mut tree = build_tree(&pre_sequences);
-    println!(
-        "  Initial tree size: {} blocks, will grow to ~{} blocks",
-        tree.current_size(),
-        tree.current_size() + bench_iters * args.depth
-    );
-
-    let mut durations = Vec::with_capacity(bench_iters);
-
-    for (i, seq) in bench_sequences.iter().enumerate() {
-        let event = seq.to_store_event(i as u64);
-
-        let start = Instant::now();
-        let _ = tree.apply_event(event);
-        let elapsed = start.elapsed();
-
-        durations.push(elapsed);
-
-        if args.verbose && (i + 1) % 100 == 0 {
-            println!("  Completed {}/{} iterations", i + 1, bench_iters);
-        }
-    }
-
-    let stats = LatencyStats::from_durations(durations);
-    stats.print("STORE_BLOCK", args.depth);
-}
-
-/// Benchmark remove_block operation
-fn bench_remove(args: &Args) {
-    println!("\n=== Benchmarking REMOVE_BLOCK ===");
+/// Benchmark store or remove operation on a steady-state index.
+///
+/// Uses a remove/store cycle to maintain size. If `time_store` is true,
+/// the store operation is timed; otherwise the remove operation is timed.
+fn bench_store_remove_cycle(args: &Args, time_store: bool) {
+    let op_name = if time_store {
+        "STORE_BLOCK"
+    } else {
+        "REMOVE_BLOCK"
+    };
 
     let num_sequences = args.size / args.depth;
     let sequences = generate_sequences(
@@ -384,26 +489,35 @@ fn bench_remove(args: &Args) {
         args.seed,
     );
 
-    // Build tree once, then remove/re-add to restore state after each timed removal
-    let mut tree = build_tree(&sequences);
-    println!("  Tree size: {} blocks", tree.current_size());
+    let mut index = build_index(&sequences, args.flat_hashmap);
+    println!("\n=== Benchmarking {} ({}) ===", op_name, index.name());
+    println!("  Size: {} blocks", index.current_size());
 
-    let mut durations = Vec::with_capacity(args.iterations);
+    let warmup_iters = (args.iterations as f64 * args.warmup_ratio) as usize;
+    let measured_iters = args.iterations - warmup_iters;
+    let mut durations = Vec::with_capacity(measured_iters);
 
     for i in 0..args.iterations {
-        // Remove a sequence (timed)
-        let seq_to_remove = &sequences[i % sequences.len()];
-        let remove_event = seq_to_remove.to_remove_event(i as u64);
+        let seq = &sequences[i % sequences.len()];
+        let remove_event = seq.to_remove_event(i as u64);
+        let store_event = seq.to_store_event(i as u64 + args.iterations as u64);
 
-        let start = Instant::now();
-        let _ = tree.apply_event(remove_event);
-        let elapsed = start.elapsed();
+        let elapsed = if time_store {
+            index.apply_event(remove_event);
+            let start = Instant::now();
+            index.apply_event(store_event);
+            start.elapsed()
+        } else {
+            let start = Instant::now();
+            index.apply_event(remove_event);
+            let elapsed = start.elapsed();
+            index.apply_event(store_event);
+            elapsed
+        };
 
-        durations.push(elapsed);
-
-        // Re-add the sequence to restore tree state (untimed)
-        let store_event = seq_to_remove.to_store_event(i as u64 + args.iterations as u64);
-        let _ = tree.apply_event(store_event);
+        if i >= warmup_iters {
+            durations.push(elapsed);
+        }
 
         if args.verbose && (i + 1) % 100 == 0 {
             println!("  Completed {}/{} iterations", i + 1, args.iterations);
@@ -411,13 +525,21 @@ fn bench_remove(args: &Args) {
     }
 
     let stats = LatencyStats::from_durations(durations);
-    stats.print("REMOVE_BLOCK", args.depth);
+    stats.print(op_name, args.depth);
+}
+
+/// Benchmark store_block operation
+fn bench_store(args: &Args) {
+    bench_store_remove_cycle(args, true);
+}
+
+/// Benchmark remove_block operation
+fn bench_remove(args: &Args) {
+    bench_store_remove_cycle(args, false);
 }
 
 /// Benchmark find_matches operation
 fn bench_find_matches(args: &Args) {
-    println!("\n=== Benchmarking FIND_MATCHES ===");
-
     let num_sequences = args.size / args.depth;
     let sequences = generate_sequences(
         num_sequences,
@@ -428,104 +550,74 @@ fn bench_find_matches(args: &Args) {
         args.seed,
     );
 
-    // Build tree once for all find_matches calls
-    let tree = build_tree(&sequences);
-
+    let index = build_index(&sequences, args.flat_hashmap);
+    println!("\n=== Benchmarking FIND_MATCHES ({}) ===", index.name());
     println!(
-        "  Tree built with {} sequences, {} total blocks",
+        "  Built with {} sequences, {} total blocks",
         sequences.len(),
-        tree.current_size()
+        index.current_size()
     );
 
-    // Benchmark hit case (lookup existing sequences)
+    let warmup_iters = (args.iterations as f64 * args.warmup_ratio) as usize;
+    let measured_iters = args.iterations - warmup_iters;
+    let half = args.depth / 2;
+
+    // HIT case
     println!("\n  --- HIT case (existing sequences) ---");
-    let mut hit_durations = Vec::with_capacity(args.iterations);
-
+    let mut hit_durations = Vec::with_capacity(measured_iters);
     for i in 0..args.iterations {
         let seq = &sequences[i % sequences.len()];
-        let hashes_copy = seq.local_hashes.clone();
-
-        let start = Instant::now();
-        let _ = tree.find_matches(hashes_copy, false);
-        let elapsed = start.elapsed();
-
-        hit_durations.push(elapsed);
-
+        let elapsed = index.find_matches_timed(seq, false);
+        if i >= warmup_iters {
+            hit_durations.push(elapsed);
+        }
         if args.verbose && (i + 1) % 100 == 0 {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
+    LatencyStats::from_durations(hit_durations).print("FIND_MATCHES (HIT)", args.depth);
 
-    let hit_stats = LatencyStats::from_durations(hit_durations);
-    hit_stats.print("FIND_MATCHES (HIT)", args.depth);
-
-    // Benchmark miss case (find_matches on non-existing sequences)
+    // MISS case
     println!("\n  --- MISS case (non-existing sequences) ---");
-    let mut miss_durations = Vec::with_capacity(args.iterations);
-
+    let mut miss_durations = Vec::with_capacity(measured_iters);
     for i in 0..args.iterations {
-        // Generate a sequence that won't match
-        let miss_hashes: Vec<LocalBlockHash> = (0..args.depth)
-            .map(|j| LocalBlockHash(0xBAD_C0DE_0000_0000 | ((i as u64) << 16) | (j as u64)))
-            .collect();
-
-        let start = Instant::now();
-        let _ = tree.find_matches(miss_hashes, false);
-        let elapsed = start.elapsed();
-
-        miss_durations.push(elapsed);
-
+        let elapsed = index.find_matches_miss_timed(args.depth, i, false);
+        if i >= warmup_iters {
+            miss_durations.push(elapsed);
+        }
         if args.verbose && (i + 1) % 100 == 0 {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
+    LatencyStats::from_durations(miss_durations).print("FIND_MATCHES (MISS)", args.depth);
 
-    let miss_stats = LatencyStats::from_durations(miss_durations);
-    miss_stats.print("FIND_MATCHES (MISS)", args.depth);
-
-    // Benchmark partial match case
+    // PARTIAL case
     println!("\n  --- PARTIAL case (prefix match only) ---");
-    let mut partial_durations = Vec::with_capacity(args.iterations);
-
+    let mut partial_durations = Vec::with_capacity(measured_iters);
     for i in 0..args.iterations {
         let seq = &sequences[i % sequences.len()];
-        // Use first half of real sequence, second half is garbage
-        let half = args.depth / 2;
-        let mut partial_hashes = seq.local_hashes[..half].to_vec();
-        partial_hashes.extend(
-            (0..half).map(|j| LocalBlockHash(0xDEAD_0000 | ((i as u64) << 16) | (j as u64))),
-        );
-
-        let start = Instant::now();
-        let _ = tree.find_matches(partial_hashes, false);
-        let elapsed = start.elapsed();
-
-        partial_durations.push(elapsed);
-
+        let elapsed = index.find_matches_partial_timed(seq, half, i, false);
+        if i >= warmup_iters {
+            partial_durations.push(elapsed);
+        }
         if args.verbose && (i + 1) % 100 == 0 {
             println!("    Completed {}/{} iterations", i + 1, args.iterations);
         }
     }
+    LatencyStats::from_durations(partial_durations).print("FIND_MATCHES (PARTIAL)", args.depth);
 
-    let partial_stats = LatencyStats::from_durations(partial_durations);
-    partial_stats.print("FIND_MATCHES (PARTIAL)", args.depth);
-
-    // Benchmark with early_exit=true
+    // EARLY_EXIT case
     println!("\n  --- EARLY_EXIT case ---");
-    let mut early_exit_durations = Vec::with_capacity(args.iterations);
-
+    let mut early_exit_durations = Vec::with_capacity(measured_iters);
     for i in 0..args.iterations {
         let seq = &sequences[i % sequences.len()];
-
-        let start = Instant::now();
-        let _ = tree.find_matches(seq.local_hashes.clone(), true);
-        let elapsed = start.elapsed();
-
-        early_exit_durations.push(elapsed);
+        let elapsed = index.find_matches_timed(seq, true);
+        if i >= warmup_iters {
+            early_exit_durations.push(elapsed);
+        }
     }
-
-    let early_exit_stats = LatencyStats::from_durations(early_exit_durations);
-    early_exit_stats.print("FIND_MATCHES (EARLY_EXIT)", args.depth);
+    LatencyStats::from_durations(early_exit_durations)
+        .print("FIND_MATCHES (EARLY_EXIT)", args.depth);
 }
 
 /// Generate logarithmically spaced values between min and max
@@ -932,6 +1024,10 @@ fn main() {
         eprintln!("prefix_prompt_ratio must be between 0.0 and 1.0");
         std::process::exit(1);
     }
+    if !(0.0..=1.0).contains(&args.warmup_ratio) {
+        eprintln!("warmup_ratio must be between 0.0 and 1.0");
+        std::process::exit(1);
+    }
 
     let num_sequences = args.size / args.depth;
     if matches!(
@@ -959,6 +1055,11 @@ fn main() {
     println!("  Block size: {} tokens", args.block_size);
     println!("  Workers: {}", args.num_workers);
     println!("  Iterations: {}", args.iterations);
+    println!(
+        "  Warmup: {:.0}% ({} iterations discarded)",
+        args.warmup_ratio * 100.0,
+        (args.iterations as f64 * args.warmup_ratio) as usize
+    );
     println!(
         "  Prefix prompt ratio: {:.1}% ({} blocks at depth {})",
         args.prefix_prompt_ratio * 100.0,

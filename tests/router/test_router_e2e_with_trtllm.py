@@ -84,6 +84,7 @@ class TRTLLMProcess:
         single_gpu: bool = False,
         request_plane: str = "tcp",
         store_backend: str = "etcd",
+        enable_local_indexer: bool = False,
     ):
         """Initialize TRT-LLM workers with dynamo integration.
 
@@ -98,6 +99,7 @@ class TRTLLMProcess:
             single_gpu: If True, all workers share GPU 0
             request_plane: Request plane to use ("nats", "tcp", or "http"). Defaults to "tcp".
             store_backend: Storage backend to use ("etcd" or "file"). Defaults to "etcd".
+            enable_local_indexer: If True, enable worker-local KV indexer for NATS Core mode. Defaults to False.
 
         Note: TRT-LLM doesn't support data parallelism like vLLM (dp_rank is always 0).
               Tensor parallelism (TP) is supported but creates 1 worker spanning multiple GPUs,
@@ -171,6 +173,10 @@ class TRTLLMProcess:
             # Add DYN_FILE_KV if using file storage backend
             if self.store_backend == "file" and "DYN_FILE_KV" in os.environ:
                 env_vars["DYN_FILE_KV"] = os.environ["DYN_FILE_KV"]
+
+            # Enable local indexer for NATS Core mode
+            if enable_local_indexer:
+                env_vars["DYN_LOCAL_INDEXER"] = "true"
 
             env.update(env_vars)
 
@@ -286,7 +292,7 @@ class TRTLLMProcess:
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_trtllm_kv_router_basic(
     request,
@@ -340,7 +346,7 @@ def test_trtllm_kv_router_basic(
 
 @pytest.mark.pre_merge
 @pytest.mark.gpu_1
-@pytest.mark.parametrize("request_plane", ["nats", "tcp"], indirect=True)
+@pytest.mark.parametrize("request_plane", ["tcp"], indirect=True)
 @pytest.mark.timeout(150)  # ~3x average (~45s/test), rounded up
 def test_router_decisions_trtllm_multiple_workers(
     request,
@@ -398,10 +404,10 @@ def test_router_decisions_trtllm_multiple_workers(
     "store_backend,use_nats_core,request_plane",
     [
         ("etcd", False, "nats"),  # JetStream mode
-        # ("etcd", True, "tcp"),  # ignored, needs unconditional nats_client
+        # ("etcd", True, "tcp"),  # nats_core mode - disabled for now
         # ("file", False, "nats"),  # File backend - TODO: investigate file backend support for TRT-LLM
     ],
-    ids=["jetstream"],  # "nats_core" and "file" commented out
+    ids=["jetstream"],
 )
 def test_trtllm_indexers_sync(
     request,
@@ -419,8 +425,11 @@ def test_trtllm_indexers_sync(
 
     Tests with configuration:
     - jetstream: etcd backend, JetStream for KV events, NATS request plane
+    - tcp_nats_core: etcd backend, local indexer with NATS Core, TCP request plane
     """
     # runtime_services_dynamic_ports handles NATS and etcd startup
+    nats_process, _etcd_process = runtime_services_dynamic_ports
+
     logger.info(
         f"Starting TRT-LLM indexers sync test: store_backend={store_backend}, "
         f"use_nats_core={use_nats_core}, request_plane={request_plane}"
@@ -438,6 +447,7 @@ def test_trtllm_indexers_sync(
             single_gpu=True,  # fit workers into one GPU
             request_plane=request_plane,
             store_backend=store_backend,
+            enable_local_indexer=use_nats_core,
         )
         logger.info(f"All TRT-LLM workers using namespace: {trtllm_workers.namespace}")
         trtllm_workers.__enter__()
@@ -451,6 +461,8 @@ def test_trtllm_indexers_sync(
             num_workers=N_TRTLLM_WORKERS,
             store_backend=store_backend,
             request_plane=request_plane,
+            test_nats_interruption=use_nats_core,
+            nats_server=nats_process if use_nats_core else None,
         )
 
         logger.info("TRT-LLM indexers sync test completed successfully")

@@ -22,12 +22,17 @@ def gms_ports():
     - frontend: Frontend HTTP port
     - shadow_system: System port for shadow/primary engine
     - primary_system: System port for primary engine (failover test only)
-    - shadow_kv_event: KV event port for shadow engine
-    - primary_kv_event: KV event port for primary engine
-    - shadow_nixl: NIXL side channel port for shadow engine
-    - primary_nixl: NIXL side channel port for primary engine
+    - shadow_kv_event: KV event port for shadow engine (vLLM)
+    - primary_kv_event: KV event port for primary engine (vLLM)
+    - shadow_nixl: NIXL side channel port for shadow engine (vLLM)
+    - primary_nixl: NIXL side channel port for primary engine (vLLM)
+    - shadow_sglang: SGLang HTTP port for shadow engine
+    - primary_sglang: SGLang HTTP port for primary engine
     """
-    ports = [allocate_port(p) for p in [8200, 8100, 8101, 20080, 20081, 20096, 20097]]
+    ports = [
+        allocate_port(p)
+        for p in [8200, 8100, 8101, 20080, 20081, 20096, 20097, 30000, 30001]
+    ]
     yield {
         "frontend": ports[0],
         "shadow_system": ports[1],
@@ -36,5 +41,7 @@ def gms_ports():
         "primary_kv_event": ports[4],
         "shadow_nixl": ports[5],
         "primary_nixl": ports[6],
+        "shadow_sglang": ports[7],
+        "primary_sglang": ports[8],
     }
     deallocate_ports(ports)
