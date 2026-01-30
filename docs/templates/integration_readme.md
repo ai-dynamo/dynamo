@@ -39,8 +39,12 @@ python -m dynamo.<backend> --<integration>-enabled
 
 ## Guides
 
-- \[<Integration> Setup\](<integration>_setup.md) - Installation and configuration
-- \[<Integration> with vLLM\](<integration>_vllm.md) - vLLM-specific usage
+| Document | Path | Description |
+|----------|------|-------------|
+| `<Integration> Setup` | `<integration>_setup.md` | Installation and configuration |
+| `<Integration> with vLLM` | `<integration>_vllm.md` | vLLM-specific usage |
+
+<!-- Convert to links: [LMCache Setup](lmcache_setup.md) -->
 
 ## External Resources
 

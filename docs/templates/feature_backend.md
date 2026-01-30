@@ -52,5 +52,9 @@ Using <Feature> with the <Backend> backend.
 
 ## See Also
 
-- \[<Feature> Overview\](./README.md)
-- \[<Backend> Guide\](/docs/backends/<backend>/README.md)
+| Document | Path |
+|----------|------|
+| `<Feature> Overview` | `./README.md` |
+| `<Backend> Guide` | `/docs/backends/<backend>/README.md` |
+
+<!-- Convert to links: [Multimodal Overview](./README.md) -->

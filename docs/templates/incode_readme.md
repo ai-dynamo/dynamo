@@ -6,4 +6,6 @@ orphan: true
 
 <!-- One-sentence description -->
 
-See \[<component> Documentation\](/docs/<component>/) for documentation.
+See `docs/<component>/` for full documentation.
+
+<!-- When using this template, replace with: [Component Documentation](/docs/component/) -->

@@ -49,5 +49,9 @@ spec:
 
 ## Next Steps
 
-- \[<Backend> Guide\](<backend>_guide.md) - Advanced configuration
-- \[Backend Comparison\](../README.md) - Compare backends
+| Document | Path | Description |
+|----------|------|-------------|
+| `<Backend> Guide` | `<backend>_guide.md` | Advanced configuration |
+| Backend Comparison | `../README.md` | Compare backends |
+
+<!-- Convert to links: [vLLM Guide](vllm_guide.md) -->

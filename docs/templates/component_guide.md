@@ -73,5 +73,9 @@ python -m dynamo.<component> --log-level DEBUG
 
 ## See Also
 
-- \[<Component> Examples\](<component>_examples.md)
-- \[<Component> Design\](/docs/design_docs/<component>_design.md)
+| Document | Path |
+|----------|------|
+| `<Component> Examples` | `<component>_examples.md` |
+| `<Component> Design` | `/docs/design_docs/<component>_design.md` |
+
+<!-- Convert to links: [Planner Examples](planner_examples.md) -->

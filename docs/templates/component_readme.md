@@ -18,7 +18,7 @@ orphan: true
 
 ### Prerequisites
 
-- Dynamo installed (`pip install nvidia-dynamo`)
+- Dynamo installed (`pip install ai-dynamo`)
 - <!-- Other prerequisites -->
 
 ### Python
@@ -47,6 +47,10 @@ spec:
 
 ## Next Steps
 
-- \[<Component> Guide\](<component>_guide.md) - Deployment and configuration
-- \[<Component> Examples\](<component>_examples.md) - Usage examples
-- \[<Component> Design\](/docs/design_docs/<component>_design.md) - Architecture
+| Document | Path | Description |
+|----------|------|-------------|
+| `<Component> Guide` | `<component>_guide.md` | Deployment and configuration |
+| `<Component> Examples` | `<component>_examples.md` | Usage examples |
+| `<Component> Design` | `/docs/design_docs/<component>_design.md` | Architecture |
+
+<!-- Convert table rows to links: [Planner Guide](planner_guide.md) -->

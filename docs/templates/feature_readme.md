@@ -14,7 +14,7 @@ orphan: true
 | SGLang | 🚧 | |
 | TensorRT-LLM | ❌ | |
 
-See \[Feature Matrix\](/docs/reference/feature-matrix.md) for full compatibility.
+See Feature Matrix at `/docs/reference/feature-matrix.md` for full compatibility.
 
 ## Overview
 
@@ -28,9 +28,13 @@ See \[Feature Matrix\](/docs/reference/feature-matrix.md) for full compatibility
 
 ## Backend-Specific Guides
 
-- \[<Feature> with vLLM\](<feature>_vllm.md)
-- \[<Feature> with SGLang\](<feature>_sglang.md)
-- \[<Feature> with TensorRT-LLM\](<feature>_trtllm.md)
+| Backend | Guide |
+|---------|-------|
+| vLLM | `<feature>_vllm.md` |
+| SGLang | `<feature>_sglang.md` |
+| TensorRT-LLM | `<feature>_trtllm.md` |
+
+<!-- Convert to links: [Multimodal with vLLM](multimodal_vllm.md) -->
 
 ## See Also
 
