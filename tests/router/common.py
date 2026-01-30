@@ -295,24 +295,36 @@ async def wait_for_workers_ready(
 
     # Poll for instance IDs until we have the expected number
     instance_ids: list[int] = []
-    max_wait_time = 60  # seconds
+    max_wait_time = 120  # seconds - allow time for model loading + worker registration
     start_time = asyncio.get_running_loop().time()
+    poll_interval = 1.0  # Start with 1 second
+    max_poll_interval = 5.0  # Cap at 5 seconds
 
     while len(instance_ids) < expected_num_workers:
         instance_ids = client.instance_ids()
-        logger.info(f"Found {len(instance_ids)} instance(s): {instance_ids}")
+        elapsed = asyncio.get_running_loop().time() - start_time
+        logger.info(
+            f"Found {len(instance_ids)} instance(s): {instance_ids} "
+            f"(elapsed: {elapsed:.1f}s/{max_wait_time}s)"
+        )
 
         if len(instance_ids) >= expected_num_workers:
             break
 
         # Check timeout
-        if asyncio.get_running_loop().time() - start_time > max_wait_time:
+        if elapsed > max_wait_time:
+            logger.error(f"Worker registration timeout after {elapsed:.1f}s:")
+            logger.error(f"  Expected workers: {expected_num_workers}")
+            logger.error(f"  Found workers: {len(instance_ids)}")
+            logger.error(f"  Instance IDs: {instance_ids}")
             raise AssertionError(
-                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), expected {expected_num_workers}"
+                f"Timeout waiting for workers. Found {len(instance_ids)} instance(s), "
+                f"expected {expected_num_workers} (waited {elapsed:.1f}s)"
             )
 
-        # Wait 1 second before polling again
-        await asyncio.sleep(1.0)
+        # Exponential backoff: 1s -> 1.5s -> 2.25s -> 3.37s -> 5s (capped)
+        await asyncio.sleep(poll_interval)
+        poll_interval = min(poll_interval * 1.5, max_poll_interval)
 
     # Send a warmup request to verify workers can handle requests
     test_token_ids = [random.randint(1, 10000) for _ in range(4)]
