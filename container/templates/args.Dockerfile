@@ -89,9 +89,9 @@ ARG TRTLLM_WHEEL_IMAGE={{ context.trtllm.trtllm_wheel_image }}
 # Copy pytorch installation from NGC PyTorch
 ARG FLASHINFER_PYTHON_VER={{ context.trtllm.flashinfer_python_ver }}
 ARG PYTORCH_TRITON_VER={{ context.trtllm.pytorch_triton_ver }}
-ARG TORCHAO_VER={{ context.trtllm.torchao_version }}
-ARG TORCHDATA_VER={{ context.trtllm.torchdata_version }}
-ARG TORCHTITAN_VER={{ context.trtllm.torchtitan_version }}
+ARG TORCHAO_VER={{ context.trtllm.torchao_ver }}
+ARG TORCHDATA_VER={{ context.trtllm.torchdata_ver }}
+ARG TORCHTITAN_VER={{ context.trtllm.torchtitan_ver }}
 ARG TORCH_VER={{ context.trtllm.torch_version }}
 ARG TORCH_TENSORRT_VER={{ context.trtllm.torch_tensorrt_version }}
 ARG TORCHVISION_VER={{ context.trtllm.torchvision_version }}
