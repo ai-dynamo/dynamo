@@ -415,7 +415,8 @@ async fn simulate_prefill(
         }
     }
     if speedup_ratio.is_finite() {
-        let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+        let deadline =
+            start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         tokio::time::sleep_until(deadline).await;
     }
 
@@ -496,7 +497,8 @@ async fn simulate_decode(
         }
     }
     if speedup_ratio.is_finite() {
-        let deadline = start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+        let deadline =
+            start_time + Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
         tokio::time::sleep_until(deadline).await;
     }
 
