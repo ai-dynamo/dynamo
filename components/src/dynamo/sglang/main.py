@@ -445,9 +445,6 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     """Initialize image diffusion worker component"""
     server_args, dynamo_args = config.server_args, config.dynamo_args
 
-    print(f"Server args: {server_args}")
-    print(f"Dynamo args: {dynamo_args}")
-
     # Initialize DiffGenerator (not sgl.Engine)
     from sglang.multimodal_gen import DiffGenerator
 
@@ -480,30 +477,17 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     if not fs_url:
         raise ValueError("--diffusion-fs-url is required for diffusion workers")
 
-    try:
-        import fsspec
+    import fsspec
 
-        # Extract protocol from URL (s3://, gs://, az://, file://)
-        fs_url_parts = fs_url.split("://")
-        protocol = fs_url_parts[0] if "://" in fs_url else "file"
+    # Extract protocol from URL (s3://, gs://, az://, file://)
+    fs_url_parts = fs_url.split("://")
+    protocol = fs_url_parts[0] if "://" in fs_url else "file"
 
-        # Initialize filesystem, configure fsspec using json configuration file
-        #  - json configuration file: ~/.config/fsspec/s3.json
-        #  - environment variables i.e. FSSPEC_S3_SECRET
-        fs = fsspec.filesystem(protocol, auto_mkdir=True)
-        logging.info(
-            f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})"
-        )
-    except ImportError:
-        logging.warning(
-            "fsspec not available. Filesystem uploads will fail. "
-            "Install with: pip install fsspec"
-        )
-    except Exception as e:
-        logging.warning(
-            f"Failed to initialize fsspec filesystem for {fs_url}: {e}. "
-            "Filesystem uploads may fail."
-        )
+    # Initialize filesystem, configure fsspec using json configuration file
+    #  - json configuration file: ~/.config/fsspec/s3.json
+    #  - environment variables i.e. FSSPEC_S3_SECRET
+    fs = fsspec.filesystem(protocol, auto_mkdir=True)
+    logging.info(f"fsspec filesystem initialized for: {fs_url} (protocol: {protocol})")
 
     component = runtime.namespace(dynamo_args.namespace).component(
         dynamo_args.component
