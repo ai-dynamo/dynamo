@@ -11,7 +11,14 @@ set -e
 MODEL_NAME="${1:-Qwen/Qwen3-0.6B}"
 
 cd /home/mabdulwahhab/repos/dynamo-7
-source .venv/bin/activate
+
+# Two venvs available:
+# 1. .venv - has editable vLLM install (with direct modifications)
+# 2. dynamo-standalone - has PyPI vLLM (with monkey patches only)
+#
+# Use dynamo-standalone by default for testing patch-based approach
+VENV_NAME="${VENV_NAME:-dynamo-standalone}"
+source "${VENV_NAME}/bin/activate"
 source .env
 
 LOG_DIR="/tmp/failover_test_$$"
@@ -80,16 +87,14 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Step 2: Start Primary Engine (with KV cache)
+# Step 2: Start Primary Engine (normal mode with full KV cache)
 echo ""
-echo "=== Step 2: Starting Primary Engine (with KV cache) ==="
+echo "=== Step 2: Starting Primary Engine (normal mode) ==="
 DYN_SYSTEM_PORT=8100 \
 python3 -m dynamo.vllm \
     --model "$MODEL_NAME" \
     -tp 1 \
     --load-format gms \
-    --enable-sleep-mode \
-    --compilation-config '{"cudagraph_mode": "PIECEWISE"}' \
     > "$PRIMARY_LOG" 2>&1 &
 PRIMARY_PID=$!
 echo "Primary Engine PID: $PRIMARY_PID"
@@ -160,11 +165,9 @@ else
     exit 1
 fi
 
-# Step 5: Start Shadow Engine (no KV cache, immediately sleep)
+# Step 5: Start Shadow Engine (--gms-mode shadow)
 echo ""
-echo "=== Step 5: Starting Shadow Engine (SHADOW_SKIP_KV_CACHE=1) ==="
-SHADOW_SKIP_KV_CACHE=1 \
-SHADOW_SKIP_MEMORY_CHECK=1 \
+echo "=== Step 5: Starting Shadow Engine (--gms-mode shadow) ==="
 DYN_SYSTEM_PORT=8101 \
 VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
 DYN_VLLM_KV_EVENT_PORT=20081 \
@@ -172,16 +175,15 @@ python3 -m dynamo.vllm \
     --model "$MODEL_NAME" \
     -tp 1 \
     --load-format gms \
-    --enable-sleep-mode \
-    --compilation-config '{"cudagraph_mode": "PIECEWISE"}' \
+    --gms-mode shadow \
     > "$SHADOW_LOG" 2>&1 &
 SHADOW_PID=$!
 echo "Shadow Engine PID: $SHADOW_PID"
 
-echo "Waiting for shadow engine to be ready..."
+echo "Waiting for shadow engine to initialize and auto-sleep..."
 for i in {1..180}; do
-    if grep -q "Registered endpoint 'generate'" "$SHADOW_LOG" 2>/dev/null; then
-        echo "✓ Shadow engine is ready!"
+    if grep -q "\[Shadow\] Engine is now sleeping" "$SHADOW_LOG" 2>/dev/null; then
+        echo "✓ Shadow engine is sleeping!"
         break
     fi
     if ! kill -0 $SHADOW_PID 2>/dev/null; then
@@ -198,38 +200,23 @@ for i in {1..180}; do
 done
 
 # Verify KV cache was skipped
-if grep -q "\[Shadow\] Skipping KV cache allocation" "$SHADOW_LOG"; then
+if grep -q "\[Shadow\] Init phase: stored config, skipping KV cache allocation" "$SHADOW_LOG"; then
     echo "✓ Shadow engine skipped KV cache allocation"
 else
     echo "✗ ERROR: Shadow engine did not skip KV cache!"
+    echo "Looking for: [Shadow] Init phase: stored config, skipping KV cache allocation"
+    tail -30 "$SHADOW_LOG"
     exit 1
 fi
-
-# Step 6: Sleep the shadow engine
-echo ""
-echo "=== Step 6: Sleeping Shadow Engine ==="
-SLEEP_RESPONSE=$(curl -s -X POST http://localhost:8101/engine/sleep \
-    -H "Content-Type: application/json" \
-    -d '{"level": 1}')
-echo "Sleep response: $SLEEP_RESPONSE"
-
-if echo "$SLEEP_RESPONSE" | grep -q '"status":"ok"'; then
-    echo "✓ Shadow engine is now sleeping"
-else
-    echo "✗ Failed to sleep shadow engine!"
-    exit 1
-fi
-
-sleep 2
 
 # Check GPU memory with both engines
 echo ""
 echo "=== GPU Memory (primary active, shadow sleeping) ==="
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
 
-# Step 7: Kill the primary engine (simulate failure)
+# Step 6: Kill the primary engine (simulate failure)
 echo ""
-echo "=== Step 7: Simulating Primary Engine Failure ==="
+echo "=== Step 6: Simulating Primary Engine Failure ==="
 echo "Killing primary engine (PID: $PRIMARY_PID)..."
 kill $PRIMARY_PID 2>/dev/null || true
 wait $PRIMARY_PID 2>/dev/null || true
@@ -239,9 +226,9 @@ echo "✓ Primary engine killed"
 # Give discovery time to notice
 sleep 3
 
-# Step 8: Wake the shadow engine (with timing)
+# Step 7: Wake the shadow engine (with timing)
 echo ""
-echo "=== Step 8: Waking Shadow Engine (Failover) ==="
+echo "=== Step 7: Waking Shadow Engine (Failover) ==="
 
 # Count current re-registration lines before wake
 REREGISTER_COUNT_BEFORE=$(cat "$SHADOW_LOG" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c "Re-registered endpoint to discovery" || echo 0)
@@ -303,9 +290,9 @@ echo ""
 echo "=== GPU Memory (after failover) ==="
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
 
-# Step 9: Test inference on shadow (now active)
+# Step 8: Test inference on shadow (now active)
 echo ""
-echo "=== Step 9: Testing Inference on Shadow Engine (Post-Failover) ==="
+echo "=== Step 8: Testing Inference on Shadow Engine (Post-Failover) ==="
 
 # Wait a bit for discovery to propagate
 sleep 2
@@ -339,8 +326,7 @@ echo "=================================================="
 echo ""
 echo "Summary:"
 echo "  - Primary engine started and served inference"
-echo "  - Shadow engine started with no KV cache"
-echo "  - Shadow engine slept (minimal memory footprint)"
+echo "  - Shadow engine started with --gms-mode shadow (no KV cache, auto-sleep)"
 echo "  - Primary engine killed (simulated failure)"
 echo "  - Shadow engine woke up in ${FAILOVER_DURATION_MS} ms"
 echo "  - Shadow engine successfully serves inference"

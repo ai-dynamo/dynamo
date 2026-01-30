@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import nullcontext
 from typing import List, Optional
 
@@ -32,6 +33,7 @@ from gpu_memory_service.vllm_integration.model_loader import (  # noqa: E402
     register_gms_loader,
 )
 from gpu_memory_service.vllm_integration.patches import (  # noqa: E402
+    apply_shadow_mode_patches,
     patch_empty_cache,
     patch_memory_snapshot,
 )
@@ -39,13 +41,16 @@ from gpu_memory_service.vllm_integration.patches import (  # noqa: E402
 # Register model loader
 register_gms_loader()
 
-# Apply utility patches
+# Apply core utility patches (always needed for GMS)
 patch_empty_cache()
 patch_memory_snapshot()
 
-logger.info(
-    "[GMS] Worker module loaded - model loader registered, utility patches applied"
-)
+# Apply shadow mode patches (check SHADOW_SKIP_KV_CACHE at runtime)
+# These patches are safe to apply even for non-shadow engines because
+# they check the environment variable at runtime before modifying behavior.
+apply_shadow_mode_patches()
+
+logger.info("[GMS] Worker module loaded - model loader registered, all patches applied")
 
 # Import Worker after patches are applied
 from vllm.v1.worker.gpu_worker import Worker  # noqa: E402
@@ -81,8 +86,18 @@ class GMSWorker(Worker):
         After the parent loads the model, we correct the model_memory_usage
         to reflect the actual bytes imported from GMS (not the delta measured
         by vLLM's memory tracking).
+
+        For shadow mode, we also set _shadow_init_phase on model_runner to
+        signal that patches should no-op during initialization.
         """
         super().load_model(*args, **kwargs)
+
+        # Shadow mode: set init phase flag on model_runner
+        # This tells patches to no-op (e.g., skip KV cache allocation)
+        if os.environ.get("SHADOW_SKIP_KV_CACHE") == "1":
+            if hasattr(self, "model_runner") and self.model_runner is not None:
+                self.model_runner._shadow_init_phase = True
+                logger.info("[Shadow] Set _shadow_init_phase=True on model_runner")
 
         # Correct memory accounting for GMS-imported weights
         try:
@@ -154,6 +169,14 @@ class GMSWorker(Worker):
         2. Shadow: KV cache was skipped at startup, allocate via allocate_kv_cache_on_wake()
         """
         from vllm.device_allocator.cumem import CuMemAllocator
+
+        # Clear shadow init phase flag FIRST
+        # This signals that patches should now work normally (e.g., allocate KV cache)
+        if getattr(self.model_runner, "_shadow_init_phase", False):
+            self.model_runner._shadow_init_phase = False
+            logger.info(
+                "[Shadow] Cleared _shadow_init_phase, patches will work normally"
+            )
 
         if tags is None:
             tags = ["weights", "kv_cache"]

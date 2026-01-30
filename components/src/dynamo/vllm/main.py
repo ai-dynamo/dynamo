@@ -308,6 +308,61 @@ def setup_vllm_engine(config, stat_logger=None):
     if engine_args.load_format == "gms":
         engine_args.worker_cls = "gpu_memory_service.vllm_integration.worker.GMSWorker"
 
+        # Shadow mode configuration
+        if config.gms_mode == "shadow":
+            # Set environment variable to trigger shadow mode patches
+            # This is checked at runtime by the patches in patches.py
+            os.environ["SHADOW_SKIP_KV_CACHE"] = "1"
+            logger.info(
+                "[Shadow] Enabled shadow mode: will skip KV cache allocation at startup"
+            )
+
+            # Force PIECEWISE CUDA graph mode (required for shadow engines)
+            # In PIECEWISE mode, attention ops are stubbed during graph capture,
+            # so no KV cache is needed at capture time
+            if engine_args.compilation_config is None:
+                engine_args.compilation_config = {"cudagraph_mode": "PIECEWISE"}
+                logger.info("[Shadow] Set CUDA graph mode to PIECEWISE")
+            elif isinstance(engine_args.compilation_config, dict):
+                if engine_args.compilation_config.get("cudagraph_mode") != "PIECEWISE":
+                    logger.warning(
+                        "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                        "(required for shadow mode)"
+                    )
+                    engine_args.compilation_config["cudagraph_mode"] = "PIECEWISE"
+            elif isinstance(engine_args.compilation_config, str):
+                # compilation_config is a string (JSON) - parse, modify, reserialize
+                import json
+
+                try:
+                    cc = json.loads(engine_args.compilation_config)
+                    if cc.get("cudagraph_mode") != "PIECEWISE":
+                        logger.warning(
+                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                            "(required for shadow mode)"
+                        )
+                        cc["cudagraph_mode"] = "PIECEWISE"
+                        engine_args.compilation_config = json.dumps(cc)
+                except json.JSONDecodeError:
+                    logger.error(
+                        "[Shadow] Could not parse compilation_config as JSON, "
+                        "shadow mode may not work correctly"
+                    )
+            else:
+                # compilation_config is a CompilationConfig object
+                from vllm.config import CUDAGraphMode
+
+                if hasattr(engine_args.compilation_config, "cudagraph_mode"):
+                    current_mode = engine_args.compilation_config.cudagraph_mode
+                    if current_mode != CUDAGraphMode.PIECEWISE:
+                        logger.warning(
+                            "[Shadow] Overriding cudagraph_mode to PIECEWISE "
+                            "(required for shadow mode)"
+                        )
+                        engine_args.compilation_config.cudagraph_mode = (
+                            CUDAGraphMode.PIECEWISE
+                        )
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -625,6 +680,18 @@ async def init(runtime: DistributedRuntime, config: Config):
     health_check_payload = VllmHealthCheckPayload(
         engine_client, use_text_input=config.use_vllm_tokenizer
     ).to_dict()
+
+    # Shadow mode: auto-sleep after registration
+    # The sleep call unregisters from discovery, so the engine won't receive
+    # inference requests until woken. The wake_up route remains accessible
+    # via DYN_SYSTEM_PORT for external coordinators to activate the engine.
+    if config.gms_mode == "shadow":
+        logger.info("[Shadow] Auto-sleeping engine after registration")
+        await handler.sleep({"level": 1})
+        logger.info(
+            "[Shadow] Engine is now sleeping - call /engine/wake_up on port %s to activate",
+            os.environ.get("DYN_SYSTEM_PORT", "8080"),
+        )
 
     try:
         logger.debug("Starting serve_endpoint for decode worker")

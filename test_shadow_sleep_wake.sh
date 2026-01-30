@@ -11,7 +11,14 @@ set -e
 MODEL_NAME="${1:-Qwen/Qwen3-0.6B}"
 
 cd /home/mabdulwahhab/repos/dynamo-7
-source .venv/bin/activate
+
+# Two venvs available:
+# 1. .venv - has editable vLLM install (with direct modifications)
+# 2. dynamo-standalone - has PyPI vLLM (with monkey patches only)
+#
+# Use dynamo-standalone by default for testing patch-based approach
+VENV_NAME="${VENV_NAME:-dynamo-standalone}"
+source "${VENV_NAME}/bin/activate"
 source .env
 
 LOG_DIR="/tmp/shadow_test_$$"
@@ -72,27 +79,24 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Step 2: Start Shadow Engine
+# Step 2: Start Shadow Engine with --gms-mode shadow
 echo ""
-echo "=== Step 2: Starting Shadow Engine (SHADOW_SKIP_KV_CACHE=1) ==="
-SHADOW_SKIP_KV_CACHE=1 \
-SHADOW_SKIP_MEMORY_CHECK=1 \
+echo "=== Step 2: Starting Shadow Engine (--gms-mode shadow) ==="
 DYN_SYSTEM_PORT=8100 \
 python3 -m dynamo.vllm \
     --model "$MODEL_NAME" \
     -tp 1 \
     --load-format gms \
-    --enable-sleep-mode \
-    --compilation-config '{"cudagraph_mode": "PIECEWISE"}' \
+    --gms-mode shadow \
     > "$ENGINE_LOG" 2>&1 &
 ENGINE_PID=$!
 echo "Engine PID: $ENGINE_PID"
 
-# Wait for engine to be ready
-echo "Waiting for engine to be ready (this may take 30-120 seconds depending on model)..."
+# Wait for engine to auto-sleep (shadow mode auto-sleeps after init)
+echo "Waiting for shadow engine to initialize and auto-sleep..."
 for i in {1..180}; do
-    if grep -q "Registered endpoint 'generate'" "$ENGINE_LOG" 2>/dev/null; then
-        echo "Engine is ready!"
+    if grep -q "\[Shadow\] Engine is now sleeping" "$ENGINE_LOG" 2>/dev/null; then
+        echo "Shadow engine is sleeping!"
         break
     fi
     if ! kill -0 $ENGINE_PID 2>/dev/null; then
@@ -111,10 +115,13 @@ done
 # Verify KV cache was skipped
 echo ""
 echo "=== Verifying KV cache was skipped ==="
-if grep -q "\[Shadow\] Skipping KV cache allocation" "$ENGINE_LOG"; then
+if grep -q "\[Shadow\] Init phase: stored config, skipping KV cache allocation" "$ENGINE_LOG"; then
     echo "✓ KV cache allocation was skipped"
 else
     echo "✗ ERROR: KV cache was not skipped!"
+    echo "Looking for: [Shadow] Init phase: stored config, skipping KV cache allocation"
+    echo "Engine log tail:"
+    tail -30 "$ENGINE_LOG"
     exit 1
 fi
 
@@ -145,40 +152,16 @@ for i in {1..30}; do
     sleep 1
 done
 
-# Check GPU memory
+# Check GPU memory (should be low - no KV cache)
 echo ""
-echo "=== GPU Memory (before sleep) ==="
+echo "=== GPU Memory (engine sleeping, no KV cache) ==="
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
 
-# Step 3: Sleep
+# Step 3: Wake the shadow engine (with timing)
 echo ""
-echo "=== Step 3: Testing Sleep ==="
-SLEEP_RESPONSE=$(curl -s -X POST http://localhost:8100/engine/sleep \
-    -H "Content-Type: application/json" \
-    -d '{"level": 1}')
-echo "Sleep response: $SLEEP_RESPONSE"
+echo "=== Step 3: Testing Wake ==="
 
-if echo "$SLEEP_RESPONSE" | grep -q '"status":"ok"'; then
-    echo "✓ Sleep succeeded"
-else
-    echo "✗ Sleep failed!"
-    exit 1
-fi
-
-sleep 2
-
-# Verify sleep logs
-if grep -q "\[GMS\] KV cache not allocated (shadow mode), skipping sleep" "$ENGINE_LOG"; then
-    echo "✓ Shadow mode sleep handled correctly"
-else
-    echo "✗ Shadow mode sleep not detected in logs"
-fi
-
-# Step 4: Wake (with timing)
-echo ""
-echo "=== Step 4: Testing Wake ==="
-
-# Count current re-registration lines before wake (strip ANSI codes and handle grep properly)
+# Count current re-registration lines before wake
 REREGISTER_COUNT_BEFORE=$(cat "$ENGINE_LOG" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c "Re-registered endpoint to discovery" || echo 0)
 REREGISTER_COUNT_BEFORE=$(echo "$REREGISTER_COUNT_BEFORE" | tr -d '[:space:]')
 
@@ -243,14 +226,14 @@ if grep -q "Allocated KV cache on wake" "$ENGINE_LOG"; then
     grep "Allocated KV cache on wake" "$ENGINE_LOG" | tail -1
 fi
 
-# Check GPU memory after wake
+# Check GPU memory after wake (should be higher - KV cache allocated)
 echo ""
-echo "=== GPU Memory (after wake) ==="
+echo "=== GPU Memory (after wake, KV cache allocated) ==="
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader
 
-# Step 5: Test Inference
+# Step 4: Test Inference
 echo ""
-echo "=== Step 5: Testing Inference ==="
+echo "=== Step 4: Testing Inference ==="
 echo "Sending completion request to frontend (port 8000)..."
 
 INFERENCE_RESPONSE=$(curl -s -X POST http://localhost:8000/v1/completions \
@@ -284,5 +267,5 @@ fi
 
 echo ""
 echo "=============================================="
-echo "=== TEST PASSED: Sleep/Wake/Inference works ==="
+echo "=== TEST PASSED: Shadow Wake/Inference works ==="
 echo "=============================================="

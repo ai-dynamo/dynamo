@@ -42,6 +42,9 @@ class Config:
     request_plane: str
     enable_local_indexer: bool = False
 
+    # GMS configuration
+    gms_mode: str = "normal"  # "normal" or "shadow"
+
     # mirror vLLM
     model: str
     served_model_name: Optional[str]
@@ -271,6 +274,19 @@ def parse_args() -> Config:
         default=False,
         help="Use vLLM's tokenizer for pre and post processing. This bypasses Dynamo's preprocessor and only v1/chat/completions will be available through the Dynamo frontend.",
     )
+    parser.add_argument(
+        "--gms-mode",
+        type=str,
+        choices=["normal", "shadow"],
+        default="normal",
+        help=(
+            "GMS (GPU Memory Service) operation mode. "
+            "'normal': Standard engine with full KV cache allocation at startup. "
+            "'shadow': Shadow/standby engine that skips KV cache allocation at startup "
+            "and automatically sleeps after initialization. Shadow engines wake up on demand "
+            "and allocate KV cache when activated. Requires --load-format=gms."
+        ),
+    )
     add_config_dump_args(parser)
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -403,7 +419,15 @@ def parse_args() -> Config:
     config.request_plane = args.request_plane
     config.enable_local_indexer = args.enable_local_indexer
     config.use_vllm_tokenizer = args.use_vllm_tokenizer
+    config.gms_mode = args.gms_mode
     # use_kv_events is set later in overwrite_args() based on kv_events_config
+
+    # Validate --gms-mode shadow requires --load-format gms
+    if config.gms_mode == "shadow" and engine_args.load_format != "gms":
+        raise ValueError(
+            "--gms-mode shadow requires --load-format gms. "
+            "Shadow mode depends on GMS for VA-stable weight sharing."
+        )
 
     # Validate custom Jinja template file exists if provided
     if config.custom_jinja_template is not None:

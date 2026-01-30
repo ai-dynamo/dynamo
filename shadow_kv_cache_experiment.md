@@ -1,22 +1,50 @@
 # Shadow Engine KV Cache Experiment
 
 ## Goal
-Enable shadow engines to start with minimal GPU memory footprint during warmup/CUDA graph capture, then expanding to full size on wake.
+Enable shadow engines to start with minimal GPU memory footprint by skipping KV cache allocation, then expanding to full capacity on wake.
 
 ---
 
-## Status: ✅ WORKING
+## Status: ✅ IMPLEMENTED
 
-**Tested:** 2026-01-28
-**Model:** Qwen/Qwen3-0.6B (also tested concepts with Qwen3-14B)
+**Implementation Date:** 2026-01-28
+**Design Document:** `docs/design/gms-shadow-mode.md`
 
-### Test Results
+---
+
+## API
+
+```bash
+# Shadow engine (skips KV cache, auto-sleeps after init)
+python3 -m dynamo.vllm \
+    --model Qwen/Qwen3-14B \
+    --load-format gms \
+    --gms-mode shadow
+```
+
+**Why `--gms-mode shadow` instead of separate flags?**
+Shadow mode requires GMS for VA-stable weights. Without GMS, wake would be slow (weight reload). Making it a GMS sub-option reflects this dependency.
+
+---
+
+## Behavior
+
+When `--gms-mode shadow`:
+1. Skip KV cache allocation at startup (via patches)
+2. Force PIECEWISE CUDA graph mode (attention stubbed during capture)
+3. Register with discovery, then immediately auto-sleep (unregisters from routing pool)
+4. Wait for external `wake_up` call on `DYN_SYSTEM_PORT`
+5. On wake: allocate KV cache, re-register with discovery, serve requests
+
+---
+
+## Test Results
 
 | Metric | Value |
 |--------|-------|
-| **Failover time** | 382 ms |
-| **Wake time** | 357 ms |
-| KV cache allocated on wake | 40.04 GiB (28 tensors) |
+| **Failover time** | ~380 ms |
+| **Wake time** | ~360 ms |
+| KV cache allocated on wake | 40.04 GiB (28 tensors for Qwen3-0.6B) |
 | Shadow sleeping footprint | ~3.4 GiB (weights only) |
 | Full engine footprint | ~44.5 GiB (weights + KV cache) |
 
@@ -25,35 +53,47 @@ Enable shadow engines to start with minimal GPU memory footprint during warmup/C
 | Stage | GPU Memory | Description |
 |-------|-----------|-------------|
 | Primary ready | ~44.5 GiB | Primary with full KV cache |
-| Primary + Shadow sleeping | 46.9 GiB | Both engines, shadow has no KV |
-| After failover | 44.6 GiB | Shadow with KV cache, primary gone |
+| Primary + Shadow sleeping | ~46.9 GiB | Both engines, shadow has no KV |
+| After failover | ~44.6 GiB | Shadow with KV cache, primary gone |
 
 ---
 
-## Current Implementation
+## Implementation
 
-**Based on:** dynamo main branch
-**vLLM Version:** 0.14.0
+### Files Modified
 
-### Environment Variables
+**dynamo:**
+- `components/src/dynamo/vllm/args.py` - Add `--gms-mode` argument
+- `components/src/dynamo/vllm/main.py` - Shadow mode setup and auto-sleep
+- `lib/gpu_memory_service/vllm_integration/patches.py` - Shadow mode patches
+- `lib/gpu_memory_service/vllm_integration/worker.py` - Apply patches
 
-| Env Var | Purpose |
-|---------|---------|
-| `SHADOW_SKIP_KV_CACHE=1` | Skip KV cache allocation at startup |
-| `SHADOW_SKIP_MEMORY_CHECK=1` | Bypass memory check for shadow engines |
+### Patches (in `patches.py`)
 
-### Architecture
+| Patch | Target | Purpose |
+|-------|--------|---------|
+| `patch_request_memory()` | `vllm.v1.worker.utils.request_memory` | Bypass memory check in shadow mode |
+| `patch_register_kv_caches()` | `NixlConnector.register_kv_caches` | Skip NIXL registration when no KV cache |
+| `patch_initialize_kv_cache()` | `GPUModelRunner.initialize_kv_cache` | Skip KV allocation, store config for wake |
+| `patch_allocate_kv_cache_on_wake()` | Adds method to `GPUModelRunner` | Allocate KV cache on wake |
 
-**dynamo changes (`lib/gpu_memory_service/vllm_integration/worker.py`):**
-- `GMSWorker.sleep()` - Handles both normal and shadow mode KV cache
-- `GMSWorker.wake_up()` - Detects empty `kv_caches` and calls `allocate_kv_cache_on_wake()`
+### Patch Details
 
-**vLLM changes (`vllm/v1/worker/gpu_model_runner.py`):**
-- `initialize_kv_cache()` - Checks `SHADOW_SKIP_KV_CACHE` env var, stores `_shadow_kernel_block_sizes`
-- `allocate_kv_cache_on_wake()` - Allocates KV cache on wake using stored config
+**1. `patch_request_memory()`**
+- **Problem:** vLLM checks `free_memory >= requested_memory` at startup, which fails for shadow engines because the primary is using GPU memory.
+- **Solution:** When `SHADOW_SKIP_KV_CACHE=1`, bypass the check entirely.
 
-**vLLM changes (`vllm/v1/worker/utils.py`):**
-- `request_memory()` - Checks `SHADOW_SKIP_MEMORY_CHECK` env var
+**2. `patch_register_kv_caches()`**
+- **Problem:** vLLM registers KV cache with NIXL for RDMA transfers, but calling `register_kv_caches({})` with empty caches causes errors.
+- **Solution:** No-op in shadow mode; registration happens in `allocate_kv_cache_on_wake()`.
+
+**3. `patch_initialize_kv_cache()`**
+- **Problem:** Need to skip KV cache allocation but preserve config for later.
+- **Solution:** Store `kv_cache_config` and `kernel_block_sizes` on self, set `kv_caches = {}`.
+
+**4. `patch_allocate_kv_cache_on_wake()`**
+- **Problem:** Need to allocate KV cache dynamically when engine wakes.
+- **Solution:** Use stored config to call `initialize_kv_cache_tensors()` and register with KV transfer group.
 
 ---
 
@@ -66,7 +106,7 @@ Enable shadow engines to start with minimal GPU memory footprint during warmup/C
 
 In **FULL** mode, during graph capture:
 ```python
-# flash_attn.py line 625
+# flash_attn.py
 key_cache, value_cache = kv_cache.unbind(0)  # 💥 Fails if no KV cache!
 ```
 
@@ -79,11 +119,9 @@ In **PIECEWISE** mode:
 
 ## Test Scripts
 
-Two automated test scripts are provided:
-
 ### Sleep/Wake Test
 ```bash
-# Test single shadow engine sleep/wake cycle with inference
+# Test shadow engine wake and inference
 ./test_shadow_sleep_wake.sh [MODEL_NAME]
 
 # Example:
@@ -104,17 +142,14 @@ Two automated test scripts are provided:
 ## Manual Test Procedure
 
 ### Prerequisites
-1. tmux session with multiple panes
-2. Environment: dynamo venv activated
-3. Branches checked out:
-   - dynamo: `gms-shadow-experiment`
-   - vLLM: `gms-shadow-experiment` (with shadow patches applied)
+1. Environment: dynamo venv activated
+2. GMS, etcd, and NATS running
 
 ### Commands
 
 #### Terminal 1: GPU Memory Service
 ```bash
-cd /home/mabdulwahhab/repos/dynamo-7
+cd /path/to/dynamo
 source .venv/bin/activate
 source .env
 python3 -m gpu_memory_service --device 0
@@ -122,114 +157,96 @@ python3 -m gpu_memory_service --device 0
 
 #### Terminal 2: Shadow Engine
 ```bash
-cd /home/mabdulwahhab/repos/dynamo-7
+cd /path/to/dynamo
 source .venv/bin/activate
 source .env
 
-# Start shadow engine with skip KV cache allocation
-SHADOW_SKIP_KV_CACHE=1 SHADOW_SKIP_MEMORY_CHECK=1 \
-  DYN_SYSTEM_PORT=8100 python3 -m dynamo.vllm \
-  --model Qwen/Qwen3-0.6B -tp 1 \
-  --load-format gms \
-  --enable-sleep-mode \
-  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
+DYN_SYSTEM_PORT=8100 python3 -m dynamo.vllm \
+    --model Qwen/Qwen3-0.6B \
+    --load-format gms \
+    --gms-mode shadow
 ```
 
-#### Terminal 3: GPU Monitor
+#### Terminal 3: Wake and Test
 ```bash
-watch -n 1 nvidia-smi
+# Wake the shadow engine
+curl -X POST http://localhost:8100/engine/wake_up
+
+# Test inference (after starting frontend)
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model": "Qwen/Qwen3-0.6B", "prompt": "Hello", "max_tokens": 10}'
 ```
 
 ### Success Criteria
 
 | Checkpoint | What to Look For |
 |------------|------------------|
-| GMS started | `GPU Memory Service running on device 0` |
-| Weights loaded | `[GMS] Read mode: imported X.XX GiB` |
-| KV cache skipped | `[Shadow] Skipping KV cache allocation (SHADOW_SKIP_KV_CACHE=1)` |
-| CUDA graphs captured | `Capturing CUDA graphs (mixed prefill-decode, PIECEWISE)` |
-| **NO** FULL graphs | Should NOT see `Capturing CUDA graphs (decode, FULL)` |
-| Engine ready | Engine startup complete |
-| Memory usage | GPU memory ~3.4 GiB (vs ~44 GiB with full KV cache) |
+| GMS started | `waiting for connections` |
+| KV cache skipped | `[Shadow] Skipping KV cache allocation` |
+| Auto-sleep | `[Shadow] Engine is now sleeping` |
+| PIECEWISE mode | `Capturing CUDA graphs ... PIECEWISE` |
+| Wake successful | `Allocated KV cache on wake: X.XX GiB` |
+| Re-registered | `Re-registered endpoint to discovery` |
 
-### Wake Test
-
-```bash
-# Call wake on shadow engine
-curl -X POST http://localhost:8100/engine/wake_up
-
-# Expected log output:
-# [GMS] KV cache not allocated - allocating on wake
-# Allocating KV cache on wake (was skipped during init)
-# Allocated KV cache on wake: 40.04 GiB (28 tensors)
-# [GMS] Successfully allocated KV cache on wake
-```
-
-### Failure Indicators
+### Error Indicators
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| `ValueError: not enough values to unpack` | FULL CUDA graph mode | Add `--compilation-config '{"cudagraph_mode": "PIECEWISE"}'` |
-| `Free memory on device ... is less than desired` | Memory check failed | Add `SHADOW_SKIP_MEMORY_CHECK=1` |
-| `allocate_kv_cache_on_wake not available` | vLLM branch not applied | Checkout `gms-shadow-experiment` and reinstall vLLM |
-| `AssertionError: Current vLLM config is not set` | Missing stored config | Ensure `_shadow_kernel_block_sizes` saved in init |
+| `--gms-mode shadow requires --load-format gms` | Missing GMS | Add `--load-format gms` |
+| `ValueError: not enough values to unpack` | FULL CUDA graph | Shadow mode forces PIECEWISE automatically |
+| Memory check failure | Shouldn't happen | Patches bypass memory check in shadow mode |
+| `allocate_kv_cache_on_wake` not found | Patches not applied | Ensure GMSWorker is being used |
 
 ---
 
 ## Git References
 
-### dynamo Repository: `/home/mabdulwahhab/repos/dynamo-7`
+### dynamo Repository
 
 | Branch | Base | Description |
 |--------|------|-------------|
-| `gms-shadow-experiment` | `main` | Shadow KV cache with GMS integration |
-
-### vLLM Repository: `/home/mabdulwahhab/repos/vllm`
-
-| Branch | Base | Description |
-|--------|------|-------------|
-| `gms-shadow-experiment` | `v0.14.0` | Skip KV cache via env vars |
+| `gms-shadow-experiment` | `main` | Shadow mode with `--gms-mode shadow` API |
 
 ---
 
-## Files Modified
+## Architecture
 
-**dynamo:**
-- `lib/gpu_memory_service/vllm_integration/worker.py` - `GMSWorker` sleep/wake for shadow mode
-- `test_shadow_sleep_wake.sh` - Automated sleep/wake test
-- `test_shadow_failover.sh` - Automated failover test
-- `shadow_kv_cache_experiment.md` - This documentation
-
-**vLLM:**
-- `vllm/v1/worker/gpu_model_runner.py` - `SHADOW_SKIP_KV_CACHE` + `allocate_kv_cache_on_wake()`
-- `vllm/v1/worker/utils.py` - `SHADOW_SKIP_MEMORY_CHECK`
-
----
-
-## Implementation Details
-
-### Key Design Decision: Storing Config at Init
-
-The `allocate_kv_cache_on_wake()` method needs `kernel_block_sizes` and `kv_cache_config` to allocate KV cache. Initially we tried recomputing these on wake, but this required the `vllm_config` context which isn't available during the GMS worker's `wake_up()` call.
-
-**Solution:** Store the necessary config during `initialize_kv_cache()`:
-```python
-# In initialize_kv_cache():
-if skip_kv_cache:
-    self._shadow_kernel_block_sizes = kernel_block_sizes  # Save for later
-    kv_caches = {}
 ```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         SHADOW MODE FLOW                             │
+└─────────────────────────────────────────────────────────────────────┘
 
-Then retrieve on wake:
-```python
-# In allocate_kv_cache_on_wake():
-assert hasattr(self, '_shadow_kernel_block_sizes'), "Must be set in initialize_kv_cache"
-kernel_block_sizes = self._shadow_kernel_block_sizes
-```
+1. Engine starts with --gms-mode shadow
+   ├── SHADOW_SKIP_KV_CACHE=1 set automatically
+   ├── PIECEWISE CUDA graph mode forced
+   └── Patches check env var at runtime
 
-### Editable vLLM Install
-```bash
-cd /home/mabdulwahhab/repos/dynamo-7
-source .venv/bin/activate
-VLLM_USE_PRECOMPILED=1 pip install -e /home/mabdulwahhab/repos/vllm --no-build-isolation
+2. Model initialization
+   ├── Weights loaded via GMS (shared with primary)
+   ├── patch_initialize_kv_cache() skips KV allocation
+   ├── Stores kv_cache_config and kernel_block_sizes
+   └── CUDA graphs captured (PIECEWISE, no KV needed)
+
+3. Registration and auto-sleep
+   ├── Engine registers with discovery
+   ├── handler.sleep() called automatically
+   └── Engine unregistered from routing pool
+
+4. Waiting state
+   ├── Engine serves endpoints (wake_up accessible)
+   ├── Not in routing pool (won't receive requests)
+   └── Minimal memory footprint (no KV cache)
+
+5. Wake (triggered externally)
+   ├── GMSWorker.wake_up() called
+   ├── Weights remapped (VA-stable)
+   ├── allocate_kv_cache_on_wake() allocates KV cache
+   ├── Register with KV transfer group
+   └── Re-register with discovery
+
+6. Active state
+   ├── Full memory footprint (weights + KV cache)
+   ├── In routing pool (receives requests)
+   └── Normal inference operation
 ```
