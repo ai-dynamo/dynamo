@@ -12,7 +12,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/examples/backends/trtllm
           command:
             - python3
@@ -36,7 +36,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/components/src/dynamo/planner
           ports:
             - name: metrics
@@ -85,7 +85,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/
           command:
             - python3
@@ -111,7 +111,7 @@ spec:
       extraPodSpec:
         terminationGracePeriodSeconds: 600
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+          image: nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.2
           workingDir: /workspace/
           command:
             - python3
