@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Backend> Guide
 
 Advanced deployment and configuration for the <Backend> backend.

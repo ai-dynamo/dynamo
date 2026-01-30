@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Feature> with <Backend>
 
 Using <Feature> with the <Backend> backend.
@@ -48,5 +52,5 @@ Using <Feature> with the <Backend> backend.
 
 ## See Also
 
-- [<Feature> Overview](./README.md)
-- [<Backend> Guide](/docs/backends/<backend>/README.md)
+- \[<Feature> Overview\](./README.md)
+- \[<Backend> Guide\](/docs/backends/<backend>/README.md)

@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Backend> Backend
 
 <!-- 2-3 sentence overview of this backend integration -->
@@ -45,5 +49,5 @@ spec:
 
 ## Next Steps
 
-- [<Backend> Guide](<backend>_guide.md) - Advanced configuration
-- [Backend Comparison](../README.md) - Compare backends
+- \[<Backend> Guide\](<backend>_guide.md) - Advanced configuration
+- \[Backend Comparison\](../README.md) - Compare backends

@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # Documentation Templates
 
 Templates for creating consistent Dynamo documentation.

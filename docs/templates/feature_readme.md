@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Feature>
 
 <!-- 2-3 sentence overview of this cross-cutting feature -->
@@ -10,7 +14,7 @@
 | SGLang | 🚧 | |
 | TensorRT-LLM | ❌ | |
 
-See [Feature Matrix](/docs/reference/feature-matrix.md) for full compatibility.
+See \[Feature Matrix\](/docs/reference/feature-matrix.md) for full compatibility.
 
 ## Overview
 
@@ -24,9 +28,9 @@ See [Feature Matrix](/docs/reference/feature-matrix.md) for full compatibility.
 
 ## Backend-Specific Guides
 
-- [<Feature> with vLLM](<feature>_vllm.md)
-- [<Feature> with SGLang](<feature>_sglang.md)
-- [<Feature> with TensorRT-LLM](<feature>_trtllm.md)
+- \[<Feature> with vLLM\](<feature>_vllm.md)
+- \[<Feature> with SGLang\](<feature>_sglang.md)
+- \[<Feature> with TensorRT-LLM\](<feature>_trtllm.md)
 
 ## See Also
 

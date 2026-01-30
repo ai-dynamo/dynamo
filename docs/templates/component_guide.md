@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Component> Guide
 
 This guide covers deployment, configuration, and integration for the <Component>.
@@ -69,5 +73,5 @@ python -m dynamo.<component> --log-level DEBUG
 
 ## See Also
 
-- [<Component> Examples](<component>_examples.md)
-- [<Component> Design](/docs/design_docs/<component>_design.md)
+- \[<Component> Examples\](<component>_examples.md)
+- \[<Component> Design\](/docs/design_docs/<component>_design.md)

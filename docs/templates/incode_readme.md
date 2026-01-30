@@ -1,5 +1,9 @@
+---
+orphan: true
+---
+
 # Dynamo <Component>
 
 <!-- One-sentence description -->
 
-See [docs/<component>/](/docs/<component>/) for documentation.
+See \[<component> Documentation\](/docs/<component>/) for documentation.

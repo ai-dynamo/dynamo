@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Component> Design
 
 Architecture and design decisions for the <Component>.

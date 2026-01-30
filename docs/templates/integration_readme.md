@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Integration> Integration
 
 <!-- 2-3 sentence overview of this external integration -->
@@ -35,8 +39,8 @@ python -m dynamo.<backend> --<integration>-enabled
 
 ## Guides
 
-- [<Integration> Setup](<integration>_setup.md) - Installation and configuration
-- [<Integration> with vLLM](<integration>_vllm.md) - vLLM-specific usage
+- \[<Integration> Setup\](<integration>_setup.md) - Installation and configuration
+- \[<Integration> with vLLM\](<integration>_vllm.md) - vLLM-specific usage
 
 ## External Resources
 

@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # EXAMPLE: Planner Documentation Migration
 
 This is an example prompt for migrating the Planner component documentation to the three-tier structure. Use this as a reference when creating migration prompts for other components.

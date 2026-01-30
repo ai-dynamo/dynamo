@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Component>
 
 <!-- 2-3 sentence overview of what this component does and its role in Dynamo -->
@@ -43,6 +47,6 @@ spec:
 
 ## Next Steps
 
-- [<Component> Guide](<component>_guide.md) - Deployment and configuration
-- [<Component> Examples](<component>_examples.md) - Usage examples
-- [<Component> Design](/docs/design_docs/<component>_design.md) - Architecture
+- \[<Component> Guide\](<component>_guide.md) - Deployment and configuration
+- \[<Component> Examples\](<component>_examples.md) - Usage examples
+- \[<Component> Design\](/docs/design_docs/<component>_design.md) - Architecture

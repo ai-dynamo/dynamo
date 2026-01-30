@@ -1,3 +1,7 @@
+---
+orphan: true
+---
+
 # <Component> Examples
 
 Usage examples for the <Component>.
