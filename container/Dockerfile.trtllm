@@ -42,15 +42,16 @@ ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
 
 ARG PYTORCH_BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG PYTORCH_BASE_IMAGE_TAG="25.10-py3"
+ARG PYTORCH_BASE_IMAGE_TAG="25.12-py3"
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-ARG RUNTIME_IMAGE_TAG="25.10-cuda13.0-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="25.12-cuda13.1-runtime-ubuntu24.04"
 
 # TensorRT-LLM specific configuration
 ARG HAS_TRTLLM_CONTEXT=0
 ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
 ARG TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 ARG GITHUB_TRTLLM_COMMIT
+ARG TRTLLM_WHEEL_IMAGE="trtllm_wheel_image_empty"
 
 # SCCACHE configuration
 ARG USE_SCCACHE
@@ -78,8 +79,15 @@ ARG NIXL_LIBFABRIC_REF
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+# Empty fallback for TRTLLM wheel image copy
+FROM alpine:3.20 AS trtllm_wheel_image_empty
+RUN mkdir -p /app/tensorrt_llm
+
 # Copy artifacts from NGC PyTorch image
 FROM ${PYTORCH_BASE_IMAGE}:${PYTORCH_BASE_IMAGE_TAG} AS pytorch_base
+
+# Resolve TRTLLM wheel image (can be a stage name or a registry image)
+FROM ${TRTLLM_WHEEL_IMAGE} AS trtllm_wheel_image
 
 ##################################
 ########## Base Image ############
@@ -509,13 +517,25 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
 # Copy pytorch installation from NGC PyTorch
-ARG TORCH_VER=2.9.0a0+145a3a7bda.nv25.10
-ARG TORCH_TENSORRT_VER=2.9.0a0
-ARG TORCHVISION_VER=0.24.0a0+094e7af5
+ARG FLASHINFER_PYTHON_VER=0.6.1
+ARG PYTORCH_TRITON_VER=3.5.1+gitbfeb0668.nv25.12
+ARG TORCHAO_VER=0.15.0+git01374eb5
+ARG TORCHDATA_VER=0.11.0
+ARG TORCHTITAN_VER=0.2.0
+ARG TORCH_VER=2.10.0a0+b4e4ee81d3.nv25.12
+ARG TORCH_TENSORRT_VER=2.10.0a0
+ARG TORCHVISION_VER=0.25.0a0+ca221243
 ARG JINJA2_VER=3.1.6
 ARG SYMPY_VER=1.14.0
-ARG FLASH_ATTN_VER=2.7.4.post1+25.10
+ARG FLASH_ATTN_VER=2.7.4.post1+25.12
 
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchao ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchao
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchao-${TORCHAO_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchao-${TORCHAO_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchdata ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchdata
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchdata-${TORCHDATA_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchdata-${TORCHDATA_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchtitan ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchtitan
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchtitan-${TORCHTITAN_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchtitan-${TORCHTITAN_VER}.dist-info
+COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch-${TORCH_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch-${TORCH_VER}.dist-info
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torchgen ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torchgen
@@ -533,15 +553,16 @@ COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/fl
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt
 COPY --from=pytorch_base /usr/local/lib/python${PYTHON_VERSION}/dist-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info ${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/torch_tensorrt-${TORCH_TENSORRT_VER}.dist-info
 
+RUN uv pip install flashinfer-python==${FLASHINFER_PYTHON_VER}
+
 # Install TensorRT-LLM and related dependencies
 ARG HAS_TRTLLM_CONTEXT
 ARG TENSORRTLLM_PIP_WHEEL
 ARG TENSORRTLLM_INDEX_URL
 ARG GITHUB_TRTLLM_COMMIT
-
-# Copy only wheel files and commit info from trtllm_wheel stage from build_context
-COPY --from=trtllm_wheel /*.whl /trtllm_wheel/
-COPY --from=trtllm_wheel /*.txt /trtllm_wheel/
+# Copy wheel build context (may be empty for download path)
+COPY --from=trtllm_wheel / /trtllm_wheel/
+COPY --from=trtllm_wheel_image /app/tensorrt_llm /trtllm_wheel_image/
 
 RUN uv pip install --no-cache "cuda-python==13.0.2"
 
@@ -555,39 +576,48 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     rm -f /etc/apt/trusted.gpg.d/cuda*.gpg
 
 RUN if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
-        # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
-        curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh" && \
-        # Modify the script to use virtual environment pip instead of system pip3
-        sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
-        bash /tmp/install_tensorrt.sh && \
         # Install from local wheel directory in build context
         WHEEL_FILE="$(find /trtllm_wheel -name "*.whl" | head -n 1)"; \
         if [ -n "$WHEEL_FILE" ]; then \
-            uv pip install --no-cache "$WHEEL_FILE" triton==3.5.0; \
+            uv pip install --no-cache "$WHEEL_FILE" triton==3.5.1; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
         fi; \
+    elif [ -n "$(find /trtllm_wheel_image -name "*.whl" | head -n 1)" ]; then \
+        # Install from wheel embedded in the TRTLLM release image
+        WHEEL_FILE="$(find /trtllm_wheel_image -name "*.whl" | head -n 1)"; \
+        uv pip install --no-cache "$WHEEL_FILE" triton==3.5.1; \
     else \
-        # Download and run install_tensorrt.sh from TensorRT-LLM GitHub before installing the wheel
-        TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/.*==([0-9a-zA-Z.+-]+).*/\1/') && \
-        (curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/v${TRTLLM_VERSION}/docker/common/install_tensorrt.sh" || \
-         curl -fsSL --retry 5 --retry-delay 10 --max-time 1800 -o /tmp/install_tensorrt.sh "https://github.com/NVIDIA/TensorRT-LLM/raw/${GITHUB_TRTLLM_COMMIT}/docker/common/install_tensorrt.sh") && \
-        # Modify the script to use virtual environment pip instead of system pip3
-        sed -i 's/pip3 install/uv pip install/g' /tmp/install_tensorrt.sh && \
-        bash /tmp/install_tensorrt.sh && \
         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
         # TRTLLM 1.2.0rc6.post2 has issues installing from pypi with uv, installing from direct wheel link works best
-        # explicitly installing triton 3.5.0 as trtllm only lists triton as dependency on x64_64 for some reason
+        # explicitly installing triton 3.5.1 as trtllm only lists triton as dependency on x64_64 for some reason
         if echo "${TENSORRTLLM_PIP_WHEEL}" | grep -q '^tensorrt-llm=='; then \
             TRTLLM_VERSION=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -E 's/tensorrt-llm==([0-9a-zA-Z.+-]+).*/\1/'); \
             PYTHON_TAG="cp$(echo ${PYTHON_VERSION} | tr -d '.')"; \
             DIRECT_URL="https://pypi.nvidia.com/tensorrt-llm/tensorrt_llm-${TRTLLM_VERSION}-${PYTHON_TAG}-${PYTHON_TAG}-linux_${ARCH_ALT}.whl"; \
-            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.0; \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${DIRECT_URL}" triton==3.5.1; \
         else \
-            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.0; \
+            uv pip install --no-cache --index-strategy=unsafe-best-match --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" triton==3.5.1; \
         fi; \
-    fi
+    fi && \
+    # Run TensorRT installer that ships with the TRTLLM wheel
+    TRT_INSTALLER="$(python -c "import glob, os, site; paths = []; \
+        paths += site.getsitepackages() if hasattr(site, 'getsitepackages') else []; \
+        user_site = site.getusersitepackages(); \
+        paths.append(user_site) if user_site else None; \
+        installer = ''; \
+        \
+        [installer:=matches[0] for base in paths \
+            for matches in [glob.glob(os.path.join(base, 'tensorrt_llm', '**', 'install_tensorrt.sh'), recursive=True)] \
+            if matches and not installer]; \
+        print(installer)")"; \
+    if [ -z "$TRT_INSTALLER" ]; then \
+        echo "No install_tensorrt.sh found inside tensorrt_llm package."; \
+        exit 1; \
+    fi; \
+    sed -i 's/pip3 install/uv pip install/g' "$TRT_INSTALLER"; \
+    bash "$TRT_INSTALLER"
 
 ##################################################
 ########## Runtime Image ########################

@@ -378,7 +378,7 @@ impl Leader for KvConnectorLeader {
 
             let scheduled_tokens = *scheduler_output
                 .num_scheduled_tokens
-                .get(request_id)
+                .get(&new_req.request_id)
                 .unwrap_or(&0);
 
             slot.apply_scheduler_output(
@@ -386,6 +386,7 @@ impl Leader for KvConnectorLeader {
                 &new_req.block_ids,
                 new_req.num_computed_tokens,
                 scheduled_tokens,
+                new_req.priorities.as_deref(),
             )?;
 
             let pending_ops_opt = slot.take_pending_operations();
@@ -428,7 +429,7 @@ impl Leader for KvConnectorLeader {
 
             let scheduled_tokens = *scheduler_output
                 .num_scheduled_tokens
-                .get(request_id)
+                .get(&cached_req.request_id)
                 .unwrap_or(&0);
 
             slot.apply_scheduler_output(
@@ -436,6 +437,7 @@ impl Leader for KvConnectorLeader {
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
                 scheduled_tokens,
+                cached_req.priorities.as_deref(),
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {

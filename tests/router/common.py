@@ -1835,7 +1835,7 @@ def _test_router_decisions_disagg(
                         verify_response_timing(timing_info)
 
                     # Small delay between requests
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
 
             return prefill_worker_ids, decode_worker_ids
 
