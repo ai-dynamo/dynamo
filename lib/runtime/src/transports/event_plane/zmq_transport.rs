@@ -27,6 +27,12 @@ const ZMQ_SNDHWM: i32 = 100_000; // Send buffer: 100K messages
 const ZMQ_RCVHWM: i32 = 100_000; // Receive buffer: 100K messages
 const ZMQ_RCVTIMEOUT_MS: i32 = 100; // Receive timeout: 100ms (avoids blocking forever)
 
+/// Raw multipart payload received from the socket pump.
+///
+/// Kept as a tuple to avoid allocation/copies, but named to keep signatures readable and
+/// satisfy `clippy::type_complexity`.
+type SocketPumpMultipart = (Vec<u8>, u64, u64, Vec<u8>);
+
 use super::codec::MsgpackCodec;
 use super::frame::Frame;
 use super::transport::{EventTransportRx, EventTransportTx, WireStream};
@@ -360,8 +366,8 @@ impl ZmqSubTransport {
             loop {
                 // Receive multipart message in blocking task: [topic, publisher_id, sequence, frame_bytes]
                 let socket_clone = Arc::clone(&socket);
-                let result = tokio::task::spawn_blocking(
-                    move || -> Result<Option<(Vec<u8>, u64, u64, Vec<u8>)>> {
+                let result =
+                    tokio::task::spawn_blocking(move || -> Result<Option<SocketPumpMultipart>> {
                         let socket = socket_clone.lock().unwrap();
 
                         // Receive topic frame (may timeout with EAGAIN)
@@ -396,9 +402,8 @@ impl ZmqSubTransport {
                         let data = socket.recv_bytes(0)?;
 
                         Ok(Some((topic, publisher_id, sequence, data)))
-                    },
-                )
-                .await;
+                    })
+                    .await;
 
                 match result {
                     Ok(Ok(Some((_topic, publisher_id, sequence, frame_bytes)))) => {
