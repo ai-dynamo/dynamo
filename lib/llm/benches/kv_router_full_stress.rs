@@ -13,7 +13,9 @@
 //! Run with: cargo bench --package dynamo-llm --bench kv_router_full_stress --features kv-router-stress -- --help
 
 use anyhow::{Context, Result};
+use bytes::Bytes;
 use clap::Parser;
+use dynamo_runtime::transports::event_plane::EventEnvelope;
 use hf_hub;
 use indicatif::{ProgressBar, ProgressStyle};
 use minijinja::{context, value::Value, Environment};
@@ -21,7 +23,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, Semaphore};
 use tokenizers::Tokenizer;
 
@@ -38,6 +40,39 @@ use dynamo_llm::preprocessor::prompt::{
 /// KV Router event subject suffix (appended to Component.subject())
 /// Full subject format: namespace.{namespace}.component.{component}.kv-events
 const KV_EVENT_SUBJECT: &str = "kv-events";
+
+/// Unique publisher ID for this benchmark instance
+static PUBLISHER_ID: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+});
+
+/// Sequence counter for envelope ordering
+static ENVELOPE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Encode an event into Msgpack format with EventEnvelope wrapper.
+/// This matches the format expected by the event plane subscriber.
+fn encode_event_with_envelope<T: Serialize>(event: &T, topic: &str) -> Result<Vec<u8>> {
+    // Encode the payload with msgpack
+    let payload = rmp_serde::to_vec_named(event).context("Failed to encode event payload")?;
+
+    // Create the envelope
+    let envelope = EventEnvelope {
+        publisher_id: *PUBLISHER_ID,
+        sequence: ENVELOPE_SEQUENCE.fetch_add(1, Ordering::SeqCst),
+        published_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        topic: topic.to_string(),
+        payload: Bytes::from(payload),
+    };
+
+    // Encode the envelope with msgpack
+    rmp_serde::to_vec_named(&envelope).context("Failed to encode envelope")
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "kv_router_full_stress")]
@@ -123,9 +158,10 @@ struct Args {
     #[arg(long, default_value = "5")]
     bucket_size: u64,
 
-    /// Model name to use in requests (should match the registered model)
-    #[arg(long, default_value = "TinyLlama/TinyLlama-1.1B-Chat-v1.0")]
-    model: String,
+    /// Model name to use in requests (should match the registered model).
+    /// If not specified, auto-detects from /v1/models when exactly one model is available.
+    #[arg(long)]
+    model: Option<String>,
 
     /// KV block size in tokens (must match frontend configuration)
     #[arg(long, default_value = "16")]
@@ -545,6 +581,62 @@ struct HealthInstance {
     endpoint: String,
 }
 
+/// Response from the frontend's /v1/models endpoint
+#[derive(Debug, Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelInfo>,
+}
+
+/// Model info from /v1/models endpoint
+#[derive(Debug, Deserialize)]
+struct ModelInfo {
+    id: String,
+}
+
+/// Fetch the model name from the frontend's /v1/models endpoint.
+///
+/// Returns the model ID if exactly one model is available.
+/// Returns an error if zero or multiple models are found (requiring explicit --model).
+async fn fetch_model_name(frontend_url: &str) -> Result<String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/v1/models", frontend_url);
+
+    println!("  Auto-detecting model from {}...", url);
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to connect to frontend /v1/models endpoint")?;
+
+    if !response.status().is_success() {
+        anyhow::bail!("Models endpoint returned status: {}", response.status());
+    }
+
+    let models: ModelsResponse = response
+        .json()
+        .await
+        .context("Failed to parse models response")?;
+
+    match models.data.len() {
+        0 => anyhow::bail!("No models found at endpoint. Is a backend running?"),
+        1 => {
+            let model_id = models.data[0].id.clone();
+            println!("  Auto-detected model: {}", model_id);
+            Ok(model_id)
+        }
+        n => {
+            println!("  Multiple models available ({}):", n);
+            for m in &models.data {
+                println!("    - {}", m.id);
+            }
+            anyhow::bail!(
+                "Multiple models available. Please specify --model explicitly."
+            )
+        }
+    }
+}
+
 /// Discover worker IDs from the frontend's /health endpoint.
 ///
 /// Returns a list of instance_ids (worker_ids) that are currently registered.
@@ -697,7 +789,7 @@ async fn build_tree_via_nats(
 
     for (event_id, seq) in sequences.iter().enumerate() {
         let event = seq.to_router_event(event_id as u64);
-        let data = serde_json::to_vec(&event).context("Failed to serialize RouterEvent")?;
+        let data = encode_event_with_envelope(&event, KV_EVENT_SUBJECT)?;
         nats_client
             .publish(subject.clone(), data.into())
             .await
@@ -1126,7 +1218,7 @@ async fn publish_events_at_rate(
     while start.elapsed() < duration {
         let seq = &sequences[(event_id as usize) % sequences.len()];
         let event = seq.to_router_event(event_id);
-        if let Ok(data) = serde_json::to_vec(&event) {
+        if let Ok(data) = encode_event_with_envelope(&event, KV_EVENT_SUBJECT) {
             let _ = nats_client.publish(subject.clone(), data.into()).await;
         }
         event_id += 1;
@@ -1338,10 +1430,21 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     let num_sequences = args.tree_size / args.depth;
-    let tokenizer_path = args.tokenizer_path.as_ref().unwrap_or(&args.model);
 
     println!("KV Router Full Stress Test");
     println!("==========================\n");
+
+    // Resolve model name: use provided value or auto-detect from /v1/models
+    let model = match args.model {
+        Some(m) => m,
+        None => {
+            println!("Model Detection:");
+            fetch_model_name(&args.frontend_url).await?
+        }
+    };
+
+    // Tokenizer path defaults to model if not specified
+    let tokenizer_path = args.tokenizer_path.as_ref().unwrap_or(&model);
 
     println!("Configuration:");
     println!(
@@ -1360,7 +1463,7 @@ async fn main() -> Result<()> {
     println!("  Duration: {}s", args.duration);
     println!("  Warmup: {}s", args.warmup);
     println!("  Concurrency: {}", args.concurrency);
-    println!("  Model: {}", args.model);
+    println!("  Model: {}", model);
     println!("  KV block size: {}", args.kv_block_size);
     println!("  Tokenizer: {}", tokenizer_path);
     println!("  Namespace: {}", args.namespace);
@@ -1386,7 +1489,7 @@ async fn main() -> Result<()> {
     let tokenizer = load_tokenizer(tokenizer_path)?;
     println!("  Tokenizer loaded successfully");
 
-    let mut prompt_renderer = try_load_prompt_renderer(&args.model)
+    let mut prompt_renderer = try_load_prompt_renderer(&model)
         .or_else(|| try_load_prompt_renderer(tokenizer_path));
 
     if prompt_renderer.is_some() {
@@ -1615,7 +1718,7 @@ async fn main() -> Result<()> {
         args.frontend_url.clone(),
         prefix_prompts,
         args.num_prefix_prompts,
-        args.model.clone(),
+        model.clone(),
         args.seed,
         args.request_rate,
         args.duration,
