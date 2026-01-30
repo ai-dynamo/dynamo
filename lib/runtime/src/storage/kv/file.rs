@@ -468,6 +468,15 @@ impl Bucket for Directory {
                 continue;
             }
 
+            // Skip temp files used for atomic writes
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(TEMP_FILE_PREFIX)
+            {
+                continue;
+            }
+
             // Canonicalize paths to handle symlinks (e.g., /var -> /private/var on macOS)
             let canonical_entry_path = match entry.path().canonicalize() {
                 Ok(p) => p,
