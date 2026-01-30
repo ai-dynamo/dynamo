@@ -56,10 +56,12 @@ class VllmProcessor:
     # it has a lot of fields.
     # request: dynamo.NVCreateChatCompletionRequest
     async def generator(self, request):
-        """TODO: document"""
+        """
+        Run a single request through the engine. Does pre and post processing on this machine, delegates
+        model inference to a worker using the router.
+        """
 
         # ** VllmProcessor.generator called: {'messages': [{'role': 'user', 'content': 'What is the capital of Tuvalu?'}], 'model': '/home/grahamk/llms/Qwen3-0.6B', 'max_completion_tokens': 1000, 'stream': False}
-        print(f"** VllmProcessor.generator request: {request}")
 
         # There seem to be two incompatible versions of apply_chat_template, depending on the model
         try:
@@ -71,18 +73,24 @@ class VllmProcessor:
             )
         except TypeError:
             # tokenizer is an impl of TokenizerLike. This is the declared type.
+
+            # mistral-common only allows 'role' and 'content', nothing else or pydantic validation breaks
+            # This deletes the optional 'name' field.
+            filtered_messages = [
+                {k: v for k, v in d.items() if k == "content" or k == "role"}
+                for d in request["messages"]
+            ]
             tokens = self.tokenizer.apply_chat_template(
-                messages=request["messages"],
+                messages=filtered_messages,
                 tokenize=True,
             )
-
-        print(f"*** Templated and tokenized: {tokens}")
 
         if "max_completion_tokens" in request:
             max_tokens = request["max_completion_tokens"]
         elif "max_tokens" in request:
             max_tokens = request["max_tokens"]
         else:
+            # Match what Rust does
             max_tokens = 8192
 
         sampling_params = SamplingParams(
@@ -108,7 +116,6 @@ class VllmProcessor:
         )
 
         # Processed: EngineCoreRequest(request_id='a2b76a85cd65e151', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], mm_features=None, sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=1.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[151643], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=16, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None), pooling_params=None, eos_token_id=151645, arrival_time=1769036937.9417946, lora_request=None, cache_salt=None, data_parallel_rank=None, prompt_embeds=None, client_index=0, current_wave=0, priority=0, trace_headers=None)
-        print(f"Processed: {vllm_preproc}")
 
         self.output_processor.add_request(
             vllm_preproc,
@@ -170,12 +177,9 @@ class VllmProcessor:
 
         # dynamo_response: Annotated
         async for dynamo_response in dynamo_stream:
-            # Mock
-            # Stream got: Annotated(data={'token_ids': [1714], 'tokens': [' method'], 'text': ' method', 'cum_log_probs': None, 'log_probs': None, 'top_logprobs': None, 'finish_reason': None, 'index': None}, event=None, comment=[], id=None)
-            #
-            # vllm
+            # dynamo_response looks like this for regular router:
             # Stream got: Annotated(data={'token_ids': [7281]}, event=None, comment=[], id=None)
-            print(f"Stream got: {dynamo_response}")
+            # For KV router is is only the inner map: {'token_ids': [7281]}
 
             if self.is_kv_router:
                 output = dynamo_response
@@ -212,8 +216,6 @@ class VllmProcessor:
             # vllm
             # RequestOutput: OutputProcessorOutput(request_outputs=[RequestOutput(request_id=9dbe240d8de78db3, prompt='What is the capital of Tuvalu?', prompt_token_ids=[3838, 374, 279, 6722, 315, 28649, 25510, 30], encoder_prompt=None, encoder_prompt_token_ids=None, prompt_logprobs=None, outputs=[CompletionOutput(index=0, text=' The', token_ids=[576], cumulative_logprob=None, logprobs=None, finish_reason=None, stop_reason=None)], finished=False, metrics=RequestStateStats(num_generation_tokens=0, arrival_time=1769118902.2172132, queued_ts=0.0, scheduled_ts=0.0, first_token_ts=0.0, last_token_ts=0.0, first_token_latency=0.0, is_corrupted=False), lora_request=None, num_cached_tokens=0, multi_modal_placeholders={})], reqs_to_abort=[])
 
-            print(f"RequestOutput: {vllm_out}")
-
             # Vec<ChatChoiceStream>
             choices = []
             for output in vllm_out.request_outputs[0].outputs:
@@ -222,7 +224,7 @@ class VllmProcessor:
                         "index": output.index,
                         # ChatCompletionStreamResponseDelta
                         "delta": {"content": output.text, "role": "assistant"},
-                        # TODO: These three likely need converting, it won't just work
+                        # TODO: These three likely need converting
                         "finish_reason": output.finish_reason,
                         "stop_reason": output.stop_reason,
                         "logprobs": output.logprobs,
