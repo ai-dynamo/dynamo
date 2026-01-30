@@ -11,48 +11,85 @@ Templates for creating consistent Dynamo documentation.
 ### Components (Router, Planner, KVBM, Frontend, Profiler)
 
 ```
-components/src/dynamo/<component>/
-└── README.md                         ← incode_readme.md (Tier 1)
-
-docs/<component>/
-├── README.md                         ← component_readme.md (Tier 2)
-├── <component>_guide.md              ← component_guide.md (Tier 2)
-└── <component>_examples.md           ← component_examples.md (Tier 2)
-
-docs/design_docs/
-└── <component>_design.md             ← component_design.md (Tier 3)
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: components/src/dynamo/<component>/README.md │ ← Redirect stub
+│   Content: 1-5 lines pointing to docs/<component>/  │
+│   Template: incode_readme.md                        │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/<component>/                           │ ← User docs
+│   • README.md ← component_readme.md                 │
+│   • <component>_guide.md ← component_guide.md       │
+│   • <component>_examples.md ← component_examples.md │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│ Tier 3: docs/design_docs/<component>_design.md      │ ← Contributor docs
+│   Template: component_design.md                     │
+└─────────────────────────────────────────────────────┘
 ```
 
 ### Backends (vLLM, SGLang, TRT-LLM)
 
 ```
-components/src/dynamo/<backend>/
-└── README.md                         ← incode_readme.md (Tier 1)
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: components/src/dynamo/<backend>/README.md   │ ← Redirect stub
+│   Content: 1-5 lines pointing to docs/backends/     │
+│   Template: incode_readme.md                        │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/backends/<backend>/                    │ ← User docs
+│   • README.md ← backend_readme.md                   │
+│   • <backend>_guide.md ← backend_guide.md           │
+│                                                     │
+│ Tier 2.5: docs/backends/README.md (exists)          │
+│   • Backend comparison table                        │
+└─────────────────────────────────────────────────────┘
 
-docs/backends/
-├── README.md                         ← Backend comparison (exists)
-└── <backend>/
-    ├── README.md                     ← backend_readme.md (Tier 2)
-    └── <backend>_guide.md            ← backend_guide.md (Tier 2)
+┌─────────────────────────────────────────────────────┐
+│ Tier 3: External                                    │
+│   Backend internals documented in upstream repos    │
+└─────────────────────────────────────────────────────┘
 ```
 
 ### Features (Multimodal, LoRA, Speculative Decoding)
 
 ```
-docs/features/<feature>/
-├── README.md                         ← feature_readme.md (Tier 2)
-├── <feature>_vllm.md                 ← feature_backend.md (Tier 2)
-├── <feature>_sglang.md               ← feature_backend.md (Tier 2)
-└── <feature>_trtllm.md               ← feature_backend.md (Tier 2)
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: N/A                                         │
+│   No in-code README (features are not components)   │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/features/<feature>/                    │ ← User docs
+│   • README.md ← feature_readme.md                   │
+│   • <feature>_vllm.md ← feature_backend.md          │
+│   • <feature>_sglang.md ← feature_backend.md        │
+│   • <feature>_trtllm.md ← feature_backend.md        │
+└─────────────────────┬───────────────────────────────┘
+                      ▼
+┌─────────────────────────────────────────────────────┐
+│ Tier 3: docs/design_docs/<feature>_design.md        │ ← Optional
+│   Only if significant architecture                  │
+└─────────────────────────────────────────────────────┘
 ```
 
 ### Integrations (LMCache, HiCache, NIXL)
 
 ```
-docs/integrations/<integration>/
-├── README.md                         ← integration_readme.md (Tier 2)
-├── <integration>_setup.md            ← (custom)
-└── <integration>_<backend>.md        ← (custom)
+┌─────────────────────────────────────────────────────┐
+│ Tier 1: N/A                                         │
+│   No in-code README (external tools)                │
+└─────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────┐
+│ Tier 2: docs/integrations/<integration>/            │ ← User docs
+│   • README.md ← integration_readme.md               │
+│   • <integration>_setup.md (custom)                 │
+│   • <integration>_<backend>.md (custom)             │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## Three-Tier Pattern
