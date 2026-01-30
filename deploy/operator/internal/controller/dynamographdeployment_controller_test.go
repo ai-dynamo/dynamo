@@ -405,7 +405,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -467,7 +467,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: podclique/test-dgd-0-decode: desired=2, ready=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -542,7 +542,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -614,7 +614,7 @@ func Test_reconcileGroveResources(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: Message("Resources not ready: test-dgd: pcsg/test-dgd-0-aggregated: desired=2, available=1"),
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1402,7 +1402,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1462,7 +1462,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1592,7 +1592,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   ReadyState,
+				State:   DGDStateReady,
 				Reason:  "all_resources_are_ready",
 				Message: "All resources are ready",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1738,7 +1738,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
@@ -1849,7 +1849,7 @@ func Test_reconcileDynamoComponentsDeployments(t *testing.T) {
 				},
 			},
 			wantReconcileResult: ReconcileResult{
-				State:   PendingState,
+				State:   DGDStatePending,
 				Reason:  "some_resources_are_not_ready",
 				Message: "Resources not ready: test-dgd-decode: Component deployment not ready - Available condition not true; test-dgd-frontend: Component deployment not ready - Available condition not true",
 				ServiceStatus: map[string]v1alpha1.ServiceReplicaStatus{
