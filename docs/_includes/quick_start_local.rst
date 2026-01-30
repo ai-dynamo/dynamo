@@ -11,17 +11,7 @@ This guide covers running Dynamo **using the CLI on your local machine or VM**.
    See the `Kubernetes Installation Guide <../kubernetes/installation_guide.html>`_
    and `Kubernetes Quickstart <../kubernetes/README.html>`_ for cluster deployments.
 
-**1. Install Dynamo**
-
-.. code-block:: bash
-
-   # Install uv (recommended Python package manager)
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-
-   # Create virtual environment
-   uv venv venv
-   source venv/bin/activate
-   uv pip install pip
+**Install Dynamo**
 
 **Option A: Containers (Recommended)**
 
@@ -50,6 +40,16 @@ versions and backend guides for run instructions: `SGLang <../backends/sglang/RE
 `TensorRT-LLM <../backends/trtllm/README.html>`_ | `vLLM <../backends/vllm/README.html>`_
 
 **Option B: Install from PyPI**
+
+.. code-block:: bash
+
+   # Install uv (recommended Python package manager)
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+
+   # Create virtual environment
+   uv venv venv
+   source venv/bin/activate
+   uv pip install pip
 
 Install system dependencies and the Dynamo wheel for your chosen backend:
 
@@ -87,15 +87,12 @@ Install system dependencies and the Dynamo wheel for your chosen backend:
    sudo apt install python3-dev libxcb1
    uv pip install --prerelease=allow "ai-dynamo[vllm]"
 
-**2. Sanity Check (Optional)**
+**Run Dynamo**
 
-Verify your system configuration and dependencies:
+.. tip::
 
-.. code-block:: bash
-
-   python3 deploy/sanity_check.py
-
-**3. Run Dynamo**
+   **(Optional)** Before running Dynamo, verify your system configuration:
+   ``python3 deploy/sanity_check.py``
 
 Start the frontend, then start a worker for your chosen backend.
 
@@ -142,7 +139,7 @@ In another terminal (or same terminal if using background mode), start a worker:
    **TensorRT-LLM only:** The warning ``Cannot connect to ModelExpress server/transport error. Using direct download.``
    is expected and can be safely ignored.
 
-**4. Test your deployment**
+**Test Your Deployment**
 
 .. code-block:: bash
 

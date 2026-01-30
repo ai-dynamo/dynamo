@@ -89,27 +89,44 @@ Want to help shape the future of distributed LLM inference? See the **[Contribut
 The following examples require a few system level packages.
 Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/reference/support-matrix.md](docs/reference/support-matrix.md)
 
-## 1. Initial Setup
+## Install Dynamo
 
-The Dynamo team recommends the `uv` Python package manager, although any way works. Install uv:
+### Option A: Containers (Recommended)
 
-```
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-Create a virtual environment:
+Containers have all dependencies pre-installed. No setup required.
 
 ```bash
+# SGLang
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
+
+# TensorRT-LLM
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
+
+# vLLM
+docker run --gpus all --network host --rm -it nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
+```
+
+> **Tip:** To run frontend and worker in the same container, either run processes in background with `&` (see below), or open a second terminal and use `docker exec -it <container_id> bash`.
+
+See [Release Artifacts](docs/reference/release-artifacts.md#container-images) for available versions.
+
+### Option B: Install from PyPI
+
+The Dynamo team recommends the `uv` Python package manager, although any way works.
+
+```bash
+# Install uv (recommended Python package manager)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Create virtual environment
 uv venv venv
 source venv/bin/activate
 uv pip install pip
 ```
 
-## 2. Select an Engine
-
 Install system dependencies and the Dynamo wheel for your chosen backend:
 
-### SGLang
+**SGLang**
 
 ```bash
 sudo apt install python3-dev
@@ -118,7 +135,7 @@ uv pip install "ai-dynamo[sglang]"
 
 > **Note:** For CUDA 13 (B300/GB300), the container is recommended. See [SGLang install docs](https://docs.sglang.ai/start/install.html) for details.
 
-### TensorRT-LLM
+**TensorRT-LLM**
 
 ```bash
 sudo apt install python3-dev
@@ -128,48 +145,16 @@ pip install --pre --extra-index-url https://pypi.nvidia.com "ai-dynamo[trtllm]"
 
 > **Note:** TensorRT-LLM requires `pip` due to a transitive Git URL dependency that `uv` doesn't resolve. We recommend using the [TensorRT-LLM container](docs/reference/release-artifacts.md#container-images) for broader compatibility.
 
-### vLLM
+**vLLM**
 
 ```bash
 sudo apt install python3-dev libxcb1
 uv pip install "ai-dynamo[vllm]"
 ```
 
-### Containers
+## Run Dynamo
 
-Pull and run prebuilt images from NVIDIA NGC:
-
-```bash
-# SGLang
-docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
-docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.8.1
-
-# TensorRT-LLM
-docker pull nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
-docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/tensorrtllm-runtime:0.8.1
-
-# vLLM
-docker pull nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
-docker run --rm -it --gpus all --network host nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.1
-```
-
-> **Tip:** To run frontend and worker in the same container, either run processes in background with `&` (see below), or open a second terminal and use `docker exec -it <container_id> bash`.
-
-See [Release Artifacts](docs/reference/release-artifacts.md#container-images) for available versions.
-
-## 3. Run Dynamo
-
-### Sanity Check (Optional)
-
-Before trying out Dynamo, you can verify your system configuration and dependencies:
-
-```bash
-python3 deploy/sanity_check.py
-```
-
-This is a quick check for system resources, development tools, LLM frameworks, and Dynamo components.
-
-### Running an LLM API Server
+> **Tip (Optional):** Before running Dynamo, verify your system configuration with `python3 deploy/sanity_check.py`
 
 Dynamo provides a simple way to spin up a local set of inference components including:
 
