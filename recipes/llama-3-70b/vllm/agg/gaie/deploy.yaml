@@ -15,7 +15,7 @@ spec:
       replicas: 1
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/epp-inference-extension-dynamo:op-mgr-probe-loop
+          image: gnvcr.io/nvidia/ai-dynamo/frontend:0.8.0
           env:
             - name: DYN_KV_BLOCK_SIZE
               value: "128"
@@ -47,7 +47,7 @@ spec:
           mountPoint: /opt/models
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:op-managed
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/examples/backends/vllm
       envs:
         - name: HF_HOME
@@ -75,7 +75,7 @@ spec:
           command:
           - /bin/sh
           - -c
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:op-managed
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.8.0
           workingDir: /workspace/examples/backends/vllm
       replicas: 1
       resources:
