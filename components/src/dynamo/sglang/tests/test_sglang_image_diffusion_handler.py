@@ -21,6 +21,7 @@ pytestmark = [
     pytest.mark.sglang,
     pytest.mark.gpu_0,  # No GPU needed for unit tests
     pytest.mark.pre_merge,
+    pytest.mark.parallel,
 ]
 
 
