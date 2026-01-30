@@ -15,6 +15,7 @@
 
 import asyncio
 import copy
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -25,6 +26,7 @@ import torch
 from tensorrt_llm.executor.result import GenerationResult
 from tensorrt_llm.executor.utils import RequestError
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
+from tensorrt_llm.llmapi import GuidedDecodingParams
 from tensorrt_llm.llmapi.llm import SamplingParams
 
 from dynamo._core import Context
@@ -622,6 +624,31 @@ class HandlerBase:
                 continue
             if hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
+
+        # Handle guided_decoding from sampling_options (NVIDIA extension fields)
+        # The frontend converts guided_json/guided_regex/etc to this format
+        guided_decoding = request["sampling_options"].get("guided_decoding")
+        if guided_decoding and isinstance(guided_decoding, dict):
+            # Extract guided decoding parameters
+            json_schema = guided_decoding.get("json")
+            regex_pattern = guided_decoding.get("regex")
+            choice_list = guided_decoding.get("choice")
+            grammar = guided_decoding.get("grammar")
+            
+            if json_schema:
+                # Convert JSON schema to string if it's a dict
+                schema_str = json.dumps(json_schema) if isinstance(json_schema, dict) else json_schema
+                sampling_params.guided_decoding = GuidedDecodingParams(json=schema_str)
+                logging.info("Guided decoding enabled with JSON schema")
+            elif regex_pattern:
+                sampling_params.guided_decoding = GuidedDecodingParams(regex=regex_pattern)
+                logging.info(f"Guided decoding enabled with regex pattern")
+            elif choice_list:
+                sampling_params.guided_decoding = GuidedDecodingParams(choice=choice_list)
+                logging.info(f"Guided decoding enabled with {len(choice_list)} choices")
+            elif grammar:
+                sampling_params.guided_decoding = GuidedDecodingParams(grammar=grammar)
+                logging.info("Guided decoding enabled with grammar")
 
         # Additional sampling params in output options
         output_options = request.get("output_options", {})
