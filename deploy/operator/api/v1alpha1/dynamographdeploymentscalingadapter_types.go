@@ -19,6 +19,8 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // DynamoGraphDeploymentScalingAdapterSpec defines the desired state of DynamoGraphDeploymentScalingAdapter
@@ -99,4 +101,24 @@ type DynamoGraphDeploymentScalingAdapterList struct {
 
 func init() {
 	SchemeBuilder.Register(&DynamoGraphDeploymentScalingAdapter{}, &DynamoGraphDeploymentScalingAdapterList{})
+}
+
+// IsReady returns true if the adapter has active replicas and a selector
+func (d *DynamoGraphDeploymentScalingAdapter) IsReady() (bool, string) {
+	if d.Status.Selector == "" {
+		return false, "Selector not set"
+	}
+	if d.Status.Replicas == 0 {
+		return false, "No replicas"
+	}
+	return true, ""
+}
+
+// GetState returns "ready" or "not_ready"
+func (d *DynamoGraphDeploymentScalingAdapter) GetState() string {
+	ready, _ := d.IsReady()
+	if ready {
+		return consts.ResourceStateReady
+	}
+	return consts.ResourceStateNotReady
 }

@@ -20,17 +20,51 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+ENABLE_OTEL=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --enable-otel)
+            ENABLE_OTEL=true
+            shift
+            ;;
+        -h|--help)
+            echo "Usage: $0 [OPTIONS]"
+            echo "Options:"
+            echo "  --enable-otel        Enable OpenTelemetry tracing"
+            echo "  -h, --help           Show this help message"
+            echo ""
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+done
+
+TRACE_ARGS=()
+if [ "$ENABLE_OTEL" = true ]; then
+    export DYN_LOGGING_JSONL=true
+    export OTEL_EXPORT_ENABLED=1
+    export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://localhost:4317}
+    TRACE_ARGS+=(--override-engine-args "{\"return_perf_metrics\": true, \"otlp_traces_endpoint\": \"${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}\" }")
+fi
+
 
 # run frontend
 # dynamo.frontend accepts either --http-port flag or DYN_HTTP_PORT env var (defaults to 8000)
+OTEL_SERVICE_NAME=dynamo-frontend \
 python3 -m dynamo.frontend &
 DYNAMO_PID=$!
 
 # run worker
 # Additional command line args can be passed
+OTEL_SERVICE_NAME=dynamo-worker \
 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --modality "$MODALITY" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
+  "${TRACE_ARGS[@]}" \
   "$@"

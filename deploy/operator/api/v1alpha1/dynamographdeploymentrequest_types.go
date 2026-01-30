@@ -28,6 +28,8 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/ai-dynamo/dynamo/deploy/operator/internal/consts"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -146,8 +148,8 @@ type DynamoGraphDeploymentRequestSpec struct {
 
 	// EnableGpuDiscovery controls whether the profiler should automatically discover GPU
 	// resources from the Kubernetes cluster nodes. When enabled, the profiler will override
-	// any manually specified hardware configuration (min_num_gpus_per_engine, max_num_gpus_per_engine,
-	// num_gpus_per_node) with values detected from the cluster.
+	// any manually specified hardware configuration (minNumGpusPerEngine, maxNumGpusPerEngine,
+	// numGpusPerNode) with values detected from the cluster.
 	// Requires cluster-wide node access permissions - only available with cluster-scoped operators.
 	// +kubebuilder:default=false
 	// +kubebuilder:validation:Optional
@@ -271,6 +273,14 @@ type DynamoGraphDeploymentRequest struct {
 // SetState updates the State field in the DGDR status.
 func (s *DynamoGraphDeploymentRequest) SetState(state string) {
 	s.Status.State = state
+}
+
+// GetState returns the current lifecycle state
+func (d *DynamoGraphDeploymentRequest) GetState() string {
+	if d.Status.State == "" {
+		return consts.ResourceStateUnknown
+	}
+	return d.Status.State
 }
 
 // GetSpec returns the spec of this DGDR as a generic interface.

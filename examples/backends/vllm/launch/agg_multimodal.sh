@@ -57,7 +57,7 @@ MODEL_SPECIFIC_ARGS=""
 if [[ "$MODEL_NAME" == "Qwen/Qwen2.5-VL-7B-Instruct" ]]; then
     MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 elif [[ "$MODEL_NAME" == "llava-hf/llava-1.5-7b-hf" ]]; then
-    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 2048"
+    MODEL_SPECIFIC_ARGS="--gpu-memory-utilization 0.85 --max-model-len 4096"
 fi
 
 # Start vLLM worker with vision model
@@ -66,7 +66,7 @@ fi
 # --connector none: No KV transfer needed for aggregated serving
 # Extra args from command line come last to allow overrides
 DYN_SYSTEM_PORT=${DYN_SYSTEM_PORT:-8081} \
-    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --enforce-eager --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
+    python -m dynamo.vllm --enable-multimodal --model $MODEL_NAME --connector none $MODEL_SPECIFIC_ARGS "${EXTRA_ARGS[@]}"
 
 # Wait for all background processes to complete
 wait

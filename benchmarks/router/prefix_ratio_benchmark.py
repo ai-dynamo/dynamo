@@ -39,10 +39,17 @@ def get_aiperf_cmd(
     num_prefix_prompts,
     artifact_dir,
     url="http://localhost:8888",
+    use_expected_osl=False,
 ):
     """Build aiperf command based on prefix ratio"""
     prefix_length = int(isl * prefix_ratio)
     synthetic_input_length = int(isl * (1 - prefix_ratio))
+
+    # Build nvext JSON with optional expected_output_tokens
+    nvext_dict = {"ignore_eos": True}
+    if use_expected_osl:
+        nvext_dict["expected_output_tokens"] = osl
+    nvext_json = json.dumps({"nvext": nvext_dict})
 
     return [
         "aiperf",
@@ -69,7 +76,7 @@ def get_aiperf_cmd(
         "--extra-inputs",
         "ignore_eos:true",
         "--extra-inputs",
-        '{"nvext":{"ignore_eos":true}}',
+        nvext_json,
         "--concurrency",
         str(concurrency),
         "--request-count",
@@ -84,6 +91,8 @@ def get_aiperf_cmd(
         str(num_prefix_prompts),
         "--artifact-dir",
         artifact_dir,
+        "--dataset-sampling-strategy",
+        "shuffle",
         "-H",
         "Authorization: Bearer NOT USED",
         "-H",
@@ -120,6 +129,7 @@ def run_benchmark_single_url(
     num_prefix_prompts,
     artifact_dir,
     url,
+    use_expected_osl=False,
 ) -> Optional[Dict]:
     """Run aiperf benchmark for a single URL"""
     aiperf_cmd = get_aiperf_cmd(
@@ -134,6 +144,7 @@ def run_benchmark_single_url(
         num_prefix_prompts,
         artifact_dir,
         url,
+        use_expected_osl,
     )
 
     logger.info(f"Running command for URL {url}: {' '.join(aiperf_cmd)}")
@@ -157,20 +168,30 @@ def aggregate_results(results: List[Optional[Dict]]) -> Optional[Dict]:
     if not results:
         return None
 
-    # For TTFT, we take the average across all URLs
-    # For throughput, we sum across all URLs (total system throughput)
-    ttft_values = [r["time_to_first_token"]["avg"] for r in results if r is not None]
-    throughput_values = [
-        r["output_token_throughput"]["avg"] for r in results if r is not None
-    ]
-
-    if not ttft_values or not throughput_values:
+    valid_results = [r for r in results if r is not None]
+    if not valid_results:
         return None
 
+    # For TTFT percentiles, average across URLs
+    ttft_p25_values = [r["time_to_first_token"]["p25"] for r in valid_results]
+    ttft_p50_values = [r["time_to_first_token"]["p50"] for r in valid_results]
+    ttft_p75_values = [r["time_to_first_token"]["p75"] for r in valid_results]
+
+    # For ITL percentiles, average across URLs
+    itl_p25_values = [r["inter_token_latency"]["p25"] for r in valid_results]
+    itl_p50_values = [r["inter_token_latency"]["p50"] for r in valid_results]
+    itl_p75_values = [r["inter_token_latency"]["p75"] for r in valid_results]
+
     aggregated = {
-        "time_to_first_token": {"avg": sum(ttft_values) / len(ttft_values)},
-        "output_token_throughput": {
-            "avg": sum(throughput_values)  # Total throughput across all URLs
+        "time_to_first_token": {
+            "p25": sum(ttft_p25_values) / len(ttft_p25_values),
+            "p50": sum(ttft_p50_values) / len(ttft_p50_values),
+            "p75": sum(ttft_p75_values) / len(ttft_p75_values),
+        },
+        "inter_token_latency": {
+            "p25": sum(itl_p25_values) / len(itl_p25_values),
+            "p50": sum(itl_p50_values) / len(itl_p50_values),
+            "p75": sum(itl_p75_values) / len(itl_p75_values),
         },
     }
 
@@ -189,6 +210,7 @@ def run_benchmark(
     num_prefix_prompts,
     output_dir,
     urls,
+    use_expected_osl=False,
 ) -> Optional[Dict]:
     """Run aiperf benchmark for a specific prefix ratio"""
     logger.info(
@@ -215,6 +237,7 @@ def run_benchmark(
             num_prefix_prompts,
             artifact_dir,
             urls[0],
+            use_expected_osl,
         )
 
     # Multiple URLs: split requests and concurrency
@@ -247,6 +270,7 @@ def run_benchmark(
             num_prefix_prompts,
             artifact_dir,
             url,
+            use_expected_osl,
         )
 
         logger.info(f"Launching process for URL {url}: {' '.join(aiperf_cmd)}")
@@ -320,6 +344,11 @@ def main():
         default=[0.1, 0.3, 0.5, 0.7, 0.9],
         help="List of prefix ratios to test",
     )
+    parser.add_argument(
+        "--use-expected-osl",
+        action="store_true",
+        help="Pass expected_output_tokens to nvext for router tracking",
+    )
 
     args = parser.parse_args()
 
@@ -328,8 +357,12 @@ def main():
 
     # Store results
     prefix_ratios = []
-    ttft_values = []
-    throughput_values = []
+    ttft_p25_values = []
+    ttft_p50_values = []
+    ttft_p75_values = []
+    itl_p25_values = []
+    itl_p50_values = []
+    itl_p75_values = []
 
     current_seed = args.seed
 
@@ -347,53 +380,86 @@ def main():
             args.num_prefix_prompts,
             args.output_dir,
             args.url,  # Now passing list of URLs
+            args.use_expected_osl,
         )
 
         if result is not None:
-            ttft = result["time_to_first_token"]["avg"]
-            throughput = result["output_token_throughput"]["avg"]
+            ttft = result["time_to_first_token"]
+            itl = result["inter_token_latency"]
 
             prefix_ratios.append(prefix_ratio)
-            ttft_values.append(ttft)
-            throughput_values.append(throughput)
+            ttft_p25_values.append(ttft["p25"])
+            ttft_p50_values.append(ttft["p50"])
+            ttft_p75_values.append(ttft["p75"])
+            itl_p25_values.append(itl["p25"])
+            itl_p50_values.append(itl["p50"])
+            itl_p75_values.append(itl["p75"])
 
             logger.info(
-                f"Prefix ratio {prefix_ratio}: TTFT={ttft:.2f}ms, Throughput={throughput:.2f} tokens/s"
+                f"Prefix ratio {prefix_ratio}: TTFT p50={ttft['p50']:.2f}ms (p25={ttft['p25']:.2f}, p75={ttft['p75']:.2f}), "
+                f"ITL p50={itl['p50']:.2f}ms (p25={itl['p25']:.2f}, p75={itl['p75']:.2f})"
             )
 
         current_seed += 1
 
     # Create plots
-    if prefix_ratios and ttft_values and throughput_values:
-        # Plot TTFT vs Prefix Ratio
+    if prefix_ratios and ttft_p50_values and itl_p50_values:
         plt.figure(figsize=(12, 5))
 
+        # Plot TTFT vs Prefix Ratio with shaded p25-p75 region
         plt.subplot(1, 2, 1)
-        plt.plot(prefix_ratios, ttft_values, "bo-", linewidth=2, markersize=8)
+        plt.fill_between(
+            prefix_ratios,
+            ttft_p25_values,
+            ttft_p75_values,
+            alpha=0.3,
+            color="blue",
+            label="p25-p75",
+        )
+        plt.plot(
+            prefix_ratios,
+            ttft_p50_values,
+            "bo-",
+            linewidth=2,
+            markersize=8,
+            label="p50",
+        )
         plt.xlabel("Prefix Ratio")
         plt.ylabel("Time to First Token (ms)")
         plt.title("TTFT vs Prefix Ratio")
         plt.grid(True, alpha=0.3)
-        for i, (pr, ttft) in enumerate(zip(prefix_ratios, ttft_values)):
+        plt.legend()
+        for i, (pr, p50) in enumerate(zip(prefix_ratios, ttft_p50_values)):
             plt.annotate(
-                f"{ttft:.1f}ms",
-                (pr, ttft),
+                f"{p50:.1f}ms",
+                (pr, p50),
                 textcoords="offset points",
                 xytext=(0, 10),
                 ha="center",
             )
 
-        # Plot Throughput vs Prefix Ratio
+        # Plot ITL vs Prefix Ratio with shaded p25-p75 region
         plt.subplot(1, 2, 2)
-        plt.plot(prefix_ratios, throughput_values, "ro-", linewidth=2, markersize=8)
+        plt.fill_between(
+            prefix_ratios,
+            itl_p25_values,
+            itl_p75_values,
+            alpha=0.3,
+            color="red",
+            label="p25-p75",
+        )
+        plt.plot(
+            prefix_ratios, itl_p50_values, "ro-", linewidth=2, markersize=8, label="p50"
+        )
         plt.xlabel("Prefix Ratio")
-        plt.ylabel("Output Token Throughput (tokens/s)")
-        plt.title("Throughput vs Prefix Ratio")
+        plt.ylabel("Inter-Token Latency (ms)")
+        plt.title("ITL vs Prefix Ratio")
         plt.grid(True, alpha=0.3)
-        for i, (pr, thpt) in enumerate(zip(prefix_ratios, throughput_values)):
+        plt.legend()
+        for i, (pr, p50) in enumerate(zip(prefix_ratios, itl_p50_values)):
             plt.annotate(
-                f"{thpt:.1f}",
-                (pr, thpt),
+                f"{p50:.1f}ms",
+                (pr, p50),
                 textcoords="offset points",
                 xytext=(0, 10),
                 ha="center",
@@ -409,8 +475,12 @@ def main():
         # Save results to JSON
         results_data = {
             "prefix_ratios": prefix_ratios,
-            "ttft_values": ttft_values,
-            "throughput_values": throughput_values,
+            "ttft_p25_values": ttft_p25_values,
+            "ttft_p50_values": ttft_p50_values,
+            "ttft_p75_values": ttft_p75_values,
+            "itl_p25_values": itl_p25_values,
+            "itl_p50_values": itl_p50_values,
+            "itl_p75_values": itl_p75_values,
             "config": {
                 "model": args.model,
                 "tokenizer": args.tokenizer,

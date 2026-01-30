@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::discovery::RuntimeConfigsWithNotify;
+use crate::discovery::RuntimeConfigs;
 use crate::local_model::runtime_config::ModelRuntimeConfig;
 use anyhow::Result;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::traits::DistributedRuntimeProvider;
-use dynamo_runtime::traits::events::EventPublisher;
+use dynamo_runtime::transports::event_plane::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -17,11 +17,10 @@ use super::KV_HIT_RATE_SUBJECT;
 use super::KvRouterConfig;
 use super::RouterConfigOverride;
 use super::WorkerSelector;
-use super::indexer::OverlapScores;
-use super::protocols::{DpRank, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
+use super::protocols::{DpRank, OverlapScores, WorkerId, WorkerSelectionResult, WorkerWithDpRank};
 use super::sequence::{ActiveSequencesMultiWorker, SequenceError};
 
-use crate::tokens::SequenceHash;
+use dynamo_tokens::SequenceHash;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -50,6 +49,9 @@ pub enum KvSchedulerError {
 
     #[error("endpoint subscriber shutdown")]
     SubscriberShutdown,
+
+    #[error("failed to initialize event publisher: {0}")]
+    InitFailed(String),
 }
 
 #[derive(Debug)]
@@ -96,33 +98,39 @@ impl KvScheduler {
     pub async fn start(
         component: Component,
         block_size: u32,
-        workers_with_configs: Arc<RuntimeConfigsWithNotify>,
+        workers_with_configs: Arc<RuntimeConfigs>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         replica_sync: bool,
-        router_uuid: String,
+        router_id: u64,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
 
         // Get initial workers from DashMap for slot initialization.
-        // ModelManager guarantees at least one worker is present before KvRouter::new() is called.
+        // Caller must ensure at least one worker is present (via wait_for_some).
         let initial_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> = workers_with_configs
             .configs
             .iter()
             .map(|r| (*r.key(), r.value().clone()))
             .collect();
 
-        let slots = Arc::new(ActiveSequencesMultiWorker::new(
-            component.clone(),
-            block_size as usize,
-            initial_workers,
-            replica_sync,
-            router_uuid,
-        ));
+        let slots = Arc::new(
+            ActiveSequencesMultiWorker::new(
+                component.clone(),
+                block_size as usize,
+                initial_workers,
+                replica_sync,
+                router_id,
+            )
+            .await
+            .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?,
+        );
 
         // Spawn background task to sync slots with DashMap when notified of changes.
-        // ModelManager's watcher updates the DashMap and notifies; we wait on notify here.
+        // ModelManager's watcher updates the DashMap and notifies; we wait on watch receiver here.
         let slots_monitor = slots.clone();
-        let workers_monitor = workers_with_configs.clone();
+        let subscriber = workers_with_configs.subscribe();
+        let configs_monitor = subscriber.configs;
+        let mut change_rx = subscriber.change_rx;
         let monitor_cancel_token = component.drt().child_token();
         tokio::spawn(async move {
             tracing::trace!("KvScheduler workers monitoring task started");
@@ -135,13 +143,17 @@ impl KvScheduler {
                         tracing::trace!("KvScheduler workers monitoring task shutting down");
                         break;
                     }
-                    _ = workers_monitor.notify.notified() => {}
+                    result = change_rx.changed() => {
+                        if result.is_err() {
+                            tracing::warn!("KvScheduler: config watch sender dropped, shutting down");
+                            break;
+                        }
+                    }
                 }
 
                 // Get current workers from DashMap
                 let current_workers: HashMap<WorkerId, Option<ModelRuntimeConfig>> =
-                    workers_monitor
-                        .configs
+                    configs_monitor
                         .iter()
                         .map(|r| (*r.key(), r.value().clone()))
                         .collect();
@@ -160,7 +172,10 @@ impl KvScheduler {
         let workers_scheduler = workers_with_configs.clone();
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
         let scheduler_cancel_token = component.drt().primary_token();
-        let ns_clone = component.namespace().clone();
+        let hit_rate_publisher =
+            EventPublisher::for_namespace(component.namespace(), KV_HIT_RATE_SUBJECT)
+                .await
+                .map_err(|e| KvSchedulerError::InitFailed(e.to_string()))?;
 
         // Background task to handle scheduling requests
         tokio::spawn(async move {
@@ -206,7 +221,7 @@ impl KvScheduler {
                             isl_blocks: selection.required_blocks as usize,
                             overlap_blocks: selection.overlap_blocks,
                         };
-                        if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                        if let Err(e) = hit_rate_publisher.publish(&event).await {
                             tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
                         }
 
@@ -234,6 +249,7 @@ impl KvScheduler {
                                 request.token_seq,
                                 request.isl_tokens,
                                 selection.overlap_blocks,
+                                None, // expected_output_tokens not available in scheduler loop
                                 selection.worker,
                             )
                             .await
@@ -304,10 +320,18 @@ impl KvScheduler {
         token_sequence: Option<Vec<SequenceHash>>,
         isl: usize,
         overlap: u32,
+        expected_output_tokens: Option<u32>,
         worker: WorkerWithDpRank,
     ) -> Result<(), SequenceError> {
         self.slots
-            .add_request(request_id, token_sequence, isl, overlap, worker)
+            .add_request(
+                request_id,
+                token_sequence,
+                isl,
+                overlap,
+                expected_output_tokens,
+                worker,
+            )
             .await
     }
 
@@ -319,6 +343,16 @@ impl KvScheduler {
 
     pub async fn free(&self, request_id: &str) -> Result<(), SequenceError> {
         self.slots.free(&request_id.to_string()).await
+    }
+
+    pub async fn add_output_block(
+        &self,
+        request_id: &str,
+        decay_fraction: Option<f64>,
+    ) -> Result<(), SequenceError> {
+        self.slots
+            .add_output_block(&request_id.to_string(), decay_fraction)
+            .await
     }
 
     pub async fn get_potential_loads(
@@ -464,6 +498,13 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         let mut worker_logits = HashMap::new();
 
+        // Use override if provided, otherwise use default config
+        let overlap_weight = request
+            .router_config_override
+            .as_ref()
+            .and_then(|cfg| cfg.overlap_score_weight)
+            .unwrap_or(self.kv_router_config.overlap_score_weight);
+
         // Calculate logits for each worker with dp_rank
         // Outer loop: iterate over all workers from runtime config
         // Inner loop: iterate over all dp_ranks for each worker
@@ -488,13 +529,6 @@ impl WorkerSelector for DefaultWorkerSelector {
                     .get(&worker)
                     .unwrap_or(&(potential_prefill_block.floor() as usize))
                     as f64;
-
-                // Use override if provided, otherwise use default config
-                let overlap_weight = request
-                    .router_config_override
-                    .as_ref()
-                    .and_then(|cfg| cfg.overlap_score_weight)
-                    .unwrap_or(self.kv_router_config.overlap_score_weight);
 
                 // Calculate logit (lower is better)
                 let logit = overlap_weight * potential_prefill_block + decode_block;

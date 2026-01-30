@@ -18,11 +18,17 @@
 package validation
 
 import (
+	"context"
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
+
+// ptr is a helper function to create a pointer to a string
+func ptr(s string) *string {
+	return &s
+}
 
 func TestSharedSpecValidator_Validate(t *testing.T) {
 	var (
@@ -31,11 +37,12 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 	)
 
 	tests := []struct {
-		name      string
-		spec      *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		fieldPath string
-		wantErr   bool
-		errMsg    string
+		name                string
+		spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		fieldPath           string
+		calculatedNamespace string
+		wantErr             bool
+		errMsg              string
 	}{
 		{
 			name: "valid spec with all fields",
@@ -60,17 +67,37 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					Size:     resource.MustParse("1Gi"),
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   false,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "negative replicas",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Replicas: &negativeReplicas,
 			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.replicas must be non-negative",
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.replicas must be non-negative",
+		},
+		{
+			name: "nil dynamoNamespace is allowed",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				DynamoNamespace: nil,
+			},
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
+		},
+		{
+			name: "empty string dynamoNamespace is allowed",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				DynamoNamespace: ptr(""),
+			},
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "ingress enabled without host",
@@ -80,9 +107,10 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					Host:    "",
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.ingress.host is required when ingress is enabled",
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.ingress.host is required when ingress is enabled",
 		},
 		{
 			name: "ingress disabled - no validation",
@@ -92,8 +120,9 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					Host:    "",
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   false,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "volume mount without mountPoint and not compilation cache",
@@ -106,9 +135,10 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.volumeMounts[0].mountPoint is required when useAsCompilationCache is false",
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.volumeMounts[0].mountPoint is required when useAsCompilationCache is false",
 		},
 		{
 			name: "volume mount with mountPoint",
@@ -120,8 +150,9 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   false,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "volume mount as compilation cache without mountPoint",
@@ -133,8 +164,9 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					},
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   false,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "shared memory enabled without size",
@@ -144,9 +176,10 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					Size:     resource.Quantity{},
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   true,
-			errMsg:    "spec.sharedMemory.size is required when disabled is false",
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.sharedMemory.size is required when disabled is false",
 		},
 		{
 			name: "shared memory enabled with size",
@@ -156,8 +189,9 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					Size:     resource.MustParse("2Gi"),
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   false,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "shared memory disabled without size",
@@ -167,24 +201,26 @@ func TestSharedSpecValidator_Validate(t *testing.T) {
 					Size:     resource.Quantity{},
 				},
 			},
-			fieldPath: "spec",
-			wantErr:   false,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             false,
 		},
 		{
 			name: "custom field path for service validation",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Replicas: &negativeReplicas,
 			},
-			fieldPath: "spec.services[main]",
-			wantErr:   true,
-			errMsg:    "spec.services[main].replicas must be non-negative",
+			fieldPath:           "spec.services[main]",
+			calculatedNamespace: "default-my-dgd",
+			wantErr:             true,
+			errMsg:              "spec.services[main].replicas must be non-negative",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath)
-			_, err := validator.Validate()
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			_, err := validator.Validate(context.Background())
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("SharedSpecValidator.Validate() error = %v, wantErr %v", err, tt.wantErr)
@@ -202,18 +238,21 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 	validReplicas := int32(3)
 
 	tests := []struct {
-		name         string
-		spec         *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
-		fieldPath    string
-		wantWarnings int
+		name                string
+		spec                *nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec
+		fieldPath           string
+		calculatedNamespace string
+		wantWarnings        int
+		wantWarningContains string // optional substring to check in warning
 	}{
 		{
 			name: "no warnings for spec without autoscaling",
 			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
 				Replicas: &validReplicas,
 			},
-			fieldPath:    "spec",
-			wantWarnings: 0,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantWarnings:        0,
 		},
 		{
 			name: "warning for deprecated autoscaling field enabled",
@@ -226,15 +265,27 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 					MaxReplicas: 10,
 				},
 			},
-			fieldPath:    "spec",
-			wantWarnings: 1,
+			fieldPath:           "spec",
+			calculatedNamespace: "default-my-dgd",
+			wantWarnings:        1,
+		},
+		{
+			name: "warning for deprecated dynamoNamespace field shows calculated namespace",
+			spec: &nvidiacomv1alpha1.DynamoComponentDeploymentSharedSpec{
+				Replicas:        &validReplicas,
+				DynamoNamespace: ptr("my-custom-namespace"),
+			},
+			fieldPath:           "spec.services[Frontend]",
+			calculatedNamespace: "hannahz-trtllm-disagg",
+			wantWarnings:        1,
+			wantWarningContains: "Value 'my-custom-namespace' will be replaced with 'hannahz-trtllm-disagg'",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath)
-			warnings, err := validator.Validate()
+			validator := NewSharedSpecValidator(tt.spec, tt.fieldPath, tt.calculatedNamespace)
+			warnings, err := validator.Validate(context.Background())
 
 			if err != nil {
 				t.Errorf("SharedSpecValidator.Validate() unexpected error = %v", err)
@@ -244,6 +295,34 @@ func TestSharedSpecValidator_Validate_Warnings(t *testing.T) {
 			if len(warnings) != tt.wantWarnings {
 				t.Errorf("SharedSpecValidator.Validate() warnings count = %d, want %d", len(warnings), tt.wantWarnings)
 			}
+
+			if tt.wantWarningContains != "" && len(warnings) > 0 {
+				found := false
+				for _, w := range warnings {
+					if contains(w, tt.wantWarningContains) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("SharedSpecValidator.Validate() warnings = %v, want warning containing %q", warnings, tt.wantWarningContains)
+				}
+			}
 		})
 	}
+}
+
+// contains checks if s contains substr
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
+		(len(s) > 0 && len(substr) > 0 && findSubstring(s, substr)))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
