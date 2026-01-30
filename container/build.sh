@@ -74,7 +74,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TRTLLM_BASE_IMAGE_TAG=25.10-py3
+TRTLLM_BASE_IMAGE_TAG=25.12-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -104,7 +104,7 @@ DEFAULT_TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="e4a6c9995dacf66bab4410475a6774152f95a0a6" # 1.2.0rc6.post1
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="45d7022cc33903509fd8045bbc577d77dd1d3e2f" # 1.3.0rc1
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TRTLLM_GIT_URL=""
@@ -113,8 +113,13 @@ TRTLLM_GIT_URL=""
 DEFAULT_TENSORRTLLM_INDEX_URL="https://pypi.nvidia.com/"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.trtllm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.2.0rc6.post1"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.3.0rc1"
+# TensorRT-LLM wheels on PyPI might not be compatible with the NGC PyTorch.
+# For incompatible versions, we install the wheel from the NGC image during the Docker build.
+# The following versions are not ABI compatible with the NGC PyTorch.
+TRTLLM_ABI_INCOMPATIBLE_VERSIONS=("1.3.0rc1")
 TENSORRTLLM_PIP_WHEEL=""
+TRTLLM_WHEEL_IMAGE=""
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 # FIXME: OPS-612 NCCL will hang with 25.03, so use 25.01 for now
@@ -136,15 +141,11 @@ SGLANG_BASE_IMAGE_TAG="25.06-cuda12.9-devel-ubuntu24.04"
 SGLANG_BASE_IMAGE_TAG_CU13="25.11-cuda13.0-devel-ubuntu24.04"
 SGLANG_CUDA_VERSION="12.9.1"
 SGLANG_CUDA_VERSION_CU13="13.0.1"
-SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.7-cu130-runtime"
-
-# GAIE (Gateway API Inference Extension) configuration for frontend (required for EPP binary for frontend image)
-GAIE_REPO_URL="https://github.com/kubernetes-sigs/gateway-api-inference-extension.git"
-GAIE_VERSION="v0.5.1"
+SGLANG_RUNTIME_IMAGE_TAG_CU13="v0.5.8-cu130-runtime"
 
 PYTHON_VERSION="3.12"
 
-NIXL_REF=0.8.0
+NIXL_REF=0.9.0
 NIXL_UCX_REF=1.20.0
 NIXL_GDRCOPY_REF=v2.5.1
 NIXL_LIBFABRIC_REF=v2.3.0
@@ -159,6 +160,10 @@ PUSH=""
 # KVBM (KV Cache Block Manager) - default disabled, enabled automatically for VLLM/TRTLLM
 # or can be explicitly enabled via --enable-kvbm flag
 ENABLE_KVBM=false
+
+# GPU Memory Service - default disabled, enabled automatically for VLLM/SGLANG
+# or can be explicitly enabled via --enable-gpu-memory-service flag
+ENABLE_GPU_MEMORY_SERVICE=false
 
 # sccache configuration for S3
 USE_SCCACHE=""
@@ -346,6 +351,9 @@ get_options() {
             ;;
         --enable-kvbm)
             ENABLE_KVBM=true
+            ;;
+        --enable-gpu-memory-service)
+            ENABLE_GPU_MEMORY_SERVICE=true
             ;;
         --enable-media-nixl)
             ENABLE_MEDIA_NIXL=true
@@ -543,6 +551,7 @@ show_help() {
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Adds AWS EFA layer on top of the built image (works with any target)]"
     echo "  [--enable-kvbm Enables KVBM support in Python 3.12]"
+    echo "  [--enable-gpu-memory-service Enables GPU Memory Service support]"
     echo "  [--enable-media-nixl Enable media processing with NIXL support (default: true for frameworks, false for none)]"
     echo "  [--enable-media-ffmpeg Enable media processing with FFMPEG support (default: true for frameworks, false for none)]"
     echo "  [--use-sccache enable sccache for Rust/C/C++ compilation caching]"
@@ -673,6 +682,50 @@ check_wheel_file() {
     return 0
 }
 
+get_trtllm_version_from_pip_wheel() {
+    local wheel_spec="$1"
+    if [[ "$wheel_spec" =~ == ]]; then
+        local version
+        version=$(echo "$wheel_spec" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+        if _is_semver_ref "$version"; then
+            echo "${version#v}"
+            return 0
+        fi
+    fi
+    echo ""
+    return 0
+}
+
+trtllm_version_incompatible() {
+    local version="$1"
+    for incompatible_version in "${TRTLLM_ABI_INCOMPATIBLE_VERSIONS[@]}"; do
+        if [[ "$version" == "$incompatible_version" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+_is_semver_ref() {
+    local ref="$1"
+    local semver_regex='^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)([-+][0-9A-Za-z.-]+|[A-Za-z][0-9A-Za-z.-]+)?$'
+    [[ "$ref" =~ $semver_regex ]]
+}
+
+get_github_trtllm_ref() {
+    local commit="$1"
+    if _is_semver_ref "$commit"; then
+        if [[ "$commit" =~ ^v ]]; then
+            echo "$commit"
+        else
+            echo "v${commit}"
+        fi
+        return 0
+    fi
+    echo "$commit"
+    return 0
+}
+
 function determine_user_intention_trtllm() {
     # The tensorrt llm installation flags are not quite mutually exclusive
     # since the user should be able to point at a directory of their choosing
@@ -760,15 +813,22 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ "$TRTLLM_INTENTION" == "download" ]]; then
         TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL:-$DEFAULT_TENSORRTLLM_INDEX_URL}
         TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL:-$DEFAULT_TENSORRTLLM_PIP_WHEEL}
-        BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
-        BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
-
+        TRTLLM_WHEEL_VERSION=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+        if trtllm_version_incompatible "${TRTLLM_WHEEL_VERSION}"; then
+            TRTLLM_WHEEL_IMAGE="nvcr.io/nvidia/tensorrt-llm/release:${TRTLLM_WHEEL_VERSION}"
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TRTLLM_WHEEL_IMAGE=${TRTLLM_WHEEL_IMAGE}"
+            PRINT_TRTLLM_WHEEL_FILE=${TRTLLM_WHEEL_IMAGE}
+        else
+            BUILD_ARGS+=" --build-arg HAS_TRTLLM_CONTEXT=0"
+            BUILD_ARGS+=" --build-arg TENSORRTLLM_PIP_WHEEL=${TENSORRTLLM_PIP_WHEEL}"
+            BUILD_ARGS+=" --build-arg TENSORRTLLM_INDEX_URL=${TENSORRTLLM_INDEX_URL}"
+            PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        fi
         # Create a dummy directory to satisfy the build context requirement
         # There is no way to conditionally copy the build context in dockerfile.
-        mkdir -p /tmp/dummy_dir
-        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/dummy_dir"
-        PRINT_TRTLLM_WHEEL_FILE=${TENSORRTLLM_PIP_WHEEL}
+        mkdir -p /tmp/trtllm_wheel_context
+        BUILD_CONTEXT_ARG+=" --build-context trtllm_wheel=/tmp/trtllm_wheel_context"
     elif [[ "$TRTLLM_INTENTION" == "install" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}"; then
@@ -807,7 +867,11 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
     if [[ -z "$TRTLLM_COMMIT" ]]; then
         # Attempt to default since the commit will work with a hash or a tag/branch
         if [[ ! -z "$TENSORRTLLM_PIP_WHEEL" ]]; then
-            TRTLLM_COMMIT=$(echo "${TENSORRTLLM_PIP_WHEEL}" | sed -n 's/.*==\([0-9a-zA-Z\.\-]*\).*/\1/p')
+            TRTLLM_COMMIT=$(get_trtllm_version_from_pip_wheel "${TENSORRTLLM_PIP_WHEEL}")
+            if [[ -z "$TRTLLM_COMMIT" ]]; then
+                echo -e "[ERROR] Could not parse a semver version from TENSORRTLLM_PIP_WHEEL: ${TENSORRTLLM_PIP_WHEEL}"
+                exit 1
+            fi
             echo "Attempting to default TRTLLM_COMMIT to \"$TRTLLM_COMMIT\" for installation of TensorRT."
         else
             echo -e "[ERROR] TRTLLM framework was set as a target but the TRTLLM_COMMIT variable was not set."
@@ -816,7 +880,8 @@ if [[ $FRAMEWORK == "TRTLLM" ]]; then
             exit 1
         fi
     fi
-    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${TRTLLM_COMMIT}"
+    GITHUB_TRTLLM_REF=$(get_github_trtllm_ref "${TRTLLM_COMMIT}")
+    BUILD_ARGS+=" --build-arg GITHUB_TRTLLM_COMMIT=${GITHUB_TRTLLM_REF}"
 
 
 fi
@@ -833,6 +898,20 @@ fi
 if [[ ${ENABLE_KVBM} == "true" ]]; then
     echo "Enabling KVBM in the dynamo image"
     BUILD_ARGS+=" --build-arg ENABLE_KVBM=${ENABLE_KVBM} "
+fi
+
+# ENABLE_GPU_MEMORY_SERVICE: Used in Dockerfiles for gpu_memory_service wheel.
+#                            Declared but not currently used in Dockerfile.trtllm.
+# Force GPU Memory Service to be enabled for VLLM and SGLANG frameworks
+if [[ $FRAMEWORK == "VLLM" ]] || [[ $FRAMEWORK == "SGLANG" ]]; then
+    echo "Forcing enable_gpu_memory_service to true in ${FRAMEWORK} image build"
+    ENABLE_GPU_MEMORY_SERVICE=true
+fi
+# For other frameworks, ENABLE_GPU_MEMORY_SERVICE defaults to false unless --enable-gpu-memory-service flag was provided
+
+if [[ ${ENABLE_GPU_MEMORY_SERVICE} == "true" ]]; then
+    echo "Enabling GPU Memory Service in the dynamo image"
+    BUILD_ARGS+=" --build-arg ENABLE_GPU_MEMORY_SERVICE=${ENABLE_GPU_MEMORY_SERVICE} "
 fi
 
 # ENABLE_MEDIA_NIXL: Enable media processing with NIXL support
@@ -969,39 +1048,33 @@ show_image_options
 # Handle FRONTEND target: build EPP image first
 if [[ ${TARGET^^} == "FRONTEND" ]]; then
     echo "Building FRONTEND image - requires EPP image"
-
-    # Build base dynamo image first (framework=NONE, target=dev)
     echo ""
-    echo "Building EPP image for Frontend..."
-    # Set up paths for GAIE
-    GAIE_CLONE_DIR="${BUILD_CONTEXT}/.build/external/gateway-api-inference-extension"
+    echo "Building EPP image for Frontend using Makefile..."
 
-    # Clone GAIE repo
-    echo ""
-    echo "Cloning GAIE repository at ${GAIE_VERSION}..."
-    $RUN_PREFIX rm -rf "${GAIE_CLONE_DIR}"
-    $RUN_PREFIX mkdir -p "$(dirname "${GAIE_CLONE_DIR}")"
-    $RUN_PREFIX git clone ${GAIE_REPO_URL} "${GAIE_CLONE_DIR}"
-    $RUN_PREFIX cd "${GAIE_CLONE_DIR}"
-    $RUN_PREFIX git checkout ${GAIE_VERSION}
-    $RUN_PREFIX cd "${BUILD_CONTEXT}"
-
-    # Build EPP image
-    echo ""
-    echo "Building EPP image..."
-    export GAIE_DIR="${GAIE_CLONE_DIR}"
-    export DYNAMO_DIR="${BUILD_CONTEXT}"
+    # EPP directory with the new self-contained build
+    EPP_DIR="${BUILD_CONTEXT}/deploy/inference-gateway/epp"
 
     # Set DOCKER_PROXY from ECR_HOSTNAME if available (for pulling base images through proxy)
+    # This prevents rate-limiting when building in CI across multiple PRs
+    DOCKER_PROXY_ARG=""
     if [[ -n "${ECR_HOSTNAME}" ]]; then
-        export DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        DOCKER_PROXY="${ECR_HOSTNAME}/dockerhub/"
+        DOCKER_PROXY_ARG="DOCKER_PROXY=${DOCKER_PROXY}"
         echo "Using DOCKER_PROXY: ${DOCKER_PROXY}"
     fi
 
-    $RUN_PREFIX bash ${DYNAMO_DIR}/deploy/inference-gateway/build-epp-dynamo.sh
+    # Build EPP image using the Makefile
+    # The Makefile handles: building Dynamo library, building Docker image, loading it locally
+    $RUN_PREFIX make -C "${EPP_DIR}" all DYNAMO_DIR="${BUILD_CONTEXT}" ${DOCKER_PROXY_ARG}
 
-    # Set EPP image tag (matches what build-epp-dynamo.sh produces)
-    EPP_IMAGE_TAG="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:${GAIE_VERSION}-dirty"
+    # Compute EPP image tag (must match Makefile's IMAGE_TAG)
+    # IMAGE_TAG = $(IMAGE_REPO):$(GIT_TAG)
+    # IMAGE_REPO = $(DOCKER_SERVER)/$(IMAGE_NAME)
+    # Image lives in local cache only, not pushed to any registry
+    EPP_DOCKER_SERVER="dynamo"
+    EPP_IMAGE_NAME="dynamo-epp"
+    EPP_GIT_TAG=$(git describe --tags --dirty --always 2>/dev/null || echo "dev")
+    EPP_IMAGE_TAG="${EPP_DOCKER_SERVER}/${EPP_IMAGE_NAME}:${EPP_GIT_TAG}"
 
     echo "Successfully built EPP image: ${EPP_IMAGE_TAG}"
 

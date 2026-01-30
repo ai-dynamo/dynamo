@@ -228,6 +228,14 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--track-output-blocks",
+        action="store_true",
+        dest="router_track_output_blocks",
+        default=False,
+        help="KV Router: Track output blocks during generation. When enabled, the router adds placeholder blocks as tokens are generated and applies fractional decay based on progress toward expected_output_tokens (default: False)",
+    )
+
+    parser.add_argument(
         "--router-ttl-secs",
         type=float,
         default=120.0,
@@ -275,6 +283,7 @@ async def worker(runtime: DistributedRuntime):
         f"router_replica_sync={args.router_replica_sync}, "
         f"router_reset_states={args.router_reset_states}, "
         f"router_track_active_blocks={args.router_track_active_blocks}, "
+        f"router_track_output_blocks={args.router_track_output_blocks}, "
         f"router_ttl_secs={args.router_ttl_secs}, "
         f"router_max_tree_size={args.router_max_tree_size}, "
         f"router_prune_target_ratio={args.router_prune_target_ratio}"
@@ -289,6 +298,7 @@ async def worker(runtime: DistributedRuntime):
         router_snapshot_threshold=args.router_snapshot_threshold,
         router_reset_states=args.router_reset_states,
         router_track_active_blocks=args.router_track_active_blocks,
+        router_track_output_blocks=args.router_track_output_blocks,
         router_ttl_secs=args.router_ttl_secs,
         router_max_tree_size=args.router_max_tree_size,
         router_prune_target_ratio=args.router_prune_target_ratio,

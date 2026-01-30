@@ -207,10 +207,9 @@ impl MockVllmEngine {
         }
 
         tracing::debug!("Starting metrics background tasks");
-        for (dp_rank, scheduler) in schedulers.iter().enumerate() {
+        for scheduler in schedulers.iter() {
             let mut metrics_rx = scheduler.metrics_receiver();
             let publisher = metrics_publisher.clone();
-            let dp_rank = dp_rank as u32;
             let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
@@ -221,15 +220,15 @@ impl MockVllmEngine {
                             // Get the latest metrics
                             let metrics = metrics_rx.borrow().clone();
 
-                            // Publish metrics
-                            if let Err(e) = publisher.publish(Arc::new(metrics)) {
-                                tracing::warn!("Failed to publish metrics for DP rank {dp_rank}: {e}");
+                            // Publish metrics using flat API
+                            if let Err(e) = publisher.publish(Some(metrics.dp_rank), metrics.active_decode_blocks) {
+                                tracing::warn!("Failed to publish metrics for DP rank {}: {e}", metrics.dp_rank);
                             } else {
-                                tracing::trace!("Published metrics for DP rank {}", dp_rank);
+                                tracing::trace!("Published metrics for DP rank {}", metrics.dp_rank);
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::debug!("Metrics publishing cancelled for DP rank {dp_rank}");
+                            tracing::debug!("Metrics publishing cancelled");
                             break;
                         }
                     }

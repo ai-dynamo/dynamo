@@ -272,6 +272,68 @@ class BaseWorkerHandler(ABC):
             tokenizer = engine.tokenizer
         self.input_param_manager = InputParamManager(tokenizer)
 
+    async def sleep(self, body: dict) -> dict:
+        """Sleep the engine to release GPU memory and unregister from discovery.
+
+        Args:
+            body: Dict with optional 'level' key (1=weights only, 2=weights+buffers, 3=everything)
+
+        Order of operations:
+        1. Unregister from discovery - stop accepting new requests
+        2. Sleep engine - safe now that no new requests will arrive
+        """
+        level = body.get("level", 1)
+        try:
+            # Step 1: Unregister endpoint instance FIRST to stop new requests from arriving
+            try:
+                await self.generate_endpoint.unregister_endpoint_instance()
+                logger.info(
+                    "[Sleep] Unregistered endpoint from discovery - worker removed from routing pool"
+                )
+            except Exception as unreg_err:
+                logger.warning(
+                    f"[Sleep] Failed to unregister endpoint from discovery: {unreg_err}"
+                )
+
+            # Step 2: Now safe to sleep - no new requests will be routed here
+            await self.engine_client.sleep(level)
+
+            return {"status": "ok", "message": f"Engine slept (level={level})"}
+        except Exception as e:
+            logger.error(f"Failed to sleep engine: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def wake_up(self, body: dict) -> dict:
+        """Wake the engine to restore GPU memory and re-register to discovery.
+
+        Args:
+            body: Dict with optional 'tags' key (e.g., ["weights", "kv_cache"]). None wakes all.
+
+        Order of operations:
+        1. Wake engine - restore GPU memory
+        2. Re-register endpoint instance - allow frontend to route requests here again
+        """
+        tags = body.get("tags")
+        try:
+            # Step 1: Wake engine first - must be ready before accepting requests
+            await self.engine_client.wake_up(tags)
+
+            # Step 2: Re-register endpoint instance to discovery so frontend can route to us again
+            try:
+                await self.generate_endpoint.register_endpoint_instance()
+                logger.info(
+                    "[Wake] Re-registered endpoint to discovery - worker added back to routing pool"
+                )
+            except Exception as reg_err:
+                logger.warning(
+                    f"[Wake] Failed to re-register endpoint to discovery: {reg_err}"
+                )
+
+            return {"status": "ok", "message": f"Engine woke (tags={tags})"}
+        except Exception as e:
+            logger.error(f"Failed to wake up engine: {e}")
+            return {"status": "error", "message": str(e)}
+
     @abstractmethod
     async def generate(self, request, context) -> AsyncGenerator[dict, None]:
         raise NotImplementedError
@@ -757,6 +819,48 @@ class BaseWorkerHandler(ABC):
 
         return prompt, sequence_length, embeddings_tensor
 
+    async def _load_image_batch(
+        self, image_mm_items: list[Dict[str, Any]]
+    ) -> list[Any]:
+        """
+        Load a batch of images from multimodal data items.
+
+        Args:
+            image_mm_items: List of multimodal data items for images
+        Returns:
+            List of loaded image data
+        Raises:
+            Exception: If any image fails to load
+        """
+        image_futures = []
+        for item in image_mm_items:
+            if isinstance(item, dict) and URL_VARIANT_KEY in item:
+                url = item[URL_VARIANT_KEY]
+                image_futures.append(self.image_loader.load_image(url))
+                logger.debug(f"Preparing to load image from URL: {url[:80]}...")
+            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
+                logger.warning(
+                    "Decoded multimodal data not yet supported in standard worker"
+                )
+
+        results = await asyncio.gather(*image_futures, return_exceptions=True)
+        loaded_images = []
+        collective_exceptions = ""
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                url = image_mm_items[i].get(URL_VARIANT_KEY, "unknown")
+                logger.error(f"Failed to load image from {url[:80]}...: {result}")
+                collective_exceptions += (
+                    f"Failed to load image from {url[:80]}...: {result}\n"
+                )
+                continue
+            loaded_images.append(result)
+
+        if collective_exceptions:
+            raise Exception(collective_exceptions)
+
+        return loaded_images
+
     async def _extract_multimodal_data(
         self, request: Dict[str, Any]
     ) -> Dict[str, Any] | None:
@@ -777,25 +881,7 @@ class BaseWorkerHandler(ABC):
         vllm_mm_data = {}
 
         # Process image_url entries
-        images = []
-        for item in mm_map.get(IMAGE_URL_KEY, []):
-            if isinstance(item, dict) and URL_VARIANT_KEY in item:
-                url = item[URL_VARIANT_KEY]
-                try:
-                    # ImageLoader supports both data: and http(s): URLs with caching
-                    image = await self.image_loader.load_image(url)
-                    images.append(image)
-                    logger.debug(f"Loaded image from URL: {url[:80]}...")
-                except Exception:
-                    logger.exception(f"Failed to load image from {url[:80]}...")
-                    raise
-            elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
-                # Decoded support from PRs #3971/#3988 (frontend decoding + NIXL transfer)
-                # Will contain NIXL metadata for direct memory access
-                # TODO: Implement NIXL read when PRs merge
-                logger.warning(
-                    "Decoded multimodal data not yet supported in standard worker"
-                )
+        images = await self._load_image_batch(mm_map.get(IMAGE_URL_KEY, []))
 
         if images:
             # vLLM expects single image or list

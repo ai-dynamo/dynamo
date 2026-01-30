@@ -552,14 +552,24 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 	componentName = GetDynamoComponentName(dynamoDeployment, componentName)
 
 	var servicePort corev1.ServicePort
-	if component.ComponentType == commonconsts.ComponentTypeFrontend {
+	switch component.ComponentType {
+	case commonconsts.ComponentTypeFrontend:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoServicePortName,
 			Port:       commonconsts.DynamoServicePort,
 			TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
 			Protocol:   corev1.ProtocolTCP,
 		}
-	} else {
+	case commonconsts.ComponentTypeEPP:
+		// EPP only exposes the gRPC endpoint for InferencePool communication
+		servicePort = corev1.ServicePort{
+			Name:        commonconsts.EPPGRPCPortName,
+			Port:        commonconsts.EPPGRPCPort,
+			TargetPort:  intstr.FromInt(commonconsts.EPPGRPCPort),
+			Protocol:    corev1.ProtocolTCP,
+			AppProtocol: ptr.To("http2"),
+		}
+	default:
 		servicePort = corev1.ServicePort{
 			Name:       commonconsts.DynamoSystemPortName,
 			Port:       commonconsts.DynamoSystemPort,
@@ -567,10 +577,24 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			Protocol:   corev1.ProtocolTCP,
 		}
 	}
+
+	// Start with user-defined labels from component.Labels
+	labels := make(map[string]string)
+	for k, v := range component.Labels {
+		labels[k] = v
+	}
+
+	// Add k8s discovery labels (these take precedence over user labels)
+	if isK8sDiscoveryEnabled {
+		labels[commonconsts.KubeLabelDynamoDiscoveryBackend] = "kubernetes"
+		labels[commonconsts.KubeLabelDynamoDiscoveryEnabled] = commonconsts.KubeLabelValueTrue
+	}
+
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      componentName,
 			Namespace: dynamoDeployment.Namespace,
+			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
@@ -579,12 +603,6 @@ func GenerateComponentService(ctx context.Context, dynamoDeployment *v1alpha1.Dy
 			},
 			Ports: []corev1.ServicePort{servicePort},
 		},
-	}
-	if isK8sDiscoveryEnabled {
-		service.Labels = map[string]string{
-			commonconsts.KubeLabelDynamoDiscoveryBackend: "kubernetes",
-			commonconsts.KubeLabelDynamoDiscoveryEnabled: commonconsts.KubeLabelValueTrue,
-		}
 	}
 	return service, nil
 }
@@ -1077,6 +1095,7 @@ func generateComponentContext(component *v1alpha1.DynamoComponentDeploymentShare
 		ParentGraphDeploymentNamespace: namespace,
 		DiscoveryBackend:               discoveryBackend,
 		DynamoNamespace:                dynamoNamespace,
+		EPPConfig:                      component.EPPConfig,
 	}
 	return componentContext
 }

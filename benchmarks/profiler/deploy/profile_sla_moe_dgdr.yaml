@@ -13,17 +13,18 @@ spec:
 
   # ProfilingConfig maps directly to the profile_sla.py config format
   profilingConfig:
-    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
+    profilerImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
+
+    # NOTE: any image built before January 10 and any release prior to 0.8.1
+    # will need to use snake_case within profilingConfig.config
     config:
-      # Model cache PVC configuration; profiler will mount this PVC to access model weights
+      # 0.8.1 and later: Model cache PVC to access model weights
       deployment:
         modelCache:
           pvcName: "model-cache"                      # Name of PVC containing model weights
           pvcPath: "deepseek-r1"                      # Subpath within PVC where model is stored
 
-      # Sweep/profiling configuration
       sweep:
-        # Standard online profiling (not using AI Configurator)
         useAiConfigurator: false
 
       hardware:
@@ -32,12 +33,11 @@ spec:
         maxNumGpusPerEngine: 16
         numGpusPerNode: 8
 
-      # SLA targets for profiling
       sla:
-        isl: 3000   # Input sequence length
-        osl: 150    # Output sequence length
-        ttft: 200.0 # Time To First Token target (milliseconds)
-        itl: 20.0   # Inter-Token Latency target (milliseconds)
+        isl: 3000
+        osl: 150
+        ttft: 200.0
+        itl: 20.0
 
     # Reference to ConfigMap containing the DGD base config
     # For MoE models, this should point to the appropriate disagg config
@@ -46,10 +46,7 @@ spec:
       name: deepseek-r1-config
       key: tep16p-dep16d-disagg.yaml
 
-  # Deployment overrides for the auto-created DGD
   deploymentOverrides:
-    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.6.1"
-
-  # Automatically create DynamoGraphDeployment after profiling
+    workersImage: "nvcr.io/nvidia/ai-dynamo/sglang-runtime:my-tag"
   autoApply: true
 

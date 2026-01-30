@@ -20,6 +20,10 @@ const (
 	DynamoSystemPort     = 9090
 	DynamoSystemPortName = "system"
 
+	// EPP (Endpoint Picker Plugin) ports
+	EPPGRPCPort     = 9002
+	EPPGRPCPortName = "grpc"
+
 	MpiRunSshPort = 2222
 
 	// Default security context values
@@ -67,8 +71,11 @@ const (
 	ComponentTypeWorker       = "worker"
 	ComponentTypePrefill      = "prefill"
 	ComponentTypeDecode       = "decode"
+	ComponentTypeEPP          = "epp"
 	ComponentTypeDefault      = "default"
 	PlannerServiceAccountName = "planner-serviceaccount"
+	EPPServiceAccountName     = "epp-serviceaccount"
+	EPPClusterRoleName        = "epp-cluster-role"
 
 	DefaultIngressSuffix = "local"
 
@@ -97,6 +104,19 @@ const (
 	MainContainerName = "main"
 
 	RestartAnnotation = "nvidia.com/restartAt"
+
+	// Resource type constants - match Kubernetes Kind names
+	// Used consistently across controllers, webhooks, and metrics
+	ResourceTypeDynamoGraphDeployment               = "DynamoGraphDeployment"
+	ResourceTypeDynamoComponentDeployment           = "DynamoComponentDeployment"
+	ResourceTypeDynamoModel                         = "DynamoModel"
+	ResourceTypeDynamoGraphDeploymentRequest        = "DynamoGraphDeploymentRequest"
+	ResourceTypeDynamoGraphDeploymentScalingAdapter = "DynamoGraphDeploymentScalingAdapter"
+
+	// Resource state constants - used in status reporting and metrics
+	ResourceStateReady    = "ready"
+	ResourceStateNotReady = "not_ready"
+	ResourceStateUnknown  = "unknown"
 )
 
 type MultinodeDeploymentType string

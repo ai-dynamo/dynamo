@@ -92,6 +92,8 @@ type RBACConfig struct {
 	PlannerClusterRoleName string
 	// DGDRProfilingClusterRoleName is the name of the ClusterRole for DGDR profiling jobs (cluster-wide mode only)
 	DGDRProfilingClusterRoleName string
+	// EPPClusterRoleName is the name of the ClusterRole for EPP (cluster-wide mode only)
+	EPPClusterRoleName string
 }
 
 type IngressConfig struct {
@@ -127,6 +129,12 @@ func DetectVolcanoAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 // This approach uses the discovery client which is simpler and more reliable
 func DetectKaiSchedulerAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	return detectAPIGroupAvailability(ctx, mgr, "scheduling.run.ai")
+}
+
+// DetectInferencePoolAvailability checks if the Gateway API Inference Extension is available
+// by checking if the inference.networking.k8s.io API group is registered
+func DetectInferencePoolAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	return detectAPIGroupAvailability(ctx, mgr, "inference.networking.k8s.io")
 }
 
 // detectAPIGroupAvailability checks if a specific API group is registered in the cluster

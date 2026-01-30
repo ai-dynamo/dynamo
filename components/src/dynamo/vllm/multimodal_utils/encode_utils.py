@@ -16,6 +16,7 @@
 import hashlib
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -24,6 +25,10 @@ from vllm.config import ECTransferConfig
 from .model import SupportedModels, is_model_supported, is_qwen_vl_model
 
 logger = logging.getLogger(__name__)
+
+# [gluo NOTE] Debug flag to compare vLLM encoder vs transformers encoder,
+# should be removed once there is proper way to extract vLLM encoder.
+VLLM_ENCODER = int(os.getenv("VLLM_ENCODER", 1))
 
 
 def get_embedding_hash(key: str) -> str:
@@ -54,6 +59,16 @@ def get_qwen_image_features(
     Raises:
         ValueError: If grid_thw is not provided for Qwen model
     """
+    logger.debug(f"Encoding image of shape: {image_embeds['pixel_values'].shape}")
+    if VLLM_ENCODER:
+        pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
+        grid_thw = image_embeds.get("image_grid_thw")
+        if grid_thw is None:
+            raise ValueError("grid_thw is not provided")
+        grid_thw = grid_thw.tolist()
+        image_embeds = vision_encoder(pixel_values, grid_thw=grid_thw)
+        return image_embeds
+
     pixel_values = image_embeds["pixel_values"].to(vision_encoder.device)
 
     grid_thw = image_embeds.get("image_grid_thw", None)

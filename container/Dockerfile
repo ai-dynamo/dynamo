@@ -27,6 +27,7 @@ ARG EPP_IMAGE="us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inferen
 
 ARG PYTHON_VERSION
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 ARG ENABLE_MEDIA_NIXL
 ARG ENABLE_MEDIA_FFMPEG
 ARG CARGO_BUILD_JOBS
@@ -134,10 +135,17 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16} \
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 # Install system dependencies
-RUN yum groupinstall -y 'Development Tools' &&  \
-    dnf install -y almalinux-release-synergy && \
+RUN dnf install -y almalinux-release-synergy && \
     dnf config-manager --set-enabled powertools && \
     dnf install -y \
+        # Autotools (required for UCX, libfabric ./autogen.sh and ./configure)
+        autoconf \
+        automake \
+        libtool \
+        make \
+        # RPM build tools (required for gdrcopy's build-rpm-packages.sh)
+        rpm-build \
+        rpm-sign \
         # Build tools
         cmake \
         ninja-build \
@@ -163,7 +171,8 @@ RUN yum groupinstall -y 'Development Tools' &&  \
         numactl-devel \
         # Libfabric support
         hwloc \
-        hwloc-devel
+        hwloc-devel && \
+    dnf clean all && rm -rf /var/cache/dnf/
 
 # Set GCC toolset 14 as the default compiler (CUDA requires GCC <= 14)
 ENV PATH="/opt/rh/gcc-toolset-14/root/usr/bin:${PATH}" \
@@ -431,6 +440,13 @@ RUN --mount=type=secret,id=aws-key-id,env=AWS_ACCESS_KEY_ID \
     fi && \
     /tmp/use-sccache.sh show-stats "Dynamo"
 
+# Build gpu_memory_service wheel (C++ extension only needs Python headers, no CUDA/torch)
+ARG ENABLE_GPU_MEMORY_SERVICE
+RUN if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        source ${VIRTUAL_ENV}/bin/activate && \
+        uv build --wheel --out-dir /opt/dynamo/dist /opt/dynamo/lib/gpu_memory_service; \
+    fi
+
 ##############################################
 ########## Runtime image ##############
 ##############################################
@@ -502,10 +518,19 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv \
 
 # Install dynamo wheels (runtime packages only, no test dependencies)
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$GMS_WHEEL"; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \
@@ -593,10 +618,19 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
         --requirement /tmp/requirements.test.txt
 
 ARG ENABLE_KVBM
+ARG ENABLE_GPU_MEMORY_SERVICE
 RUN uv pip install \
     /opt/dynamo/wheelhouse/ai_dynamo_runtime*.whl \
     /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
     /opt/dynamo/wheelhouse/nixl/nixl*.whl && \
+    if [ "$ENABLE_GPU_MEMORY_SERVICE" = "true" ]; then \
+        GMS_WHEEL=$(ls /opt/dynamo/wheelhouse/gpu_memory_service*.whl 2>/dev/null | head -1); \
+        if [ -z "$GMS_WHEEL" ]; then \
+            echo "ERROR: ENABLE_GPU_MEMORY_SERVICE is true but no gpu_memory_service wheel found in wheelhouse" >&2; \
+            exit 1; \
+        fi; \
+        uv pip install "$GMS_WHEEL"; \
+    fi && \
     if [ "$ENABLE_KVBM" = "true" ]; then \
         KVBM_WHEEL=$(ls /opt/dynamo/wheelhouse/kvbm*.whl 2>/dev/null | head -1); \
         if [ -z "$KVBM_WHEEL" ]; then \

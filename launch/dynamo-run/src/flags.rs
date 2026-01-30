@@ -128,7 +128,7 @@ pub struct Flags {
     pub migration_limit: Option<u32>,
 
     /// Which key-value backend to use: etcd, mem, file.
-    /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENPOINTS) for connection details.
+    /// Etcd uses the ETCD_* env vars (e.g. ETCD_ENDPOINTS) for connection details.
     /// File uses root dir from env var DYN_FILE_KV or defaults to $TMPDIR/dynamo_store_kv.
     #[arg(long, default_value = "etcd", value_parser = ["etcd", "file", "mem"])]
     pub store_kv: String,
@@ -193,6 +193,7 @@ impl Flags {
                 self.use_kv_events,
                 self.router_replica_sync,
                 self.router_track_active_blocks,
+                None, // track_output_blocks
                 // defaulting below args (no longer maintaining new flags for dynamo-run)
                 None, // assume_kv_reuse
                 None,

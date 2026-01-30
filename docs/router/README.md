@@ -216,6 +216,69 @@ The router uses KV events from workers by default to maintain an accurate global
   - **NATS is not needed** - suitable for simpler deployments without NATS infrastructure
   - Suitable for testing or when event processing becomes a bottleneck
 
+## Event Transport Modes
+
+The router supports two event transport modes for KV cache state synchronization:
+
+- **JetStream (default)**: Persistent event stream with durable consumers. State persists across router restarts via snapshots in NATS object store. Best for production with multi-replica consistency.
+
+- **NATS Core with Local Indexer** (`--enable-local-indexer` on workers): Fire-and-forget pub/sub where workers maintain local radix trees. Router rebuilds state by querying workers on startup. Lower latency, simpler setup.
+
+See [KV Cache Routing](kv_cache_routing.md#global-kv-cache-state-synchronization) for architecture diagrams and details.
+
+## Disaggregated Serving
+
+Dynamo supports disaggregated serving where prefill and decode are handled by separate worker pools. Register prefill workers with `ModelType.Prefill` and the frontend automatically activates an internal prefill router.
+
+Key points:
+- Prefill router auto-activates when both prefill and decode workers register with the same model name
+- Supports vLLM and TensorRT-LLM backends (SGLang requires separate router setup)
+- Use `--no-track-active-blocks` for prefill-only workers
+
+See [KV Cache Routing - Disaggregated Serving](kv_cache_routing.md#disaggregated-serving-prefill-and-decode) for setup examples.
+
+## Router Replicas and State Persistence
+
+For high availability, run multiple router replicas with `--router-replica-sync` to synchronize active block tracking via NATS.
+
+State persistence options:
+- **JetStream mode**: Automatic persistence via event stream and object store snapshots
+- **Local Indexer mode**: State rebuilds from workers on startup
+- **Reset state**: Use `--router-reset-states` to start fresh (use with caution)
+
+See [KV Cache Routing - Serving Multiple Router Replicas](kv_cache_routing.md#serving-multiple-router-replicas) for details.
+
+## Busy Thresholds
+
+Control worker saturation with busy thresholds:
+- `--active-decode-blocks-threshold <0.0-1.0>`: Mark workers busy when KV cache utilization exceeds threshold
+- `--active-prefill-tokens-threshold <count>`: Mark workers busy when active prefill tokens exceed threshold
+
+Thresholds can be updated at runtime via the `/busy_threshold` HTTP endpoint. See [Dynamic Threshold Configuration](kv_cache_routing.md#dynamic-threshold-configuration).
+
+## Python API
+
+For programmatic routing control, use the `KvPushRouter` class directly:
+
+```python
+from dynamo.llm import DistributedRuntime, KvPushRouter, KvRouterConfig
+
+router = KvPushRouter(endpoint=endpoint, block_size=16, kv_router_config=KvRouterConfig())
+stream = await router.generate(token_ids=tokens, model="model-name")
+```
+
+Key methods: `generate()`, `best_worker()`, `get_potential_loads()`, `mark_prefill_complete()`, `free()`.
+
+See [KV Cache Routing - Python API](kv_cache_routing.md#using-kvpushrouter-python-api) for complete examples.
+
+## Prerequisites and Limitations
+
+- **Dynamic endpoints only**: KV router requires `register_llm()` with `model_input=ModelInput.Tokens`
+- **No multimodal support**: Currently tracks token-based blocks only
+- **No static endpoints**: Use `--router-mode round-robin` for static endpoint deployments
+
+See [KV Cache Routing - Prerequisites](kv_cache_routing.md#prerequisites-and-limitations) for details.
+
 ## Tuning Guidelines
 
 ### 1. Understand Your Workload Characteristics

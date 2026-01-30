@@ -41,7 +41,7 @@ use super::{
 };
 use crate::engines::ValidateRequest;
 use crate::protocols::openai::chat_completions::aggregator::ChatCompletionAggregator;
-use crate::protocols::openai::nvext::resolve_and_apply_routing_hints;
+use crate::protocols::openai::nvext::apply_header_routing_overrides;
 use crate::protocols::openai::{
     chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionResponse,
@@ -293,8 +293,7 @@ async fn handler_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Apply routing hints from headers (headers take priority over nvext)
-    request.nvext = resolve_and_apply_routing_hints(request.nvext.take(), &headers);
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -716,8 +715,7 @@ async fn handler_chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Apply routing hints from headers (headers take priority over nvext)
-    request.nvext = resolve_and_apply_routing_hints(request.nvext.take(), &headers);
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -1149,8 +1147,7 @@ async fn handler_responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Apply routing hints from headers (headers take priority over nvext)
-    request.nvext = resolve_and_apply_routing_hints(request.nvext.take(), &headers);
+    request.nvext = apply_header_routing_overrides(request.nvext.take(), &headers);
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);

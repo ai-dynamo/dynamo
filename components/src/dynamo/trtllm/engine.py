@@ -6,7 +6,10 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Optional
 
-from tensorrt_llm import LLM
+from tensorrt_llm import LLM, MultimodalEncoder
+from tensorrt_llm.llmapi.llm import BaseLLM
+
+from dynamo.trtllm.constants import DisaggregationMode
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +22,20 @@ class Backend(str, enum.Enum):
 
 
 class TensorRTLLMEngine:
-    def __init__(self, engine_args):
+    def __init__(
+        self,
+        engine_args,
+        disaggregation_mode: Optional[DisaggregationMode] = None,
+    ):
         self._llm: Optional[LLM] = None
+        self.disaggregation_mode = (
+            disaggregation_mode
+            if disaggregation_mode is not None
+            else DisaggregationMode.AGGREGATED
+        )
+        # NOTE: `engine_args` may be reused by callers (e.g., for logging or other workers).
+        # Copy it so that our internal `pop()` / pruning doesn't leak side effects.
+        engine_args = dict(engine_args)
         backend = engine_args.pop("backend", Backend.PYTORCH)
         if backend == Backend.PYTORCH:
             self._llm_cls = LLM
@@ -38,7 +53,27 @@ class TensorRTLLMEngine:
 
     async def initialize(self):
         if not self._llm:
-            self._llm = self._llm_cls(**self.engine_args)
+            if self.disaggregation_mode == DisaggregationMode.ENCODE:
+                # Initialize the multimodal encoder for full EPD
+                # Prefill/decode workers initialize the standard TRT-LLM `LLM` from `engine_args`
+                # (model, backend settings, kv cache config, etc.). ENCODE workers instead use
+                # TRT-LLM's `MultimodalEncoder`, which has a different constructor surface.
+                # We intentionally pass only the supported parameters to avoid unexpected kwargs.
+                max_batch_size = self.engine_args.get("max_batch_size", 1)
+                model = self.engine_args.get("model")
+                logging.info(
+                    f"Initializing multimodal encoder with max_batch_size: {max_batch_size}"
+                )
+                # MultimodalEncoder and LLM both inherit from BaseLLM in TRT-LLM,
+                # so storing either in self._llm is valid.
+                self._llm = MultimodalEncoder(
+                    model=model,
+                    max_batch_size=max_batch_size,
+                )
+            else:
+                # Prefill/decode workers: initialize standard TRT-LLM `LLM` with full engine_args
+                # (model path, backend settings, KV cache config, disaggregation settings, etc.)
+                self._llm = self._llm_cls(**self.engine_args)
 
     async def cleanup(self):
         if self._llm:
@@ -50,7 +85,7 @@ class TensorRTLLMEngine:
                 self._llm = None
 
     @property
-    def llm(self):
+    def llm(self) -> BaseLLM:
         if not self._llm:
             raise RuntimeError("Engine not initialized")
         return self._llm
@@ -91,8 +126,11 @@ class TensorRTLLMEngine:
 
 
 @asynccontextmanager
-async def get_llm_engine(engine_args) -> AsyncGenerator[TensorRTLLMEngine, None]:
-    engine = TensorRTLLMEngine(engine_args)
+async def get_llm_engine(
+    engine_args,
+    disaggregation_mode: Optional[DisaggregationMode] = None,
+) -> AsyncGenerator[TensorRTLLMEngine, None]:
+    engine = TensorRTLLMEngine(engine_args, disaggregation_mode)
     try:
         await engine.initialize()
         yield engine

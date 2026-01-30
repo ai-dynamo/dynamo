@@ -13,23 +13,148 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: pre_merge
-
-run-name: Pre Merge Validation of (${{ github.repository }}/${{ github.ref }}) by ${{ github.actor }}.
+name: Pre Merge
 
 on:
+  push:
+    branches:
+    - main
+    - release/*.*.*
   pull_request:
 
+# Cancel any previous check runs for the same pull request to avoid redundant workflows.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  changed-files:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.changes.outputs.rust }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+        with:
+          fetch-depth: 0
+      - name: Check for changes
+        id: changes
+        uses: ./.github/actions/changed-files
+        with:
+          gh_token: ${{ github.token }}
+
+  pre-merge-status-check:
+    runs-on: ubuntu-latest
+    needs: [changed-files, pre-commit, rust-tests, rust-clippy]
+    if: always()
+    steps:
+      - name: "Check all dependent jobs"
+        run: |
+          echo '${{ toJson(needs) }}' | jq -e 'to_entries | map(.value.result) | all(. as $result | ["success", "skipped"] | any($result == .))'
 
   pre-commit:
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-    - uses: pre-commit/action@v3.0.0
+    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       timeout-minutes: 3
 
+  rust-tests:
+    needs: changed-files
+    if: needs.changed-files.outputs.rust == 'true'
+    runs-on:
+      group: Fastchecker
+    strategy:
+      # removing kvbm from here - it will fail to test with nixl dep enabled
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      with:
+        lfs: true
+    - name: Set up system dependencies
+      run: |
+        # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+        PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+        PROTOC_VER="30.2"
+        PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+        PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+        curl -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+        echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+        unzip "${PROTOC_ZIP}" -d $HOME/.local
+        rm "${PROTOC_ZIP}"
+        export PATH="$PATH:$HOME/.local/bin"
+        protoc --version
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add rustfmt
+    - name: Verify Code Formatting
+      working-directory: ${{ matrix.dir }}
+      run: cargo fmt -- --check
+    - name: Install and Run cargo-deny
+      working-directory: ${{ matrix.dir }}
+      run: |
+        cargo-deny --version || cargo install cargo-deny@0.19.0
+        cargo-deny -L error --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+    # Have an explicit step to build tests first to separate time spent on build vs execution.
+    - name: Compile Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --no-run
+    - name: Run Doc Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo doc --no-deps && cargo test --locked --doc
+    - name: Run Unit Tests
+      working-directory: ${{ matrix.dir }}
+      # NOTE: --all-targets doesn't run doc tests
+      run: cargo test --locked --all-targets
 
+  rust-clippy:
+    needs: changed-files
+    if: needs.changed-files.outputs.rust == 'true'
+    runs-on:
+      group: Fastchecker
+    strategy:
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples', 'launch/dynamo-run'] }
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955  # v4.3.0
+      with:
+        lfs: true
+    - name: Set up system dependencies
+      run: |
+        # Install protoc for Rust build dependencies (NOTE: much faster than apt install)
+        PB_REL="https://github.com/protocolbuffers/protobuf/releases"
+        PROTOC_VER="30.2"
+        PROTOC_ZIP="protoc-${PROTOC_VER}-linux-x86_64.zip"
+        PROTOC_SHA256="327e9397c6fb3ea2a542513a3221334c6f76f7aa524a7d2561142b67b312a01f"
+        curl -fsSLO "$PB_REL/download/v${PROTOC_VER}/${PROTOC_ZIP}"
+        echo "${PROTOC_SHA256}  ${PROTOC_ZIP}" | sha256sum -c -
+        unzip "${PROTOC_ZIP}" -d $HOME/.local
+        rm "${PROTOC_ZIP}"
+        export PATH="$PATH:$HOME/.local/bin"
+        protoc --version
+    - name: Cache cargo artifacts
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4.3.0
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+    - name: Set up Rust Toolchain Components
+      run: rustup component add clippy
+    - name: Run Clippy Checks
+      working-directory: ${{ matrix.dir }}
+      run: cargo clippy --no-deps --all-targets -- -D warnings

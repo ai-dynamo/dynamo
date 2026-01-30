@@ -9,102 +9,58 @@ use validator::{Validate, ValidationError};
 
 pub use crate::protocols::common::timing::TimingInfo;
 
-/// HTTP header for specifying decode/backend worker instance ID.
-/// Used for both `backend_instance_id` (aggregated mode) and `decode_worker_id` (disaggregated mode).
 pub const HEADER_WORKER_INSTANCE_ID: &str = "x-worker-instance-id";
-
-/// HTTP header for specifying prefill worker instance ID (disaggregated mode).
 pub const HEADER_PREFILL_INSTANCE_ID: &str = "x-prefill-instance-id";
+/// Header to disable local bookkeeping updates (for GAIE Stage 2)
+/// When set to "false", the router skips add_request, mark_prefill_completed, and free calls.
+pub const HEADER_ENABLE_LOCAL_UPDATES: &str = "x-enable-local-updates";
 
-/// Resolved routing hints from headers and nvext.
-/// Values are resolved with header priority, falling back to nvext.
-#[derive(Debug, Clone, Default)]
-pub struct ResolvedRoutingHints {
-    pub backend_instance_id: Option<u64>,
-    pub prefill_worker_id: Option<u64>,
-    pub decode_worker_id: Option<u64>,
-}
-
-impl ResolvedRoutingHints {
-    /// Resolve routing hints from HTTP headers and nvext.
-    ///
-    /// Resolution order for each field:
-    /// 1. Check the corresponding HTTP header
-    /// 2. Fall back to the nvext field
-    ///
-    /// Header mappings:
-    /// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
-    /// - `x-prefill-instance-id` -> `prefill_worker_id`
-    pub fn resolve(headers: &HeaderMap, nvext: Option<&NvExt>) -> Self {
-        let backend_instance_id =
-            resolve_worker_id(headers, nvext, HEADER_WORKER_INSTANCE_ID, |ext| {
-                ext.backend_instance_id
-            });
-
-        let decode_worker_id =
-            resolve_worker_id(headers, nvext, HEADER_WORKER_INSTANCE_ID, |ext| {
-                ext.decode_worker_id
-            });
-
-        let prefill_worker_id =
-            resolve_worker_id(headers, nvext, HEADER_PREFILL_INSTANCE_ID, |ext| {
-                ext.prefill_worker_id
-            });
-
-        Self {
-            backend_instance_id,
-            prefill_worker_id,
-            decode_worker_id,
-        }
-    }
-}
-
-/// Resolve a single worker ID value from header first, then nvext.
-fn resolve_worker_id<F>(
-    headers: &HeaderMap,
-    nvext: Option<&NvExt>,
-    header_name: &str,
-    nvext_getter: F,
-) -> Option<u64>
-where
-    F: FnOnce(&NvExt) -> Option<u64>,
-{
-    // Try header first
-    if let Some(value) = headers
-        .get(header_name)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return Some(value);
-    }
-
-    // Fall back to nvext
-    nvext.and_then(nvext_getter)
-}
-
-/// Resolve routing hints from headers and nvext, then apply to a mutable nvext.
+/// Apply routing overrides from HTTP headers to nvext.
 ///
-/// This is a convenience function that:
-/// 1. Resolves routing values (header priority, nvext fallback)
-/// 2. Applies the resolved values to the nvext
-/// 3. Returns the nvext (creating one if it was None and hints were found)
-pub fn resolve_and_apply_routing_hints(
-    nvext: Option<NvExt>,
-    headers: &HeaderMap,
-) -> Option<NvExt> {
-    let hints = ResolvedRoutingHints::resolve(headers, nvext.as_ref());
+/// Header mappings:
+/// - `x-worker-instance-id` -> `backend_instance_id` and `decode_worker_id`
+/// - `x-prefill-instance-id` -> `prefill_worker_id`
+/// - `x-enable-local-updates` -> `enable_local_updates` (set to false to disable router bookkeeping)
+///
+/// Headers take priority over existing nvext values when present.
+/// If no headers are present, returns the original nvext unchanged.
+pub fn apply_header_routing_overrides(nvext: Option<NvExt>, headers: &HeaderMap) -> Option<NvExt> {
+    let worker_id = headers
+        .get(HEADER_WORKER_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
 
-    // Only create/modify nvext if we have any resolved hints
-    if hints.backend_instance_id.is_some()
-        || hints.decode_worker_id.is_some()
-        || hints.prefill_worker_id.is_some()
-    {
-        let mut ext = nvext.unwrap_or_default();
-        ext.apply_resolved_hints(&hints);
-        Some(ext)
-    } else {
-        nvext
+    let prefill_id = headers
+        .get(HEADER_PREFILL_INSTANCE_ID)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+
+    // Parse enable_local_updates header: "true" or "false"
+    let enable_local_updates = headers
+        .get(HEADER_ENABLE_LOCAL_UPDATES)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| match s.to_lowercase().as_str() {
+            "true" | "1" => Some(true),
+            "false" | "0" => Some(false),
+            _ => None,
+        });
+
+    if worker_id.is_none() && prefill_id.is_none() && enable_local_updates.is_none() {
+        return nvext;
     }
+
+    let mut ext = nvext.unwrap_or_default();
+    if let Some(id) = worker_id {
+        ext.backend_instance_id = Some(id);
+        ext.decode_worker_id = Some(id);
+    }
+    if let Some(id) = prefill_id {
+        ext.prefill_worker_id = Some(id);
+    }
+    if let Some(enabled) = enable_local_updates {
+        ext.enable_local_updates = Some(enabled);
+    }
+    Some(ext)
 }
 
 pub trait NvExtProvider {
@@ -324,9 +280,9 @@ mod tests {
         assert!(nv_ext.validate().is_ok());
     }
 
-    // Test ResolvedRoutingHints - header takes priority, nvext used as fallback
+    // Test apply_header_routing_overrides - worker header present, prefill header absent
     #[test]
-    fn test_resolved_routing_hints_header_priority() {
+    fn test_apply_header_routing_overrides() {
         use axum::http::HeaderMap;
 
         // Only HEADER_WORKER_INSTANCE_ID is in the header
@@ -341,12 +297,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let resolved = ResolvedRoutingHints::resolve(&headers, Some(&nvext));
+        let result = apply_header_routing_overrides(Some(nvext), &headers).unwrap();
 
         // Header should override backend_instance_id and decode_worker_id
-        assert_eq!(resolved.backend_instance_id, Some(123));
-        assert_eq!(resolved.decode_worker_id, Some(123));
-        // prefill_worker_id should fall back to nvext since header is absent
-        assert_eq!(resolved.prefill_worker_id, Some(777));
+        assert_eq!(result.backend_instance_id, Some(123));
+        assert_eq!(result.decode_worker_id, Some(123));
+        // prefill_worker_id should remain from original nvext (not overwritten by header)
+        assert_eq!(result.prefill_worker_id, Some(777));
     }
 }
