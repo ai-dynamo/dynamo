@@ -1,0 +1,191 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Fern docs version release workflow
+#
+# Creates a new versioned documentation snapshot on the fern branch when a
+# new release tag is pushed. This workflow:
+#
+# 1. Triggers on new version tags (vX.Y.Z format only, excludes .post0, .rc1, etc.)
+# 2. Works on the docs-website branch (not main)
+# 3. Copies pages/ to pages-vX.Y.Z/
+# 4. Creates versions/vX.Y.Z.yml from versions/next.yml (updating paths)
+# 5. Updates docs.yml to include the new version after "Next"
+# 6. Commits and pushes changes to docs-website branch
+#
+# The docs-website branch is the source of truth for published documentation.
+# The sync-fern-vnext.yml workflow keeps vNext in sync with main.
+
+name: Fern Version Release
+
+on:
+  push:
+    tags:
+      # Match only clean semver tags: vX.Y.Z
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to release (e.g., v0.9.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-version:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+
+          # Validate tag format (must be vX.Y.Z exactly)
+          if ! echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid tag format: $TAG. Must be vX.Y.Z (e.g., v0.9.0)"
+            exit 1
+          fi
+
+          # Extract version without 'v' prefix
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Processing version: $VERSION (tag: $TAG)"
+
+      - name: Checkout docs-website branch
+        uses: actions/checkout@v4
+        with:
+          ref: docs-website
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if version already exists
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          if [ -d "fern/pages-$TAG" ]; then
+            echo "::error::Version $TAG already exists (fern/pages-$TAG directory found)"
+            exit 1
+          fi
+
+          if [ -f "fern/versions/$TAG.yml" ]; then
+            echo "::error::Version $TAG already exists (fern/versions/$TAG.yml found)"
+            exit 1
+          fi
+
+          echo "Version $TAG does not exist yet, proceeding with release"
+
+      - name: Setup Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create versioned pages directory
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Creating fern/pages-$TAG/ from fern/pages/..."
+
+          # Copy current pages/ to pages-vX.Y.Z/
+          cp -r fern/pages "fern/pages-$TAG"
+
+          echo "Created fern/pages-$TAG/"
+          ls -la "fern/pages-$TAG/" | head -20
+
+      - name: Convert GitHub callouts to Fern format
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          echo "Converting GitHub-style callouts to Fern format in pages-$TAG/..."
+          python3 fern/convert_callouts.py --dir "fern/pages-$TAG"
+          echo "Callout conversion complete."
+
+      - name: Create version config file
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          VERSION="${{ steps.version.outputs.version }}"
+          VERSION_FILE="fern/versions/$TAG.yml"
+
+          echo "Creating version config: $VERSION_FILE"
+
+          # Copy next.yml as template
+          cp fern/versions/next.yml "$VERSION_FILE"
+
+          # Update the comment at the top
+          sed -i "s/# Navigation structure for Latest version/# Navigation structure for $TAG version/" "$VERSION_FILE"
+          sed -i "s|# Matching https://docs.nvidia.com/dynamo/latest/|# Snapshot from tag $TAG|" "$VERSION_FILE"
+
+          # Update all page paths from ../pages/ to ../pages-vX.Y.Z/
+          sed -i "s|path: \.\./pages/|path: ../pages-$TAG/|g" "$VERSION_FILE"
+
+          echo "Created $VERSION_FILE"
+          echo "First 30 lines:"
+          head -30 "$VERSION_FILE"
+
+      - name: Update docs.yml with new version
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          DOCS_FILE="fern/docs.yml"
+
+          echo "Updating $DOCS_FILE to include $TAG..."
+
+          # Check if version already in docs.yml
+          if grep -q "display-name: $TAG" "$DOCS_FILE"; then
+            echo "Version $TAG already in docs.yml, skipping update"
+            exit 0
+          fi
+
+          # Insert new version after "Next" entry
+          # The new version should be inserted after the "path: ./versions/next.yml" line
+          # Use a temp file approach for reliable multi-line insertion
+          awk -v tag="$TAG" '
+            /path: \.\/versions\/next\.yml/ {
+              print
+              print "  - display-name: " tag
+              print "    path: ./versions/" tag ".yml"
+              next
+            }
+            { print }
+          ' "$DOCS_FILE" > "${DOCS_FILE}.tmp" && mv "${DOCS_FILE}.tmp" "$DOCS_FILE"
+
+          echo "Updated docs.yml versions section:"
+          grep -A 20 "^versions:" "$DOCS_FILE"
+
+      - name: Commit and push changes
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+
+          git add "fern/pages-$TAG/"
+          git add "fern/versions/$TAG.yml"
+          git add fern/docs.yml
+
+          git commit -m "docs(fern): release version $TAG
+
+          - Created fern/pages-$TAG/ with documentation snapshot
+          - Created fern/versions/$TAG.yml version navigation config
+          - Updated fern/docs.yml to include $TAG in version list
+
+          Automated by fern-version-release workflow
+          Source tag: $TAG"
+
+          git push origin docs-website
+
+          echo "✅ Successfully released documentation for $TAG on docs-website branch"
