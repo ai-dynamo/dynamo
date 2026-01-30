@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 import logging
@@ -19,7 +19,7 @@ async def read_decoded_media_via_nixl(
     connector: nixl_connect.Connector,
     decoded_meta: Dict[str, Any],
     return_metadata: bool = False,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+) -> np.ndarray | Tuple[np.ndarray, Dict[str, Any]]:
     """
     Read pre-decoded media data via NIXL RDMA transfer, into a CPU numpy array.
 
@@ -35,7 +35,7 @@ async def read_decoded_media_via_nixl(
     descriptor = decoded_meta["nixl_descriptor"]
     remote_device = (
         "cpu"
-        if descriptor.get("mem_type").lower() == "dram"
+        if descriptor.get("mem_type", "dram").lower() == "dram"
         else f"cuda:{descriptor.get('device_id', 0)}"
     )
 

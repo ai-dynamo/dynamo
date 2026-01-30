@@ -263,6 +263,7 @@ class BaseWorkerHandler(ABC):
         self.enable_frontend_decoding = enable_frontend_decoding
         # NIXL connector for frontend decoding - lazy initialized
         self._nixl_connector = None
+        self._nixl_connector_lock = asyncio.Lock()
         # LoRA tracking
         self.lora_id_for_name: dict[str, int] = {}
         self.lora_name_to_path: dict[str, str] = {}
@@ -906,19 +907,21 @@ class BaseWorkerHandler(ABC):
                 logger.debug(f"Preparing to load image from URL: {url[:80]}...")
             elif isinstance(item, dict) and DECODED_VARIANT_KEY in item:
                 if self.enable_frontend_decoding:
-                    if self._nixl_connector is None:
-                        self._nixl_connector = nixl_connect.Connector()
-                        await self._nixl_connector.initialize()
+                    async with self._nixl_connector_lock:
+                        if self._nixl_connector is None:
+                            self._nixl_connector = nixl_connect.Connector()
+                            await self._nixl_connector.initialize()
 
                     metadata = item[DECODED_VARIANT_KEY]
                     image_futures.append(
                         read_decoded_media_via_nixl(self._nixl_connector, metadata)
                     )
                 else:
-                    logger.warning(
+                    logger.error(
                         "Received Decoded multimodal data but --frontend-decoding not enabled. "
                         "Use --frontend-decoding flag to enable NIXL RDMA image transfer."
                     )
+                    raise ValueError("Could not load decoded media from frontend")
 
         # Process images in parallel
         results = await asyncio.gather(*image_futures, return_exceptions=True)
