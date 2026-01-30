@@ -86,6 +86,11 @@ ARG TENSORRTLLM_INDEX_URL={{ context.trtllm.index_url }}
 ARG GITHUB_TRTLLM_COMMIT={{ context.trtllm.github_trtllm_commit }}
 
 # Copy pytorch installation from NGC PyTorch
+ARG FLASHINFER_PYTHON_VER={{ context.trtllm.flashinfer_python_ver }}
+ARG PYTORCH_TRITON_VER={{ context.trtllm.pytorch_triton_ver }}
+ARG TORCHAO_VER={{ context.trtllm.torchao_version }}
+ARG TORCHDATA_VER={{ context.trtllm.torchdata_version }}
+ARG TORCHTITAN_VER={{ context.trtllm.torchtitan_version }}
 ARG TORCH_VER={{ context.trtllm.torch_version }}
 ARG TORCH_TENSORRT_VER={{ context.trtllm.torch_tensorrt_version }}
 ARG TORCHVISION_VER={{ context.trtllm.torchvision_version }}

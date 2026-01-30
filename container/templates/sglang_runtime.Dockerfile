@@ -92,7 +92,7 @@ RUN --mount=type=bind,source=.,target=/mnt/local_src \
         pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
             nvidia-nccl-cu12==2.28.3 \
             nvidia-cudnn-cu12==9.16.0.29 \
-            nvidia-cutlass-dsl==4.3.0; \
+            nvidia-cutlass-dsl==4.3.5; \
     elif [ "$CUDA_MAJOR" = "13" ]; then \
         # CUDA 13: Install CuDNN for PyTorch 2.9.1 compatibility
         pip install --no-cache-dir --break-system-packages --force-reinstall --no-deps \
