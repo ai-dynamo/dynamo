@@ -454,7 +454,23 @@ async def init_image_diffusion(runtime: DistributedRuntime, config: Config):
     if not server_args.model_path:
         raise ValueError("--model is required for diffusion workers")
 
-    generator = DiffGenerator.from_pretrained(model_path=server_args.model_path)
+    # Parallelism configuration
+    tp_size = getattr(server_args, "tp_size", 1)
+    dp_size = getattr(server_args, "dp_size", 1)
+    num_gpus = tp_size * dp_size
+
+    # Distributed configuration
+    dist_timeout = getattr(server_args, "dist_timeout", None)
+
+    generator = DiffGenerator.from_pretrained(
+        model_path=server_args.model_path,
+        # Parallelism configuration
+        num_gpus=num_gpus,
+        tp_size=tp_size,
+        dp_size=dp_size,
+        # Distributed configuration
+        dist_timeout=dist_timeout,
+    )
 
     # Initialize fsspec filesystems for image storage
     fs = None
