@@ -256,10 +256,14 @@ async def worker():
         )
         logger.debug("init_multimodal_worker completed")
     elif config.is_prefill_worker:
-        await init_prefill(runtime, config, shutdown_event, pre_created_engine=pre_created_engine)
+        await init_prefill(
+            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+        )
         logger.debug("init_prefill completed")
     else:
-        await init(runtime, config, shutdown_event, pre_created_engine=pre_created_engine)
+        await init(
+            runtime, config, shutdown_event, pre_created_engine=pre_created_engine
+        )
         logger.debug("init completed")
 
     logger.debug("Worker function completed, exiting...")
@@ -530,7 +534,10 @@ async def register_vllm_model(
 
 
 async def init_prefill(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event, pre_created_engine=None
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    pre_created_engine=None,
 ):
     """
     Instantiate and serve
@@ -654,7 +661,10 @@ async def init_prefill(
 
 
 async def init(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event, pre_created_engine=None
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    pre_created_engine=None,
 ):
     """
     Instantiate and serve
@@ -1071,7 +1081,10 @@ async def init_ec_processor(
 
 
 async def init_multimodal_worker(
-    runtime: DistributedRuntime, config: Config, shutdown_event: asyncio.Event, pre_created_engine=None
+    runtime: DistributedRuntime,
+    config: Config,
+    shutdown_event: asyncio.Event,
+    pre_created_engine=None,
 ):
     """
     Initialize multimodal worker component.
