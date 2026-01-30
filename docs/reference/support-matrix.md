@@ -16,7 +16,7 @@ The following table shows the backend framework versions included with each Dyna
 
 | **Dynamo** | **vLLM** | **SGLang** | **TensorRT-LLM** | **NIXL** |
 | :--- | :--- | :--- | :--- | :--- |
-| **main (ToT)** | `0.14.0` | `0.5.7` | `1.2.0rc6.post2` | `0.9.0` |
+| **main (ToT)** | `0.14.1` | `0.5.8` | `1.2.0rc6.post2` | `0.9.0` |
 | **v0.8.1.post1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post2` | `0.8.0` |
 | **v0.8.1** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
 | **v0.8.0** | `0.12.0` | `0.5.6.post2` | `1.2.0rc6.post1` | `0.8.0` |
