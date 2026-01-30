@@ -257,10 +257,10 @@ impl Scheduler {
         component: Option<dynamo_runtime::component::Component>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        // Assert speedup_ratio is greater than 0
+        // Assert speedup_ratio is greater than 0 or is infinity
         assert!(
-            args.speedup_ratio > 0.0,
-            "speedup_ratio must be greater than 0, got: {}",
+            args.speedup_ratio > 0.0 || args.speedup_ratio.is_infinite(),
+            "speedup_ratio must be greater than 0 or infinity, got: {}",
             args.speedup_ratio
         );
 
@@ -324,6 +324,18 @@ impl Scheduler {
                     dp_rank,
                     active_decode_blocks: kv_manager.num_active_blocks() as u64,
                 });
+
+                // 5. Sleep to maintain target iteration timing
+                // Skip sleep if speedup_ratio is infinite (instant execution)
+                if args.speedup_ratio.is_finite() {
+                    let target_duration =
+                        Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
+                    let elapsed = iteration_start.elapsed();
+
+                    if elapsed < target_duration {
+                        tokio::time::sleep(target_duration - elapsed).await;
+                    }
+                }
             }
         });
 
@@ -434,18 +446,15 @@ async fn simulate_decode(
     let start_time = tokio::time::Instant::now();
     // Compute decode timing
     let active_kv_tokens = kv_manager.num_active_blocks() * block_size;
+
     // Compute average context length across all active decode requests
-    let (total_length, count) = state
+    let total_length: usize = state
         .decode
         .keys()
-        .filter_map(|uuid| state.requests.get(uuid))
-        .fold((0usize, 0usize), |(sum, cnt), req| {
-            if let Request::Active(seq) = req {
-                (sum + seq.len(), cnt + 1)
-            } else {
-                (sum, cnt)
-            }
-        });
+        .map(|uuid| if let Request::Active(seq) = state.requests.get(uuid).unwrap() { seq.len() } else { 0 })
+        .sum();
+    let count = state.decode.len();
+
     let context_length = if count > 0 { total_length / count } else { 0 };
     let decoding_time = perf_model.predict_decode_time(active_kv_tokens, context_length);
     let total_time = Duration::from_secs_f64(decoding_time / 1000.0);
@@ -472,10 +481,8 @@ async fn simulate_decode(
 
         // Check completion and send notification
         let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
-        let should_output = sequence.generated_tokens() > sequence.already_generated_tokens();
 
-        let send_failed = should_output
-            && output_tx.as_ref().is_some_and(|tx| {
+        let send_failed = output_tx.as_ref().is_some_and(|tx| {
                 tx.send(OutputSignal {
                     uuid,
                     completed: is_complete,
