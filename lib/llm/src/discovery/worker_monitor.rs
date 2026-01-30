@@ -363,16 +363,19 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 let worker_id_str = worker_id.to_string();
                                 for dp_rank in dp_ranks {
                                     let dp_rank_str = dp_rank.to_string();
-                                    // Clean up load metrics
-                                    let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
-                                    let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
-                                    // Clean up timing metrics (TTFT/ITL per worker)
-                                    let _ = WORKER_LAST_TTFT_GAUGE
-                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
-                                    let _ = WORKER_LAST_ITL_GAUGE
-                                        .remove_label_values(&[&worker_id_str, &dp_rank_str]);
+                                    // Clean up metrics for both worker types since we don't know which type this worker was
+                                    for worker_type in [WORKER_TYPE_DECODE, WORKER_TYPE_PREFILL] {
+                                        // Clean up load metrics
+                                        let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
+                                        let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
+                                        // Clean up timing metrics (TTFT/ITL per worker)
+                                        let _ = WORKER_LAST_TTFT_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
+                                        let _ = WORKER_LAST_ITL_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), worker_type]);
+                                    }
                                 }
                                 tracing::debug!(
                                     "Removed Prometheus metrics for worker {}",
@@ -481,12 +484,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                             // Clean up metrics for removed decode workers (with worker_type=decode label)
                             for worker_id in &removed_workers {
                                 let worker_id_str = worker_id.to_string();
-                                let _ = WORKER_LAST_ITL_GAUGE
-                                    .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE]);
-                                let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-                                    .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE]);
-                                let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-                                    .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_DECODE]);
+                                // Get dp_ranks from known_worker_dp_ranks if available, otherwise use [0]
+                                let dp_ranks: Vec<u32> = known_worker_dp_ranks
+                                    .get(worker_id)
+                                    .map(|ranks| ranks.iter().copied().collect())
+                                    .unwrap_or_else(|| vec![0]);
+                                for dp_rank in dp_ranks {
+                                    let dp_rank_str = dp_rank.to_string();
+                                    let _ = WORKER_LAST_ITL_GAUGE
+                                        .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_DECODE]);
+                                    let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+                                        .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_DECODE]);
+                                    let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+                                        .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_DECODE]);
+                                }
                                 tracing::debug!(
                                     "Cleaned up metrics for removed decode worker {}",
                                     worker_id
@@ -520,12 +531,20 @@ impl WorkerLoadMonitor for KvWorkerMonitor {
                                 // Clean up metrics for removed prefill workers (with worker_type=prefill label)
                                 for worker_id in &removed_workers {
                                     let worker_id_str = worker_id.to_string();
-                                    let _ = WORKER_LAST_TTFT_GAUGE
-                                        .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_PREFILL]);
-                                    let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
-                                        .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_PREFILL]);
-                                    let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
-                                        .remove_label_values(&[worker_id_str.as_str(), "0", WORKER_TYPE_PREFILL]);
+                                    // Get dp_ranks from known_worker_dp_ranks if available, otherwise use [0]
+                                    let dp_ranks: Vec<u32> = known_worker_dp_ranks
+                                        .get(worker_id)
+                                        .map(|ranks| ranks.iter().copied().collect())
+                                        .unwrap_or_else(|| vec![0]);
+                                    for dp_rank in dp_ranks {
+                                        let dp_rank_str = dp_rank.to_string();
+                                        let _ = WORKER_LAST_TTFT_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_PREFILL]);
+                                        let _ = WORKER_ACTIVE_DECODE_BLOCKS_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_PREFILL]);
+                                        let _ = WORKER_ACTIVE_PREFILL_TOKENS_GAUGE
+                                            .remove_label_values(&[worker_id_str.as_str(), dp_rank_str.as_str(), WORKER_TYPE_PREFILL]);
+                                    }
                                     tracing::debug!(
                                         "Cleaned up metrics for removed prefill worker {}",
                                         worker_id

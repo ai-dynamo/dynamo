@@ -189,9 +189,13 @@ impl RequestTracker {
     }
 
     /// Record the prefill worker ID and DP rank. Returns true if worker_id was recorded for the first time.
+    /// Only sets the dp_rank if the worker_id is newly set to avoid mismatched worker_id/dp_rank pairs.
     pub fn record_prefill_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
-        let _ = self.prefill_dp_rank.set(dp_rank);
-        self.prefill_worker_id.set(id).is_ok()
+        let is_new = self.prefill_worker_id.set(id).is_ok();
+        if is_new {
+            let _ = self.prefill_dp_rank.set(dp_rank);
+        }
+        is_new
     }
 
     /// Record the decode worker ID. Returns true if this was the first call.
@@ -200,9 +204,13 @@ impl RequestTracker {
     }
 
     /// Record the decode worker ID and DP rank. Returns true if worker_id was recorded for the first time.
+    /// Only sets the dp_rank if the worker_id is newly set to avoid mismatched worker_id/dp_rank pairs.
     pub fn record_decode_worker_with_rank(&self, id: u64, dp_rank: u32) -> bool {
-        let _ = self.decode_dp_rank.set(dp_rank);
-        self.decode_worker_id.set(id).is_ok()
+        let is_new = self.decode_worker_id.set(id).is_ok();
+        if is_new {
+            let _ = self.decode_dp_rank.set(dp_rank);
+        }
+        is_new
     }
 
     /// Set the request phase and return a permit that blocks subsequent phase changes.
